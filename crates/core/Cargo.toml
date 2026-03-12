@@ -1,0 +1,33 @@
+[package]
+name = "tamagotchi-core"
+description = "Core agent loop, LLM client, memory, and config for Tamagotchi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tamagotchi-tools = { path = "../tools" }
+tamagotchi-apply-patch = { path = "../apply-patch" }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+eventsource-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }
+serde_yaml = { workspace = true }
+which = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"

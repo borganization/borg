@@ -1,0 +1,27 @@
+# Build artifacts
+/target
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Editor/IDE
+.vscode/
+.idea/
+*.sublime-*
+.vim/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Rust
+
+# Logs
+*.log
+
+# Reference implementations (local only)
+/reference

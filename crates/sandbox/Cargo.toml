@@ -1,0 +1,17 @@
+[package]
+name = "tamagotchi-sandbox"
+description = "macOS Seatbelt and Linux Bubblewrap sandboxing for Tamagotchi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
