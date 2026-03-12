@@ -1,0 +1,26 @@
+[package]
+name = "tamagotchi-cli"
+description = "CLI for the Tamagotchi AI personal assistant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "tamagotchi"
+path = "src/main.rs"
+
+[dependencies]
+tamagotchi-core = { path = "../core" }
+tamagotchi-heartbeat = { path = "../heartbeat" }
+tamagotchi-tools = { path = "../tools" }
+tokio = { workspace = true }
+clap = { workspace = true }
+crossterm = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures-util = { workspace = true }
+
+[lints]
+workspace = true

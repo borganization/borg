@@ -1,0 +1,18 @@
+[package]
+name = "tamagotchi-heartbeat"
+description = "Proactive heartbeat scheduler for Tamagotchi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tamagotchi-core = { path = "../core" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+cron = { workspace = true }
+
+[lints]
+workspace = true
