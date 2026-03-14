@@ -49,3 +49,74 @@ pub fn generate_profile(policy: &SandboxPolicy, tool_dir: &Path) -> String {
 
     profile
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            network: false,
+            fs_read: vec![],
+            fs_write: vec![],
+        }
+    }
+
+    #[test]
+    fn profile_starts_with_deny_default() {
+        let profile = generate_profile(&default_policy(), Path::new("/tmp/tool"));
+        assert!(profile.contains("(deny default)"));
+    }
+
+    #[test]
+    fn profile_includes_tool_dir() {
+        let profile = generate_profile(&default_policy(), Path::new("/my/tool/dir"));
+        assert!(profile.contains("(allow file-read* (subpath \"/my/tool/dir\"))"));
+    }
+
+    #[test]
+    fn profile_no_network_by_default() {
+        let profile = generate_profile(&default_policy(), Path::new("/tmp/tool"));
+        assert!(!profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn profile_network_when_allowed() {
+        let policy = SandboxPolicy {
+            network: true,
+            fs_read: vec![],
+            fs_write: vec![],
+        };
+        let profile = generate_profile(&policy, Path::new("/tmp/tool"));
+        assert!(profile.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn profile_additional_read_paths() {
+        let policy = SandboxPolicy {
+            network: false,
+            fs_read: vec!["/data/input".to_string()],
+            fs_write: vec![],
+        };
+        let profile = generate_profile(&policy, Path::new("/tmp/tool"));
+        assert!(profile.contains("(allow file-read* (subpath \"/data/input\"))"));
+    }
+
+    #[test]
+    fn profile_additional_write_paths() {
+        let policy = SandboxPolicy {
+            network: false,
+            fs_read: vec![],
+            fs_write: vec!["/data/output".to_string()],
+        };
+        let profile = generate_profile(&policy, Path::new("/tmp/tool"));
+        assert!(profile.contains("(allow file-write* (subpath \"/data/output\"))"));
+    }
+
+    #[test]
+    fn profile_allows_basic_process_ops() {
+        let profile = generate_profile(&default_policy(), Path::new("/tmp/tool"));
+        assert!(profile.contains("(allow process-exec)"));
+        assert!(profile.contains("(allow process-fork)"));
+    }
+}
