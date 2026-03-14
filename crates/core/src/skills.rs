@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tracing::debug;
 
 use crate::config::Config;
+use crate::conversation::estimate_tokens;
 
 const BUILTIN_SLACK: &str = include_str!("../skills/slack/SKILL.md");
 const BUILTIN_DISCORD: &str = include_str!("../skills/discord/SKILL.md");
@@ -225,10 +226,6 @@ pub fn load_skills_context(max_tokens: usize) -> Result<String> {
     } else {
         Ok(format!("# Skills\n\n{}\n", parts.join("\n---\n\n")))
     }
-}
-
-fn estimate_tokens(text: &str) -> usize {
-    text.len() / 4
 }
 
 #[cfg(test)]

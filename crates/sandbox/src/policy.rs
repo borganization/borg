@@ -96,3 +96,54 @@ impl SandboxPolicy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn default_policy_values() {
+        let policy = SandboxPolicy::default();
+        assert!(!policy.network);
+        assert!(policy.fs_read.is_empty());
+        assert!(policy.fs_write.is_empty());
+    }
+
+    #[test]
+    fn wrap_command_returns_sandbox_command() {
+        let policy = SandboxPolicy::default();
+        let args = vec!["script.py".to_string()];
+        let cmd = policy.wrap_command("python3", &args, Path::new("/tmp/tool"));
+        // On Linux, should wrap with bwrap
+        // On macOS, should wrap with sandbox-exec
+        // On other, should pass through
+        assert!(!cmd.program.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_wraps_with_bwrap() {
+        let policy = SandboxPolicy::default();
+        let args = vec!["script.py".to_string()];
+        let cmd = policy.wrap_command("python3", &args, Path::new("/tmp/tool"));
+        assert_eq!(cmd.program, "bwrap");
+        // The original program and args should be at the end
+        assert!(cmd.args.contains(&"python3".to_string()));
+        assert!(cmd.args.contains(&"script.py".to_string()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_preserves_original_args_order() {
+        let policy = SandboxPolicy::default();
+        let args = vec!["arg1".to_string(), "arg2".to_string()];
+        let cmd = policy.wrap_command("node", &args, Path::new("/tmp/tool"));
+        // Original program and args should appear at the end after bwrap flags
+        let node_pos = cmd.args.iter().position(|a| a == "node").unwrap();
+        let arg1_pos = cmd.args.iter().position(|a| a == "arg1").unwrap();
+        let arg2_pos = cmd.args.iter().position(|a| a == "arg2").unwrap();
+        assert!(node_pos < arg1_pos);
+        assert!(arg1_pos < arg2_pos);
+    }
+}
