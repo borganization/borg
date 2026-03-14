@@ -25,6 +25,7 @@ dirs = { workspace = true }
 uuid = { workspace = true }
 serde_yaml = { workspace = true }
 which = { workspace = true }
+tiktoken-rs = { workspace = true }
 
 [lints]
 workspace = true
