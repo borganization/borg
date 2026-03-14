@@ -31,13 +31,21 @@ export OPENROUTER_API_KEY="sk-or-..."
 
 Or add it to your shell profile / `.env` file. See `.env.example` for the template.
 
-2. Initialize the data directory:
+2. Initialize with the onboarding wizard:
 
 ```sh
 tamagotchi init
 ```
 
-This creates `~/.tamagotchi/` with default config, personality, and memory files:
+This launches an interactive TUI that walks you through setup:
+
+- **Name your agent** — give it a custom identity (appears in SOUL.md)
+- **Pick a personality style** — Professional, Casual, Snarky, Nurturing, or Minimal
+- **Choose a model** — select from popular OpenRouter models (Claude, GPT-4.1, Gemini, Llama, etc.)
+
+The wizard writes your choices to `config.toml` and generates a personalized `SOUL.md`. If you cancel mid-wizard, defaults are used instead.
+
+This creates `~/.tamagotchi/` with your customized config, personality, and memory files:
 
 ```
 ~/.tamagotchi/
