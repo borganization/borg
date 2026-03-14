@@ -16,7 +16,7 @@ struct Cli {
 enum Commands {
     /// Start interactive REPL (default)
     Chat,
-    /// Initialize ~/.tamagotchi directory with default config
+    /// Run interactive setup wizard for ~/.tamagotchi
     Init,
     /// Send a single message and exit
     Ask {
@@ -78,7 +78,7 @@ fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
 
     let config_path = data_dir.join("config.toml");
     if !config_path.exists() {
-        let config_content = onboarding::generate_config("anthropic/claude-sonnet-4");
+        let config_content = onboarding::generate_config("anthropic/claude-sonnet-4")?;
         std::fs::write(&config_path, config_content)?;
         println!("  Created {}", config_path.display());
     }
