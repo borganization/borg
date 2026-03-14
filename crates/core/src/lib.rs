@@ -4,6 +4,7 @@ pub mod conversation;
 pub mod llm;
 pub mod logging;
 pub mod memory;
+pub mod provider;
 pub mod skills;
 pub mod soul;
 pub mod tokenizer;

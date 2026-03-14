@@ -6,6 +6,8 @@ use crossterm::{
 use inquire::{Password, Select, Text};
 use std::io;
 
+use std::str::FromStr;
+
 use tamagotchi_core::config::Config;
 use tamagotchi_core::provider::Provider;
 
@@ -188,7 +190,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
     println!("  Let's set up your personal AI assistant.\n");
 
     // ── Step 1: Agent name ──
-    let agent_name = prompt_or_cancel!(Text::new("What should your agent be called?")
+    let agent_name = prompt_or_cancel!(Text::new("What's your agent's name?")
         .with_default("Tamagotchi")
         .prompt());
 
@@ -207,25 +209,51 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         .position(|s| chosen_style.starts_with(s.name))
         .unwrap_or(0);
 
-    // ── Step 3: Model selection ──
-    let model_options: Vec<String> = MODELS
+    // ── Step 3: Provider selection ──
+    let provider_options: Vec<String> = PROVIDERS
+        .iter()
+        .map(|(id, name, desc)| {
+            let detected = Provider::from_str(id)
+                .ok()
+                .and_then(|p| std::env::var(p.default_env_var()).ok())
+                .is_some();
+            let marker = if detected { " [key detected]" } else { "" };
+            format!("{name} — {desc}{marker}")
+        })
+        .collect();
+
+    let chosen_provider =
+        prompt_or_cancel!(Select::new("Choose your LLM provider:", provider_options)
+            .with_help_message("You can change this later in config.toml")
+            .prompt());
+
+    let provider_id = PROVIDERS
+        .iter()
+        .find(|(_, name, _)| chosen_provider.starts_with(name))
+        .map(|(id, _, _)| *id)
+        .unwrap_or("openrouter");
+
+    // ── Step 4: Model selection ──
+    let models = models_for_provider(provider_id);
+    let model_options: Vec<String> = models
         .iter()
         .map(|(_, label)| (*label).to_string())
         .collect();
 
     let chosen_model = prompt_or_cancel!(Select::new("Choose your default model:", model_options)
-        .with_help_message(
-            "All models served via OpenRouter — you can change this later in config.toml"
-        )
+        .with_help_message("You can change this later in config.toml")
         .prompt());
 
-    let model_id = MODELS
+    let model_id = models
         .iter()
         .find(|(_, label)| *label == chosen_model.as_str())
         .map(|(id, _)| (*id).to_string())
-        .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string());
+        .unwrap_or_else(|| models[0].0.to_string());
 
-    // ── Step 4: API key ──
+    // ── Step 5: API key ──
+    let provider = Provider::from_str(provider_id)?;
+    let env_var_name = provider.default_env_var();
+
     let data_dir = Config::data_dir()?;
     let env_path = data_dir.join(".env");
     let existing_key = if env_path.exists() {
@@ -233,7 +261,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
             .ok()
             .and_then(|contents| {
                 contents.lines().find_map(|line| {
-                    line.strip_prefix("OPENROUTER_API_KEY=")
+                    line.strip_prefix(&format!("{env_var_name}="))
                         .map(|v| v.trim().trim_matches('"').to_string())
                 })
             })
@@ -246,8 +274,13 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         println!("  API key already configured in {}", env_path.display());
         None
     } else {
-        let key = prompt_or_cancel!(Password::new("OpenRouter API key:")
-            .with_help_message("Get yours at https://openrouter.ai/keys — leave empty to skip")
+        let prompt_label = format!("{} API key:", provider_id_to_display(provider_id));
+        let help_msg = format!(
+            "Get yours at {} — leave empty to skip",
+            provider_key_url(provider_id)
+        );
+        let key = prompt_or_cancel!(Password::new(&prompt_label)
+            .with_help_message(&help_msg)
             .without_confirmation()
             .prompt());
         if key.trim().is_empty() {
@@ -261,6 +294,11 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
     println!();
     print_checkmark(&mut stdout, "Agent name:", &agent_name)?;
     print_checkmark(&mut stdout, "Style:     ", STYLES[style_index].name)?;
+    print_checkmark(
+        &mut stdout,
+        "Provider:  ",
+        provider_id_to_display(provider_id),
+    )?;
     print_checkmark(&mut stdout, "Model:     ", &model_id)?;
     if existing_key.is_some() {
         print_checkmark(&mut stdout, "API key:   ", "(already set)")?;
@@ -281,6 +319,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         style_index,
         model_id,
         api_key,
+        provider: provider_id.to_string(),
     }))
 }
 
@@ -334,12 +373,16 @@ fn validate_model_id(model_id: &str) -> Result<()> {
 }
 
 /// Generate config.toml content from onboarding choices.
-pub fn generate_config(model_id: &str) -> Result<String> {
+pub fn generate_config(model_id: &str, provider_id: &str) -> Result<String> {
     validate_model_id(model_id)?;
+
+    let provider = Provider::from_str(provider_id)?;
+    let env_var = provider.default_env_var();
 
     Ok(format!(
         r#"[llm]
-api_key_env = "OPENROUTER_API_KEY"
+provider = "{provider_id}"
+api_key_env = "{env_var}"
 model = "{model_id}"
 temperature = 0.7
 max_tokens = 4096
@@ -381,7 +424,7 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     if config_path.exists() {
         println!("  Skipped {} (already exists)", config_path.display());
     } else {
-        let config_content = generate_config(&result.model_id)?;
+        let config_content = generate_config(&result.model_id, &result.provider)?;
         std::fs::write(&config_path, &config_content)?;
         println!("  Created {}", config_path.display());
     }
@@ -407,8 +450,10 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
 
     // Write .env with API key (skip if not provided)
     if let Some(ref api_key) = result.api_key {
+        let provider = Provider::from_str(&result.provider)?;
+        let env_var = provider.default_env_var();
         let env_path = data_dir.join(".env");
-        std::fs::write(&env_path, format!("OPENROUTER_API_KEY={api_key}\n"))?;
+        std::fs::write(&env_path, format!("{env_var}={api_key}\n"))?;
         println!("  Created {}", env_path.display());
     }
 
@@ -443,20 +488,52 @@ mod tests {
 
     #[test]
     fn generate_config_default_model() {
-        let config = generate_config("anthropic/claude-sonnet-4").expect("valid model");
+        let config =
+            generate_config("anthropic/claude-sonnet-4", "openrouter").expect("valid model");
         assert!(config.contains("model = \"anthropic/claude-sonnet-4\""));
+        assert!(config.contains("provider = \"openrouter\""));
+        assert!(config.contains("api_key_env = \"OPENROUTER_API_KEY\""));
         assert!(config.contains("[llm]"));
         assert!(config.contains("[sandbox]"));
     }
 
     #[test]
+    fn generate_config_anthropic_provider() {
+        let config = generate_config("claude-sonnet-4", "anthropic").expect("valid");
+        assert!(config.contains("provider = \"anthropic\""));
+        assert!(config.contains("api_key_env = \"ANTHROPIC_API_KEY\""));
+    }
+
+    #[test]
+    fn generate_config_openai_provider() {
+        let config = generate_config("gpt-4.1", "openai").expect("valid");
+        assert!(config.contains("provider = \"openai\""));
+        assert!(config.contains("api_key_env = \"OPENAI_API_KEY\""));
+    }
+
+    #[test]
+    fn generate_config_gemini_provider() {
+        let config = generate_config("gemini-2.5-pro", "gemini").expect("valid");
+        assert!(config.contains("provider = \"gemini\""));
+        assert!(config.contains("api_key_env = \"GEMINI_API_KEY\""));
+    }
+
+    #[test]
     fn generate_config_rejects_empty_model() {
-        assert!(generate_config("").is_err());
+        assert!(generate_config("", "openrouter").is_err());
     }
 
     #[test]
     fn generate_config_rejects_injection() {
-        assert!(generate_config("model\"\nmalicious = true").is_err());
+        assert!(generate_config("model\"\nmalicious = true", "openrouter").is_err());
+    }
+
+    #[test]
+    fn models_for_all_providers_non_empty() {
+        for (id, _, _) in PROVIDERS {
+            let models = models_for_provider(id);
+            assert!(!models.is_empty(), "models for {id} should not be empty");
+        }
     }
 
     #[test]
