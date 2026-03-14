@@ -25,6 +25,12 @@ inquire = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
 dotenvy = { workspace = true }
+ratatui = { workspace = true }
+tui-textarea = { workspace = true }
+pulldown-cmark = { workspace = true }
+textwrap = { workspace = true }
+unicode-width = { workspace = true }
+futures = { workspace = true }
 
 [lints]
 workspace = true
