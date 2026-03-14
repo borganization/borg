@@ -9,7 +9,7 @@ Cargo workspace with 6 crates:
 ```
 crates/
   cli/          Binary: REPL, clap args, heartbeat display, onboarding TUI
-  core/         Library: agent loop, OpenRouter SSE client, memory, soul, config
+  core/         Library: agent loop, multi-provider LLM client, memory, soul, config
   heartbeat/    Library: proactive scheduler with quiet hours + dedup
   tools/        Library: tool manifest parsing, registry, subprocess executor
   sandbox/      Library: macOS Seatbelt + Linux Bubblewrap policies
@@ -27,13 +27,13 @@ cargo fmt --check
 cargo clippy -- -D warnings
 ```
 
-Binary name is `tamagotchi`. Requires `OPENROUTER_API_KEY` env var at runtime (see `.env.example`).
+Binary name is `tamagotchi`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` at runtime (see `.env.example`).
 
 ## CLI Commands
 
 - `tamagotchi` or `tamagotchi chat` — interactive REPL
 - `tamagotchi ask "message"` — one-shot query
-- `tamagotchi init` — interactive onboarding wizard (name, personality, model selection)
+- `tamagotchi init` — interactive onboarding wizard (name, personality, provider, model selection)
 
 ## Agent Loop
 
@@ -106,6 +106,7 @@ Used by `apply_patch` to create/modify/delete files:
 
 ```toml
 [llm]
+provider = "openrouter"             # openrouter | openai | anthropic | gemini (auto-detected if omitted)
 api_key_env = "OPENROUTER_API_KEY"
 model = "anthropic/claude-sonnet-4"
 temperature = 0.7
@@ -189,7 +190,8 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 | `crates/cli/src/onboarding.rs` | TUI onboarding wizard (inquire-based) |
 | `crates/cli/src/repl.rs` | Interactive loop + heartbeat rendering |
 | `crates/core/src/agent.rs` | Conversation loop + tool dispatch |
-| `crates/core/src/llm.rs` | OpenRouter streaming SSE client |
+| `crates/core/src/provider.rs` | Provider enum, auto-detection, headers |
+| `crates/core/src/llm.rs` | Multi-provider streaming SSE client |
 | `crates/core/src/config.rs` | Config parsing with defaults |
 | `crates/core/src/soul.rs` | SOUL.md load/save |
 | `crates/core/src/memory.rs` | Memory loading with token budget |

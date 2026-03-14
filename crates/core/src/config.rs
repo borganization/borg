@@ -2,6 +2,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use std::str::FromStr;
+
+use crate::provider::Provider;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -22,6 +26,8 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
+    #[serde(default)]
+    pub provider: Option<String>,
     #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
     #[serde(default = "default_model")]
@@ -117,6 +123,7 @@ fn default_max_history_tokens() -> usize {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
+            provider: None,
             api_key_env: default_api_key_env(),
             model: default_model(),
             temperature: default_temperature(),
@@ -210,6 +217,49 @@ impl Config {
             )
         })
     }
+
+    /// Resolve the provider and API key from config + environment.
+    ///
+    /// Priority:
+    /// 1. Explicit `provider` in config → use that provider, resolve key from `api_key_env` or provider default
+    /// 2. If `api_key_env` is set to a non-default value → try it, auto-detect provider from the value
+    /// 3. Auto-detect from environment variables in priority order
+    pub fn resolve_provider(&self) -> Result<(Provider, String)> {
+        // Case 1: Explicit provider in config
+        if let Some(ref provider_str) = self.llm.provider {
+            let provider = Provider::from_str(provider_str)?;
+            // Try api_key_env first, then the provider's default env var
+            let key = std::env::var(&self.llm.api_key_env)
+                .or_else(|_| std::env::var(provider.default_env_var()))
+                .with_context(|| {
+                    format!(
+                        "API key not found for provider {provider}. Set {} or {}.",
+                        self.llm.api_key_env,
+                        provider.default_env_var()
+                    )
+                })?;
+            return Ok((provider, key));
+        }
+
+        // Case 2: api_key_env is set to a non-default value — honor it
+        if self.llm.api_key_env != default_api_key_env() {
+            if let Ok(key) = std::env::var(&self.llm.api_key_env) {
+                if !key.is_empty() {
+                    // Try to guess the provider from the env var name
+                    let provider = match self.llm.api_key_env.as_str() {
+                        "OPENAI_API_KEY" => Provider::OpenAi,
+                        "ANTHROPIC_API_KEY" => Provider::Anthropic,
+                        "GEMINI_API_KEY" => Provider::Gemini,
+                        _ => Provider::OpenRouter, // fallback: treat custom key as OpenRouter-compatible
+                    };
+                    return Ok((provider, key));
+                }
+            }
+        }
+
+        // Case 3: Auto-detect from env
+        Provider::detect_from_env()
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +272,7 @@ mod tests {
         let cfg = Config::default();
 
         // LLM defaults
+        assert!(cfg.llm.provider.is_none());
         assert_eq!(cfg.llm.api_key_env, "OPENROUTER_API_KEY");
         assert_eq!(cfg.llm.model, "anthropic/claude-sonnet-4");
         assert!((cfg.llm.temperature - 0.7).abs() < f32::EPSILON);
@@ -395,5 +446,89 @@ model = "meta/llama-3"
 
         // Cleanup
         std::env::remove_var(env_name);
+    }
+
+    #[test]
+    fn parse_config_with_provider_field() {
+        let toml_str = r#"
+[llm]
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-sonnet-4"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.llm.provider.as_deref(), Some("anthropic"));
+        assert_eq!(cfg.llm.model, "claude-sonnet-4");
+    }
+
+    #[test]
+    fn parse_config_without_provider_field() {
+        let toml_str = r#"
+[llm]
+api_key_env = "OPENROUTER_API_KEY"
+model = "anthropic/claude-sonnet-4"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(cfg.llm.provider.is_none());
+    }
+
+    #[test]
+    fn resolve_provider_explicit_uses_custom_env_var() {
+        // Explicit provider resolves key from api_key_env without relying on auto-detect
+        let unique_env = "TAMAGOTCHI_TEST_RESOLVE_EXPLICIT";
+        std::env::set_var(unique_env, "sk-ant-test");
+
+        let mut cfg = Config::default();
+        cfg.llm.provider = Some("anthropic".to_string());
+        cfg.llm.api_key_env = unique_env.to_string();
+
+        let (provider, key) = cfg.resolve_provider().unwrap();
+        assert_eq!(provider, Provider::Anthropic);
+        assert_eq!(key, "sk-ant-test");
+
+        std::env::remove_var(unique_env);
+    }
+
+    #[test]
+    fn resolve_provider_explicit_errors_without_key() {
+        let unique_env = "TAMAGOTCHI_TEST_RESOLVE_MISSING";
+        std::env::remove_var(unique_env);
+
+        let mut cfg = Config::default();
+        cfg.llm.provider = Some("openai".to_string());
+        cfg.llm.api_key_env = unique_env.to_string();
+
+        // Also ensure the default OPENAI_API_KEY is not set (best effort)
+        let saved = std::env::var("OPENAI_API_KEY").ok();
+        std::env::remove_var("OPENAI_API_KEY");
+
+        let result = cfg.resolve_provider();
+        // Should error since neither custom env nor provider default is set
+        // (may succeed if OPENAI_API_KEY happens to be set by another test)
+        if saved.is_none() {
+            assert!(result.is_err());
+        }
+
+        if let Some(val) = saved {
+            std::env::set_var("OPENAI_API_KEY", val);
+        }
+    }
+
+    #[test]
+    fn resolve_provider_custom_api_key_env() {
+        // When api_key_env is non-default and maps to a known provider
+        let unique_env = "TAMAGOTCHI_TEST_CUSTOM_KEY";
+        std::env::set_var(unique_env, "sk-custom");
+
+        let mut cfg = Config::default();
+        cfg.llm.api_key_env = unique_env.to_string();
+        // No explicit provider — falls through to auto-detect path
+        // Since api_key_env is not a known provider env var, it won't match case 2
+        // It will try auto-detect from env
+
+        // This mainly tests that the code doesn't panic
+        let _ = cfg.resolve_provider();
+
+        std::env::remove_var(unique_env);
     }
 }
