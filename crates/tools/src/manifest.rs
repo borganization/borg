@@ -109,3 +109,108 @@ impl ToolManifest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    const FULL_TOML: &str = r#"
+name = "weather"
+description = "Get the weather"
+runtime = "python"
+entrypoint = "main.py"
+timeout_ms = 15000
+
+[sandbox]
+network = true
+fs_read = ["/etc/ssl"]
+fs_write = []
+
+[parameters]
+type = "object"
+[parameters.properties.city]
+type = "string"
+description = "City name"
+[parameters.required]
+values = ["city"]
+"#;
+
+    #[test]
+    fn parse_full_manifest() {
+        let manifest: ToolManifest = toml::from_str(FULL_TOML).unwrap();
+        assert_eq!(manifest.name, "weather");
+        assert_eq!(manifest.description, "Get the weather");
+        assert_eq!(manifest.runtime, "python");
+        assert_eq!(manifest.entrypoint, "main.py");
+        assert_eq!(manifest.timeout_ms, 15000);
+        assert!(manifest.sandbox.network);
+        assert_eq!(manifest.sandbox.fs_read, vec!["/etc/ssl"]);
+        assert!(manifest.sandbox.fs_write.is_empty());
+        assert_eq!(manifest.parameters.required.values, vec!["city"]);
+    }
+
+    #[test]
+    fn parse_minimal_manifest() {
+        let toml_str = r#"
+name = "hello"
+description = "Says hello"
+"#;
+        let manifest: ToolManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.name, "hello");
+        assert_eq!(manifest.runtime, "python");
+        assert_eq!(manifest.entrypoint, "main.py");
+        assert_eq!(manifest.timeout_ms, 30000);
+        assert!(!manifest.sandbox.network);
+    }
+
+    #[test]
+    fn parameters_json_schema_output() {
+        let manifest: ToolManifest = toml::from_str(FULL_TOML).unwrap();
+        let schema = manifest.parameters_json_schema();
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["city"]["type"], "string");
+        assert_eq!(schema["properties"]["city"]["description"], "City name");
+        assert_eq!(schema["required"], serde_json::json!(["city"]));
+    }
+
+    #[test]
+    fn parameters_json_schema_empty_properties() {
+        let toml_str = r#"
+name = "empty"
+description = "No params"
+"#;
+        let manifest: ToolManifest = toml::from_str(toml_str).unwrap();
+        let schema = manifest.parameters_json_schema();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn sandbox_policy_conversion() {
+        let manifest: ToolManifest = toml::from_str(FULL_TOML).unwrap();
+        let policy = manifest.sandbox_policy();
+        assert!(policy.network);
+        assert_eq!(policy.fs_read, vec!["/etc/ssl"]);
+        assert!(policy.fs_write.is_empty());
+    }
+
+    #[test]
+    fn load_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool.toml");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            write!(f, "{FULL_TOML}").unwrap();
+        }
+        let manifest = ToolManifest::load(&path).unwrap();
+        assert_eq!(manifest.name, "weather");
+    }
+
+    #[test]
+    fn load_nonexistent_file_errors() {
+        let result = ToolManifest::load(Path::new("/tmp/nonexistent_tool_toml_xyz.toml"));
+        assert!(result.is_err());
+    }
+}
