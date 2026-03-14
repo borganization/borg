@@ -16,6 +16,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
+    #[serde(default)]
+    pub conversation: ConversationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +74,12 @@ pub struct SkillsConfig {
     pub max_context_tokens: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationConfig {
+    #[serde(default = "default_max_history_tokens")]
+    pub max_history_tokens: usize,
+}
+
 fn default_api_key_env() -> String {
     "OPENROUTER_API_KEY".to_string()
 }
@@ -101,6 +109,9 @@ fn default_max_context_tokens() -> usize {
 }
 fn default_skills_max_tokens() -> usize {
     4000
+}
+fn default_max_history_tokens() -> usize {
+    32000
 }
 
 impl Default for LlmConfig {
@@ -156,6 +167,14 @@ impl Default for SkillsConfig {
         Self {
             enabled: default_true(),
             max_context_tokens: default_skills_max_tokens(),
+        }
+    }
+}
+
+impl Default for ConversationConfig {
+    fn default() -> Self {
+        Self {
+            max_history_tokens: default_max_history_tokens(),
         }
     }
 }
@@ -228,6 +247,9 @@ mod tests {
         // Skills defaults
         assert!(cfg.skills.enabled);
         assert_eq!(cfg.skills.max_context_tokens, 4000);
+
+        // Conversation defaults
+        assert_eq!(cfg.conversation.max_history_tokens, 32000);
     }
 
     #[test]
@@ -255,6 +277,9 @@ mode = "permissive"
 
 [memory]
 max_context_tokens = 16000
+
+[conversation]
+max_history_tokens = 64000
 "#;
 
         let cfg: Config = toml::from_str(toml_str).expect("should parse complete toml");
@@ -276,6 +301,8 @@ max_context_tokens = 16000
         assert_eq!(cfg.sandbox.mode, "permissive");
 
         assert_eq!(cfg.memory.max_context_tokens, 16000);
+
+        assert_eq!(cfg.conversation.max_history_tokens, 64000);
     }
 
     #[test]
