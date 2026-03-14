@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tracing::debug;
 
 use crate::config::Config;
+use crate::conversation::estimate_tokens;
 
 pub fn memory_dir() -> Result<PathBuf> {
     Ok(Config::data_dir()?.join("memory"))
@@ -111,11 +112,6 @@ pub fn read_memory(filename: &str) -> Result<String> {
     } else {
         Ok(format!("Memory file '{filename}' not found."))
     }
-}
-
-fn estimate_tokens(text: &str) -> usize {
-    // Rough estimate: ~4 characters per token
-    text.len() / 4
 }
 
 #[cfg(test)]

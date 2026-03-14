@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::config::Config;
+use crate::conversation::compact_history;
 use crate::llm::{LlmClient, StreamEvent};
 use crate::memory::{load_memory_context, read_memory, write_memory};
 use crate::skills::{load_all_skills, load_skills_context, Skill};
@@ -87,6 +88,12 @@ impl Agent {
 
     pub async fn run_agent_loop(&mut self, event_tx: mpsc::Sender<AgentEvent>) -> Result<()> {
         loop {
+            // Compact history if it exceeds the token budget
+            compact_history(
+                &mut self.history,
+                self.config.conversation.max_history_tokens,
+            );
+
             let system_prompt = self.build_system_prompt()?;
             let tool_defs = self.build_tool_definitions();
 
