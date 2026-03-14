@@ -21,6 +21,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 futures-util = { workspace = true }
+inquire = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
 
 [lints]
 workspace = true
