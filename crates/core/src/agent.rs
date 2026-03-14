@@ -1,16 +1,22 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::config::Config;
-use crate::conversation::compact_history;
+use crate::conversation::{compact_history, normalize_history};
 use crate::llm::{LlmClient, StreamEvent};
 use crate::memory::{load_memory_context, read_memory, write_memory};
 use crate::skills::{load_all_skills, load_skills_context, Skill};
 use crate::soul::load_soul;
+use crate::truncate::truncate_output;
 use crate::types::{FunctionCall, Message, ToolCall, ToolDefinition};
 use tamagotchi_apply_patch::apply_patch_to_dir;
 use tamagotchi_tools::registry::ToolRegistry;
+
+/// Max tokens for tool output before truncation (head + tail preserved).
+const TOOL_OUTPUT_MAX_TOKENS: usize = 4000;
 
 pub enum AgentEvent {
     TextDelta(String),
@@ -88,6 +94,9 @@ impl Agent {
 
     pub async fn run_agent_loop(&mut self, event_tx: mpsc::Sender<AgentEvent>) -> Result<()> {
         loop {
+            // Normalize history to fix structural invariants (missing/orphaned tool results)
+            normalize_history(&mut self.history);
+
             // Compact history if it exceeds the token budget
             compact_history(
                 &mut self.history,
@@ -209,10 +218,13 @@ impl Agent {
                     })
                     .await;
 
-                let result = self
+                let raw_result = self
                     .execute_tool(name, args)
                     .await
                     .unwrap_or_else(|e| format!("Error: {e}"));
+
+                // Truncate large tool outputs to prevent blowing the context window
+                let result = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
 
                 let _ = event_tx
                     .send(AgentEvent::ToolResult {
@@ -282,20 +294,29 @@ impl Agent {
             }
             "run_shell" => {
                 let command = args["command"].as_str().context("Missing 'command'")?;
-                let output = tokio::process::Command::new("sh")
+                let timeout_ms = self.config.tools.default_timeout_ms;
+                let timeout_dur = Duration::from_millis(timeout_ms);
+
+                let child = tokio::process::Command::new("sh")
                     .arg("-c")
                     .arg(command)
-                    .output()
-                    .await
-                    .context("Failed to execute shell command")?;
+                    .output();
 
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let status = output.status.code().unwrap_or(-1);
+                match tokio::time::timeout(timeout_dur, child).await {
+                    Ok(Ok(output)) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let status = output.status.code().unwrap_or(-1);
 
-                Ok(format!(
-                    "Exit code: {status}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-                ))
+                        Ok(format!(
+                            "Exit code: {status}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+                        ))
+                    }
+                    Ok(Err(e)) => Err(anyhow::anyhow!("Failed to execute shell command: {e}")),
+                    Err(_) => Ok(format!(
+                        "Error: command timed out after {timeout_ms}ms\nCommand: {command}"
+                    )),
+                }
             }
             _ => {
                 // Try user tools

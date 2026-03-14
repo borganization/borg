@@ -5,4 +5,5 @@ pub mod llm;
 pub mod memory;
 pub mod skills;
 pub mod soul;
+pub mod truncate;
 pub mod types;
