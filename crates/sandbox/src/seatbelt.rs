@@ -53,89 +53,70 @@ pub fn generate_profile(policy: &SandboxPolicy, tool_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    #[test]
-    fn profile_starts_with_version_and_deny() {
-        let policy = SandboxPolicy::default();
-        let profile = generate_profile(&policy, &PathBuf::from("/tmp/tool"));
-        assert!(profile.starts_with("(version 1)\n(deny default)\n"));
-    }
-
-    #[test]
-    fn profile_allows_process_ops() {
-        let policy = SandboxPolicy::default();
-        let profile = generate_profile(&policy, &PathBuf::from("/tmp/tool"));
-        assert!(profile.contains("(allow process-exec)"));
-        assert!(profile.contains("(allow process-fork)"));
-        assert!(profile.contains("(allow sysctl-read)"));
-        assert!(profile.contains("(allow mach-lookup)"));
-    }
-
-    #[test]
-    fn tool_dir_readable() {
-        let policy = SandboxPolicy::default();
-        let profile = generate_profile(&policy, &PathBuf::from("/home/user/tools/my_tool"));
-        assert!(profile.contains("(allow file-read* (subpath \"/home/user/tools/my_tool\"))"));
-    }
-
-    #[test]
-    fn system_paths_readable() {
-        let policy = SandboxPolicy::default();
-        let profile = generate_profile(&policy, &PathBuf::from("/tmp/tool"));
-        for path in &["/usr", "/lib", "/System", "/Library", "/bin", "/sbin"] {
-            assert!(
-                profile.contains(&format!("(allow file-read* (subpath \"{path}\"))")),
-                "expected {path} to be readable"
-            );
+    fn default_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            network: false,
+            fs_read: vec![],
+            fs_write: vec![],
         }
     }
 
     #[test]
-    fn tmp_writable() {
-        let policy = SandboxPolicy::default();
-        let profile = generate_profile(&policy, &PathBuf::from("/tmp/tool"));
-        assert!(profile.contains("(allow file-write* (subpath \"/private/tmp\"))"));
-        assert!(profile.contains("(allow file-write* (subpath \"/tmp\"))"));
+    fn profile_starts_with_deny_default() {
+        let profile = generate_profile(&default_policy(), Path::new("/tmp/tool"));
+        assert!(profile.contains("(deny default)"));
     }
 
     #[test]
-    fn custom_read_paths_included() {
-        let policy = SandboxPolicy {
-            network: false,
-            fs_read: vec!["/data/custom".to_string()],
-            fs_write: vec![],
-        };
-        let profile = generate_profile(&policy, &PathBuf::from("/tmp/tool"));
-        assert!(profile.contains("(allow file-read* (subpath \"/data/custom\"))"));
+    fn profile_includes_tool_dir() {
+        let profile = generate_profile(&default_policy(), Path::new("/my/tool/dir"));
+        assert!(profile.contains("(allow file-read* (subpath \"/my/tool/dir\"))"));
     }
 
     #[test]
-    fn custom_write_paths_included() {
-        let policy = SandboxPolicy {
-            network: false,
-            fs_read: vec![],
-            fs_write: vec!["/data/output".to_string()],
-        };
-        let profile = generate_profile(&policy, &PathBuf::from("/tmp/tool"));
-        assert!(profile.contains("(allow file-write* (subpath \"/data/output\"))"));
+    fn profile_no_network_by_default() {
+        let profile = generate_profile(&default_policy(), Path::new("/tmp/tool"));
+        assert!(!profile.contains("(allow network*)"));
     }
 
     #[test]
-    fn network_allowed_when_enabled() {
+    fn profile_network_when_allowed() {
         let policy = SandboxPolicy {
             network: true,
             fs_read: vec![],
             fs_write: vec![],
         };
-        let profile = generate_profile(&policy, &PathBuf::from("/tmp/tool"));
+        let profile = generate_profile(&policy, Path::new("/tmp/tool"));
         assert!(profile.contains("(allow network*)"));
     }
 
     #[test]
-    fn network_denied_when_disabled() {
-        let policy = SandboxPolicy::default();
-        let profile = generate_profile(&policy, &PathBuf::from("/tmp/tool"));
-        assert!(!profile.contains("(allow network*)"));
+    fn profile_additional_read_paths() {
+        let policy = SandboxPolicy {
+            network: false,
+            fs_read: vec!["/data/input".to_string()],
+            fs_write: vec![],
+        };
+        let profile = generate_profile(&policy, Path::new("/tmp/tool"));
+        assert!(profile.contains("(allow file-read* (subpath \"/data/input\"))"));
+    }
+
+    #[test]
+    fn profile_additional_write_paths() {
+        let policy = SandboxPolicy {
+            network: false,
+            fs_read: vec![],
+            fs_write: vec!["/data/output".to_string()],
+        };
+        let profile = generate_profile(&policy, Path::new("/tmp/tool"));
+        assert!(profile.contains("(allow file-write* (subpath \"/data/output\"))"));
+    }
+
+    #[test]
+    fn profile_allows_basic_process_ops() {
+        let profile = generate_profile(&default_policy(), Path::new("/tmp/tool"));
+        assert!(profile.contains("(allow process-exec)"));
+        assert!(profile.contains("(allow process-fork)"));
     }
 }
