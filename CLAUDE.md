@@ -114,6 +114,7 @@ max_tokens = 4096
 [heartbeat]
 enabled = false
 interval = "30m"
+cron = "0 */30 * * * *"          # optional, overrides interval
 quiet_hours_start = "23:00"
 quiet_hours_end = "07:00"
 
@@ -136,7 +137,7 @@ max_context_tokens = 4000
 
 - `~/.tamagotchi/MEMORY.md` — loaded every turn
 - `~/.tamagotchi/memory/*.md` — loaded by recency until token budget exhausted
-- Token estimate: `len / 4`
+- Token estimation via `tiktoken-rs` (cl100k_base BPE tokenizer)
 
 ## Personality (SOUL.md)
 
