@@ -95,7 +95,7 @@ fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
     let config_path = data_dir.join("config.toml");
     if !config_path.exists() {
         let config_content =
-            onboarding::generate_config("anthropic/claude-sonnet-4", "openrouter")?;
+            onboarding::generate_config("anthropic/claude-sonnet-4", "openrouter", "", "")?;
         std::fs::write(&config_path, config_content)?;
         println!("  Created {}", config_path.display());
     }

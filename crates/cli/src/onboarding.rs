@@ -118,6 +118,7 @@ const STYLES: &[PersonalityStyle] = &[
 
 /// Assembled choices from the onboarding wizard.
 pub struct OnboardingResult {
+    pub user_name: String,
     pub agent_name: String,
     pub style_index: usize,
     pub model_id: String,
@@ -189,12 +190,15 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
 
     println!("  Let's set up your personal AI assistant.\n");
 
-    // ── Step 1: Agent name ──
+    // ── Step 1: User name ──
+    let user_name = prompt_or_cancel!(Text::new("What's your name?").prompt());
+
+    // ── Step 2: Agent name ──
     let agent_name = prompt_or_cancel!(Text::new("What's your agent's name?")
         .with_default("Tamagotchi")
         .prompt());
 
-    // ── Step 2: Personality style ──
+    // ── Step 3: Personality style ──
     let style_options: Vec<String> = STYLES
         .iter()
         .map(|s| format!("{} — {}", s.name, s.description))
@@ -209,7 +213,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         .position(|s| chosen_style.starts_with(s.name))
         .unwrap_or(0);
 
-    // ── Step 3: Provider selection ──
+    // ── Step 4: Provider selection ──
     let provider_options: Vec<String> = PROVIDERS
         .iter()
         .map(|(id, name, desc)| {
@@ -233,7 +237,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         .map(|(id, _, _)| *id)
         .unwrap_or("openrouter");
 
-    // ── Step 4: Model selection ──
+    // ── Step 5: Model selection ──
     let models = models_for_provider(provider_id);
     let model_options: Vec<String> = models
         .iter()
@@ -250,7 +254,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         .map(|(id, _)| (*id).to_string())
         .unwrap_or_else(|| models[0].0.to_string());
 
-    // ── Step 5: API key ──
+    // ── Step 6: API key ──
     let provider = Provider::from_str(provider_id)?;
     let env_var_name = provider.default_env_var();
 
@@ -292,6 +296,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
 
     // ── Summary ──
     println!();
+    print_checkmark(&mut stdout, "Your name: ", &user_name)?;
     print_checkmark(&mut stdout, "Agent name:", &agent_name)?;
     print_checkmark(&mut stdout, "Style:     ", STYLES[style_index].name)?;
     print_checkmark(
@@ -315,6 +320,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
     println!();
 
     Ok(Some(OnboardingResult {
+        user_name,
         agent_name,
         style_index,
         model_id,
@@ -324,7 +330,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
 }
 
 /// Generate SOUL.md content from onboarding choices.
-pub fn generate_soul(name: &str, style_index: usize) -> Result<String> {
+pub fn generate_soul(name: &str, style_index: usize, owner_name: &str) -> Result<String> {
     let style = STYLES
         .get(style_index)
         .ok_or_else(|| anyhow::anyhow!("invalid style index {style_index}"))?;
@@ -332,7 +338,7 @@ pub fn generate_soul(name: &str, style_index: usize) -> Result<String> {
     Ok(format!(
         r#"# {name} — Your AI Personal Assistant
 
-You are {name}, a helpful AI personal assistant. You live on your owner's computer and help them with tasks, remember things for them, and occasionally check in to see how they're doing.
+You are {name}, a helpful AI personal assistant. You belong to {owner_name} and live on their computer. You help them with tasks, remember things for them, and occasionally check in to see how they're doing.
 
 ## Personality
 - Proactive when you notice something useful
@@ -373,14 +379,23 @@ fn validate_model_id(model_id: &str) -> Result<()> {
 }
 
 /// Generate config.toml content from onboarding choices.
-pub fn generate_config(model_id: &str, provider_id: &str) -> Result<String> {
+pub fn generate_config(
+    model_id: &str,
+    provider_id: &str,
+    user_name: &str,
+    agent_name: &str,
+) -> Result<String> {
     validate_model_id(model_id)?;
 
     let provider = Provider::from_str(provider_id)?;
     let env_var = provider.default_env_var();
 
     Ok(format!(
-        r#"[llm]
+        r#"[user]
+name = "{user_name}"
+agent_name = "{agent_name}"
+
+[llm]
 provider = "{provider_id}"
 api_key_env = "{env_var}"
 model = "{model_id}"
@@ -424,7 +439,12 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     if config_path.exists() {
         println!("  Skipped {} (already exists)", config_path.display());
     } else {
-        let config_content = generate_config(&result.model_id, &result.provider)?;
+        let config_content = generate_config(
+            &result.model_id,
+            &result.provider,
+            &result.user_name,
+            &result.agent_name,
+        )?;
         std::fs::write(&config_path, &config_content)?;
         println!("  Created {}", config_path.display());
     }
@@ -434,7 +454,8 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     if soul_path.exists() {
         println!("  Skipped {} (already exists)", soul_path.display());
     } else {
-        let soul_content = generate_soul(&result.agent_name, result.style_index)?;
+        let soul_content =
+            generate_soul(&result.agent_name, result.style_index, &result.user_name)?;
         std::fs::write(&soul_path, &soul_content)?;
         println!("  Created {}", soul_path.display());
     }
@@ -466,9 +487,10 @@ mod tests {
 
     #[test]
     fn generate_soul_contains_name_and_style() {
-        let soul = generate_soul("Buddy", 0).expect("valid style index");
+        let soul = generate_soul("Buddy", 0, "Mike").expect("valid style index");
         assert!(soul.contains("# Buddy — Your AI Personal Assistant"));
         assert!(soul.contains("You are Buddy"));
+        assert!(soul.contains("You belong to Mike"));
         assert!(soul.contains("## Communication Style"));
         assert!(soul.contains("Professional and direct"));
     }
@@ -476,20 +498,20 @@ mod tests {
     #[test]
     fn generate_soul_all_styles_valid() {
         for i in 0..STYLES.len() {
-            let soul = generate_soul("Test", i).expect("valid style index");
+            let soul = generate_soul("Test", i, "Owner").expect("valid style index");
             assert!(soul.contains(STYLES[i].name) || soul.contains("Communication Style"));
         }
     }
 
     #[test]
     fn generate_soul_invalid_index_errors() {
-        assert!(generate_soul("Test", 999).is_err());
+        assert!(generate_soul("Test", 999, "Owner").is_err());
     }
 
     #[test]
     fn generate_config_default_model() {
-        let config =
-            generate_config("anthropic/claude-sonnet-4", "openrouter").expect("valid model");
+        let config = generate_config("anthropic/claude-sonnet-4", "openrouter", "Mike", "Buddy")
+            .expect("valid model");
         assert!(config.contains("model = \"anthropic/claude-sonnet-4\""));
         assert!(config.contains("provider = \"openrouter\""));
         assert!(config.contains("api_key_env = \"OPENROUTER_API_KEY\""));
@@ -498,34 +520,46 @@ mod tests {
     }
 
     #[test]
+    fn generate_config_includes_user_section() {
+        let config = generate_config("anthropic/claude-sonnet-4", "openrouter", "Mike", "Buddy")
+            .expect("valid model");
+        assert!(config.contains("[user]"));
+        assert!(config.contains("name = \"Mike\""));
+        assert!(config.contains("agent_name = \"Buddy\""));
+    }
+
+    #[test]
     fn generate_config_anthropic_provider() {
-        let config = generate_config("claude-sonnet-4", "anthropic").expect("valid");
+        let config =
+            generate_config("claude-sonnet-4", "anthropic", "User", "Agent").expect("valid");
         assert!(config.contains("provider = \"anthropic\""));
         assert!(config.contains("api_key_env = \"ANTHROPIC_API_KEY\""));
     }
 
     #[test]
     fn generate_config_openai_provider() {
-        let config = generate_config("gpt-4.1", "openai").expect("valid");
+        let config = generate_config("gpt-4.1", "openai", "User", "Agent").expect("valid");
         assert!(config.contains("provider = \"openai\""));
         assert!(config.contains("api_key_env = \"OPENAI_API_KEY\""));
     }
 
     #[test]
     fn generate_config_gemini_provider() {
-        let config = generate_config("gemini-2.5-pro", "gemini").expect("valid");
+        let config = generate_config("gemini-2.5-pro", "gemini", "User", "Agent").expect("valid");
         assert!(config.contains("provider = \"gemini\""));
         assert!(config.contains("api_key_env = \"GEMINI_API_KEY\""));
     }
 
     #[test]
     fn generate_config_rejects_empty_model() {
-        assert!(generate_config("", "openrouter").is_err());
+        assert!(generate_config("", "openrouter", "User", "Agent").is_err());
     }
 
     #[test]
     fn generate_config_rejects_injection() {
-        assert!(generate_config("model\"\nmalicious = true", "openrouter").is_err());
+        assert!(
+            generate_config("model\"\nmalicious = true", "openrouter", "User", "Agent").is_err()
+        );
     }
 
     #[test]

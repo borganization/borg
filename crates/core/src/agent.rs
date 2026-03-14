@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use crate::config::Config;
-use crate::conversation::{compact_history, normalize_history};
+use crate::conversation::{compact_history, history_tokens, normalize_history};
 use crate::llm::{LlmClient, StreamEvent};
 use crate::logging::log_message;
 use crate::memory::{load_memory_context, read_memory, write_memory};
@@ -59,6 +59,35 @@ impl Agent {
 
     pub fn history(&self) -> &[Message] {
         &self.history
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub fn config_mut(&mut self) -> &mut Config {
+        &mut self.config
+    }
+
+    /// Compact conversation history, returning (before_tokens, after_tokens).
+    pub fn compact(&mut self) -> (usize, usize) {
+        let before = history_tokens(&self.history);
+        compact_history(
+            &mut self.history,
+            self.config.conversation.max_history_tokens,
+        );
+        let after = history_tokens(&self.history);
+        (before, after)
+    }
+
+    /// Clear all conversation history.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+    }
+
+    /// Returns (message_count, estimated_token_count) for the current session.
+    pub fn conversation_stats(&self) -> (usize, usize) {
+        (self.history.len(), history_tokens(&self.history))
     }
 
     fn build_system_prompt(&self) -> Result<String> {
