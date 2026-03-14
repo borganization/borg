@@ -4,19 +4,25 @@ use crossterm::{
     ExecutableCommand,
 };
 use inquire::{Password, Select, Text};
-use std::io::{self, Write};
+use std::io;
 
 use tamagotchi_core::config::Config;
+use tamagotchi_core::provider::Provider;
 
-const BANNER: &str = r#"
-  ╔══════════════════════════════════════╗
-  ║      🐣  Welcome to Tamagotchi  🐣   ║
-  ║     Your AI Personal Assistant       ║
-  ╚══════════════════════════════════════╝
-"#;
+/// Provider choices with display labels.
+const PROVIDERS: &[(&str, &str, &str)] = &[
+    (
+        "openrouter",
+        "OpenRouter",
+        "Access all models via one API key",
+    ),
+    ("openai", "OpenAI", "GPT models directly"),
+    ("anthropic", "Anthropic", "Claude models directly"),
+    ("gemini", "Gemini", "Google Gemini models directly"),
+];
 
-/// Model choices available via OpenRouter.
-const MODELS: &[(&str, &str)] = &[
+/// Model choices per provider.
+const OPENROUTER_MODELS: &[(&str, &str)] = &[
     ("anthropic/claude-sonnet-4", "Claude Sonnet 4 (recommended)"),
     ("anthropic/claude-haiku-4", "Claude Haiku 4 (fast, cheap)"),
     ("openai/gpt-4.1", "GPT-4.1"),
@@ -28,6 +34,24 @@ const MODELS: &[(&str, &str)] = &[
     ("meta-llama/llama-4-scout", "Llama 4 Scout (fast)"),
     ("deepseek/deepseek-r1", "DeepSeek R1"),
     ("mistralai/mistral-large", "Mistral Large"),
+];
+
+const OPENAI_MODELS: &[(&str, &str)] = &[
+    ("gpt-4.1", "GPT-4.1 (recommended)"),
+    ("gpt-4.1-mini", "GPT-4.1 Mini (fast, cheap)"),
+    ("gpt-4.1-nano", "GPT-4.1 Nano (fastest)"),
+    ("o3-mini", "o3-mini (reasoning)"),
+];
+
+const ANTHROPIC_MODELS: &[(&str, &str)] = &[
+    ("claude-sonnet-4", "Claude Sonnet 4 (recommended)"),
+    ("claude-haiku-4", "Claude Haiku 4 (fast, cheap)"),
+    ("claude-opus-4", "Claude Opus 4 (most capable)"),
+];
+
+const GEMINI_MODELS: &[(&str, &str)] = &[
+    ("gemini-2.5-pro", "Gemini 2.5 Pro (recommended)"),
+    ("gemini-2.5-flash", "Gemini 2.5 Flash (fast)"),
 ];
 
 /// Personality style presets.
@@ -96,6 +120,7 @@ pub struct OnboardingResult {
     pub style_index: usize,
     pub model_id: String,
     pub api_key: Option<String>,
+    pub provider: String,
 }
 
 /// Helper: prompt the user for input, returning `None` on cancel/interrupt.
@@ -125,24 +150,46 @@ fn print_checkmark(stdout: &mut io::Stdout, label: &str, value: &str) -> Result<
     Ok(())
 }
 
+/// Get the model list for a given provider.
+fn models_for_provider(provider_id: &str) -> &'static [(&'static str, &'static str)] {
+    match provider_id {
+        "openai" => OPENAI_MODELS,
+        "anthropic" => ANTHROPIC_MODELS,
+        "gemini" => GEMINI_MODELS,
+        _ => OPENROUTER_MODELS,
+    }
+}
+
+fn provider_id_to_display(id: &str) -> &str {
+    PROVIDERS
+        .iter()
+        .find(|(pid, _, _)| *pid == id)
+        .map(|(_, name, _)| *name)
+        .unwrap_or(id)
+}
+
+fn provider_key_url(provider_id: &str) -> &'static str {
+    match provider_id {
+        "openrouter" => "https://openrouter.ai/keys",
+        "openai" => "https://platform.openai.com/api-keys",
+        "anthropic" => "https://console.anthropic.com/settings/keys",
+        "gemini" => "https://aistudio.google.com/apikey",
+        _ => "your provider's website",
+    }
+}
+
 /// Run the interactive onboarding wizard. Returns `None` if the user cancels.
 pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
     let mut stdout = io::stdout();
 
     // ── Banner ──
-    stdout.execute(SetForegroundColor(Color::Magenta))?;
-    stdout.execute(SetAttribute(Attribute::Bold))?;
-    stdout.execute(Print(BANNER))?;
-    stdout.execute(ResetColor)?;
-    stdout.execute(SetAttribute(Attribute::Reset))?;
-    stdout.flush()?;
+    crate::logo::print_logo()?;
 
     println!("  Let's set up your personal AI assistant.\n");
 
     // ── Step 1: Agent name ──
     let agent_name = prompt_or_cancel!(Text::new("What should your agent be called?")
         .with_default("Tamagotchi")
-        .with_help_message("This name appears in the SOUL.md personality file")
         .prompt());
 
     // ── Step 2: Personality style ──

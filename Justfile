@@ -33,3 +33,7 @@ check:
 # Run the binary
 run *args="":
     cargo run -- {{args}}
+
+# Wipe all config/data so you can re-run onboarding from scratch
+reset:
+    rm -rf ~/.tamagotchi
