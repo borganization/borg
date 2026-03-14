@@ -1,7 +1,9 @@
 use anyhow::Result;
 use chrono::{Local, NaiveTime};
+use cron::Schedule;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::str::FromStr;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -32,43 +34,84 @@ impl HeartbeatScheduler {
     }
 
     pub async fn run(mut self, tx: mpsc::Sender<HeartbeatEvent>) {
+        if let Some(ref cron_expr) = self.config.cron {
+            self.run_cron(cron_expr.clone(), tx).await;
+        } else {
+            self.run_interval(tx).await;
+        }
+    }
+
+    async fn run_interval(&mut self, tx: mpsc::Sender<HeartbeatEvent>) {
         let interval =
             parse_interval(&self.config.interval).unwrap_or(std::time::Duration::from_secs(1800));
-        info!("Heartbeat scheduler started (interval: {:?})", interval);
+        info!("Heartbeat scheduler started (interval: {interval:?})");
 
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await; // Skip immediate first tick
 
         loop {
             ticker.tick().await;
+            self.tick(&tx).await;
+        }
+    }
 
-            if self.is_quiet_hours() {
-                debug!("Heartbeat: in quiet hours, skipping");
-                continue;
+    async fn run_cron(&mut self, cron_expr: String, tx: mpsc::Sender<HeartbeatEvent>) {
+        let schedule = match Schedule::from_str(&cron_expr) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Invalid cron expression '{cron_expr}': {e}. Falling back to interval.");
+                self.run_interval(tx).await;
+                return;
             }
+        };
 
-            match self.fire_heartbeat().await {
-                Ok(Some(message)) => {
-                    let hash = hash_string(&message);
-                    if self.last_hash == Some(hash) {
-                        debug!("Heartbeat: duplicate response, suppressing");
-                        continue;
-                    }
-                    self.last_hash = Some(hash);
+        info!("Heartbeat scheduler started (cron: {cron_expr})");
 
-                    if message.trim().is_empty() {
-                        debug!("Heartbeat: empty response, suppressing");
-                        continue;
-                    }
+        loop {
+            let now = Local::now();
+            let next = match schedule.upcoming(Local).next() {
+                Some(t) => t,
+                None => {
+                    warn!("Cron schedule exhausted");
+                    return;
+                }
+            };
 
-                    let _ = tx.send(HeartbeatEvent::Message(message)).await;
+            let wait = (next - now)
+                .to_std()
+                .unwrap_or(std::time::Duration::from_secs(60));
+            tokio::time::sleep(wait).await;
+            self.tick(&tx).await;
+        }
+    }
+
+    async fn tick(&mut self, tx: &mpsc::Sender<HeartbeatEvent>) {
+        if self.is_quiet_hours() {
+            debug!("Heartbeat: in quiet hours, skipping");
+            return;
+        }
+
+        match self.fire_heartbeat().await {
+            Ok(Some(message)) => {
+                let hash = hash_string(&message);
+                if self.last_hash == Some(hash) {
+                    debug!("Heartbeat: duplicate response, suppressing");
+                    return;
                 }
-                Ok(None) => {
-                    debug!("Heartbeat: no response");
+                self.last_hash = Some(hash);
+
+                if message.trim().is_empty() {
+                    debug!("Heartbeat: empty response, suppressing");
+                    return;
                 }
-                Err(e) => {
-                    warn!("Heartbeat error: {e}");
-                }
+
+                let _ = tx.send(HeartbeatEvent::Message(message)).await;
+            }
+            Ok(None) => {
+                debug!("Heartbeat: no response");
+            }
+            Err(e) => {
+                warn!("Heartbeat error: {e}");
             }
         }
     }
@@ -112,7 +155,6 @@ impl HeartbeatScheduler {
         if start <= end {
             now >= start && now < end
         } else {
-            // Spans midnight (e.g., 23:00 to 07:00)
             now >= start || now < end
         }
     }

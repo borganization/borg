@@ -1,12 +1,13 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use crate::config::Config;
 use crate::conversation::{compact_history, normalize_history};
 use crate::llm::{LlmClient, StreamEvent};
+use crate::logging::log_message;
 use crate::memory::{load_memory_context, read_memory, write_memory};
 use crate::skills::{load_all_skills, load_skills_context, Skill};
 use crate::soul::load_soul;
@@ -20,8 +21,19 @@ const TOOL_OUTPUT_MAX_TOKENS: usize = 4000;
 
 pub enum AgentEvent {
     TextDelta(String),
-    ToolExecuting { name: String, args: String },
-    ToolResult { name: String, result: String },
+    ToolExecuting {
+        name: String,
+        args: String,
+    },
+    ToolResult {
+        name: String,
+        result: String,
+    },
+    /// Request confirmation from the user for a shell command. Send `true` to approve.
+    ShellConfirmation {
+        command: String,
+        respond: oneshot::Sender<bool>,
+    },
     TurnComplete,
     Error(String),
 }
@@ -72,7 +84,6 @@ impl Agent {
 
     fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut tools = core_tool_definitions();
-        // Convert tool registry definitions to core types
         for td in self.tool_registry.tool_definitions() {
             tools.push(ToolDefinition::new(
                 &td.function.name,
@@ -88,7 +99,9 @@ impl Agent {
         user_input: &str,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<()> {
-        self.history.push(Message::user(user_input));
+        let msg = Message::user(user_input);
+        log_message(&msg);
+        self.history.push(msg);
         self.run_agent_loop(event_tx).await
     }
 
@@ -115,7 +128,6 @@ impl Agent {
                 Some(tool_defs.as_slice())
             };
 
-            // Stream the response
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
             let messages_clone = messages.clone();
             let tools_clone = tools.map(<[ToolDefinition]>::to_vec);
@@ -131,7 +143,6 @@ impl Agent {
                 })
             };
 
-            // Collect the full response
             let mut text_content = String::new();
             let mut tool_calls: Vec<PartialToolCall> = Vec::new();
 
@@ -168,15 +179,14 @@ impl Agent {
 
             let _ = stream_handle.await;
 
-            // Build assistant message
             if tool_calls.is_empty() {
-                // Text-only response — we're done
-                self.history.push(Message::assistant(&text_content));
+                let msg = Message::assistant(&text_content);
+                log_message(&msg);
+                self.history.push(msg);
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
             }
 
-            // Has tool calls — execute them and loop
             let tc: Vec<ToolCall> = tool_calls
                 .iter()
                 .map(|ptc| ToolCall {
@@ -204,9 +214,9 @@ impl Agent {
                     tool_call_id: None,
                 }
             };
+            log_message(&assistant_msg);
             self.history.push(assistant_msg);
 
-            // Execute each tool call
             for tool_call in &tc {
                 let name = &tool_call.function.name;
                 let args = &tool_call.function.arguments;
@@ -219,7 +229,7 @@ impl Agent {
                     .await;
 
                 let raw_result = self
-                    .execute_tool(name, args)
+                    .execute_tool(name, args, &event_tx)
                     .await
                     .unwrap_or_else(|e| format!("Error: {e}"));
 
@@ -233,27 +243,43 @@ impl Agent {
                     })
                     .await;
 
-                self.history
-                    .push(Message::tool_result(&tool_call.id, &result));
+                let msg = Message::tool_result(&tool_call.id, &result);
+                log_message(&msg);
+                self.history.push(msg);
             }
-
-            // Loop to get next LLM response
         }
     }
 
-    async fn execute_tool(&mut self, name: &str, args_json: &str) -> Result<String> {
-        let args: serde_json::Value =
-            serde_json::from_str(args_json).context("Invalid tool arguments JSON")?;
+    async fn execute_tool(
+        &mut self,
+        name: &str,
+        args_json: &str,
+        event_tx: &mpsc::Sender<AgentEvent>,
+    ) -> Result<String> {
+        let args: serde_json::Value = match serde_json::from_str(args_json) {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(format!(
+                    "Error: Invalid JSON arguments: {e}. Please provide valid JSON."
+                ));
+            }
+        };
 
         match name {
             "write_memory" => {
-                let filename = args["filename"].as_str().context("Missing 'filename'")?;
-                let content = args["content"].as_str().context("Missing 'content'")?;
+                let Some(filename) = args["filename"].as_str() else {
+                    return Ok("Error: Missing required parameter 'filename'.".to_string());
+                };
+                let Some(content) = args["content"].as_str() else {
+                    return Ok("Error: Missing required parameter 'content'.".to_string());
+                };
                 let append = args["append"].as_bool().unwrap_or(false);
                 write_memory(filename, content, append)
             }
             "read_memory" => {
-                let filename = args["filename"].as_str().context("Missing 'filename'")?;
+                let Some(filename) = args["filename"].as_str() else {
+                    return Ok("Error: Missing required parameter 'filename'.".to_string());
+                };
                 read_memory(filename)
             }
             "list_tools" => {
@@ -277,25 +303,53 @@ impl Agent {
                 }
             }
             "apply_skill_patch" => {
-                let patch = args["patch"].as_str().context("Missing 'patch'")?;
+                let Some(patch) = args["patch"].as_str() else {
+                    return Ok("Error: Missing required parameter 'patch'.".to_string());
+                };
                 let base_dir = Config::data_dir()?.join("skills");
                 std::fs::create_dir_all(&base_dir)?;
-                apply_patch_to_dir(patch, &base_dir)?;
-                Ok("Skill patch applied successfully.".to_string())
+                match apply_patch_to_dir(patch, &base_dir) {
+                    Ok(_) => Ok("Skill patch applied successfully.".to_string()),
+                    Err(e) => Ok(format!("Error applying skill patch: {e}")),
+                }
             }
             "apply_patch" => {
-                let patch = args["patch"].as_str().context("Missing 'patch'")?;
+                let Some(patch) = args["patch"].as_str() else {
+                    return Ok("Error: Missing required parameter 'patch'.".to_string());
+                };
                 let base_dir = Config::data_dir()?.join("tools");
                 std::fs::create_dir_all(&base_dir)?;
-                apply_patch_to_dir(patch, &base_dir)?;
-                // Reload tool registry
-                self.tool_registry = ToolRegistry::new()?;
-                Ok("Patch applied successfully. Tool registry reloaded.".to_string())
+                match apply_patch_to_dir(patch, &base_dir) {
+                    Ok(_) => {
+                        self.tool_registry = ToolRegistry::new()?;
+                        Ok("Patch applied successfully. Tool registry reloaded.".to_string())
+                    }
+                    Err(e) => Ok(format!("Error applying patch: {e}")),
+                }
             }
             "run_shell" => {
                 let command = args["command"].as_str().context("Missing 'command'")?;
                 let timeout_ms = self.config.tools.default_timeout_ms;
                 let timeout_dur = Duration::from_millis(timeout_ms);
+
+                // Request confirmation from the user
+                let (confirm_tx, confirm_rx) = oneshot::channel();
+                let _ = event_tx
+                    .send(AgentEvent::ShellConfirmation {
+                        command: command.to_string(),
+                        respond: confirm_tx,
+                    })
+                    .await;
+
+                match confirm_rx.await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Ok("Shell command denied by user.".to_string());
+                    }
+                    Err(_) => {
+                        return Ok("Shell command cancelled (no response).".to_string());
+                    }
+                }
 
                 let child = tokio::process::Command::new("sh")
                     .arg("-c")
@@ -318,13 +372,10 @@ impl Agent {
                     )),
                 }
             }
-            _ => {
-                // Try user tools
-                self.tool_registry
-                    .execute_tool(name, args_json)
-                    .await
-                    .with_context(|| format!("Failed to execute tool '{name}'"))
-            }
+            _ => match self.tool_registry.execute_tool(name, args_json).await {
+                Ok(result) => Ok(result),
+                Err(e) => Ok(format!("Error executing tool '{name}': {e}")),
+            },
         }
     }
 }
@@ -399,7 +450,7 @@ fn core_tool_definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "run_shell",
-            "Execute a shell command. Use with caution.",
+            "Execute a shell command. Requires user confirmation before execution.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
