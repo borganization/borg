@@ -22,6 +22,8 @@ pub struct Config {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub conversation: ConversationConfig,
+    #[serde(default)]
+    pub user: UserConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +86,14 @@ pub struct SkillsConfig {
 pub struct ConversationConfig {
     #[serde(default = "default_max_history_tokens")]
     pub max_history_tokens: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
 }
 
 fn default_api_key_env() -> String {
@@ -209,6 +219,95 @@ impl Config {
         Ok(config)
     }
 
+    pub fn save(&self) -> Result<()> {
+        let config_path = Self::data_dir()?.join("config.toml");
+        let content = toml::to_string_pretty(self).with_context(|| "Failed to serialize config")?;
+        std::fs::write(&config_path, content)
+            .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+        Ok(())
+    }
+
+    pub fn display_settings(&self) -> String {
+        let provider = self.llm.provider.as_deref().unwrap_or("(auto-detect)");
+        format!(
+            "Settings:\n  \
+             provider       = {provider}\n  \
+             model          = {}\n  \
+             temperature    = {}\n  \
+             max_tokens     = {}\n  \
+             sandbox.enabled = {}\n  \
+             sandbox.mode   = {}\n  \
+             memory.max_context_tokens = {}\n  \
+             skills.enabled = {}\n  \
+             skills.max_context_tokens = {}",
+            self.llm.model,
+            self.llm.temperature,
+            self.llm.max_tokens,
+            self.sandbox.enabled,
+            self.sandbox.mode,
+            self.memory.max_context_tokens,
+            self.skills.enabled,
+            self.skills.max_context_tokens,
+        )
+    }
+
+    pub fn apply_setting(&mut self, key: &str, value: &str) -> Result<String> {
+        match key {
+            "model" => {
+                self.llm.model = value.to_string();
+                Ok(format!("model = {value}"))
+            }
+            "temperature" => {
+                let v: f32 = value
+                    .parse()
+                    .with_context(|| "Invalid float for temperature")?;
+                if !(0.0..=2.0).contains(&v) {
+                    anyhow::bail!("temperature must be between 0.0 and 2.0");
+                }
+                self.llm.temperature = v;
+                Ok(format!("temperature = {v}"))
+            }
+            "max_tokens" => {
+                let v: u32 = value
+                    .parse()
+                    .with_context(|| "Invalid integer for max_tokens")?;
+                self.llm.max_tokens = v;
+                Ok(format!("max_tokens = {v}"))
+            }
+            "provider" => {
+                self.llm.provider = Some(value.to_string());
+                Ok(format!("provider = {value}"))
+            }
+            "sandbox.mode" => {
+                self.sandbox.mode = value.to_string();
+                Ok(format!("sandbox.mode = {value}"))
+            }
+            "sandbox.enabled" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for sandbox.enabled")?;
+                self.sandbox.enabled = v;
+                Ok(format!("sandbox.enabled = {v}"))
+            }
+            "memory.max_context_tokens" => {
+                let v: usize = value.parse().with_context(|| "Invalid integer")?;
+                self.memory.max_context_tokens = v;
+                Ok(format!("memory.max_context_tokens = {v}"))
+            }
+            "skills.enabled" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for skills.enabled")?;
+                self.skills.enabled = v;
+                Ok(format!("skills.enabled = {v}"))
+            }
+            _ => anyhow::bail!(
+                "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
+                 sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled"
+            ),
+        }
+    }
+
     pub fn api_key(&self) -> Result<String> {
         std::env::var(&self.llm.api_key_env).with_context(|| {
             format!(
@@ -301,6 +400,10 @@ mod tests {
 
         // Conversation defaults
         assert_eq!(cfg.conversation.max_history_tokens, 32000);
+
+        // User defaults
+        assert!(cfg.user.name.is_none());
+        assert!(cfg.user.agent_name.is_none());
     }
 
     #[test]
@@ -449,6 +552,25 @@ model = "meta/llama-3"
     }
 
     #[test]
+    fn parse_config_with_user_section() {
+        let toml_str = r#"
+[user]
+name = "Mike"
+agent_name = "Buddy"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.user.name.as_deref(), Some("Mike"));
+        assert_eq!(cfg.user.agent_name.as_deref(), Some("Buddy"));
+    }
+
+    #[test]
+    fn parse_config_without_user_section_yields_none() {
+        let cfg: Config = toml::from_str("").expect("should parse empty toml");
+        assert!(cfg.user.name.is_none());
+        assert!(cfg.user.agent_name.is_none());
+    }
+
+    #[test]
     fn parse_config_with_provider_field() {
         let toml_str = r#"
 [llm]
@@ -530,5 +652,123 @@ model = "anthropic/claude-sonnet-4"
         let _ = cfg.resolve_provider();
 
         std::env::remove_var(unique_env);
+    }
+
+    #[test]
+    fn display_settings_contains_key_fields() {
+        let cfg = Config::default();
+        let display = cfg.display_settings();
+        assert!(display.contains("model"));
+        assert!(display.contains("temperature"));
+        assert!(display.contains("max_tokens"));
+        assert!(display.contains("sandbox.enabled"));
+        assert!(display.contains("sandbox.mode"));
+        assert!(display.contains("(auto-detect)"));
+    }
+
+    #[test]
+    fn display_settings_shows_explicit_provider() {
+        let mut cfg = Config::default();
+        cfg.llm.provider = Some("anthropic".to_string());
+        let display = cfg.display_settings();
+        assert!(display.contains("anthropic"));
+        assert!(!display.contains("(auto-detect)"));
+    }
+
+    #[test]
+    fn apply_setting_model() {
+        let mut cfg = Config::default();
+        let result = cfg.apply_setting("model", "gpt-4o").unwrap();
+        assert!(result.contains("gpt-4o"));
+        assert_eq!(cfg.llm.model, "gpt-4o");
+    }
+
+    #[test]
+    fn apply_setting_temperature() {
+        let mut cfg = Config::default();
+        let result = cfg.apply_setting("temperature", "0.5").unwrap();
+        assert!(result.contains("0.5"));
+        assert!((cfg.llm.temperature - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn apply_setting_temperature_out_of_range() {
+        let mut cfg = Config::default();
+        assert!(cfg.apply_setting("temperature", "3.0").is_err());
+        assert!(cfg.apply_setting("temperature", "-1.0").is_err());
+    }
+
+    #[test]
+    fn apply_setting_temperature_invalid() {
+        let mut cfg = Config::default();
+        assert!(cfg.apply_setting("temperature", "not_a_number").is_err());
+    }
+
+    #[test]
+    fn apply_setting_max_tokens() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("max_tokens", "8192").unwrap();
+        assert_eq!(cfg.llm.max_tokens, 8192);
+    }
+
+    #[test]
+    fn apply_setting_provider() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("provider", "openai").unwrap();
+        assert_eq!(cfg.llm.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn apply_setting_sandbox_mode() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("sandbox.mode", "permissive").unwrap();
+        assert_eq!(cfg.sandbox.mode, "permissive");
+    }
+
+    #[test]
+    fn apply_setting_sandbox_enabled() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("sandbox.enabled", "false").unwrap();
+        assert!(!cfg.sandbox.enabled);
+    }
+
+    #[test]
+    fn apply_setting_memory_max_context_tokens() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("memory.max_context_tokens", "16000").unwrap();
+        assert_eq!(cfg.memory.max_context_tokens, 16000);
+    }
+
+    #[test]
+    fn apply_setting_skills_enabled() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("skills.enabled", "false").unwrap();
+        assert!(!cfg.skills.enabled);
+    }
+
+    #[test]
+    fn apply_setting_unknown_key_errors() {
+        let mut cfg = Config::default();
+        assert!(cfg.apply_setting("nonexistent", "value").is_err());
+    }
+
+    #[test]
+    fn save_and_reload_round_trip() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config_path = dir.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.llm.model = "test-round-trip".to_string();
+        cfg.llm.temperature = 1.5;
+        cfg.llm.max_tokens = 2048;
+
+        // Save manually to the temp path (can't use save() since it writes to ~/.tamagotchi)
+        let content = toml::to_string_pretty(&cfg).expect("serialize");
+        std::fs::write(&config_path, content).expect("write");
+
+        let loaded = Config::load_from(&config_path).expect("reload");
+        assert_eq!(loaded.llm.model, "test-round-trip");
+        assert!((loaded.llm.temperature - 1.5).abs() < f32::EPSILON);
+        assert_eq!(loaded.llm.max_tokens, 2048);
     }
 }

@@ -34,6 +34,13 @@ pub enum AppAction {
         input: String,
         event_tx: mpsc::Sender<AgentEvent>,
     },
+    CompactHistory,
+    ClearHistory,
+    ShowUsage,
+    UpdateSetting {
+        key: String,
+        value: String,
+    },
 }
 
 pub struct App<'a> {
@@ -153,13 +160,31 @@ impl<'a> App<'a> {
         Ok(AppAction::Continue)
     }
 
+    pub fn push_system_message(&mut self, text: String) {
+        self.cells.push(HistoryCell::System { text });
+    }
+
     fn handle_submit(&mut self, input: &str) -> Result<AppAction> {
-        match input {
+        let trimmed = input.trim();
+
+        // Exact matches
+        match trimmed {
             "quit" | "exit" => return Ok(AppAction::Quit),
-            "help" => {
-                self.cells.push(HistoryCell::System {
-                    text: "Commands:\n  quit/exit  - Exit\n  help       - Show this help\n  /tools     - List tools\n  /memory    - Show memory\n  /skills    - List skills\n  /history   - Show history".to_string(),
-                });
+            "help" | "/help" => {
+                self.push_system_message(
+                    "Commands:\n  \
+                     /help      - Show this help\n  \
+                     /settings  - Show/change settings (/settings <key> <value>)\n  \
+                     /usage     - Show usage stats\n  \
+                     /compact   - Compact conversation history\n  \
+                     /clear     - Clear conversation\n  \
+                     /tools     - List tools\n  \
+                     /memory    - Show memory\n  \
+                     /skills    - List skills\n  \
+                     /history   - Show history\n  \
+                     quit/exit  - Exit"
+                        .to_string(),
+                );
                 return Ok(AppAction::Continue);
             }
             "/tools" => {
@@ -170,7 +195,7 @@ impl<'a> App<'a> {
                 } else {
                     tools.join("\n")
                 };
-                self.cells.push(HistoryCell::System { text });
+                self.push_system_message(text);
                 return Ok(AppAction::Continue);
             }
             "/memory" => {
@@ -182,7 +207,7 @@ impl<'a> App<'a> {
                 } else {
                     memory
                 };
-                self.cells.push(HistoryCell::System { text });
+                self.push_system_message(text);
                 return Ok(AppAction::Continue);
             }
             "/skills" => {
@@ -196,7 +221,7 @@ impl<'a> App<'a> {
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                self.cells.push(HistoryCell::System { text });
+                self.push_system_message(text);
                 return Ok(AppAction::Continue);
             }
             "/history" => {
@@ -207,17 +232,59 @@ impl<'a> App<'a> {
                         } else {
                             lines.join("\n")
                         };
-                        self.cells.push(HistoryCell::System { text });
+                        self.push_system_message(text);
                     }
                     Err(e) => {
-                        self.cells.push(HistoryCell::System {
-                            text: format!("Error reading history: {e}"),
-                        });
+                        self.push_system_message(format!("Error reading history: {e}"));
                     }
                 }
                 return Ok(AppAction::Continue);
             }
+            "/settings" => {
+                self.push_system_message(self.config.display_settings());
+                return Ok(AppAction::Continue);
+            }
+            "/compact" => {
+                return Ok(AppAction::CompactHistory);
+            }
+            "/clear" => {
+                self.cells.clear();
+                return Ok(AppAction::ClearHistory);
+            }
+            "/usage" => {
+                return Ok(AppAction::ShowUsage);
+            }
             _ => {}
+        }
+
+        // Prefix commands: /settings <key> <value>
+        if let Some(rest) = trimmed.strip_prefix("/settings ") {
+            let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+            if parts.len() == 2 {
+                let key = parts[0].to_string();
+                let value = parts[1].to_string();
+                match self.config.apply_setting(&key, &value) {
+                    Ok(confirmation) => {
+                        self.push_system_message(format!("Updated: {confirmation}"));
+                        if let Err(e) = self.config.save() {
+                            self.push_system_message(format!(
+                                "Warning: failed to save config: {e}"
+                            ));
+                        }
+                        return Ok(AppAction::UpdateSetting { key, value });
+                    }
+                    Err(e) => {
+                        self.push_system_message(format!("Error: {e}"));
+                        return Ok(AppAction::Continue);
+                    }
+                }
+            } else {
+                self.push_system_message(
+                    "Usage: /settings <key> <value>\nUse /settings to see current values."
+                        .to_string(),
+                );
+                return Ok(AppAction::Continue);
+            }
         }
 
         // Prepare to send to agent
@@ -354,14 +421,16 @@ impl<'a> App<'a> {
         let mut all_lines: Vec<Line<'static>> = Vec::new();
 
         if self.cells.is_empty() {
-            all_lines.push(Line::from(Span::styled(
-                "Tamagotchi AI Assistant",
-                theme::bold(),
-            )));
-            all_lines.push(Line::from(Span::styled(
-                "Type a message to begin.",
-                theme::dim(),
-            )));
+            let title = match &self.config.user.agent_name {
+                Some(name) => format!("{name} AI Assistant"),
+                None => "Tamagotchi AI Assistant".to_string(),
+            };
+            all_lines.push(Line::from(Span::styled(title, theme::bold())));
+            let subtitle = match &self.config.user.name {
+                Some(name) => format!("Hey {name}! Type a message to begin."),
+                None => "Type a message to begin.".to_string(),
+            };
+            all_lines.push(Line::from(Span::styled(subtitle, theme::dim())));
             all_lines.push(Line::default());
         }
 
