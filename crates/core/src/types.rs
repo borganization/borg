@@ -108,3 +108,119 @@ impl ToolDefinition {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_system_constructor() {
+        let msg = Message::system("You are helpful.");
+        assert_eq!(msg.role, Role::System);
+        assert_eq!(msg.content.as_deref(), Some("You are helpful."));
+        assert!(msg.tool_calls.is_none());
+        assert!(msg.tool_call_id.is_none());
+    }
+
+    #[test]
+    fn message_user_constructor() {
+        let msg = Message::user("Hello");
+        assert_eq!(msg.role, Role::User);
+        assert_eq!(msg.content.as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn message_assistant_constructor() {
+        let msg = Message::assistant("Hi there");
+        assert_eq!(msg.role, Role::Assistant);
+        assert_eq!(msg.content.as_deref(), Some("Hi there"));
+    }
+
+    #[test]
+    fn message_tool_result_constructor() {
+        let msg = Message::tool_result("call_123", "result text");
+        assert_eq!(msg.role, Role::Tool);
+        assert_eq!(msg.content.as_deref(), Some("result text"));
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_123"));
+        assert!(msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn message_constructors_accept_string_types() {
+        let owned = String::from("owned string");
+        let msg = Message::user(owned);
+        assert_eq!(msg.content.as_deref(), Some("owned string"));
+
+        let msg2 = Message::system("static str");
+        assert_eq!(msg2.content.as_deref(), Some("static str"));
+    }
+
+    #[test]
+    fn role_serializes_to_lowercase() {
+        assert_eq!(serde_json::to_string(&Role::System).unwrap(), "\"system\"");
+        assert_eq!(serde_json::to_string(&Role::User).unwrap(), "\"user\"");
+        assert_eq!(
+            serde_json::to_string(&Role::Assistant).unwrap(),
+            "\"assistant\""
+        );
+        assert_eq!(serde_json::to_string(&Role::Tool).unwrap(), "\"tool\"");
+    }
+
+    #[test]
+    fn role_deserializes_from_lowercase() {
+        let role: Role = serde_json::from_str("\"system\"").unwrap();
+        assert_eq!(role, Role::System);
+        let role: Role = serde_json::from_str("\"tool\"").unwrap();
+        assert_eq!(role, Role::Tool);
+    }
+
+    #[test]
+    fn message_serialization_skips_none_fields() {
+        let msg = Message::user("test");
+        let json = serde_json::to_value(&msg).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("tool_calls"));
+        assert!(!json.as_object().unwrap().contains_key("tool_call_id"));
+    }
+
+    #[test]
+    fn tool_definition_new_sets_function_type() {
+        let td = ToolDefinition::new("my_tool", "A tool", serde_json::json!({"type": "object"}));
+        assert_eq!(td.tool_type, "function");
+        assert_eq!(td.function.name, "my_tool");
+        assert_eq!(td.function.description, "A tool");
+        assert_eq!(td.function.parameters["type"], "object");
+    }
+
+    #[test]
+    fn tool_call_json_round_trip() {
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "read_memory".to_string(),
+                arguments: "{\"filename\":\"test.md\"}".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&tc).unwrap();
+        let deserialized: ToolCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "call_1");
+        assert_eq!(deserialized.function.name, "read_memory");
+        assert_eq!(
+            deserialized.function.arguments,
+            "{\"filename\":\"test.md\"}"
+        );
+    }
+
+    #[test]
+    fn tool_result_serialization() {
+        let tr = ToolResult {
+            tool_call_id: "call_1".to_string(),
+            content: "success".to_string(),
+            is_error: false,
+        };
+        let json = serde_json::to_value(&tr).unwrap();
+        assert_eq!(json["tool_call_id"], "call_1");
+        assert_eq!(json["content"], "success");
+        assert_eq!(json["is_error"], false);
+    }
+}

@@ -229,4 +229,95 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("non-existent"));
     }
+
+    #[test]
+    fn append_mode_with_empty_search() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("append.txt");
+        std::fs::write(&file_path, "existing content").unwrap();
+
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "append.txt".to_string(),
+            hunks: vec![Hunk {
+                search: "".to_string(),
+                replace: "appended line".to_string(),
+            }],
+        }]);
+        apply_patch(&patch, dir.path()).unwrap();
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("existing content"));
+        assert!(content.contains("appended line"));
+    }
+
+    #[test]
+    fn multiple_hunks_applied_sequentially() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("multi.rs");
+        std::fs::write(&file_path, "fn a() { old_a(); }\nfn b() { old_b(); }\n").unwrap();
+
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "multi.rs".to_string(),
+            hunks: vec![
+                Hunk {
+                    search: "old_a()".to_string(),
+                    replace: "new_a()".to_string(),
+                },
+                Hunk {
+                    search: "old_b()".to_string(),
+                    replace: "new_b()".to_string(),
+                },
+            ],
+        }]);
+        apply_patch(&patch, dir.path()).unwrap();
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("new_a()"));
+        assert!(content.contains("new_b()"));
+        assert!(!content.contains("old_a()"));
+        assert!(!content.contains("old_b()"));
+    }
+
+    #[test]
+    fn add_file_creates_nested_directories() {
+        let dir = TempDir::new().unwrap();
+        let patch = make_patch(vec![PatchOperation::AddFile {
+            path: "deep/nested/dir/file.txt".to_string(),
+            content: "deep content".to_string(),
+        }]);
+        let affected = apply_patch(&patch, dir.path()).unwrap();
+        assert_eq!(affected, vec!["deep/nested/dir/file.txt"]);
+        assert!(dir.path().join("deep/nested/dir/file.txt").exists());
+    }
+
+    #[test]
+    fn multiple_operations_in_one_patch() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("update_me.txt"), "old content").unwrap();
+        std::fs::write(dir.path().join("delete_me.txt"), "bye").unwrap();
+
+        let patch = make_patch(vec![
+            PatchOperation::AddFile {
+                path: "new_file.txt".to_string(),
+                content: "new".to_string(),
+            },
+            PatchOperation::UpdateFile {
+                path: "update_me.txt".to_string(),
+                hunks: vec![Hunk {
+                    search: "old content".to_string(),
+                    replace: "new content".to_string(),
+                }],
+            },
+            PatchOperation::DeleteFile {
+                path: "delete_me.txt".to_string(),
+            },
+        ]);
+
+        let affected = apply_patch(&patch, dir.path()).unwrap();
+        assert_eq!(affected.len(), 3);
+        assert!(dir.path().join("new_file.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("update_me.txt")).unwrap(),
+            "new content"
+        );
+        assert!(!dir.path().join("delete_me.txt").exists());
+    }
 }

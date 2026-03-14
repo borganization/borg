@@ -228,4 +228,97 @@ hello
         let result = parse_patch("this is not a patch at all");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn parse_add_file_multiline_content() {
+        let input = "\
+*** Begin Patch
+*** Add File: src/main.rs
+fn main() {
+    println!(\"hello\");
+    println!(\"world\");
+}
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 1);
+        match &patch.operations[0] {
+            PatchOperation::AddFile { content, .. } => {
+                assert!(content.contains("println!(\"hello\");"));
+                assert!(content.contains("println!(\"world\");"));
+                assert_eq!(content.lines().count(), 4);
+            }
+            other => panic!("Expected AddFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_without_begin_end_markers() {
+        // The parser is lenient and doesn't require Begin/End markers
+        let input = "\
+*** Add File: test.txt
+content here";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 1);
+        match &patch.operations[0] {
+            PatchOperation::AddFile { path, content } => {
+                assert_eq!(path, "test.txt");
+                assert_eq!(content, "content here");
+            }
+            other => panic!("Expected AddFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_update_with_multiple_hunks() {
+        let input = "\
+*** Begin Patch
+*** Update File: lib.rs
+@@ -1,1 +1,1 @@
+-fn old_a() {}
++fn new_a() {}
+@@ -5,1 +5,1 @@
+-fn old_b() {}
++fn new_b() {}
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert_eq!(hunks.len(), 2);
+                assert!(hunks[0].search.contains("old_a"));
+                assert!(hunks[0].replace.contains("new_a"));
+                assert!(hunks[1].search.contains("old_b"));
+                assert!(hunks[1].replace.contains("new_b"));
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_update_with_context_lines() {
+        let input = "\
+*** Begin Patch
+*** Update File: main.rs
+@@ -1,5 +1,5 @@
+ use std::io;
+
+ fn main() {
+-    old_call();
++    new_call();
+ }
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert_eq!(hunks.len(), 1);
+                // Context lines should be in both search and replace
+                assert!(hunks[0].search.contains("use std::io;"));
+                assert!(hunks[0].replace.contains("use std::io;"));
+                assert!(hunks[0].search.contains("old_call()"));
+                assert!(!hunks[0].search.contains("new_call()"));
+                assert!(hunks[0].replace.contains("new_call()"));
+                assert!(!hunks[0].replace.contains("old_call()"));
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
 }

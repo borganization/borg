@@ -109,3 +109,127 @@ impl ToolManifest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FULL_TOML: &str = r#"
+name = "weather"
+description = "Get current weather"
+runtime = "node"
+entrypoint = "index.js"
+timeout_ms = 15000
+
+[sandbox]
+network = true
+fs_read = ["/etc/ssl"]
+fs_write = ["/tmp/cache"]
+
+[parameters]
+type = "object"
+[parameters.properties.city]
+type = "string"
+description = "City name"
+[parameters.properties.units]
+type = "string"
+description = "Temperature units"
+[parameters.required]
+values = ["city"]
+"#;
+
+    const MINIMAL_TOML: &str = r#"
+name = "hello"
+description = "Say hello"
+"#;
+
+    #[test]
+    fn parse_complete_tool_manifest() {
+        let manifest: ToolManifest = toml::from_str(FULL_TOML).unwrap();
+        assert_eq!(manifest.name, "weather");
+        assert_eq!(manifest.description, "Get current weather");
+        assert_eq!(manifest.runtime, "node");
+        assert_eq!(manifest.entrypoint, "index.js");
+        assert_eq!(manifest.timeout_ms, 15000);
+        assert!(manifest.sandbox.network);
+        assert_eq!(manifest.sandbox.fs_read, vec!["/etc/ssl"]);
+        assert_eq!(manifest.sandbox.fs_write, vec!["/tmp/cache"]);
+    }
+
+    #[test]
+    fn parse_minimal_manifest_applies_defaults() {
+        let manifest: ToolManifest = toml::from_str(MINIMAL_TOML).unwrap();
+        assert_eq!(manifest.name, "hello");
+        assert_eq!(manifest.runtime, "python");
+        assert_eq!(manifest.entrypoint, "main.py");
+        assert_eq!(manifest.timeout_ms, 30000);
+        assert!(!manifest.sandbox.network);
+        assert!(manifest.sandbox.fs_read.is_empty());
+        assert!(manifest.sandbox.fs_write.is_empty());
+        assert_eq!(manifest.parameters.param_type, "object");
+        assert!(manifest.parameters.required.values.is_empty());
+    }
+
+    #[test]
+    fn parameters_json_schema_generation() {
+        let manifest: ToolManifest = toml::from_str(FULL_TOML).unwrap();
+        let schema = manifest.parameters_json_schema();
+
+        assert_eq!(schema["type"], "object");
+
+        let props = schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("city"));
+        assert!(props.contains_key("units"));
+        assert_eq!(props["city"]["type"], "string");
+        assert_eq!(props["city"]["description"], "City name");
+        assert_eq!(props["units"]["type"], "string");
+
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "city");
+    }
+
+    #[test]
+    fn parameters_json_schema_empty_properties() {
+        let manifest: ToolManifest = toml::from_str(MINIMAL_TOML).unwrap();
+        let schema = manifest.parameters_json_schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"].as_object().unwrap().is_empty());
+        assert!(schema["required"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sandbox_policy_maps_correctly() {
+        let manifest: ToolManifest = toml::from_str(FULL_TOML).unwrap();
+        let policy = manifest.sandbox_policy();
+        assert!(policy.network);
+        assert_eq!(policy.fs_read, vec!["/etc/ssl"]);
+        assert_eq!(policy.fs_write, vec!["/tmp/cache"]);
+    }
+
+    #[test]
+    fn sandbox_policy_defaults() {
+        let manifest: ToolManifest = toml::from_str(MINIMAL_TOML).unwrap();
+        let policy = manifest.sandbox_policy();
+        assert!(!policy.network);
+        assert!(policy.fs_read.is_empty());
+        assert!(policy.fs_write.is_empty());
+    }
+
+    #[test]
+    fn load_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool.toml");
+        std::fs::write(&path, FULL_TOML).unwrap();
+
+        let manifest = ToolManifest::load(&path).unwrap();
+        assert_eq!(manifest.name, "weather");
+        assert_eq!(manifest.runtime, "node");
+    }
+
+    #[test]
+    fn load_nonexistent_file_errors() {
+        let result = ToolManifest::load(Path::new("/tmp/nonexistent_tool_toml_xyz.toml"));
+        assert!(result.is_err());
+    }
+}
