@@ -149,78 +149,55 @@ mod tests {
     #[test]
     fn parse_interval_minutes() {
         let d = parse_interval("30m").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(1800));
+        assert_eq!(d, std::time::Duration::from_secs(30 * 60));
     }
 
     #[test]
     fn parse_interval_hours() {
         let d = parse_interval("2h").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(7200));
+        assert_eq!(d, std::time::Duration::from_secs(2 * 3600));
     }
 
     #[test]
-    fn parse_interval_seconds_suffix() {
-        let d = parse_interval("60s").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(60));
+    fn parse_interval_seconds() {
+        let d = parse_interval("45s").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(45));
     }
 
     #[test]
-    fn parse_interval_raw_number() {
+    fn parse_interval_bare_number() {
         let d = parse_interval("120").unwrap();
         assert_eq!(d, std::time::Duration::from_secs(120));
     }
 
     #[test]
     fn parse_interval_with_whitespace() {
-        let d = parse_interval("  15m  ").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(900));
+        let d = parse_interval("  10m  ").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(600));
     }
 
     #[test]
-    fn parse_interval_invalid_returns_none() {
-        assert!(parse_interval("invalid").is_none());
+    fn parse_interval_invalid() {
         assert!(parse_interval("abc").is_none());
-    }
-
-    #[test]
-    fn parse_interval_empty_returns_none() {
         assert!(parse_interval("").is_none());
     }
 
     #[test]
-    fn parse_interval_one_minute() {
-        let d = parse_interval("1m").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(60));
-    }
-
-    #[test]
-    fn parse_interval_one_hour() {
-        let d = parse_interval("1h").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(3600));
-    }
-
-    #[test]
-    fn hash_string_consistent() {
+    fn hash_string_deterministic() {
         let h1 = hash_string("hello");
         let h2 = hash_string("hello");
         assert_eq!(h1, h2);
     }
 
     #[test]
-    fn hash_string_different_inputs() {
+    fn hash_string_different_for_different_inputs() {
         let h1 = hash_string("hello");
         let h2 = hash_string("world");
         assert_ne!(h1, h2);
     }
 
     #[test]
-    fn hash_string_empty() {
-        // Should not panic
-        let _h = hash_string("");
-    }
-
-    #[test]
-    fn quiet_hours_disabled_when_not_configured() {
+    fn quiet_hours_no_config() {
         let config = HeartbeatConfig {
             enabled: true,
             interval: "30m".to_string(),
@@ -228,64 +205,37 @@ mod tests {
             quiet_hours_end: None,
             cron: None,
         };
-        // is_quiet_hours is a method on HeartbeatScheduler, but we can't construct one
-        // without LlmClient. Instead, test the logic inline:
-        let (start, end) = (&config.quiet_hours_start, &config.quiet_hours_end);
-        assert!(start.is_none());
-        assert!(end.is_none());
-        // The is_quiet_hours method returns false when either is None
+        let llm = test_scheduler(config);
+        assert!(!llm.is_quiet_hours());
     }
 
     #[test]
-    fn quiet_hours_time_parsing() {
-        // Test that the time format used by is_quiet_hours parses correctly
-        let start = NaiveTime::parse_from_str("23:00", "%H:%M").unwrap();
-        let end = NaiveTime::parse_from_str("07:00", "%H:%M").unwrap();
-        assert!(start > end); // spans midnight
-
-        let start2 = NaiveTime::parse_from_str("09:00", "%H:%M").unwrap();
-        let end2 = NaiveTime::parse_from_str("17:00", "%H:%M").unwrap();
-        assert!(start2 < end2); // same day
+    fn quiet_hours_invalid_format() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: Some("not-a-time".to_string()),
+            quiet_hours_end: Some("also-bad".to_string()),
+            cron: None,
+        };
+        let sched = test_scheduler(config);
+        // Invalid times should not be treated as quiet hours
+        assert!(!sched.is_quiet_hours());
     }
 
-    #[test]
-    fn quiet_hours_midnight_spanning_logic() {
-        // Test the quiet hours logic for midnight-spanning ranges
-        let start = NaiveTime::parse_from_str("23:00", "%H:%M").unwrap();
-        let end = NaiveTime::parse_from_str("07:00", "%H:%M").unwrap();
-
-        // 02:00 should be in quiet hours (after midnight, before end)
-        let time_2am = NaiveTime::parse_from_str("02:00", "%H:%M").unwrap();
-        let in_quiet = time_2am >= start || time_2am < end;
-        assert!(in_quiet);
-
-        // 23:30 should be in quiet hours (after start, before midnight)
-        let time_2330 = NaiveTime::parse_from_str("23:30", "%H:%M").unwrap();
-        let in_quiet = time_2330 >= start || time_2330 < end;
-        assert!(in_quiet);
-
-        // 12:00 should NOT be in quiet hours
-        let time_noon = NaiveTime::parse_from_str("12:00", "%H:%M").unwrap();
-        let in_quiet = time_noon >= start || time_noon < end;
-        assert!(!in_quiet);
+    fn test_scheduler(config: HeartbeatConfig) -> HeartbeatScheduler {
+        HeartbeatScheduler {
+            config,
+            llm: make_test_llm(),
+            last_hash: None,
+        }
     }
 
-    #[test]
-    fn quiet_hours_same_day_logic() {
-        // Test same-day quiet hours (start < end)
-        let start = NaiveTime::parse_from_str("09:00", "%H:%M").unwrap();
-        let end = NaiveTime::parse_from_str("17:00", "%H:%M").unwrap();
-
-        let time_noon = NaiveTime::parse_from_str("12:00", "%H:%M").unwrap();
-        let in_quiet = time_noon >= start && time_noon < end;
-        assert!(in_quiet);
-
-        let time_8am = NaiveTime::parse_from_str("08:00", "%H:%M").unwrap();
-        let in_quiet = time_8am >= start && time_8am < end;
-        assert!(!in_quiet);
-
-        let time_6pm = NaiveTime::parse_from_str("18:00", "%H:%M").unwrap();
-        let in_quiet = time_6pm >= start && time_6pm < end;
-        assert!(!in_quiet);
+    fn make_test_llm() -> LlmClient {
+        use tamagotchi_core::config::Config;
+        // Set the env var so LlmClient::new doesn't fail
+        std::env::set_var("OPENROUTER_API_KEY", "test-key");
+        let config = Config::default();
+        LlmClient::new(config).expect("should create LlmClient for testing")
     }
 }

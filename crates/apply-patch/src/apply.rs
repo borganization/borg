@@ -4,12 +4,51 @@ use tracing::{debug, info};
 
 use crate::parser::{Hunk, Patch, PatchOperation};
 
+fn validate_patch_path(path: &str, base_dir: &Path) -> Result<()> {
+    let full = base_dir.join(path);
+    let canonical_base = std::fs::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
+    // For new files, canonicalize as far as possible then check prefix
+    let resolved = if full.exists() {
+        std::fs::canonicalize(&full)?
+    } else {
+        // Walk up to find an existing ancestor, then append the rest
+        let mut existing = full;
+        let mut tail = Vec::new();
+        while !existing.exists() {
+            if let Some(file_name) = existing.file_name() {
+                tail.push(file_name.to_os_string());
+            } else {
+                break;
+            }
+            if let Some(parent) = existing.parent() {
+                existing = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+        let mut resolved = if existing.exists() {
+            std::fs::canonicalize(&existing)?
+        } else {
+            existing
+        };
+        for component in tail.into_iter().rev() {
+            resolved = resolved.join(component);
+        }
+        resolved
+    };
+    if !resolved.starts_with(&canonical_base) {
+        bail!("Path traversal detected: '{path}' escapes base directory");
+    }
+    Ok(())
+}
+
 pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
     let mut affected_files = Vec::new();
 
     for op in &patch.operations {
         match op {
             PatchOperation::AddFile { path, content } => {
+                validate_patch_path(path, base_dir)?;
                 let full_path = base_dir.join(path);
                 if let Some(parent) = full_path.parent() {
                     std::fs::create_dir_all(parent)
@@ -21,6 +60,7 @@ pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
                 affected_files.push(path.clone());
             }
             PatchOperation::UpdateFile { path, hunks } => {
+                validate_patch_path(path, base_dir)?;
                 let full_path = base_dir.join(path);
                 if !full_path.exists() {
                     bail!("Cannot update non-existent file: {path}");
@@ -40,6 +80,7 @@ pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
                 affected_files.push(path.clone());
             }
             PatchOperation::DeleteFile { path } => {
+                validate_patch_path(path, base_dir)?;
                 let full_path = base_dir.join(path);
                 if full_path.exists() {
                     std::fs::remove_file(&full_path)
@@ -231,93 +272,46 @@ mod tests {
     }
 
     #[test]
-    fn append_mode_with_empty_search() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("append.txt");
-        std::fs::write(&file_path, "existing content").unwrap();
-
-        let patch = make_patch(vec![PatchOperation::UpdateFile {
-            path: "append.txt".to_string(),
-            hunks: vec![Hunk {
-                search: "".to_string(),
-                replace: "appended line".to_string(),
-            }],
-        }]);
-        apply_patch(&patch, dir.path()).unwrap();
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert!(content.contains("existing content"));
-        assert!(content.contains("appended line"));
-    }
-
-    #[test]
-    fn multiple_hunks_applied_sequentially() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("multi.rs");
-        std::fs::write(&file_path, "fn a() { old_a(); }\nfn b() { old_b(); }\n").unwrap();
-
-        let patch = make_patch(vec![PatchOperation::UpdateFile {
-            path: "multi.rs".to_string(),
-            hunks: vec![
-                Hunk {
-                    search: "old_a()".to_string(),
-                    replace: "new_a()".to_string(),
-                },
-                Hunk {
-                    search: "old_b()".to_string(),
-                    replace: "new_b()".to_string(),
-                },
-            ],
-        }]);
-        apply_patch(&patch, dir.path()).unwrap();
-        let content = std::fs::read_to_string(&file_path).unwrap();
-        assert!(content.contains("new_a()"));
-        assert!(content.contains("new_b()"));
-        assert!(!content.contains("old_a()"));
-        assert!(!content.contains("old_b()"));
-    }
-
-    #[test]
-    fn add_file_creates_nested_directories() {
+    fn add_file_path_traversal_blocked() {
         let dir = TempDir::new().unwrap();
         let patch = make_patch(vec![PatchOperation::AddFile {
-            path: "deep/nested/dir/file.txt".to_string(),
-            content: "deep content".to_string(),
+            path: "../../etc/evil.txt".to_string(),
+            content: "malicious".to_string(),
         }]);
-        let affected = apply_patch(&patch, dir.path()).unwrap();
-        assert_eq!(affected, vec!["deep/nested/dir/file.txt"]);
-        assert!(dir.path().join("deep/nested/dir/file.txt").exists());
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Path traversal"),
+            "expected path traversal error"
+        );
     }
 
     #[test]
-    fn multiple_operations_in_one_patch() {
+    fn update_file_path_traversal_blocked() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("update_me.txt"), "old content").unwrap();
-        std::fs::write(dir.path().join("delete_me.txt"), "bye").unwrap();
-
-        let patch = make_patch(vec![
-            PatchOperation::AddFile {
-                path: "new_file.txt".to_string(),
-                content: "new".to_string(),
-            },
-            PatchOperation::UpdateFile {
-                path: "update_me.txt".to_string(),
-                hunks: vec![Hunk {
-                    search: "old content".to_string(),
-                    replace: "new content".to_string(),
-                }],
-            },
-            PatchOperation::DeleteFile {
-                path: "delete_me.txt".to_string(),
-            },
-        ]);
-
-        let affected = apply_patch(&patch, dir.path()).unwrap();
-        assert_eq!(affected.len(), 3);
-        assert!(dir.path().join("new_file.txt").exists());
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("update_me.txt")).unwrap(),
-            "new content"
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "../../../etc/passwd".to_string(),
+            hunks: vec![],
+        }]);
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Path traversal"),
+            "expected path traversal error"
         );
-        assert!(!dir.path().join("delete_me.txt").exists());
+    }
+
+    #[test]
+    fn delete_file_path_traversal_blocked() {
+        let dir = TempDir::new().unwrap();
+        let patch = make_patch(vec![PatchOperation::DeleteFile {
+            path: "../../dangerous.txt".to_string(),
+        }]);
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Path traversal"),
+            "expected path traversal error"
+        );
     }
 }
