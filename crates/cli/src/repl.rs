@@ -38,7 +38,7 @@ pub async fn run() -> Result<()> {
         });
     }
 
-    println!("Tamagotchi AI Assistant");
+    crate::logo::print_logo()?;
     println!("Type 'quit' or 'exit' to leave. Type 'help' for commands.\n");
 
     loop {
