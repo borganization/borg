@@ -45,13 +45,19 @@ pub async fn run() -> Result<()> {
         print!("> ");
         io::stdout().flush()?;
 
-        // Read input in a blocking thread so we don't block the tokio runtime
-        let input = tokio::task::spawn_blocking(|| {
-            let mut input = String::new();
-            let bytes = io::stdin().read_line(&mut input)?;
-            Ok::<(String, usize), io::Error>((input, bytes))
-        })
-        .await??;
+        let input = tokio::select! {
+            result = tokio::task::spawn_blocking(|| {
+                let mut input = String::new();
+                let bytes = io::stdin().read_line(&mut input)?;
+                Ok::<(String, usize), io::Error>((input, bytes))
+            }) => {
+                result??
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nGoodbye!");
+                return Ok(());
+            }
+        };
 
         if input.1 == 0 {
             break; // EOF
@@ -70,6 +76,8 @@ pub async fn run() -> Result<()> {
                 println!("  help       - Show this help");
                 println!("  /tools     - List available tools");
                 println!("  /memory    - Show loaded memory");
+                println!("  /skills    - List available skills");
+                println!("  /history   - Show recent conversation log");
                 println!();
                 continue;
             }
@@ -96,16 +104,43 @@ pub async fn run() -> Result<()> {
                 }
                 continue;
             }
+            "/skills" => {
+                let skills = tamagotchi_core::skills::load_all_skills()?;
+                if skills.is_empty() {
+                    println!("No skills installed.");
+                } else {
+                    for skill in &skills {
+                        println!("  {}", skill.summary_line());
+                    }
+                }
+                println!();
+                continue;
+            }
+            "/history" => {
+                match tamagotchi_core::logging::read_history(50) {
+                    Ok(lines) => {
+                        if lines.is_empty() {
+                            println!("No conversation history for today.");
+                        } else {
+                            for line in &lines {
+                                println!("{line}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error reading history: {e}");
+                    }
+                }
+                println!();
+                continue;
+            }
             _ => {}
         }
 
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
 
-        // Spawn the agent work — agent is !Send because of the way we set it up,
-        // so we run it in the current task and collect events
         let send_future = agent.send_message(&input, event_tx);
 
-        // We need to drive both the send_future and the event rendering concurrently
         let render_handle = tokio::spawn(async move {
             let mut stdout = io::stdout();
             while let Some(event) = event_rx.recv().await {
@@ -132,6 +167,27 @@ pub async fn run() -> Result<()> {
                         println!();
                         let _ = stdout.flush();
                     }
+                    AgentEvent::ShellConfirmation { command, respond } => {
+                        let _ = stdout.execute(SetForegroundColor(Color::Red));
+                        println!("\n[run_shell] {command}");
+                        let _ = stdout.execute(ResetColor);
+                        print!("Allow? [y/N] ");
+                        let _ = stdout.flush();
+
+                        let approved = tokio::task::spawn_blocking(|| {
+                            let mut answer = String::new();
+                            if io::stdin().read_line(&mut answer).is_ok() {
+                                let trimmed = answer.trim().to_lowercase();
+                                trimmed == "y" || trimmed == "yes"
+                            } else {
+                                false
+                            }
+                        })
+                        .await
+                        .unwrap_or(false);
+
+                        let _ = respond.send(approved);
+                    }
                     AgentEvent::TurnComplete => {
                         println!();
                     }
@@ -144,11 +200,18 @@ pub async fn run() -> Result<()> {
             }
         });
 
-        if let Err(e) = send_future.await {
-            eprintln!("Error: {e}");
+        // Drive agent work; handle Ctrl+C during streaming
+        tokio::select! {
+            result = send_future => {
+                if let Err(e) = result {
+                    eprintln!("Error: {e}");
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\n[interrupted]");
+            }
         }
 
-        // Wait for rendering to finish
         let _ = render_handle.await;
     }
 
@@ -174,6 +237,11 @@ pub async fn one_shot(message: &str) -> Result<()> {
                 }
                 AgentEvent::TurnComplete => {
                     println!();
+                }
+                AgentEvent::ShellConfirmation { respond, .. } => {
+                    // In one-shot mode, deny shell commands by default
+                    let _ = respond.send(false);
+                    eprintln!("Shell command denied in one-shot mode. Use --yes to allow.");
                 }
                 AgentEvent::Error(e) => {
                     eprintln!("Error: {e}");
