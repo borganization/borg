@@ -39,6 +39,7 @@ uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 inquire = "0.7"
 tiktoken-rs = "0.9"
+dotenvy = "0.15"
 
 [workspace.lints.clippy]
 identity_op = "deny"
