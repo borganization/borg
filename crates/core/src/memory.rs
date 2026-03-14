@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use tracing::debug;
 
 use crate::config::Config;
-use crate::conversation::estimate_tokens;
+use crate::tokenizer::estimate_tokens;
 
 pub fn memory_dir() -> Result<PathBuf> {
     Ok(Config::data_dir()?.join("memory"))
@@ -133,17 +133,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn estimate_tokens_calculation() {
+    fn estimate_tokens_nonempty() {
         assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("abcd"), 1); // 4 chars = 1 token
-        assert_eq!(estimate_tokens("abcdefgh"), 2); // 8 chars = 2 tokens
-        assert_eq!(estimate_tokens("ab"), 0); // 2 chars = 0 tokens (integer division)
-    }
-
-    #[test]
-    fn estimate_tokens_longer_text() {
-        let text = "a".repeat(400);
-        assert_eq!(estimate_tokens(&text), 100);
+        assert!(estimate_tokens("Hello, world!") > 0);
     }
 
     #[test]
@@ -205,18 +197,14 @@ mod tests {
 
     #[test]
     fn read_memory_special_filenames() {
-        // SOUL.md should resolve to data_dir/SOUL.md
-        // Just test that the function doesn't panic
         let _result = read_memory("SOUL.md");
         let _result = read_memory("MEMORY.md");
     }
 
     #[test]
     fn load_memory_context_empty_returns_empty() {
-        // With a very small budget, we might get empty (or content if ~/.tamagotchi exists)
         let result = load_memory_context(0);
         assert!(result.is_ok());
-        // Budget of 0 means nothing should be loaded
         assert!(result.unwrap().is_empty());
     }
 

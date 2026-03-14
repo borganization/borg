@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tracing::debug;
 
 use crate::config::Config;
-use crate::conversation::estimate_tokens;
+use crate::tokenizer::estimate_tokens;
 
 const BUILTIN_SLACK: &str = include_str!("../skills/slack/SKILL.md");
 const BUILTIN_DISCORD: &str = include_str!("../skills/discord/SKILL.md");

@@ -38,6 +38,7 @@ serde_yaml = "0.9"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 inquire = "0.7"
+tiktoken-rs = "0.9"
 
 [workspace.lints.clippy]
 identity_op = "deny"
