@@ -386,8 +386,8 @@ impl<'a> App<'a> {
         frame.render_widget(paragraph, area);
 
         if self.total_lines > visible_height {
-            let mut scrollbar_state = ScrollbarState::new(max_scroll)
-                .position(max_scroll - self.scroll_offset);
+            let mut scrollbar_state =
+                ScrollbarState::new(max_scroll).position(max_scroll - self.scroll_offset);
             frame.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight),
                 area,
