@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::path::PathBuf;
 use tracing::debug;
 
@@ -73,7 +73,19 @@ pub fn load_memory_context(max_tokens: usize) -> Result<String> {
     }
 }
 
+fn validate_memory_filename(filename: &str) -> Result<()> {
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        bail!("Invalid memory filename: must not contain path separators or '..'");
+    }
+    if filename.is_empty() {
+        bail!("Memory filename must not be empty");
+    }
+    Ok(())
+}
+
 pub fn write_memory(filename: &str, content: &str, append: bool) -> Result<String> {
+    validate_memory_filename(filename)?;
+
     let path = if filename == "SOUL.md" {
         Config::data_dir()?.join("SOUL.md")
     } else if filename == "MEMORY.md" {
@@ -98,6 +110,8 @@ pub fn write_memory(filename: &str, content: &str, append: bool) -> Result<Strin
 }
 
 pub fn read_memory(filename: &str) -> Result<String> {
+    validate_memory_filename(filename)?;
+
     let path = if filename == "SOUL.md" {
         Config::data_dir()?.join("SOUL.md")
     } else if filename == "MEMORY.md" {
@@ -116,4 +130,42 @@ pub fn read_memory(filename: &str) -> Result<String> {
 fn estimate_tokens(text: &str) -> usize {
     // Rough estimate: ~4 characters per token
     text.len() / 4
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_path_traversal() {
+        assert!(validate_memory_filename("../../etc/passwd").is_err());
+        assert!(validate_memory_filename("../secret.md").is_err());
+        assert!(validate_memory_filename("..").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_slashes() {
+        assert!(validate_memory_filename("sub/dir/file.md").is_err());
+        assert!(validate_memory_filename("sub\\dir\\file.md").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty() {
+        assert!(validate_memory_filename("").is_err());
+    }
+
+    #[test]
+    fn validate_accepts_simple_filenames() {
+        assert!(validate_memory_filename("SOUL.md").is_ok());
+        assert!(validate_memory_filename("MEMORY.md").is_ok());
+        assert!(validate_memory_filename("notes.md").is_ok());
+        assert!(validate_memory_filename("my-topic.md").is_ok());
+    }
+
+    #[test]
+    fn estimate_tokens_basic() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcdefgh"), 2);
+    }
 }

@@ -141,3 +141,101 @@ fn hash_string(s: &str) -> u64 {
     s.hash(&mut hasher);
     hasher.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_interval_minutes() {
+        let d = parse_interval("30m").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn parse_interval_hours() {
+        let d = parse_interval("2h").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(2 * 3600));
+    }
+
+    #[test]
+    fn parse_interval_seconds() {
+        let d = parse_interval("45s").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(45));
+    }
+
+    #[test]
+    fn parse_interval_bare_number() {
+        let d = parse_interval("120").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(120));
+    }
+
+    #[test]
+    fn parse_interval_with_whitespace() {
+        let d = parse_interval("  10m  ").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(600));
+    }
+
+    #[test]
+    fn parse_interval_invalid() {
+        assert!(parse_interval("abc").is_none());
+        assert!(parse_interval("").is_none());
+    }
+
+    #[test]
+    fn hash_string_deterministic() {
+        let h1 = hash_string("hello");
+        let h2 = hash_string("hello");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn hash_string_different_for_different_inputs() {
+        let h1 = hash_string("hello");
+        let h2 = hash_string("world");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn quiet_hours_no_config() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+        };
+        let llm = test_scheduler(config);
+        assert!(!llm.is_quiet_hours());
+    }
+
+    #[test]
+    fn quiet_hours_invalid_format() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: Some("not-a-time".to_string()),
+            quiet_hours_end: Some("also-bad".to_string()),
+            cron: None,
+        };
+        let sched = test_scheduler(config);
+        // Invalid times should not be treated as quiet hours
+        assert!(!sched.is_quiet_hours());
+    }
+
+    fn test_scheduler(config: HeartbeatConfig) -> HeartbeatScheduler {
+        HeartbeatScheduler {
+            config,
+            llm: make_test_llm(),
+            last_hash: None,
+        }
+    }
+
+    fn make_test_llm() -> LlmClient {
+        use tamagotchi_core::config::Config;
+        // Set the env var so LlmClient::new doesn't fail
+        std::env::set_var("OPENROUTER_API_KEY", "test-key");
+        let config = Config::default();
+        LlmClient::new(config).expect("should create LlmClient for testing")
+    }
+}
