@@ -28,6 +28,10 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
+    // Also load .env from the data directory (~/.tamagotchi/.env)
+    if let Ok(data_dir) = tamagotchi_core::config::Config::data_dir() {
+        let _ = dotenvy::from_path(data_dir.join(".env"));
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -54,13 +58,19 @@ fn init_data_dir() -> Result<()> {
     // Run interactive onboarding wizard
     match onboarding::run_onboarding()? {
         Some(result) => {
+            let has_api_key = result.api_key.is_some();
             onboarding::apply_onboarding(&result)?;
             println!();
             println!("Initialized {}", data_dir.display());
             println!();
-            println!("Next steps:");
-            println!("  1. Set your API key:  export OPENROUTER_API_KEY=\"your-key\"");
-            println!("  2. Start chatting:    tamagotchi");
+            if has_api_key {
+                println!("You're all set! Run `tamagotchi` to start chatting.");
+            } else {
+                println!("You're all set! Run `tamagotchi` to start chatting.");
+                println!();
+                println!("Note: You'll need to set OPENROUTER_API_KEY before chatting.");
+                println!("  Add it to {}", data_dir.join(".env").display());
+            }
         }
         None => {
             // User cancelled — fall back to defaults so the directory is still usable
