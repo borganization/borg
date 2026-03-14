@@ -3,7 +3,7 @@ use crossterm::{
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     ExecutableCommand,
 };
-use inquire::{Select, Text};
+use inquire::{Password, Select, Text};
 use std::io::{self, Write};
 
 use tamagotchi_core::config::Config;
@@ -95,6 +95,7 @@ pub struct OnboardingResult {
     pub agent_name: String,
     pub style_index: usize,
     pub model_id: String,
+    pub api_key: Option<String>,
 }
 
 /// Helper: prompt the user for input, returning `None` on cancel/interrupt.
@@ -177,17 +178,62 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         .map(|(id, _)| (*id).to_string())
         .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string());
 
+    // ── Step 4: API key ──
+    let data_dir = Config::data_dir()?;
+    let env_path = data_dir.join(".env");
+    let existing_key = if env_path.exists() {
+        std::fs::read_to_string(&env_path)
+            .ok()
+            .and_then(|contents| {
+                contents.lines().find_map(|line| {
+                    line.strip_prefix("OPENROUTER_API_KEY=")
+                        .map(|v| v.trim().trim_matches('"').to_string())
+                })
+            })
+            .filter(|k| !k.is_empty())
+    } else {
+        None
+    };
+
+    let api_key = if existing_key.is_some() {
+        println!("  API key already configured in {}", env_path.display());
+        None
+    } else {
+        let key = prompt_or_cancel!(Password::new("OpenRouter API key:")
+            .with_help_message("Get yours at https://openrouter.ai/keys — leave empty to skip")
+            .without_confirmation()
+            .prompt());
+        if key.trim().is_empty() {
+            None
+        } else {
+            Some(key.trim().to_string())
+        }
+    };
+
     // ── Summary ──
     println!();
     print_checkmark(&mut stdout, "Agent name:", &agent_name)?;
     print_checkmark(&mut stdout, "Style:     ", STYLES[style_index].name)?;
     print_checkmark(&mut stdout, "Model:     ", &model_id)?;
+    if existing_key.is_some() {
+        print_checkmark(&mut stdout, "API key:   ", "(already set)")?;
+    } else if let Some(ref key) = api_key {
+        let masked = if key.len() > 8 {
+            format!("{}...{}", &key[..5], &key[key.len() - 4..])
+        } else {
+            "****".to_string()
+        };
+        print_checkmark(&mut stdout, "API key:   ", &masked)?;
+    } else {
+        print_checkmark(&mut stdout, "API key:   ", "(skipped)")?;
+    }
     println!();
 
     Ok(Some(OnboardingResult {
         agent_name,
         style_index,
         model_id,
+        api_key,
     }))
 }
 
@@ -310,6 +356,13 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     } else {
         std::fs::write(&memory_path, "# Memory Index\n\nNo memories yet.\n")?;
         println!("  Created {}", memory_path.display());
+    }
+
+    // Write .env with API key (skip if not provided)
+    if let Some(ref api_key) = result.api_key {
+        let env_path = data_dir.join(".env");
+        std::fs::write(&env_path, format!("OPENROUTER_API_KEY={api_key}\n"))?;
+        println!("  Created {}", env_path.display());
     }
 
     Ok(())
