@@ -4,12 +4,51 @@ use tracing::{debug, info};
 
 use crate::parser::{Hunk, Patch, PatchOperation};
 
+fn validate_patch_path(path: &str, base_dir: &Path) -> Result<()> {
+    let full = base_dir.join(path);
+    let canonical_base = std::fs::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
+    // For new files, canonicalize as far as possible then check prefix
+    let resolved = if full.exists() {
+        std::fs::canonicalize(&full)?
+    } else {
+        // Walk up to find an existing ancestor, then append the rest
+        let mut existing = full;
+        let mut tail = Vec::new();
+        while !existing.exists() {
+            if let Some(file_name) = existing.file_name() {
+                tail.push(file_name.to_os_string());
+            } else {
+                break;
+            }
+            if let Some(parent) = existing.parent() {
+                existing = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+        let mut resolved = if existing.exists() {
+            std::fs::canonicalize(&existing)?
+        } else {
+            existing
+        };
+        for component in tail.into_iter().rev() {
+            resolved = resolved.join(component);
+        }
+        resolved
+    };
+    if !resolved.starts_with(&canonical_base) {
+        bail!("Path traversal detected: '{path}' escapes base directory");
+    }
+    Ok(())
+}
+
 pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
     let mut affected_files = Vec::new();
 
     for op in &patch.operations {
         match op {
             PatchOperation::AddFile { path, content } => {
+                validate_patch_path(path, base_dir)?;
                 let full_path = base_dir.join(path);
                 if let Some(parent) = full_path.parent() {
                     std::fs::create_dir_all(parent)
@@ -21,6 +60,7 @@ pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
                 affected_files.push(path.clone());
             }
             PatchOperation::UpdateFile { path, hunks } => {
+                validate_patch_path(path, base_dir)?;
                 let full_path = base_dir.join(path);
                 if !full_path.exists() {
                     bail!("Cannot update non-existent file: {path}");
@@ -40,6 +80,7 @@ pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
                 affected_files.push(path.clone());
             }
             PatchOperation::DeleteFile { path } => {
+                validate_patch_path(path, base_dir)?;
                 let full_path = base_dir.join(path);
                 if full_path.exists() {
                     std::fs::remove_file(&full_path)
@@ -228,5 +269,49 @@ mod tests {
         let result = apply_patch(&patch, dir.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("non-existent"));
+    }
+
+    #[test]
+    fn add_file_path_traversal_blocked() {
+        let dir = TempDir::new().unwrap();
+        let patch = make_patch(vec![PatchOperation::AddFile {
+            path: "../../etc/evil.txt".to_string(),
+            content: "malicious".to_string(),
+        }]);
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Path traversal"),
+            "expected path traversal error"
+        );
+    }
+
+    #[test]
+    fn update_file_path_traversal_blocked() {
+        let dir = TempDir::new().unwrap();
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "../../../etc/passwd".to_string(),
+            hunks: vec![],
+        }]);
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Path traversal"),
+            "expected path traversal error"
+        );
+    }
+
+    #[test]
+    fn delete_file_path_traversal_blocked() {
+        let dir = TempDir::new().unwrap();
+        let patch = make_patch(vec![PatchOperation::DeleteFile {
+            path: "../../dangerous.txt".to_string(),
+        }]);
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Path traversal"),
+            "expected path traversal error"
+        );
     }
 }
