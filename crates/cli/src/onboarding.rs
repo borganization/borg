@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use crossterm::{
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     ExecutableCommand,
@@ -97,6 +97,33 @@ pub struct OnboardingResult {
     pub model_id: String,
 }
 
+/// Helper: prompt the user for input, returning `None` on cancel/interrupt.
+macro_rules! prompt_or_cancel {
+    ($prompt:expr) => {
+        match $prompt {
+            Ok(val) => val,
+            Err(
+                inquire::InquireError::OperationCanceled
+                | inquire::InquireError::OperationInterrupted,
+            ) => {
+                println!("\nSetup cancelled.");
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+}
+
+fn print_checkmark(stdout: &mut io::Stdout, label: &str, value: &str) -> Result<()> {
+    stdout.execute(SetForegroundColor(Color::Green))?;
+    stdout.execute(SetAttribute(Attribute::Bold))?;
+    stdout.execute(Print("  ✓ "))?;
+    stdout.execute(ResetColor)?;
+    stdout.execute(SetAttribute(Attribute::Reset))?;
+    stdout.execute(Print(format!("{label}  {value}\n")))?;
+    Ok(())
+}
+
 /// Run the interactive onboarding wizard. Returns `None` if the user cancels.
 pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
     let mut stdout = io::stdout();
@@ -112,20 +139,10 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
     println!("  Let's set up your personal AI assistant.\n");
 
     // ── Step 1: Agent name ──
-    let agent_name = match Text::new("What should your agent be called?")
+    let agent_name = prompt_or_cancel!(Text::new("What should your agent be called?")
         .with_default("Tamagotchi")
         .with_help_message("This name appears in the SOUL.md personality file")
-        .prompt()
-    {
-        Ok(name) => name,
-        Err(
-            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
-        ) => {
-            println!("\nSetup cancelled.");
-            return Ok(None);
-        }
-        Err(e) => return Err(e.into()),
-    };
+        .prompt());
 
     // ── Step 2: Personality style ──
     let style_options: Vec<String> = STYLES
@@ -133,22 +150,14 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         .map(|s| format!("{} — {}", s.name, s.description))
         .collect();
 
-    let style_index = match Select::new("Pick a personality style:", style_options)
+    let chosen_style = prompt_or_cancel!(Select::new("Pick a personality style:", style_options)
         .with_help_message("Defines the tone of your agent's responses")
-        .prompt()
-    {
-        Ok(chosen) => STYLES
-            .iter()
-            .position(|s| chosen.starts_with(s.name))
-            .unwrap_or(0),
-        Err(
-            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
-        ) => {
-            println!("\nSetup cancelled.");
-            return Ok(None);
-        }
-        Err(e) => return Err(e.into()),
-    };
+        .prompt());
+
+    let style_index = STYLES
+        .iter()
+        .position(|s| chosen_style.starts_with(s.name))
+        .unwrap_or(0);
 
     // ── Step 3: Model selection ──
     let model_options: Vec<String> = MODELS
@@ -156,48 +165,23 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         .map(|(_, label)| (*label).to_string())
         .collect();
 
-    let model_id = match Select::new("Choose your default model:", model_options)
+    let chosen_model = prompt_or_cancel!(Select::new("Choose your default model:", model_options)
         .with_help_message(
-            "All models served via OpenRouter — you can change this later in config.toml",
+            "All models served via OpenRouter — you can change this later in config.toml"
         )
-        .prompt()
-    {
-        Ok(chosen) => MODELS
-            .iter()
-            .find(|(_, label)| *label == chosen.as_str())
-            .map(|(id, _)| (*id).to_string())
-            .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string()),
-        Err(
-            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
-        ) => {
-            println!("\nSetup cancelled.");
-            return Ok(None);
-        }
-        Err(e) => return Err(e.into()),
-    };
+        .prompt());
+
+    let model_id = MODELS
+        .iter()
+        .find(|(_, label)| *label == chosen_model.as_str())
+        .map(|(id, _)| (*id).to_string())
+        .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string());
 
     // ── Summary ──
     println!();
-    stdout.execute(SetForegroundColor(Color::Green))?;
-    stdout.execute(SetAttribute(Attribute::Bold))?;
-    print!("  ✓ ");
-    stdout.execute(ResetColor)?;
-    stdout.execute(SetAttribute(Attribute::Reset))?;
-    println!("Agent name:  {agent_name}");
-
-    stdout.execute(SetForegroundColor(Color::Green))?;
-    stdout.execute(SetAttribute(Attribute::Bold))?;
-    print!("  ✓ ");
-    stdout.execute(ResetColor)?;
-    stdout.execute(SetAttribute(Attribute::Reset))?;
-    println!("Style:       {}", STYLES[style_index].name);
-
-    stdout.execute(SetForegroundColor(Color::Green))?;
-    stdout.execute(SetAttribute(Attribute::Bold))?;
-    print!("  ✓ ");
-    stdout.execute(ResetColor)?;
-    stdout.execute(SetAttribute(Attribute::Reset))?;
-    println!("Model:       {model_id}");
+    print_checkmark(&mut stdout, "Agent name:", &agent_name)?;
+    print_checkmark(&mut stdout, "Style:     ", STYLES[style_index].name)?;
+    print_checkmark(&mut stdout, "Model:     ", &model_id)?;
     println!();
 
     Ok(Some(OnboardingResult {
@@ -208,9 +192,12 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
 }
 
 /// Generate SOUL.md content from onboarding choices.
-pub fn generate_soul(name: &str, style_index: usize) -> String {
-    let style = &STYLES[style_index];
-    format!(
+pub fn generate_soul(name: &str, style_index: usize) -> Result<String> {
+    let style = STYLES
+        .get(style_index)
+        .ok_or_else(|| anyhow::anyhow!("invalid style index {style_index}"))?;
+
+    Ok(format!(
         r#"# {name} — Your AI Personal Assistant
 
 You are {name}, a helpful AI personal assistant. You live on your owner's computer and help them with tasks, remember things for them, and occasionally check in to see how they're doing.
@@ -235,12 +222,29 @@ You are {name}, a helpful AI personal assistant. You live on your owner's comput
 "#,
         name = name,
         style_snippet = style.soul_snippet,
-    )
+    ))
+}
+
+/// Validate that a model ID is safe for TOML interpolation (alphanumeric, slashes, hyphens, dots).
+fn validate_model_id(model_id: &str) -> Result<()> {
+    if model_id.is_empty() {
+        bail!("model ID cannot be empty");
+    }
+    if model_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '.' | '_'))
+    {
+        Ok(())
+    } else {
+        bail!("model ID contains invalid characters: {model_id}")
+    }
 }
 
 /// Generate config.toml content from onboarding choices.
-pub fn generate_config(model_id: &str) -> String {
-    format!(
+pub fn generate_config(model_id: &str) -> Result<String> {
+    validate_model_id(model_id)?;
+
+    Ok(format!(
         r#"[llm]
 api_key_env = "OPENROUTER_API_KEY"
 model = "{model_id}"
@@ -267,7 +271,7 @@ max_context_tokens = 8000
 enabled = true
 max_context_tokens = 4000
 "#,
-    )
+    ))
 }
 
 /// Apply onboarding results: create directories, write config and soul files.
@@ -279,24 +283,94 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
         std::fs::create_dir_all(data_dir.join(sub))?;
     }
 
-    // Write config.toml
+    // Write config.toml (skip if already exists to avoid clobbering manual edits)
     let config_path = data_dir.join("config.toml");
-    let config_content = generate_config(&result.model_id);
-    std::fs::write(&config_path, &config_content)?;
-    println!("  Created {}", config_path.display());
+    if config_path.exists() {
+        println!("  Skipped {} (already exists)", config_path.display());
+    } else {
+        let config_content = generate_config(&result.model_id)?;
+        std::fs::write(&config_path, &config_content)?;
+        println!("  Created {}", config_path.display());
+    }
 
-    // Write SOUL.md
+    // Write SOUL.md (skip if already exists)
     let soul_path = data_dir.join("SOUL.md");
-    let soul_content = generate_soul(&result.agent_name, result.style_index);
-    std::fs::write(&soul_path, &soul_content)?;
-    println!("  Created {}", soul_path.display());
+    if soul_path.exists() {
+        println!("  Skipped {} (already exists)", soul_path.display());
+    } else {
+        let soul_content = generate_soul(&result.agent_name, result.style_index)?;
+        std::fs::write(&soul_path, &soul_content)?;
+        println!("  Created {}", soul_path.display());
+    }
 
-    // Write MEMORY.md
+    // Write MEMORY.md (skip if already exists)
     let memory_path = data_dir.join("MEMORY.md");
-    if !memory_path.exists() {
+    if memory_path.exists() {
+        println!("  Skipped {} (already exists)", memory_path.display());
+    } else {
         std::fs::write(&memory_path, "# Memory Index\n\nNo memories yet.\n")?;
         println!("  Created {}", memory_path.display());
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_soul_contains_name_and_style() {
+        let soul = generate_soul("Buddy", 0).expect("valid style index");
+        assert!(soul.contains("# Buddy — Your AI Personal Assistant"));
+        assert!(soul.contains("You are Buddy"));
+        assert!(soul.contains("## Communication Style"));
+        assert!(soul.contains("Professional and direct"));
+    }
+
+    #[test]
+    fn generate_soul_all_styles_valid() {
+        for i in 0..STYLES.len() {
+            let soul = generate_soul("Test", i).expect("valid style index");
+            assert!(soul.contains(STYLES[i].name) || soul.contains("Communication Style"));
+        }
+    }
+
+    #[test]
+    fn generate_soul_invalid_index_errors() {
+        assert!(generate_soul("Test", 999).is_err());
+    }
+
+    #[test]
+    fn generate_config_default_model() {
+        let config = generate_config("anthropic/claude-sonnet-4").expect("valid model");
+        assert!(config.contains("model = \"anthropic/claude-sonnet-4\""));
+        assert!(config.contains("[llm]"));
+        assert!(config.contains("[sandbox]"));
+    }
+
+    #[test]
+    fn generate_config_rejects_empty_model() {
+        assert!(generate_config("").is_err());
+    }
+
+    #[test]
+    fn generate_config_rejects_injection() {
+        assert!(generate_config("model\"\nmalicious = true").is_err());
+    }
+
+    #[test]
+    fn validate_model_id_accepts_valid() {
+        assert!(validate_model_id("anthropic/claude-sonnet-4").is_ok());
+        assert!(validate_model_id("openai/gpt-4.1-mini").is_ok());
+        assert!(validate_model_id("meta-llama/llama-4-scout").is_ok());
+    }
+
+    #[test]
+    fn validate_model_id_rejects_invalid() {
+        assert!(validate_model_id("").is_err());
+        assert!(validate_model_id("model\"").is_err());
+        assert!(validate_model_id("model\nkey=val").is_err());
+        assert!(validate_model_id("model with spaces").is_err());
+    }
 }
