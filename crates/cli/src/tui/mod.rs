@@ -162,6 +162,47 @@ async fn run_event_loop(
                     }
                 });
             }
+            AppAction::CompactHistory => {
+                let mut agent = agent.lock().await;
+                let (before, after) = agent.compact();
+                let freed = before.saturating_sub(after);
+                app.push_system_message(format!(
+                    "Compacted: {before} → {after} tokens ({freed} freed)"
+                ));
+            }
+            AppAction::ClearHistory => {
+                let mut agent = agent.lock().await;
+                agent.clear_history();
+                app.push_system_message("Conversation cleared.".to_string());
+            }
+            AppAction::ShowUsage => {
+                let agent = agent.lock().await;
+                let (msg_count, token_count) = agent.conversation_stats();
+                drop(agent);
+
+                let mut text = format!("Session: {msg_count} messages, ~{token_count} tokens\n");
+
+                for (label, days) in [("24h", 1), ("7d", 7), ("30d", 30)] {
+                    match tamagotchi_core::logging::count_messages_for_period(days) {
+                        Ok(stats) => {
+                            text.push_str(&format!(
+                                "{label}: {} user, {} assistant, {} tool calls\n",
+                                stats.user_messages, stats.assistant_messages, stats.tool_calls
+                            ));
+                        }
+                        Err(e) => {
+                            text.push_str(&format!("{label}: error reading logs: {e}\n"));
+                        }
+                    }
+                }
+                app.push_system_message(text.trim_end().to_string());
+            }
+            AppAction::UpdateSetting { key, value } => {
+                let mut agent = agent.lock().await;
+                if let Err(e) = agent.config_mut().apply_setting(&key, &value) {
+                    app.push_system_message(format!("Warning: failed to sync agent config: {e}"));
+                }
+            }
             AppAction::Continue => {}
         }
     }
