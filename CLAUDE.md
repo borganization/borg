@@ -8,7 +8,7 @@ Cargo workspace with 6 crates:
 
 ```
 crates/
-  cli/          Binary: REPL, clap args, heartbeat display
+  cli/          Binary: REPL, clap args, heartbeat display, onboarding TUI
   core/         Library: agent loop, OpenRouter SSE client, memory, soul, config
   heartbeat/    Library: proactive scheduler with quiet hours + dedup
   tools/        Library: tool manifest parsing, registry, subprocess executor
@@ -33,7 +33,7 @@ Binary name is `tamagotchi`. Requires `OPENROUTER_API_KEY` env var at runtime (s
 
 - `tamagotchi` or `tamagotchi chat` — interactive REPL
 - `tamagotchi ask "message"` — one-shot query
-- `tamagotchi init` — scaffold `~/.tamagotchi/` with defaults
+- `tamagotchi init` — interactive onboarding wizard (name, personality, model selection)
 
 ## Agent Loop
 
@@ -142,6 +142,8 @@ max_context_tokens = 4000
 
 `~/.tamagotchi/SOUL.md` is injected into the system prompt. The agent can update it via `write_memory` targeting `SOUL.md`. Changes persist across sessions.
 
+During `tamagotchi init`, the onboarding wizard generates a personalized SOUL.md based on the user's chosen agent name and personality style (Professional, Casual, Snarky, Nurturing, or Minimal).
+
 ## Skills
 
 Skills are instruction bundles (SKILL.md files with YAML frontmatter) that teach the agent how to use external CLI tools via `run_shell`. Distinct from "tools" which are sandboxed executable scripts.
@@ -183,6 +185,7 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 | File | What |
 |------|------|
 | `crates/cli/src/main.rs` | Entry point, clap commands, init |
+| `crates/cli/src/onboarding.rs` | TUI onboarding wizard (inquire-based) |
 | `crates/cli/src/repl.rs` | Interactive loop + heartbeat rendering |
 | `crates/core/src/agent.rs` | Conversation loop + tool dispatch |
 | `crates/core/src/llm.rs` | OpenRouter streaming SSE client |
