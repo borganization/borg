@@ -1,0 +1,186 @@
+use ratatui::text::{Line, Span};
+
+use super::markdown;
+use super::theme;
+
+#[derive(Clone)]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Denied,
+}
+
+#[derive(Clone)]
+pub enum HistoryCell {
+    User {
+        text: String,
+    },
+    Assistant {
+        text: String,
+        streaming: bool,
+    },
+    ToolStart {
+        name: String,
+        args: String,
+    },
+    ToolResult {
+        #[allow(dead_code)]
+        name: String,
+        output: String,
+        is_error: bool,
+    },
+    ShellApproval {
+        command: String,
+        status: ApprovalStatus,
+    },
+    Heartbeat {
+        text: String,
+    },
+    System {
+        text: String,
+    },
+}
+
+/// Truncate a string to at most `max_bytes` bytes at a valid UTF-8 boundary.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+impl HistoryCell {
+    pub fn render(&self, width: u16) -> Vec<Line<'static>> {
+        match self {
+            HistoryCell::User { text } => {
+                let mut lines = vec![Line::from(vec![
+                    Span::styled("You: ", theme::bold()),
+                    Span::raw(text.clone()),
+                ])];
+                lines.push(Line::default());
+                lines
+            }
+            HistoryCell::Assistant { text, streaming } => {
+                let mut lines = if text.is_empty() && *streaming {
+                    vec![Line::from(Span::styled(
+                        format!("{} ...", theme::BULLET),
+                        theme::dim(),
+                    ))]
+                } else {
+                    let prefix_span = Span::styled(format!("{} ", theme::BULLET), theme::dim());
+                    let md_lines = markdown::render_markdown(text, width.saturating_sub(2));
+                    if md_lines.is_empty() {
+                        vec![Line::from(prefix_span)]
+                    } else {
+                        let mut result = Vec::with_capacity(md_lines.len());
+                        for (i, mut line) in md_lines.into_iter().enumerate() {
+                            if i == 0 {
+                                let mut spans = vec![prefix_span.clone()];
+                                spans.extend(line.spans);
+                                result.push(Line::from(spans));
+                            } else {
+                                let mut spans = vec![Span::raw("  ")];
+                                spans.append(&mut line.spans);
+                                result.push(Line::from(spans));
+                            }
+                        }
+                        result
+                    }
+                };
+                if *streaming {
+                    lines.push(Line::from(Span::styled("▊", theme::dim())));
+                } else {
+                    lines.push(Line::default());
+                }
+                lines
+            }
+            HistoryCell::ToolStart { name, args } => {
+                let preview = if args.len() > 80 {
+                    format!("{}...", truncate_str(args, 77))
+                } else {
+                    args.clone()
+                };
+                vec![Line::from(vec![
+                    Span::styled(format!("  {} Running ", theme::BULLET), theme::tool_style()),
+                    Span::styled(name.clone(), theme::tool_style()),
+                    Span::styled(format!(" {preview}"), theme::dim()),
+                ])]
+            }
+            HistoryCell::ToolResult {
+                output, is_error, ..
+            } => {
+                let style = if *is_error {
+                    theme::error_style()
+                } else {
+                    theme::success_style()
+                };
+                let preview_lines: Vec<&str> = output.lines().take(5).collect();
+                let truncated = output.lines().count() > 5;
+                let mut lines: Vec<Line<'static>> = Vec::new();
+                for (i, pl) in preview_lines.iter().enumerate() {
+                    let prefix = if i == 0 {
+                        format!("  {} ", theme::TREE_END)
+                    } else {
+                        "    ".to_string()
+                    };
+                    let text = if pl.len() > 200 {
+                        format!("{}...", truncate_str(pl, 197))
+                    } else {
+                        pl.to_string()
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, style),
+                        Span::styled(text, style),
+                    ]));
+                }
+                if truncated {
+                    lines.push(Line::from(Span::styled("    ...", theme::dim())));
+                }
+                lines
+            }
+            HistoryCell::ShellApproval { command, status } => {
+                let status_text = match status {
+                    ApprovalStatus::Pending => "[y/N]",
+                    ApprovalStatus::Approved => "[approved]",
+                    ApprovalStatus::Denied => "[denied]",
+                };
+                let status_style = match status {
+                    ApprovalStatus::Pending => theme::error_style(),
+                    ApprovalStatus::Approved => theme::success_style(),
+                    ApprovalStatus::Denied => theme::dim(),
+                };
+                vec![
+                    Line::from(vec![
+                        Span::styled("  [run_shell] ", theme::error_style()),
+                        Span::styled(command.clone(), theme::error_style()),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  Allow? "),
+                        Span::styled(status_text.to_string(), status_style),
+                    ]),
+                ]
+            }
+            HistoryCell::Heartbeat { text } => {
+                vec![
+                    Line::from(vec![
+                        Span::styled("[heartbeat] ", theme::code_style()),
+                        Span::styled(text.clone(), theme::code_style()),
+                    ]),
+                    Line::default(),
+                ]
+            }
+            HistoryCell::System { text } => {
+                let mut lines: Vec<Line<'static>> = text
+                    .lines()
+                    .map(|l| Line::from(Span::styled(l.to_string(), theme::dim())))
+                    .collect();
+                lines.push(Line::default());
+                lines
+            }
+        }
+    }
+}

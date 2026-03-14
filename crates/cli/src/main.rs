@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 mod logo;
 mod onboarding;
 mod repl;
+mod tui;
 
 #[derive(Parser)]
 #[command(name = "tamagotchi", about = "AI Personal Assistant Agent")]
@@ -60,6 +61,8 @@ fn init_data_dir() -> Result<()> {
     match onboarding::run_onboarding()? {
         Some(result) => {
             let has_api_key = result.api_key.is_some();
+            let provider: tamagotchi_core::provider::Provider = result.provider.parse()?;
+            let env_var = provider.default_env_var();
             onboarding::apply_onboarding(&result)?;
             println!();
             println!("Initialized {}", data_dir.display());
@@ -69,7 +72,7 @@ fn init_data_dir() -> Result<()> {
             } else {
                 println!("You're all set! Run `tamagotchi` to start chatting.");
                 println!();
-                println!("Note: You'll need to set OPENROUTER_API_KEY before chatting.");
+                println!("Note: You'll need to set {env_var} before chatting.");
                 println!("  Add it to {}", data_dir.join(".env").display());
             }
         }
@@ -91,7 +94,8 @@ fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
 
     let config_path = data_dir.join("config.toml");
     if !config_path.exists() {
-        let config_content = onboarding::generate_config("anthropic/claude-sonnet-4")?;
+        let config_content =
+            onboarding::generate_config("anthropic/claude-sonnet-4", "openrouter")?;
         std::fs::write(&config_path, config_content)?;
         println!("  Created {}", config_path.display());
     }
