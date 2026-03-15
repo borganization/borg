@@ -1,0 +1,6 @@
+{
+  "dm_policy": "open",
+  "allowlist": [],
+  "blocked": [],
+  "max_message_length": 10000
+}
