@@ -147,7 +147,9 @@ impl<'a> Composer<'a> {
                 None
             }
             // Ctrl+P — emacs-style history back (same as Up when single-line)
-            (KeyCode::Char('p'), m) if m.contains(KeyModifiers::CONTROL) && self.is_single_line() => {
+            (KeyCode::Char('p'), m)
+                if m.contains(KeyModifiers::CONTROL) && self.is_single_line() =>
+            {
                 let current = self.textarea.lines().join("\n");
                 if let Some(entry) = self.history.up(&current) {
                     let entry = entry.to_string();
@@ -156,7 +158,9 @@ impl<'a> Composer<'a> {
                 None
             }
             // Ctrl+N — emacs-style history forward (same as Down when browsing)
-            (KeyCode::Char('n'), m) if m.contains(KeyModifiers::CONTROL) && self.history.is_browsing() => {
+            (KeyCode::Char('n'), m)
+                if m.contains(KeyModifiers::CONTROL) && self.history.is_browsing() =>
+            {
                 match self.history.down() {
                     Some(Some(entry)) => {
                         let entry = entry.to_string();

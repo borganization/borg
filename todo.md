@@ -23,3 +23,18 @@
 - [ ] **Tool output size limits** — user tool stdout is unbounded; large outputs could overwhelm context
 - [ ] **Graceful shutdown** — no signal handling for clean exit (ctrl+c drops mid-stream)
 - [ ] **run_shell safety** — consider confirmation prompt or allowlist for shell commands executed by the agent
+
+## Phase 4: OpenClaw-Inspired Features
+
+- [ ] **Session Export** — Markdown/JSON/text export of conversations
+- [ ] **Vector-Based Semantic Memory** — Embeddings for memory recall
+- [ ] **Subagent Spawning** — Isolated child agents for subtasks
+- [ ] **Multi-Channel Messaging** — Telegram, Discord, Slack adapters
+- [ ] **Cron Job Management** — User-defined scheduled tasks beyond heartbeat
+- [ ] **Tool Streaming** — Real-time output from long-running tools
+- [ ] **Agent Workflows** — Reusable multi-step procedure definitions
+- [ ] **A2UI Rich Agent UI** — Rich terminal UI components
+- [ ] **Voice Wake-Word** — Audio activation support
+- [ ] **Remote Gateway** — HTTP API gateway mode
+- [ ] **OpenTelemetry** — Distributed tracing and metrics
+- [ ] **Plugin Config Schema UI** — Visual config editor for plugins

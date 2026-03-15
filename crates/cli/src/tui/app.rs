@@ -329,6 +329,7 @@ impl<'a> App<'a> {
                      /tools     - List tools\n  \
                      /memory    - Show memory\n  \
                      /skills    - List skills\n  \
+                     /doctor    - Run diagnostics\n  \
                      /history   - Show recent history\n  \
                      /sessions  - List saved sessions\n  \
                      /save      - Save current session\n  \
@@ -390,6 +391,11 @@ impl<'a> App<'a> {
                         self.push_system_message(format!("Error reading history: {e}"));
                     }
                 }
+                return Ok(AppAction::Continue);
+            }
+            "/doctor" => {
+                let report = tamagotchi_core::doctor::run_diagnostics(&self.config);
+                self.push_system_message(report.format());
                 return Ok(AppAction::Continue);
             }
             "/settings" => {

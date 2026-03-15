@@ -49,6 +49,10 @@ const COMMANDS: &[SlashCommandDef] = &[
         description: "List skills",
     },
     SlashCommandDef {
+        name: "/doctor",
+        description: "Run diagnostics",
+    },
+    SlashCommandDef {
         name: "/history",
         description: "Show recent history",
     },

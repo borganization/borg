@@ -13,7 +13,37 @@ pub struct SandboxCommand {
     pub args: Vec<String>,
 }
 
+/// Check if a path matches any blocked path pattern.
+/// Blocked patterns are basename fragments (e.g., ".ssh", "credentials").
+fn is_path_blocked(path: &str, blocked_paths: &[String]) -> bool {
+    for blocked in blocked_paths {
+        // Match if the path contains the blocked pattern as a path component
+        if path.contains(blocked) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Filter out paths that match the security blocklist.
+fn filter_blocked(paths: &[String], blocked_paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|p| !is_path_blocked(p, blocked_paths))
+        .cloned()
+        .collect()
+}
+
 impl SandboxPolicy {
+    /// Return a copy of this policy with blocked paths removed from fs_read/fs_write.
+    pub fn with_blocked_paths_filtered(&self, blocked_paths: &[String]) -> Self {
+        Self {
+            network: self.network,
+            fs_read: filter_blocked(&self.fs_read, blocked_paths),
+            fs_write: filter_blocked(&self.fs_write, blocked_paths),
+        }
+    }
+
     pub fn wrap_command(
         &self,
         program: &str,
@@ -154,5 +184,42 @@ mod tests {
         let arg2_pos = cmd.args.iter().position(|a| a == "arg2").unwrap();
         assert!(node_pos < arg1_pos);
         assert!(arg1_pos < arg2_pos);
+    }
+
+    #[test]
+    fn filter_blocked_paths_removes_sensitive() {
+        let blocked = vec![".ssh".into(), ".aws".into(), "credentials".into()];
+        let policy = SandboxPolicy {
+            network: false,
+            fs_read: vec![
+                "/home/user/.ssh".into(),
+                "/data/public".into(),
+                "/home/user/.aws/config".into(),
+            ],
+            fs_write: vec!["/tmp/output".into(), "/home/user/credentials".into()],
+        };
+        let filtered = policy.with_blocked_paths_filtered(&blocked);
+        assert_eq!(filtered.fs_read, vec!["/data/public".to_string()]);
+        assert_eq!(filtered.fs_write, vec!["/tmp/output".to_string()]);
+    }
+
+    #[test]
+    fn filter_blocked_paths_empty_blocklist() {
+        let policy = SandboxPolicy {
+            network: true,
+            fs_read: vec!["/home/user/.ssh".into()],
+            fs_write: vec![],
+        };
+        let filtered = policy.with_blocked_paths_filtered(&[]);
+        assert_eq!(filtered.fs_read, policy.fs_read);
+        assert!(filtered.network);
+    }
+
+    #[test]
+    fn is_path_blocked_matches() {
+        let blocked = vec![".ssh".into(), ".env".into()];
+        assert!(is_path_blocked("/home/user/.ssh/id_rsa", &blocked));
+        assert!(is_path_blocked("/project/.env", &blocked));
+        assert!(!is_path_blocked("/home/user/code", &blocked));
     }
 }

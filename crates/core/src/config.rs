@@ -150,6 +150,7 @@ pub struct DebugConfig {
 #[serde(default)]
 pub struct SecurityConfig {
     pub secret_detection: bool,
+    pub blocked_paths: Vec<String>,
 }
 
 impl Default for LlmConfig {
@@ -227,6 +228,15 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             secret_detection: true,
+            blocked_paths: vec![
+                ".ssh".into(),
+                ".aws".into(),
+                ".gnupg".into(),
+                ".config/gh".into(),
+                ".env".into(),
+                "credentials".into(),
+                "private_key".into(),
+            ],
         }
     }
 }
