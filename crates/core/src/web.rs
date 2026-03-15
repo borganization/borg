@@ -47,11 +47,11 @@ pub async fn web_fetch(url: &str, max_chars: Option<usize>) -> Result<String> {
         body
     };
 
-    if text.len() > max {
+    let char_count = text.chars().count();
+    if char_count > max {
+        let truncated: String = text.chars().take(max).collect();
         Ok(format!(
-            "{}\n\n[truncated — showing {max} of {} chars]",
-            &text[..max],
-            text.len()
+            "{truncated}\n\n[truncated — showing {max} of {char_count} chars]"
         ))
     } else {
         Ok(text)
@@ -218,13 +218,33 @@ fn html_to_text(html: &str) -> String {
     collapse_whitespace(&text)
 }
 
-/// Extract text from an element, skipping script/style tags.
+/// Extract text from an element, skipping script/style/noscript content.
 fn extract_text(element: &scraper::ElementRef<'_>) -> String {
+    use scraper::node::Node;
+
+    let skip_tags: &[&str] = &["script", "style", "noscript"];
+
     let mut parts = Vec::new();
-    for text in element.text() {
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            parts.push(trimmed);
+    for node in element.descendants() {
+        if let Node::Text(text_node) = node.value() {
+            // Check if any ancestor is a script/style/noscript element
+            let mut in_skip = false;
+            let mut ancestor = node.parent();
+            while let Some(a) = ancestor {
+                if let Node::Element(el) = a.value() {
+                    if skip_tags.contains(&el.name.local.as_ref()) {
+                        in_skip = true;
+                        break;
+                    }
+                }
+                ancestor = a.parent();
+            }
+            if !in_skip {
+                let trimmed = text_node.text.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+            }
         }
     }
     parts.join(" ")

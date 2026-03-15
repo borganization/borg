@@ -244,14 +244,16 @@ impl Agent {
 
             normalize_history(&mut self.history);
 
-            // Use LLM-based compaction
-            let compaction_llm = LlmClient::new(self.config.clone())?;
-            compact_history(
-                &mut self.history,
-                self.config.conversation.max_history_tokens,
-                &compaction_llm,
-            )
-            .await;
+            // Only run LLM-based compaction when history exceeds the token budget
+            if history_tokens(&self.history) > self.config.conversation.max_history_tokens {
+                let compaction_llm = LlmClient::new(self.config.clone())?;
+                compact_history(
+                    &mut self.history,
+                    self.config.conversation.max_history_tokens,
+                    &compaction_llm,
+                )
+                .await;
+            }
 
             let system_prompt = self.build_system_prompt()?;
             let tool_defs = self.build_tool_definitions();

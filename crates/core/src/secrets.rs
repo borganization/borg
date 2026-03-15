@@ -47,7 +47,12 @@ static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
             label: "Slack Token",
         },
         SecretPattern {
-            regex: Regex::new(r"(?:password|passwd|pwd)\s*[=:]\s*\S{8,}")
+            regex: Regex::new(r#"(?:password|passwd|pwd)\s*[=:]\s*"[^"]{8,}""#)
+                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            label: "Quoted Password",
+        },
+        SecretPattern {
+            regex: Regex::new(r"(?:password|passwd|pwd)\s*[=:]\s*(\S{8,64})")
                 .unwrap_or_else(|e| panic!("bad regex: {e}")),
             label: "Password Assignment",
         },
