@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Local;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -8,14 +8,14 @@ use std::path::PathBuf;
 use crate::config::Config;
 use crate::types::Message;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct LogEntry {
     timestamp: String,
     #[serde(flatten)]
     kind: LogEntryKind,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum LogEntryKind {
     #[serde(rename = "user_message")]
@@ -32,7 +32,7 @@ enum LogEntryKind {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct LogToolCall {
     id: String,
     name: String,
@@ -143,6 +143,66 @@ pub fn read_history(lines: usize) -> Result<Vec<String>> {
     Ok(all_lines[start..].to_vec())
 }
 
+fn format_time(timestamp: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|dt| dt.format("%H:%M").to_string())
+        .unwrap_or_else(|_| "??:??".to_string())
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let first_line = s.lines().next().unwrap_or(s);
+    if first_line.len() > max {
+        format!("{}…", &first_line[..max])
+    } else {
+        first_line.to_string()
+    }
+}
+
+fn format_entry(entry: &LogEntry) -> String {
+    let time = format_time(&entry.timestamp);
+    match &entry.kind {
+        LogEntryKind::UserMessage { content } => {
+            format!("[{time}] You: {}", truncate(content, 200))
+        }
+        LogEntryKind::AssistantMessage {
+            content,
+            tool_calls,
+        } => {
+            if let Some(tcs) = tool_calls {
+                if !tcs.is_empty() {
+                    let names: Vec<&str> = tcs.iter().map(|tc| tc.name.as_str()).collect();
+                    return format!("[{time}] Assistant: [called {}]", names.join(", "));
+                }
+            }
+            let text = content.as_deref().unwrap_or("");
+            format!("[{time}] Assistant: {}", truncate(text, 200))
+        }
+        LogEntryKind::ToolResult {
+            tool_call_id,
+            content,
+        } => {
+            let short_id = if tool_call_id.len() > 8 {
+                &tool_call_id[..8]
+            } else {
+                tool_call_id
+            };
+            format!("[{time}] Tool ({short_id}): {}", truncate(content, 120))
+        }
+    }
+}
+
+pub fn read_history_formatted(count: usize) -> Result<Vec<String>> {
+    let raw = read_history(count)?;
+    Ok(raw
+        .iter()
+        .map(|line| {
+            serde_json::from_str::<LogEntry>(line)
+                .map(|entry| format_entry(&entry))
+                .unwrap_or_else(|_| line.clone())
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +285,49 @@ mod tests {
         assert_eq!(stats.user_messages, 0);
         assert_eq!(stats.assistant_messages, 0);
         assert_eq!(stats.tool_calls, 0);
+    }
+
+    #[test]
+    fn format_entry_user_message() {
+        let entry: LogEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-03-14T10:30:00+00:00","type":"user_message","content":"hello world"}"#,
+        ).unwrap();
+        assert_eq!(format_entry(&entry), "[10:30] You: hello world");
+    }
+
+    #[test]
+    fn format_entry_assistant_message() {
+        let entry: LogEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-03-14T10:31:00+00:00","type":"assistant_message","content":"Sure, I can help."}"#,
+        ).unwrap();
+        assert_eq!(format_entry(&entry), "[10:31] Assistant: Sure, I can help.");
+    }
+
+    #[test]
+    fn format_entry_assistant_tool_call() {
+        let entry: LogEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-03-14T10:32:00+00:00","type":"assistant_message","content":null,"tool_calls":[{"id":"call_abc123","name":"run_shell","arguments":"{}"}]}"#,
+        ).unwrap();
+        assert_eq!(format_entry(&entry), "[10:32] Assistant: [called run_shell]");
+    }
+
+    #[test]
+    fn format_entry_tool_result() {
+        let entry: LogEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-03-14T10:33:00+00:00","type":"tool_result","tool_call_id":"call_abc123def","content":"command output here"}"#,
+        ).unwrap();
+        assert_eq!(format_entry(&entry), "[10:33] Tool (call_abc): command output here");
+    }
+
+    #[test]
+    fn format_entry_truncates_long_content() {
+        let long = "x".repeat(300);
+        let json = format!(
+            r#"{{"timestamp":"2026-03-14T10:30:00+00:00","type":"user_message","content":"{long}"}}"#
+        );
+        let entry: LogEntry = serde_json::from_str(&json).unwrap();
+        let formatted = format_entry(&entry);
+        assert!(formatted.ends_with('…'));
+        assert!(formatted.len() < 250);
     }
 }
