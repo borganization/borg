@@ -434,6 +434,20 @@ impl Agent {
                 let Some(patch) = args["patch"].as_str() else {
                     return Ok("Error: Missing required parameter 'patch'.".to_string());
                 };
+                let base_dir = std::env::current_dir()
+                    .context("Failed to determine current working directory")?;
+                match apply_patch_to_dir(patch, &base_dir) {
+                    Ok(affected) => Ok(format!(
+                        "Patch applied successfully. Files affected: {}",
+                        affected.join(", ")
+                    )),
+                    Err(e) => Ok(format!("Error applying patch: {e}")),
+                }
+            }
+            "create_tool" => {
+                let Some(patch) = args["patch"].as_str() else {
+                    return Ok("Error: Missing required parameter 'patch'.".to_string());
+                };
                 let base_dir = Config::data_dir()?.join("tools");
                 std::fs::create_dir_all(&base_dir)?;
                 match apply_patch_to_dir(patch, &base_dir) {
@@ -553,7 +567,21 @@ fn core_tool_definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "apply_patch",
-            "Create or modify files in the tools directory using a patch DSL. Use this to create new tools.\n\nPatch format:\n*** Begin Patch\n*** Add File: <tool-name>/tool.toml\n+<line1>\n+<line2>\n*** Add File: <tool-name>/main.py\n+<line1>\n+<line2>\n*** Update File: <tool-name>/main.py\n@@\n context\n-old line\n+new line\n*** Delete File: <tool-name>/old.py\n*** End Patch\n\nIMPORTANT: Every content line in Add File MUST start with '+'. Update File lines must start with ' ' (context), '-' (remove), or '+' (add).",
+            "Create, update, or delete files in the current working directory using the patch DSL.\n\nPatch format:\n*** Begin Patch\n*** Add File: path/to/file.txt\n+<line1>\n+<line2>\n*** Update File: path/to/file.txt\n@@\n context\n-old line\n+new line\n*** Delete File: path/to/old.txt\n*** End Patch\n\nIMPORTANT: Every content line in Add File MUST start with '+'. Update File lines must start with ' ' (context), '-' (remove), or '+' (add). File paths are relative to the current working directory.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "string",
+                        "description": "The patch content in the patch DSL format"
+                    }
+                },
+                "required": ["patch"]
+            }),
+        ),
+        ToolDefinition::new(
+            "create_tool",
+            "Create or modify user tools in ~/.tamagotchi/tools/ using the patch DSL.\n\nPatch format:\n*** Begin Patch\n*** Add File: <tool-name>/tool.toml\n+<line1>\n+<line2>\n*** Add File: <tool-name>/main.py\n+<line1>\n+<line2>\n*** Update File: <tool-name>/main.py\n@@\n context\n-old line\n+new line\n*** Delete File: <tool-name>/old.py\n*** End Patch\n\nIMPORTANT: Every content line in Add File MUST start with '+'. Update File lines must start with ' ' (context), '-' (remove), or '+' (add).",
             serde_json::json!({
                 "type": "object",
                 "properties": {

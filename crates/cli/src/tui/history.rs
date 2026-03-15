@@ -106,7 +106,17 @@ impl HistoryCell {
                 lines
             }
             HistoryCell::ToolStart { name, args } => {
-                let preview = if args.len() > 80 {
+                let preview = if name == "apply_patch" || name == "apply_skill_patch" {
+                    // Hide verbose patch content; just show a short summary
+                    let file_count = args.matches("*** Add File:").count()
+                        + args.matches("*** Update File:").count()
+                        + args.matches("*** Delete File:").count();
+                    if file_count > 0 {
+                        format!("({file_count} file(s))")
+                    } else {
+                        String::new()
+                    }
+                } else if args.len() > 80 {
                     format!("{}...", truncate_str(args, 77))
                 } else {
                     args.clone()
