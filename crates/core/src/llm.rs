@@ -165,19 +165,23 @@ pub struct LlmClient {
     config: Config,
     provider: Provider,
     api_key: String,
+    /// Additional fallback keys (rotated on 401/429 errors).
+    fallback_keys: Vec<String>,
     debug_logging: bool,
 }
 
 impl LlmClient {
     pub fn new(config: Config) -> Result<Self> {
-        let (provider, api_key) = config.resolve_provider()?;
+        let (provider, mut keys) = config.resolve_api_keys()?;
         let debug_logging = config.debug.llm_logging;
         let client = Client::new();
+        let api_key = keys.remove(0);
         Ok(Self {
             client,
             config,
             provider,
             api_key,
+            fallback_keys: keys,
             debug_logging,
         })
     }
@@ -198,7 +202,7 @@ impl LlmClient {
     }
 
     pub async fn stream_chat(
-        &self,
+        &mut self,
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
         tx: mpsc::Sender<StreamEvent>,
@@ -207,9 +211,30 @@ impl LlmClient {
             .await
     }
 
+    /// Try rotating to the next fallback API key. Returns true if rotation succeeded.
+    /// If `keep_old` is false, the current key is discarded (e.g. on 401/403 auth failure).
+    /// If `keep_old` is true, the current key is pushed to the back of the pool (e.g. on 429 rate limit).
+    fn try_rotate_key(&mut self, keep_old: bool) -> bool {
+        if self.fallback_keys.is_empty() {
+            return false;
+        }
+        let old_key = std::mem::replace(&mut self.api_key, self.fallback_keys.remove(0));
+        if keep_old {
+            self.fallback_keys.push(old_key);
+        } else {
+            info!("Discarding revoked/invalid API key");
+        }
+        info!(
+            "Rotated to next API key ({} fallbacks remaining)",
+            self.fallback_keys.len()
+        );
+        true
+    }
+
     /// Stream chat with cancellation support and retry logic.
+    /// Supports multi-key fallback: on 401/429 errors, rotates to the next available key.
     pub async fn stream_chat_with_cancel(
-        &self,
+        &mut self,
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
         tx: mpsc::Sender<StreamEvent>,
@@ -217,6 +242,8 @@ impl LlmClient {
     ) -> Result<()> {
         let max_retries = self.config.llm.max_retries;
         let initial_delay = Duration::from_millis(self.config.llm.initial_retry_delay_ms);
+        let total_keys = 1 + self.fallback_keys.len();
+        let mut keys_tried = 0_usize;
 
         for attempt in 0..=max_retries {
             if cancel.is_cancelled() {
@@ -235,6 +262,21 @@ impl LlmClient {
             match result {
                 Ok(()) => return Ok(()),
                 Err(e) => {
+                    // On auth failure or rate limit, try rotating to next key before retrying
+                    let is_auth_error = matches!(&e, LlmError::Fatal { source } if
+                        format!("{source}").contains("401") || format!("{source}").contains("403"));
+                    let is_rate_limit = matches!(&e, LlmError::Retryable { source, .. } if
+                        format!("{source}").contains("429"));
+
+                    if (is_auth_error || is_rate_limit)
+                        && keys_tried < total_keys
+                        && self.try_rotate_key(!is_auth_error)
+                    {
+                        keys_tried += 1;
+                        info!("Auth/rate-limit error, trying next API key...");
+                        continue;
+                    }
+
                     if !e.is_retryable() || attempt == max_retries {
                         let msg = format!("{e}");
                         let _ = tx.send(StreamEvent::Error(msg.clone())).await;

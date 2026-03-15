@@ -4,7 +4,7 @@ AI personal assistant agent built in Rust. The agent itself is the plugin system
 
 ## Architecture
 
-Cargo workspace with 6 crates:
+Cargo workspace with 7 crates:
 
 ```
 crates/
@@ -14,6 +14,7 @@ crates/
   tools/        Library: tool manifest parsing, registry, subprocess executor
   sandbox/      Library: macOS Seatbelt + Linux Bubblewrap policies
   apply-patch/  Library: patch DSL parser + filesystem applicator
+  gateway/      Library: webhook gateway for messaging channel integrations
 ```
 
 **Data directory:** `~/.tamagotchi/` — config, personality, memory, user-created tools, logs.
@@ -34,7 +35,8 @@ Binary name is `tamagotchi`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_K
 - `tamagotchi` or `tamagotchi chat` — interactive REPL
 - `tamagotchi ask "message"` — one-shot query
 - `tamagotchi init` — interactive onboarding wizard (name, personality, provider, model selection)
-- `tamagotchi doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, budget)
+- `tamagotchi gateway` — start webhook gateway server for messaging channels
+- `tamagotchi doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget)
 
 ## Agent Loop
 
@@ -59,6 +61,8 @@ System prompt assembled each turn: `SOUL.md` + current time + memory context + s
 | `list_skills` | List all skills with status and source |
 | `apply_skill_patch` | Create/modify files in `~/.tamagotchi/skills/` via patch DSL |
 | `read_pdf` | Extract text from a PDF file with token-aware truncation |
+| `create_channel` | Create/modify channel integrations in `~/.tamagotchi/channels/` via patch DSL |
+| `list_channels` | List all messaging channels with status and webhook paths |
 
 ## User Tools
 
@@ -169,7 +173,7 @@ During `tamagotchi init`, the onboarding wizard generates a personalized SOUL.md
 
 Skills are instruction bundles (SKILL.md files with YAML frontmatter) that teach the agent how to use external CLI tools via `run_shell`. Distinct from "tools" which are sandboxed executable scripts.
 
-- **Built-in skills**: Embedded via `include_str!` in `crates/core/skills/*/SKILL.md` (slack, discord, github, weather, skill-creator)
+- **Built-in skills**: Embedded via `include_str!` in `crates/core/skills/*/SKILL.md` (slack, discord, github, weather, skill-creator, git, http, search, docker, database, notes, calendar, 1password, browser)
 - **User skills**: `~/.tamagotchi/skills/<name>/SKILL.md` — created via `apply_skill_patch`
 - User skills with the same name override built-in skills
 - Requirements (bins/env vars) are checked at load time; unavailable skills are still listed but flagged
@@ -192,6 +196,56 @@ requires:
 Instructions and command examples here.
 ```
 
+## Messaging Channels (Gateway)
+
+Channels are user-created integrations that receive webhooks from external services, route messages to the agent, and send responses back. They follow the same pattern as tools.
+
+**Location:** `~/.tamagotchi/channels/<name>/`
+
+**channel.toml format:**
+```toml
+name = "my-slack"
+description = "Slack workspace integration"
+runtime = "python"              # python | node | deno | bash
+
+[scripts]
+inbound = "parse_inbound.py"   # Receives {headers, body} JSON -> normalized message
+outbound = "send_outbound.py"  # Receives {text, sender_id, channel_id, token} JSON -> sends
+verify = "verify.py"           # Optional: webhook signature verification
+
+[sandbox]
+network = true
+fs_read = ["/etc/ssl"]
+fs_write = []
+
+[auth]
+secret_env = "SLACK_SIGNING_SECRET"  # For webhook verification
+token_env = "SLACK_BOT_TOKEN"        # Passed to outbound script
+
+[settings]
+webhook_path = "/webhook/my-slack"   # Default: /webhook/<name>
+timeout_ms = 15000
+max_concurrent = 5
+```
+
+**Message flow:** External Service -> POST /webhook/<name> -> verify -> parse inbound -> agent -> outbound script
+
+**Config:**
+```toml
+[gateway]
+enabled = false
+host = "127.0.0.1"
+port = 7842
+max_concurrent = 10
+request_timeout_ms = 120000
+```
+
+**CLI:** `tamagotchi gateway` starts the gateway server standalone. Also spawns in the daemon when `gateway.enabled = true`.
+
+**Built-in tools:** `create_channel` (patch DSL to `~/.tamagotchi/channels/`), `list_channels`
+
+**Database:** V3 migration adds `channel_sessions` and `channel_messages` tables.
+
 ## Lifecycle Hooks
 
 `crates/core/src/hooks.rs` — extensible hook system for intercepting agent loop events.
@@ -213,6 +267,7 @@ Available via `tamagotchi doctor` CLI subcommand or `/doctor` TUI command.
 SQLite at `~/.tamagotchi/tamagotchi.db` with versioned migrations:
 - **V1**: sessions, scheduled_tasks, task_runs, meta, token_usage tables
 - **V2**: messages table (crash recovery), retry_count on scheduled_tasks
+- **V3**: channel_sessions + channel_messages tables (gateway)
 - Schema version tracked in `meta` table; migrations run automatically on `Database::open()`
 
 ## Signal Handling & Graceful Shutdown
@@ -267,6 +322,11 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 | `crates/sandbox/src/bubblewrap.rs` | Linux bwrap arg building |
 | `crates/apply-patch/src/parser.rs` | Patch DSL parser |
 | `crates/apply-patch/src/apply.rs` | Filesystem patch applicator |
+| `crates/gateway/src/manifest.rs` | channel.toml parsing |
+| `crates/gateway/src/registry.rs` | Scan + register user channels |
+| `crates/gateway/src/executor.rs` | Channel script subprocess execution |
+| `crates/gateway/src/server.rs` | Axum HTTP server (webhook routes) |
+| `crates/gateway/src/handler.rs` | Webhook handler: verify -> parse -> agent -> respond |
 
 ## Testing
 
@@ -274,4 +334,5 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 cargo test                          # all tests
 cargo test -p tamagotchi-apply-patch  # 13 patch tests
 cargo test -p tamagotchi-core         # config + skills tests
+cargo test -p tamagotchi-gateway      # channel manifest + registry tests
 ```

@@ -90,7 +90,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 2;
+    const CURRENT_VERSION: u32 = 3;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -108,6 +108,9 @@ impl Database {
         }
         if current < 2 {
             self.migrate_v2()?;
+        }
+        if current < 3 {
+            self.migrate_v3()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -209,6 +212,37 @@ impl Database {
                     Err(e)
                 }
             })?;
+        Ok(())
+    }
+
+    /// V3: Add channel_sessions and channel_messages tables for gateway
+    fn migrate_v3(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS channel_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_name TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_active INTEGER NOT NULL,
+                UNIQUE(channel_name, sender_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS channel_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_name TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                content TEXT,
+                metadata_json TEXT,
+                session_id TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_channel_messages_session
+                ON channel_messages(channel_name, sender_id, created_at);
+            ",
+        )?;
         Ok(())
     }
 
@@ -413,6 +447,56 @@ impl Database {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    // ── Channel sessions ──
+
+    pub fn resolve_channel_session(&self, channel_name: &str, sender_id: &str) -> Result<String> {
+        let now = chrono::Utc::now().timestamp();
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id FROM channel_sessions WHERE channel_name = ?1 AND sender_id = ?2",
+        )?;
+        let existing: Option<String> = stmt
+            .query_map(params![channel_name, sender_id], |row| row.get(0))?
+            .next()
+            .and_then(std::result::Result::ok);
+
+        match existing {
+            Some(session_id) => {
+                self.conn.execute(
+                    "UPDATE channel_sessions SET last_active = ?1 WHERE channel_name = ?2 AND sender_id = ?3",
+                    params![now, channel_name, sender_id],
+                )?;
+                Ok(session_id)
+            }
+            None => {
+                let session_id = uuid::Uuid::new_v4().to_string();
+                self.conn.execute(
+                    "INSERT INTO channel_sessions (channel_name, sender_id, session_id, created_at, last_active)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![channel_name, sender_id, session_id, now, now],
+                )?;
+                Ok(session_id)
+            }
+        }
+    }
+
+    pub fn log_channel_message(
+        &self,
+        channel_name: &str,
+        sender_id: &str,
+        direction: &str,
+        content: Option<&str>,
+        metadata_json: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<i64> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO channel_messages (channel_name, sender_id, direction, content, metadata_json, session_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![channel_name, sender_id, direction, content, metadata_json, session_id, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
     }
 
     // ── Token usage ──

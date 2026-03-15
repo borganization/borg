@@ -6,6 +6,7 @@ use std::str::FromStr;
 
 use crate::policy::ExecutionPolicy;
 use crate::provider::Provider;
+use crate::secrets_resolve::SecretRef;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -38,6 +39,8 @@ pub struct Config {
     #[serde(default)]
     pub budget: BudgetConfig,
     #[serde(default)]
+    pub gateway: GatewayConfig,
+    #[serde(default)]
     pub credentials: std::collections::HashMap<String, String>,
 }
 
@@ -46,6 +49,12 @@ pub struct Config {
 pub struct LlmConfig {
     pub provider: Option<String>,
     pub api_key_env: String,
+    /// Single SecretRef for API key (takes priority over api_key_env).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<SecretRef>,
+    /// Multiple API keys for fallback/rotation (tried in order on auth failure).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<SecretRef>,
     pub model: String,
     pub temperature: f32,
     pub max_tokens: u32,
@@ -139,6 +148,28 @@ impl Default for BudgetConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GatewayConfig {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+    pub max_concurrent: usize,
+    pub request_timeout_ms: u64,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "127.0.0.1".into(),
+            port: 7842,
+            max_concurrent: 10,
+            request_timeout_ms: 120_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DebugConfig {
     /// When true, log full LLM request/response to ~/.tamagotchi/logs/debug/
@@ -158,6 +189,8 @@ impl Default for LlmConfig {
         Self {
             provider: None,
             api_key_env: "OPENROUTER_API_KEY".into(),
+            api_key: None,
+            api_keys: Vec::new(),
             model: "anthropic/claude-sonnet-4".into(),
             temperature: 0.7,
             max_tokens: 4096,
@@ -277,6 +310,10 @@ impl Config {
 
     pub fn tools_dir() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("tools"))
+    }
+
+    pub fn channels_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("channels"))
     }
 
     pub fn logs_dir() -> Result<PathBuf> {
@@ -462,28 +499,69 @@ impl Config {
     }
 
     pub fn api_key(&self) -> Result<String> {
+        // Try SecretRef first, then fall back to env var name
+        if let Some(ref secret_ref) = self.llm.api_key {
+            return secret_ref.resolve();
+        }
         std::env::var(&self.llm.api_key_env).with_context(|| {
             format!(
-                "API key not found. Set the {} environment variable.",
+                "API key not found. Set the {} environment variable or configure api_key in config.toml.",
                 self.llm.api_key_env
             )
         })
     }
 
     /// Resolve the provider and API key from config + environment.
+    /// Resolution priority: api_key (SecretRef) → api_key_env → provider default env var → auto-detect.
     pub fn resolve_provider(&self) -> Result<(Provider, String)> {
         if let Some(ref provider_str) = self.llm.provider {
             let provider = Provider::from_str(provider_str)?;
+
+            // Try SecretRef first
+            if let Some(ref secret_ref) = self.llm.api_key {
+                match secret_ref.resolve() {
+                    Ok(key) if !key.is_empty() => return Ok((provider, key)),
+                    Ok(_) => {
+                        eprintln!("Warning: api_key SecretRef resolved to empty string, falling back to api_key_env");
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: api_key SecretRef failed to resolve: {e}, falling back to api_key_env");
+                    }
+                }
+            }
+
             let key = std::env::var(&self.llm.api_key_env)
                 .or_else(|_| std::env::var(provider.default_env_var()))
                 .with_context(|| {
                     format!(
-                        "API key not found for provider {provider}. Set {} or {}.",
+                        "API key not found for provider {provider}. Set {} or {} or configure api_key in config.toml.",
                         self.llm.api_key_env,
                         provider.default_env_var()
                     )
                 })?;
             return Ok((provider, key));
+        }
+
+        // Try SecretRef with auto-detect
+        if let Some(ref secret_ref) = self.llm.api_key {
+            match secret_ref.resolve() {
+                Ok(key) if !key.is_empty() => {
+                    // Infer provider from api_key_env name
+                    let provider = match self.llm.api_key_env.as_str() {
+                        "OPENAI_API_KEY" => Provider::OpenAi,
+                        "ANTHROPIC_API_KEY" => Provider::Anthropic,
+                        "GEMINI_API_KEY" => Provider::Gemini,
+                        _ => Provider::OpenRouter,
+                    };
+                    return Ok((provider, key));
+                }
+                Ok(_) => {
+                    eprintln!("Warning: api_key SecretRef resolved to empty string, falling back to env detection");
+                }
+                Err(e) => {
+                    eprintln!("Warning: api_key SecretRef failed to resolve: {e}, falling back to env detection");
+                }
+            }
         }
 
         if self.llm.api_key_env != LlmConfig::default().api_key_env {
@@ -501,6 +579,31 @@ impl Config {
         }
 
         Provider::detect_from_env()
+    }
+
+    /// Resolve all available API keys for the configured provider.
+    /// Returns the provider and a list of resolved keys (for multi-key fallback).
+    /// Falls back to a single key from `resolve_provider` if no `api_keys` are configured.
+    pub fn resolve_api_keys(&self) -> Result<(Provider, Vec<String>)> {
+        // Resolve provider and primary key once to avoid duplicate SecretRef resolution
+        let (provider, primary_key) = self.resolve_provider()?;
+
+        if !self.llm.api_keys.is_empty() {
+            let mut keys = Vec::new();
+            for secret_ref in &self.llm.api_keys {
+                if let Ok(key) = secret_ref.resolve() {
+                    if !key.is_empty() {
+                        keys.push(key);
+                    }
+                }
+            }
+            if !keys.is_empty() {
+                return Ok((provider, keys));
+            }
+        }
+
+        // Fall back to single key from resolve_provider
+        Ok((provider, vec![primary_key]))
     }
 }
 
@@ -873,5 +976,237 @@ warning_threshold = 0.9
         let display = cfg.display_settings();
         assert!(display.contains("budget.monthly_token_limit"));
         assert!(display.contains("budget.warning_threshold"));
+    }
+
+    #[test]
+    fn parse_config_with_secret_ref_env() {
+        let toml_str = r#"
+[llm]
+provider = "openrouter"
+api_key = { source = "env", var = "MY_SECRET_KEY" }
+model = "anthropic/claude-sonnet-4"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(cfg.llm.api_key.is_some());
+        if let Some(SecretRef::Env { var }) = &cfg.llm.api_key {
+            assert_eq!(var, "MY_SECRET_KEY");
+        } else {
+            panic!("expected Env variant");
+        }
+    }
+
+    #[test]
+    fn parse_config_with_secret_ref_exec() {
+        let toml_str = r#"
+[llm]
+provider = "openrouter"
+api_key = { source = "exec", command = "security", args = ["find-generic-password", "-s", "tamagotchi", "-w"] }
+model = "anthropic/claude-sonnet-4"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(cfg.llm.api_key.is_some());
+        if let Some(SecretRef::Exec { command, args }) = &cfg.llm.api_key {
+            assert_eq!(command, "security");
+            assert_eq!(args.len(), 4);
+        } else {
+            panic!("expected Exec variant");
+        }
+    }
+
+    #[test]
+    fn parse_config_with_api_keys_list() {
+        let toml_str = r#"
+[llm]
+provider = "openrouter"
+model = "anthropic/claude-sonnet-4"
+
+[[llm.api_keys]]
+source = "env"
+var = "PRIMARY_KEY"
+
+[[llm.api_keys]]
+source = "env"
+var = "FALLBACK_KEY"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.llm.api_keys.len(), 2);
+    }
+
+    #[test]
+    fn parse_config_without_secret_ref_uses_defaults() {
+        let toml_str = r#"
+[llm]
+api_key_env = "MY_KEY"
+model = "test-model"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(cfg.llm.api_key.is_none());
+        assert!(cfg.llm.api_keys.is_empty());
+        assert_eq!(cfg.llm.api_key_env, "MY_KEY");
+    }
+
+    #[test]
+    fn resolve_provider_prefers_secret_ref() {
+        let env_name = "TAMAGOTCHI_TEST_SECRET_REF_RESOLVE";
+        std::env::set_var(env_name, "secret-ref-key");
+        let mut cfg = Config::default();
+        cfg.llm.provider = Some("openrouter".to_string());
+        cfg.llm.api_key = Some(SecretRef::Env {
+            var: env_name.to_string(),
+        });
+        let (provider, key) = cfg.resolve_provider().expect("should resolve");
+        assert_eq!(key, "secret-ref-key");
+        assert_eq!(provider, Provider::OpenRouter);
+        std::env::remove_var(env_name);
+    }
+
+    #[test]
+    fn resolve_api_keys_multi() {
+        let env1 = "TAMAGOTCHI_TEST_MULTI_KEY_1";
+        let env2 = "TAMAGOTCHI_TEST_MULTI_KEY_2";
+        std::env::set_var(env1, "key-one");
+        std::env::set_var(env2, "key-two");
+        let mut cfg = Config::default();
+        cfg.llm.provider = Some("openrouter".to_string());
+        cfg.llm.api_keys = vec![
+            SecretRef::Env {
+                var: env1.to_string(),
+            },
+            SecretRef::Env {
+                var: env2.to_string(),
+            },
+        ];
+        let (_, keys) = cfg.resolve_api_keys().expect("should resolve");
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0], "key-one");
+        assert_eq!(keys[1], "key-two");
+        std::env::remove_var(env1);
+        std::env::remove_var(env2);
+    }
+
+    /// Ensure that serializing a Config and parsing it back produces valid TOML.
+    /// This catches issues like duplicate table headers.
+    #[test]
+    fn save_produces_parseable_toml() {
+        let cfg = Config::default();
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize default config");
+        let _parsed: Config = toml::from_str(&serialized).unwrap_or_else(|e| {
+            panic!("default config round-trip failed:\n{serialized}\nerror: {e}")
+        });
+    }
+
+    /// Same as above but with various fields populated.
+    #[test]
+    fn save_with_populated_fields_produces_parseable_toml() {
+        let mut cfg = Config::default();
+        cfg.llm.provider = Some("openrouter".to_string());
+        cfg.llm.model = "anthropic/claude-sonnet-4".to_string();
+        cfg.llm.api_key = Some(SecretRef::Env {
+            var: "MY_KEY".to_string(),
+        });
+        cfg.llm.api_keys = vec![
+            SecretRef::Env {
+                var: "KEY1".to_string(),
+            },
+            SecretRef::Exec {
+                command: "security".to_string(),
+                args: vec!["find-generic-password".to_string(), "-w".to_string()],
+            },
+        ];
+        cfg.user.name = Some("Test".to_string());
+        cfg.user.agent_name = Some("Buddy".to_string());
+        cfg.credentials
+            .insert("test".to_string(), "value".to_string());
+        cfg.budget.monthly_token_limit = 1_000_000;
+
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        let parsed: Config = toml::from_str(&serialized).unwrap_or_else(|e| {
+            panic!("populated config round-trip failed:\n{serialized}\nerror: {e}")
+        });
+        assert_eq!(parsed.llm.model, "anthropic/claude-sonnet-4");
+        assert!(parsed.llm.api_key.is_some());
+        assert_eq!(parsed.llm.api_keys.len(), 2);
+        assert_eq!(parsed.budget.monthly_token_limit, 1_000_000);
+    }
+
+    /// Verify that a realistic config.toml (matching the format produced by onboarding) parses.
+    #[test]
+    fn parse_realistic_config_toml() {
+        let toml_str = r#"
+[user]
+name = "Mike"
+agent_name = "Buddy"
+
+[llm]
+provider = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+model = "anthropic/claude-sonnet-4"
+temperature = 0.7
+max_tokens = 4096
+max_retries = 3
+initial_retry_delay_ms = 200
+request_timeout_ms = 60000
+
+[heartbeat]
+enabled = false
+interval = "30m"
+
+[tools]
+default_timeout_ms = 30000
+
+[sandbox]
+enabled = true
+mode = "strict"
+
+[memory]
+max_context_tokens = 8000
+
+[skills]
+enabled = true
+max_context_tokens = 4000
+
+[conversation]
+max_history_tokens = 32000
+max_iterations = 25
+show_thinking = true
+
+[policy]
+auto_approve = []
+deny = []
+
+[debug]
+llm_logging = false
+
+[security]
+secret_detection = true
+blocked_paths = [".ssh", ".aws", ".gnupg", ".config/gh", ".env", "credentials", "private_key"]
+
+[web]
+enabled = true
+search_provider = "duckduckgo"
+
+[tasks]
+enabled = false
+max_concurrent = 3
+
+[budget]
+monthly_token_limit = 0
+warning_threshold = 0.8
+
+[gateway]
+enabled = false
+host = "127.0.0.1"
+port = 7842
+max_concurrent = 10
+request_timeout_ms = 120000
+
+[credentials]
+"#;
+        let cfg: Config = toml::from_str(toml_str)
+            .unwrap_or_else(|e| panic!("realistic config parse failed: {e}"));
+        assert_eq!(cfg.user.name.as_deref(), Some("Mike"));
+        assert_eq!(cfg.llm.model, "anthropic/claude-sonnet-4");
+        assert_eq!(cfg.llm.api_key_env, "OPENROUTER_API_KEY");
+        assert!(cfg.llm.api_key.is_none());
     }
 }
