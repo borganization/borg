@@ -12,6 +12,7 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+dirs = { workspace = true }
 
 [lints]
 workspace = true

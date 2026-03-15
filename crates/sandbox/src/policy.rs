@@ -34,6 +34,25 @@ fn filter_blocked(paths: &[String], blocked_paths: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Expand `~` prefix to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}/{rest}", home.display());
+        }
+    } else if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home.to_string_lossy().to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// Expand tilde in all paths.
+fn expand_tilde_paths(paths: &[String]) -> Vec<String> {
+    paths.iter().map(|p| expand_tilde(p)).collect()
+}
+
 impl SandboxPolicy {
     /// Return a copy of this policy with blocked paths removed from fs_read/fs_write.
     pub fn with_blocked_paths_filtered(&self, blocked_paths: &[String]) -> Self {
@@ -41,6 +60,15 @@ impl SandboxPolicy {
             network: self.network,
             fs_read: filter_blocked(&self.fs_read, blocked_paths),
             fs_write: filter_blocked(&self.fs_write, blocked_paths),
+        }
+    }
+
+    /// Return a copy with `~` expanded to the user's home directory in all paths.
+    pub fn with_tildes_expanded(&self) -> Self {
+        Self {
+            network: self.network,
+            fs_read: expand_tilde_paths(&self.fs_read),
+            fs_write: expand_tilde_paths(&self.fs_write),
         }
     }
 
@@ -221,5 +249,54 @@ mod tests {
         assert!(is_path_blocked("/home/user/.ssh/id_rsa", &blocked));
         assert!(is_path_blocked("/project/.env", &blocked));
         assert!(!is_path_blocked("/home/user/code", &blocked));
+    }
+
+    #[test]
+    fn expand_tilde_expands_home_prefix() {
+        let home = dirs::home_dir().expect("home dir must exist for test");
+        let home_str = home.to_string_lossy();
+
+        assert_eq!(expand_tilde("~/Library/Messages"), format!("{home_str}/Library/Messages"));
+        assert_eq!(expand_tilde("~/.tamagotchi/channels"), format!("{home_str}/.tamagotchi/channels"));
+    }
+
+    #[test]
+    fn expand_tilde_preserves_absolute_paths() {
+        assert_eq!(expand_tilde("/usr/local/bin"), "/usr/local/bin");
+        assert_eq!(expand_tilde("/tmp/test"), "/tmp/test");
+    }
+
+    #[test]
+    fn expand_tilde_preserves_bare_tilde() {
+        let home = dirs::home_dir().expect("home dir must exist for test");
+        assert_eq!(expand_tilde("~"), home.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn expand_tilde_does_not_expand_mid_path() {
+        // Only leading ~ should be expanded
+        assert_eq!(expand_tilde("/data/~user"), "/data/~user");
+    }
+
+    #[test]
+    fn with_tildes_expanded_applies_to_all_paths() {
+        let home = dirs::home_dir().expect("home dir must exist for test");
+        let home_str = home.to_string_lossy();
+
+        let policy = SandboxPolicy {
+            network: false,
+            fs_read: vec!["~/Library/Messages".into(), "/etc/ssl".into()],
+            fs_write: vec!["~/.tamagotchi/channels/imessage".into()],
+        };
+        let expanded = policy.with_tildes_expanded();
+
+        assert_eq!(expanded.fs_read, vec![
+            format!("{home_str}/Library/Messages"),
+            "/etc/ssl".to_string(),
+        ]);
+        assert_eq!(expanded.fs_write, vec![
+            format!("{home_str}/.tamagotchi/channels/imessage"),
+        ]);
+        assert!(!expanded.network);
     }
 }
