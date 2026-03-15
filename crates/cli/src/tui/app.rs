@@ -241,7 +241,7 @@ impl<'a> App<'a> {
 
         // Exact matches
         match trimmed {
-            "quit" | "exit" => return Ok(AppAction::Quit),
+            "quit" | "exit" | "/exit" => return Ok(AppAction::Quit),
             "help" | "/help" => {
                 self.push_system_message(
                     "Commands:\n  \
