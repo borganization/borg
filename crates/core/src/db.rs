@@ -83,6 +83,15 @@ pub struct NewTask<'a> {
     pub next_run: Option<i64>,
 }
 
+/// Parameters for updating an existing scheduled task. `None` fields are left unchanged.
+pub struct UpdateTask<'a> {
+    pub name: Option<&'a str>,
+    pub prompt: Option<&'a str>,
+    pub schedule_type: Option<&'a str>,
+    pub schedule_expr: Option<&'a str>,
+    pub timezone: Option<&'a str>,
+}
+
 impl Database {
     /// Open (or create) the database at `~/.tamagotchi/tamagotchi.db`.
     pub fn open() -> Result<Self> {
@@ -726,6 +735,69 @@ impl Database {
         Ok(rows)
     }
 
+    pub fn get_task_by_id(&self, id: &str) -> Result<Option<ScheduledTaskRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at
+             FROM scheduled_tasks WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], |row| {
+            Ok(ScheduledTaskRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                prompt: row.get(2)?,
+                schedule_type: row.get(3)?,
+                schedule_expr: row.get(4)?,
+                timezone: row.get(5)?,
+                status: row.get(6)?,
+                next_run: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn delete_task(&self, id: &str) -> Result<bool> {
+        self.conn
+            .execute("DELETE FROM task_runs WHERE task_id = ?1", params![id])?;
+        let deleted = self
+            .conn
+            .execute("DELETE FROM scheduled_tasks WHERE id = ?1", params![id])?;
+        Ok(deleted > 0)
+    }
+
+    pub fn update_task(&self, id: &str, update: &UpdateTask<'_>) -> Result<bool> {
+        let existing = match self.get_task_by_id(id)? {
+            Some(row) => row,
+            None => return Ok(false),
+        };
+
+        let name = update.name.unwrap_or(&existing.name);
+        let prompt = update.prompt.unwrap_or(&existing.prompt);
+        let schedule_type = update.schedule_type.unwrap_or(&existing.schedule_type);
+        let schedule_expr = update.schedule_expr.unwrap_or(&existing.schedule_expr);
+        let timezone = update.timezone.unwrap_or(&existing.timezone);
+
+        let next_run = if update.schedule_type.is_some() || update.schedule_expr.is_some() {
+            crate::tasks::calculate_next_run(schedule_type, schedule_expr)?
+        } else {
+            existing.next_run
+        };
+
+        self.conn.execute(
+            "UPDATE scheduled_tasks SET name = ?1, prompt = ?2, schedule_type = ?3, schedule_expr = ?4, timezone = ?5, next_run = ?6 WHERE id = ?7",
+            params![name, prompt, schedule_type, schedule_expr, timezone, next_run, id],
+        )?;
+        Ok(true)
+    }
+
+    pub fn last_task_run(&self, task_id: &str) -> Result<Option<TaskRunRow>> {
+        let runs = self.task_run_history(task_id, 1)?;
+        Ok(runs.into_iter().next())
+    }
+
     // ── Channel sessions ──
 
     pub fn resolve_channel_session(&self, channel_name: &str, sender_id: &str) -> Result<String> {
@@ -983,6 +1055,128 @@ mod tests {
         assert!(!db
             .update_task_status("nonexistent", "paused")
             .expect("update"));
+    }
+
+    #[test]
+    fn get_task_by_id_found() {
+        let db = test_db();
+        db.create_task(&NewTask {
+            id: "t1",
+            name: "test",
+            prompt: "prompt",
+            schedule_type: "interval",
+            schedule_expr: "30m",
+            timezone: "local",
+            next_run: Some(100),
+        })
+        .expect("create");
+        let task = db.get_task_by_id("t1").expect("get").expect("some");
+        assert_eq!(task.name, "test");
+        assert_eq!(task.schedule_expr, "30m");
+    }
+
+    #[test]
+    fn get_task_by_id_not_found() {
+        let db = test_db();
+        assert!(db.get_task_by_id("nope").expect("get").is_none());
+    }
+
+    #[test]
+    fn delete_task_removes_task_and_runs() {
+        let db = test_db();
+        db.create_task(&NewTask {
+            id: "t1",
+            name: "test",
+            prompt: "prompt",
+            schedule_type: "interval",
+            schedule_expr: "30m",
+            timezone: "local",
+            next_run: Some(100),
+        })
+        .expect("create");
+        db.record_task_run("t1", 1000, 500, Some("done"), None)
+            .expect("record");
+
+        assert!(db.delete_task("t1").expect("delete"));
+        assert!(db.get_task_by_id("t1").expect("get").is_none());
+        assert!(db.task_run_history("t1", 10).expect("history").is_empty());
+    }
+
+    #[test]
+    fn delete_nonexistent_task_returns_false() {
+        let db = test_db();
+        assert!(!db.delete_task("nope").expect("delete"));
+    }
+
+    #[test]
+    fn update_task_fields() {
+        let db = test_db();
+        db.create_task(&NewTask {
+            id: "t1",
+            name: "old name",
+            prompt: "old prompt",
+            schedule_type: "interval",
+            schedule_expr: "30m",
+            timezone: "local",
+            next_run: Some(100),
+        })
+        .expect("create");
+
+        let update = UpdateTask {
+            name: Some("new name"),
+            prompt: None,
+            schedule_type: None,
+            schedule_expr: Some("1h"),
+            timezone: None,
+        };
+        assert!(db.update_task("t1", &update).expect("update"));
+
+        let task = db.get_task_by_id("t1").expect("get").expect("some");
+        assert_eq!(task.name, "new name");
+        assert_eq!(task.prompt, "old prompt");
+        assert_eq!(task.schedule_expr, "1h");
+    }
+
+    #[test]
+    fn update_task_not_found() {
+        let db = test_db();
+        let update = UpdateTask {
+            name: Some("x"),
+            prompt: None,
+            schedule_type: None,
+            schedule_expr: None,
+            timezone: None,
+        };
+        assert!(!db.update_task("nope", &update).expect("update"));
+    }
+
+    #[test]
+    fn last_task_run_returns_most_recent() {
+        let db = test_db();
+        db.create_task(&NewTask {
+            id: "t1",
+            name: "test",
+            prompt: "prompt",
+            schedule_type: "interval",
+            schedule_expr: "30m",
+            timezone: "local",
+            next_run: Some(100),
+        })
+        .expect("create");
+        db.record_task_run("t1", 1000, 500, Some("first"), None)
+            .expect("record");
+        db.record_task_run("t1", 2000, 300, Some("second"), None)
+            .expect("record");
+
+        let run = db.last_task_run("t1").expect("last").expect("some");
+        assert_eq!(run.started_at, 2000);
+        assert_eq!(run.result.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn last_task_run_none_when_no_runs() {
+        let db = test_db();
+        assert!(db.last_task_run("t1").expect("last").is_none());
     }
 
     #[test]

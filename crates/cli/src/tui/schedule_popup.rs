@@ -1,0 +1,436 @@
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::Frame;
+
+use tamagotchi_core::db::ScheduledTaskRow;
+
+use super::theme;
+
+#[derive(Clone)]
+enum SchedulePhase {
+    Browsing,
+    EditingSchedule { buffer: String },
+}
+
+pub struct SchedulePopup {
+    visible: bool,
+    tasks: Vec<TaskItem>,
+    cursor: usize,
+    phase: SchedulePhase,
+    status_message: Option<(String, bool)>,
+}
+
+struct TaskItem {
+    task: ScheduledTaskRow,
+    original_status: String,
+    original_schedule_expr: String,
+    pending_delete: bool,
+}
+
+pub enum ScheduleAction {
+    ToggleStatus {
+        task_id: String,
+        new_status: String,
+    },
+    UpdateSchedule {
+        task_id: String,
+        schedule_type: String,
+        new_expr: String,
+    },
+    DeleteTask {
+        task_id: String,
+    },
+}
+
+impl SchedulePopup {
+    pub fn new() -> Self {
+        Self {
+            visible: false,
+            tasks: Vec::new(),
+            cursor: 0,
+            phase: SchedulePhase::Browsing,
+            status_message: None,
+        }
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    pub fn show(&mut self) {
+        self.visible = true;
+        self.cursor = 0;
+        self.phase = SchedulePhase::Browsing;
+        self.status_message = None;
+
+        self.tasks = match tamagotchi_core::db::Database::open() {
+            Ok(db) => match db.list_tasks() {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|task| {
+                        let original_status = task.status.clone();
+                        let original_schedule_expr = task.schedule_expr.clone();
+                        TaskItem {
+                            task,
+                            original_status,
+                            original_schedule_expr,
+                            pending_delete: false,
+                        }
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+    }
+
+    pub fn dismiss(&mut self) {
+        self.visible = false;
+        self.phase = SchedulePhase::Browsing;
+        self.status_message = None;
+    }
+
+    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Vec<ScheduleAction>> {
+        use crossterm::event::KeyCode;
+
+        if !self.visible {
+            return None;
+        }
+
+        match &mut self.phase {
+            SchedulePhase::Browsing => match key.code {
+                KeyCode::Esc => {
+                    self.dismiss();
+                    None
+                }
+                KeyCode::Up => {
+                    if !self.tasks.is_empty() {
+                        if self.cursor == 0 {
+                            self.cursor = self.tasks.len() - 1;
+                        } else {
+                            self.cursor -= 1;
+                        }
+                    }
+                    self.status_message = None;
+                    None
+                }
+                KeyCode::Down => {
+                    if !self.tasks.is_empty() {
+                        self.cursor = (self.cursor + 1) % self.tasks.len();
+                    }
+                    self.status_message = None;
+                    None
+                }
+                KeyCode::Char(' ') | KeyCode::Enter => {
+                    if let Some(item) = self.tasks.get_mut(self.cursor) {
+                        let status = item.task.status.as_str();
+                        match status {
+                            "active" => {
+                                item.task.status = "paused".to_string();
+                                self.status_message =
+                                    Some(("Paused (Tab to apply)".to_string(), true));
+                            }
+                            "paused" => {
+                                item.task.status = "active".to_string();
+                                self.status_message =
+                                    Some(("Resumed (Tab to apply)".to_string(), true));
+                            }
+                            _ => {
+                                self.status_message =
+                                    Some((format!("Cannot toggle {status} task"), false));
+                            }
+                        }
+                    }
+                    None
+                }
+                KeyCode::Char('e') => {
+                    if let Some(item) = self.tasks.get(self.cursor) {
+                        if item.task.status == "cancelled" || item.task.status == "completed" {
+                            self.status_message =
+                                Some(("Cannot edit a finished task".to_string(), false));
+                            return None;
+                        }
+                        let buf = item.task.schedule_expr.clone();
+                        self.phase = SchedulePhase::EditingSchedule { buffer: buf };
+                    }
+                    None
+                }
+                KeyCode::Char('d') => {
+                    if let Some(item) = self.tasks.get_mut(self.cursor) {
+                        item.pending_delete = !item.pending_delete;
+                    }
+                    None
+                }
+                KeyCode::Tab => {
+                    let actions = self.collect_actions();
+                    if actions.is_empty() {
+                        self.status_message = Some(("No changes to apply.".to_string(), false));
+                        return None;
+                    }
+                    self.dismiss();
+                    Some(actions)
+                }
+                _ => None,
+            },
+            SchedulePhase::EditingSchedule { ref mut buffer } => match key.code {
+                KeyCode::Esc => {
+                    self.phase = SchedulePhase::Browsing;
+                    self.status_message = None;
+                    None
+                }
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    None
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                    None
+                }
+                KeyCode::Enter => {
+                    if buffer.is_empty() {
+                        self.status_message =
+                            Some(("Expression cannot be empty".to_string(), false));
+                        return None;
+                    }
+                    if let Some(item) = self.tasks.get(self.cursor) {
+                        let stype = &item.task.schedule_type;
+                        if let Err(e) = tamagotchi_core::tasks::validate_schedule(stype, buffer) {
+                            self.status_message = Some((format!("Invalid: {e}"), false));
+                            return None;
+                        }
+                    }
+                    let new_expr = buffer.clone();
+                    if let Some(item) = self.tasks.get_mut(self.cursor) {
+                        item.task.schedule_expr = new_expr;
+                    }
+                    self.phase = SchedulePhase::Browsing;
+                    self.status_message =
+                        Some(("Schedule updated (Tab to apply)".to_string(), true));
+                    None
+                }
+                _ => None,
+            },
+        }
+    }
+
+    fn collect_actions(&self) -> Vec<ScheduleAction> {
+        let mut actions = Vec::new();
+
+        for item in &self.tasks {
+            if item.pending_delete {
+                actions.push(ScheduleAction::DeleteTask {
+                    task_id: item.task.id.clone(),
+                });
+                continue;
+            }
+
+            if item.task.status != item.original_status {
+                actions.push(ScheduleAction::ToggleStatus {
+                    task_id: item.task.id.clone(),
+                    new_status: item.task.status.clone(),
+                });
+            }
+            if item.task.schedule_expr != item.original_schedule_expr {
+                actions.push(ScheduleAction::UpdateSchedule {
+                    task_id: item.task.id.clone(),
+                    schedule_type: item.task.schedule_type.clone(),
+                    new_expr: item.task.schedule_expr.clone(),
+                });
+            }
+        }
+
+        actions
+    }
+
+    pub fn render(&self, frame: &mut Frame) {
+        if !self.visible {
+            return;
+        }
+
+        let area = frame.area();
+        let popup_width = (area.width * 60 / 100)
+            .max(44)
+            .min(area.width.saturating_sub(4));
+        let popup_height = (area.height * 80 / 100)
+            .max(12)
+            .min(area.height.saturating_sub(2));
+        let x = 1;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        frame.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme::dim())
+            .title(" Scheduled Tasks ");
+
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        if inner.height < 5 || inner.width < 12 {
+            return;
+        }
+
+        let content_height = (inner.height as usize).saturating_sub(2);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut row_indices: Vec<usize> = Vec::new();
+
+        if self.tasks.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " No scheduled tasks.".to_string(),
+                theme::dim(),
+            )));
+        }
+
+        for (i, item) in self.tasks.iter().enumerate() {
+            row_indices.push(lines.len());
+
+            let check = match item.task.status.as_str() {
+                "active" => "x",
+                "paused" => " ",
+                _ => "-",
+            };
+
+            let delete_label = if item.pending_delete { " (delete)" } else { "" };
+
+            let next_str = item
+                .task
+                .next_run
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .map(|dt| format!("Next: {}", dt.format("%Y-%m-%d %H:%M UTC")))
+                .unwrap_or_default();
+
+            let label = format!(
+                "  [{check}] {:<28} {} {}",
+                item.task.name, item.task.schedule_type, item.task.schedule_expr,
+            );
+
+            let is_cursor = i == self.cursor;
+            let style = if is_cursor {
+                theme::popup_selected()
+            } else if item.task.status == "cancelled" || item.task.status == "completed" {
+                theme::dim()
+            } else {
+                ratatui::style::Style::default()
+            };
+
+            lines.push(Line::from(Span::styled(
+                format!("{label}{delete_label}"),
+                style,
+            )));
+
+            if !next_str.is_empty() {
+                let detail_style = if is_cursor {
+                    theme::popup_selected()
+                } else {
+                    theme::dim()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("      {next_str}"),
+                    detail_style,
+                )));
+            }
+        }
+
+        let selected_line = row_indices.get(self.cursor).copied().unwrap_or(0);
+        let scroll_offset = if selected_line >= content_height {
+            selected_line - content_height + 1
+        } else {
+            0
+        };
+
+        let visible_lines: Vec<Line<'static>> = lines
+            .into_iter()
+            .skip(scroll_offset)
+            .take(content_height)
+            .collect();
+
+        let content_area = Rect::new(inner.x, inner.y, inner.width, content_height as u16);
+        frame.render_widget(Paragraph::new(visible_lines), content_area);
+
+        if let Some((ref msg, is_success)) = self.status_message {
+            let style = if is_success {
+                theme::success_style()
+            } else {
+                theme::error_style()
+            };
+            let status_y = inner.y + inner.height - 2;
+            let status_area = Rect::new(inner.x, status_y, inner.width, 1);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(format!(" {msg}"), style))),
+                status_area,
+            );
+        }
+
+        if let SchedulePhase::EditingSchedule { ref buffer } = self.phase {
+            let edit_y = inner.y + inner.height.saturating_sub(4);
+            let edit_area = Rect::new(inner.x, edit_y, inner.width, 2);
+            frame.render_widget(Clear, edit_area);
+            let edit_lines = vec![
+                Line::from(Span::styled(
+                    " Edit schedule expression:".to_string(),
+                    theme::bold(),
+                )),
+                Line::from(Span::styled(
+                    format!("   > {buffer}_"),
+                    theme::popup_selected(),
+                )),
+            ];
+            frame.render_widget(Paragraph::new(edit_lines), edit_area);
+        }
+
+        let hint = if matches!(self.phase, SchedulePhase::EditingSchedule { .. }) {
+            " Enter: save  Esc: cancel"
+        } else {
+            " Space: toggle  e: edit  d: delete  Tab: apply  Esc: close"
+        };
+        let footer_y = inner.y + inner.height - 1;
+        let footer_area = Rect::new(inner.x, footer_y, inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(hint.to_string(), theme::dim()))),
+            footer_area,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_popup_not_visible() {
+        let popup = SchedulePopup::new();
+        assert!(!popup.is_visible());
+    }
+
+    #[test]
+    fn dismiss_hides_popup() {
+        let mut popup = SchedulePopup::new();
+        popup.show();
+        assert!(popup.is_visible());
+        popup.dismiss();
+        assert!(!popup.is_visible());
+    }
+
+    #[test]
+    fn esc_dismisses() {
+        let mut popup = SchedulePopup::new();
+        popup.show();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        popup.handle_key(esc);
+        assert!(!popup.is_visible());
+    }
+
+    #[test]
+    fn no_changes_returns_none() {
+        let mut popup = SchedulePopup::new();
+        popup.show();
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let result = popup.handle_key(tab);
+        assert!(result.is_none());
+    }
+}

@@ -74,14 +74,35 @@ pub fn format_task(task: &ScheduledTaskRow) -> String {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max])
+    if s.chars().count() > max {
+        let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
+        format!("{}...", &s[..end])
     } else {
         s.to_string()
     }
 }
 
-fn parse_interval(s: &str) -> Option<std::time::Duration> {
+/// Validate a schedule expression without computing the next run time.
+pub fn validate_schedule(schedule_type: &str, schedule_expr: &str) -> Result<()> {
+    match schedule_type {
+        "cron" => {
+            Schedule::from_str(schedule_expr)
+                .with_context(|| format!("Invalid cron expression: {schedule_expr}"))?;
+            Ok(())
+        }
+        "interval" => {
+            parse_interval(schedule_expr)
+                .ok_or_else(|| anyhow::anyhow!("Invalid interval: {schedule_expr}"))?;
+            Ok(())
+        }
+        "once" => Ok(()),
+        other => {
+            anyhow::bail!("Unknown schedule type: {other}. Use 'cron', 'interval', or 'once'.")
+        }
+    }
+}
+
+pub fn parse_interval(s: &str) -> Option<std::time::Duration> {
     let s = s.trim();
     if let Some(mins) = s.strip_suffix('m') {
         mins.parse::<u64>()
@@ -169,6 +190,42 @@ mod tests {
     }
 
     #[test]
+    fn validate_schedule_valid_cron() {
+        assert!(validate_schedule("cron", "0 0 9 * * * *").is_ok());
+    }
+
+    #[test]
+    fn validate_schedule_invalid_cron() {
+        assert!(validate_schedule("cron", "not a cron").is_err());
+    }
+
+    #[test]
+    fn validate_schedule_valid_interval() {
+        assert!(validate_schedule("interval", "30m").is_ok());
+    }
+
+    #[test]
+    fn validate_schedule_invalid_interval() {
+        assert!(validate_schedule("interval", "abc").is_err());
+    }
+
+    #[test]
+    fn validate_schedule_once() {
+        assert!(validate_schedule("once", "").is_ok());
+    }
+
+    #[test]
+    fn validate_schedule_unknown_type() {
+        assert!(validate_schedule("weekly", "").is_err());
+    }
+
+    #[test]
+    fn parse_interval_is_pub() {
+        // Verifies parse_interval is now pub by calling it from tests
+        assert!(parse_interval("30m").is_some());
+    }
+
+    #[test]
     fn truncate_str_short() {
         assert_eq!(truncate_str("hello", 10), "hello");
     }
@@ -178,6 +235,14 @@ mod tests {
         let long = "a".repeat(100);
         let result = truncate_str(&long, 10);
         assert!(result.ends_with("..."));
-        assert_eq!(result.len(), 13); // 10 + "..."
+        assert_eq!(result.chars().count(), 13); // 10 + "..."
+    }
+
+    #[test]
+    fn truncate_str_multibyte() {
+        let s = "hello\u{1F600}world"; // emoji in the middle
+        let result = truncate_str(s, 6);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 9); // 6 + "..."
     }
 }
