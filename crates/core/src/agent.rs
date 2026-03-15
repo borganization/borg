@@ -461,7 +461,7 @@ impl Agent {
             let tools_clone = tools.map(<[ToolDefinition]>::to_vec);
             let cancel_clone = cancel.clone();
             let stream_handle = {
-                let llm_client = LlmClient::new(self.config.clone())?;
+                let mut llm_client = LlmClient::new(self.config.clone())?;
                 tokio::spawn(async move {
                     if let Err(e) = llm_client
                         .stream_chat_with_cancel(
@@ -798,6 +798,50 @@ impl Agent {
                     }
                     Err(e) => Ok(format!("Error applying patch: {e}")),
                 }
+            }
+            "create_channel" => {
+                let patch = require_str_param(&args, "patch")?;
+                let base_dir = Config::channels_dir()?;
+                std::fs::create_dir_all(&base_dir)?;
+                match apply_patch_to_dir(patch, &base_dir) {
+                    Ok(_) => Ok("Channel patch applied successfully.".to_string()),
+                    Err(e) => Ok(format!("Error applying channel patch: {e}")),
+                }
+            }
+            "list_channels" => {
+                let channels_dir = Config::channels_dir()?;
+                if !channels_dir.exists() {
+                    return Ok("No channels directory found.".to_string());
+                }
+                let mut channels = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&channels_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            let manifest_path = path.join("channel.toml");
+                            if manifest_path.exists() {
+                                if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                                    if let Ok(manifest) = toml::from_str::<toml::Value>(&content) {
+                                        let name = manifest
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("?");
+                                        let desc = manifest
+                                            .get("description")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        channels.push(format!("{name}: {desc}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(if channels.is_empty() {
+                    "No channels installed.".to_string()
+                } else {
+                    channels.join("\n")
+                })
             }
             "run_shell" => {
                 let command = args["command"].as_str().context("Missing 'command'")?;
@@ -1138,6 +1182,8 @@ fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         ToolDefinition::new("list_skills", "List all available skills with their status and source.", serde_json::json!({"type":"object","properties":{}})),
         ToolDefinition::new("apply_skill_patch", "Create or modify skill files in the skills directory using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
         ToolDefinition::new("read_pdf", "Read and extract text from a PDF file.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the PDF file"},"max_chars":{"type":"integer","description":"Maximum characters to return (default: 50000)","default":50000}},"required":["file_path"]})),
+        ToolDefinition::new("create_channel", "Create or modify messaging channel integrations in ~/.tamagotchi/channels/ using the patch DSL. Channels receive webhooks and route messages to the agent.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
+        ToolDefinition::new("list_channels", "List all messaging channel integrations with their status and webhook paths.", serde_json::json!({"type":"object","properties":{}})),
     ];
 
     if config.web.enabled {

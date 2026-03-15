@@ -35,6 +35,8 @@ enum Commands {
     },
     /// Run diagnostics to check configuration, connectivity, and dependencies
     Doctor,
+    /// Start the webhook gateway server for messaging channels
+    Gateway,
     /// Run as a background daemon (executes scheduled tasks and heartbeat)
     Daemon,
     /// Manage the daemon as a system service
@@ -105,6 +107,7 @@ async fn main() -> Result<()> {
         Some(Commands::Init) => init_data_dir()?,
         Some(Commands::Ask { message, yes, json }) => repl::one_shot(&message, yes, json).await?,
         Some(Commands::Doctor) => run_doctor()?,
+        Some(Commands::Gateway) => run_gateway(shutdown).await?,
         Some(Commands::Daemon) => service::run_daemon(shutdown).await?,
         Some(Commands::Service { action }) => match action {
             ServiceAction::Install => service::install_service()?,
@@ -115,6 +118,12 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_gateway(shutdown: CancellationToken) -> Result<()> {
+    let config = tamagotchi_core::config::Config::load()?;
+    let gateway = tamagotchi_gateway::GatewayServer::new(config, shutdown)?;
+    gateway.run().await
 }
 
 fn run_doctor() -> Result<()> {
@@ -185,8 +194,14 @@ fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
 
     let config_path = data_dir.join("config.toml");
     if !config_path.exists() {
-        let config_content =
-            onboarding::generate_config("anthropic/claude-sonnet-4", "openrouter", "", "", 0)?;
+        let config_content = onboarding::generate_config(
+            "anthropic/claude-sonnet-4",
+            "openrouter",
+            "",
+            "",
+            0,
+            &onboarding::KeyStorage::EnvFile,
+        )?;
         std::fs::write(&config_path, config_content)?;
         println!("  Created {}", config_path.display());
     }

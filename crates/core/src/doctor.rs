@@ -80,6 +80,9 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
     // Provider checks
     check_provider(config, &mut checks);
 
+    // Secrets audit
+    check_secrets(config, &mut checks);
+
     // Sandbox checks
     check_sandbox(&mut checks);
 
@@ -94,6 +97,9 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
 
     // Data directory checks
     check_data_dir(&mut checks);
+
+    // Gateway checks
+    check_gateway(config, &mut checks);
 
     // Budget checks
     check_budget(config, &mut checks);
@@ -173,6 +179,107 @@ fn check_provider(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
         name: "API connectivity".to_string(),
         status: CheckStatus::Warn("skipped (use --online for live check)".to_string()),
     });
+}
+
+fn check_secrets(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
+    // Check if api_key SecretRef is configured (more secure than plaintext .env)
+    if config.llm.api_key.is_some() {
+        checks.push(DiagnosticCheck {
+            category: "Secrets",
+            name: "API key via SecretRef".to_string(),
+            status: CheckStatus::Pass,
+        });
+    }
+
+    // Check for plaintext API keys in .env file
+    if let Ok(data_dir) = Config::data_dir() {
+        let env_path = data_dir.join(".env");
+        if env_path.exists() {
+            match std::fs::read_to_string(&env_path) {
+                Ok(contents) => {
+                    let has_plaintext_keys = contents.lines().any(|line| {
+                        let trimmed = line.trim();
+                        !trimmed.is_empty()
+                            && !trimmed.starts_with('#')
+                            && trimmed.contains('=')
+                            && (trimmed.contains("API_KEY") || trimmed.contains("api_key"))
+                    });
+
+                    if has_plaintext_keys {
+                        let hint = if config.llm.api_key.is_some() {
+                            "plaintext .env still present — consider removing it"
+                        } else {
+                            "plaintext API keys in .env — consider using SecretRef in config.toml (e.g., api_key = { source = \"exec\", command = \"security\", args = [\"find-generic-password\", \"-s\", \"tamagotchi\", \"-w\"] })"
+                        };
+                        checks.push(DiagnosticCheck {
+                            category: "Secrets",
+                            name: "plaintext keys in .env".to_string(),
+                            status: CheckStatus::Warn(hint.to_string()),
+                        });
+                    } else {
+                        checks.push(DiagnosticCheck {
+                            category: "Secrets",
+                            name: "no plaintext API keys in .env".to_string(),
+                            status: CheckStatus::Pass,
+                        });
+                    }
+                }
+                Err(_) => {
+                    checks.push(DiagnosticCheck {
+                        category: "Secrets",
+                        name: ".env readable".to_string(),
+                        status: CheckStatus::Warn("could not read .env file".to_string()),
+                    });
+                }
+            }
+
+            // Check file permissions on Unix
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if let Ok(meta) = std::fs::metadata(&env_path) {
+                    let mode = meta.mode() & 0o777;
+                    if mode & 0o077 != 0 {
+                        checks.push(DiagnosticCheck {
+                            category: "Secrets",
+                            name: ".env file permissions".to_string(),
+                            status: CheckStatus::Warn(format!(
+                                "permissions are {mode:04o} — should be 0600 or stricter"
+                            )),
+                        });
+                    } else {
+                        checks.push(DiagnosticCheck {
+                            category: "Secrets",
+                            name: ".env file permissions".to_string(),
+                            status: CheckStatus::Pass,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for multi-key fallback
+    if !config.llm.api_keys.is_empty() {
+        let resolved_count = config
+            .llm
+            .api_keys
+            .iter()
+            .filter(|sr| sr.resolve().is_ok())
+            .count();
+        checks.push(DiagnosticCheck {
+            category: "Secrets",
+            name: format!(
+                "multi-key fallback: {resolved_count}/{} keys resolvable",
+                config.llm.api_keys.len()
+            ),
+            status: if resolved_count > 0 {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Warn("no fallback keys could be resolved".to_string())
+            },
+        });
+    }
 }
 
 fn check_sandbox(checks: &mut Vec<DiagnosticCheck>) {
@@ -404,6 +511,83 @@ fn check_data_dir(checks: &mut Vec<DiagnosticCheck>) {
             checks.push(DiagnosticCheck {
                 category: "Data",
                 name: "database accessible".to_string(),
+                status: CheckStatus::Fail(format!("{e}")),
+            });
+        }
+    }
+}
+
+fn check_gateway(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
+    if !config.gateway.enabled {
+        checks.push(DiagnosticCheck {
+            category: "Gateway",
+            name: "gateway enabled".to_string(),
+            status: CheckStatus::Warn("disabled".to_string()),
+        });
+        return;
+    }
+
+    checks.push(DiagnosticCheck {
+        category: "Gateway",
+        name: format!(
+            "gateway config: {}:{}",
+            config.gateway.host, config.gateway.port
+        ),
+        status: CheckStatus::Pass,
+    });
+
+    match Config::channels_dir() {
+        Ok(channels_dir) => {
+            if channels_dir.exists() {
+                let mut count = 0;
+                let mut errors = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&channels_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            let manifest_path = path.join("channel.toml");
+                            if manifest_path.exists() {
+                                match std::fs::read_to_string(&manifest_path) {
+                                    Ok(content) => match toml::from_str::<toml::Value>(&content) {
+                                        Ok(_) => count += 1,
+                                        Err(e) => {
+                                            errors.push(format!("{}: {e}", manifest_path.display()))
+                                        }
+                                    },
+                                    Err(e) => {
+                                        errors.push(format!("{}: {e}", manifest_path.display()))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                checks.push(DiagnosticCheck {
+                    category: "Gateway",
+                    name: format!("{count} channel(s) found"),
+                    status: CheckStatus::Pass,
+                });
+
+                for error in errors {
+                    checks.push(DiagnosticCheck {
+                        category: "Gateway",
+                        name: "channel manifest".to_string(),
+                        status: CheckStatus::Fail(error),
+                    });
+                }
+            } else {
+                checks.push(DiagnosticCheck {
+                    category: "Gateway",
+                    name: "channels directory".to_string(),
+                    status: CheckStatus::Warn("not found".to_string()),
+                });
+            }
+        }
+        Err(e) => {
+            checks.push(DiagnosticCheck {
+                category: "Gateway",
+                name: "channels directory".to_string(),
                 status: CheckStatus::Fail(format!("{e}")),
             });
         }
