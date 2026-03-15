@@ -193,12 +193,12 @@ impl<'a> App<'a> {
                 }
 
                 match key.code {
-                    KeyCode::Up => {
+                    KeyCode::Up if !self.composer.is_empty() && !self.composer.is_browsing_history() => {
                         self.scroll_offset = self.scroll_offset.saturating_add(1);
                         self.auto_scroll = false;
                         return Ok(AppAction::Continue);
                     }
-                    KeyCode::Down => {
+                    KeyCode::Down if !self.composer.is_browsing_history() => {
                         self.scroll_offset = self.scroll_offset.saturating_sub(1);
                         if self.scroll_offset == 0 {
                             self.auto_scroll = true;
