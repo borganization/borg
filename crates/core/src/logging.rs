@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::config::Config;
+use crate::secrets::redact_secrets;
 use crate::types::Message;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,24 +64,24 @@ pub fn log_message(message: &Message) {
 
     let kind = match message.role {
         crate::types::Role::User => {
-            let content = message.content.clone().unwrap_or_default();
+            let content = redact_secrets(&message.content.clone().unwrap_or_default());
             LogEntryKind::UserMessage { content }
         }
         crate::types::Role::Assistant => LogEntryKind::AssistantMessage {
-            content: message.content.clone(),
+            content: message.content.as_deref().map(redact_secrets),
             tool_calls: message.tool_calls.as_ref().map(|tcs| {
                 tcs.iter()
                     .map(|tc| LogToolCall {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
-                        arguments: tc.function.arguments.clone(),
+                        arguments: redact_secrets(&tc.function.arguments),
                     })
                     .collect()
             }),
         },
         crate::types::Role::Tool => LogEntryKind::ToolResult {
             tool_call_id: message.tool_call_id.clone().unwrap_or_default(),
-            content: message.content.clone().unwrap_or_default(),
+            content: redact_secrets(&message.content.clone().unwrap_or_default()),
         },
         crate::types::Role::System => return,
     };
@@ -308,7 +309,10 @@ mod tests {
         let entry: LogEntry = serde_json::from_str(
             r#"{"timestamp":"2026-03-14T10:32:00+00:00","type":"assistant_message","content":null,"tool_calls":[{"id":"call_abc123","name":"run_shell","arguments":"{}"}]}"#,
         ).unwrap();
-        assert_eq!(format_entry(&entry), "[10:32] Assistant: [called run_shell]");
+        assert_eq!(
+            format_entry(&entry),
+            "[10:32] Assistant: [called run_shell]"
+        );
     }
 
     #[test]
@@ -316,7 +320,10 @@ mod tests {
         let entry: LogEntry = serde_json::from_str(
             r#"{"timestamp":"2026-03-14T10:33:00+00:00","type":"tool_result","tool_call_id":"call_abc123def","content":"command output here"}"#,
         ).unwrap();
-        assert_eq!(format_entry(&entry), "[10:33] Tool (call_abc): command output here");
+        assert_eq!(
+            format_entry(&entry),
+            "[10:33] Tool (call_abc): command output here"
+        );
     }
 
     #[test]

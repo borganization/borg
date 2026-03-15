@@ -48,6 +48,12 @@ impl ToolRegistry {
             let entry = entry?;
             let path = entry.path();
 
+            // Skip symlinks to prevent registering tools from unexpected locations
+            if path.is_symlink() {
+                warn!("Skipping symlinked tool directory: {}", path.display());
+                continue;
+            }
+
             if !path.is_dir() {
                 continue;
             }
