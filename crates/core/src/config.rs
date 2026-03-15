@@ -397,6 +397,13 @@ impl Config {
                 self.skills.enabled = v;
                 Ok(format!("skills.enabled = {v}"))
             }
+            "skills.max_context_tokens" => {
+                let v: usize = value
+                    .parse()
+                    .with_context(|| "Invalid integer for skills.max_context_tokens")?;
+                self.skills.max_context_tokens = v;
+                Ok(format!("skills.max_context_tokens = {v}"))
+            }
             "conversation.max_iterations" => {
                 let v: u32 = value
                     .parse()
@@ -438,8 +445,8 @@ impl Config {
             _ => anyhow::bail!(
                 "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
                  sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled, \
-                 conversation.max_iterations, conversation.show_thinking, security.secret_detection, \
-                 budget.monthly_token_limit, budget.warning_threshold"
+                 skills.max_context_tokens, conversation.max_iterations, conversation.show_thinking, \
+                 security.secret_detection, budget.monthly_token_limit, budget.warning_threshold"
             ),
         }
     }

@@ -16,6 +16,7 @@ use super::command_popup::CommandPopup;
 use super::composer::Composer;
 use super::history::{ApprovalStatus, HistoryCell};
 use super::layout;
+use super::settings_popup::SettingsPopup;
 use super::spinner;
 use super::theme;
 
@@ -59,6 +60,7 @@ pub struct App<'a> {
     pub state: AppState,
     pub composer: Composer<'a>,
     pub command_popup: CommandPopup,
+    pub settings_popup: SettingsPopup,
     pub scroll_offset: usize,
     pub total_lines: usize,
     pub config: Config,
@@ -78,6 +80,7 @@ impl<'a> App<'a> {
             state: AppState::Idle,
             composer: Composer::new(),
             command_popup: CommandPopup::new(),
+            settings_popup: SettingsPopup::new(),
             scroll_offset: 0,
             total_lines: 0,
             config,
@@ -145,6 +148,13 @@ impl<'a> App<'a> {
             AppState::Idle => {
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(AppAction::Quit);
+                }
+
+                if self.settings_popup.is_visible() {
+                    if let Some(action) = self.settings_popup.handle_key(key, &mut self.config)? {
+                        return Ok(action);
+                    }
+                    return Ok(AppAction::Continue);
                 }
 
                 if self.command_popup.is_visible() {
@@ -320,7 +330,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/settings" => {
-                self.push_system_message(self.config.display_settings());
+                self.settings_popup.show();
                 return Ok(AppAction::Continue);
             }
             "/compact" => {
@@ -607,6 +617,7 @@ impl<'a> App<'a> {
         self.composer.render(frame, app_layout.composer);
         self.render_footer(frame, app_layout.footer);
         self.command_popup.render(frame, app_layout.composer);
+        self.settings_popup.render(frame, &self.config);
     }
 
     fn render_transcript(&mut self, frame: &mut Frame, area: Rect) {

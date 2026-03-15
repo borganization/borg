@@ -4,6 +4,7 @@ mod composer;
 mod history;
 mod layout;
 mod markdown;
+mod settings_popup;
 mod spinner;
 mod theme;
 
