@@ -48,7 +48,8 @@ System prompt assembled each turn: `SOUL.md` + current time + memory context + s
 | `write_memory` | Write/append to memory files (SOUL.md, MEMORY.md, or topic files) |
 | `read_memory` | Read a memory file |
 | `list_tools` | List user-created tools |
-| `apply_patch` | Create/modify files in `~/.tamagotchi/tools/` via patch DSL |
+| `apply_patch` | Create/update/delete files in the current working directory via patch DSL |
+| `create_tool` | Create/modify files in `~/.tamagotchi/tools/` via patch DSL |
 | `run_shell` | Execute a shell command |
 | `list_skills` | List all skills with status and source |
 | `apply_skill_patch` | Create/modify files in `~/.tamagotchi/skills/` via patch DSL |
