@@ -31,6 +31,16 @@ impl ChannelRegistry {
         Ok(registry)
     }
 
+    pub fn with_dir(dir: PathBuf) -> Result<Self> {
+        let mut registry = Self {
+            channels: HashMap::new(),
+            channels_dir: dir,
+        };
+
+        registry.scan()?;
+        Ok(registry)
+    }
+
     pub fn scan(&mut self) -> Result<()> {
         self.channels.clear();
 
@@ -158,5 +168,51 @@ description = "A test channel"
         registry.scan().unwrap();
         assert_eq!(registry.list_channels().len(), 1);
         assert!(registry.get("test-channel").is_some());
+    }
+
+    #[test]
+    fn scan_valid_channel_via_with_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let channel_dir = dir.path().join("my-discord");
+        std::fs::create_dir_all(&channel_dir).unwrap();
+        std::fs::write(
+            channel_dir.join("channel.toml"),
+            "name = \"my-discord\"\ndescription = \"Discord integration\"\n",
+        )
+        .unwrap();
+
+        let registry = ChannelRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(registry.list_channels().len(), 1);
+        assert!(registry.get("my-discord").is_some());
+    }
+
+    #[test]
+    fn scan_skips_invalid_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let channel_dir = dir.path().join("bad-channel");
+        std::fs::create_dir_all(&channel_dir).unwrap();
+        std::fs::write(channel_dir.join("channel.toml"), "not valid {{{{").unwrap();
+
+        let registry = ChannelRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert!(registry.list_channels().is_empty());
+    }
+
+    #[test]
+    fn channel_definitions_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let channel_dir = dir.path().join("slack");
+        std::fs::create_dir_all(&channel_dir).unwrap();
+        std::fs::write(
+            channel_dir.join("channel.toml"),
+            "name = \"slack\"\ndescription = \"Slack bot\"\n",
+        )
+        .unwrap();
+
+        let registry = ChannelRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        let list = registry.list_channels();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].contains("slack"));
+        assert!(list[0].contains("Slack bot"));
+        assert!(list[0].contains("/webhook/slack"));
     }
 }
