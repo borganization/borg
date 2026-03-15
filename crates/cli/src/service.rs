@@ -98,7 +98,10 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
             _ = interval.tick() => {}
         }
 
-        // Check for due tasks
+        // Check for due tasks (skip if tasks.enabled is false)
+        if !config.tasks.enabled {
+            continue;
+        }
         let now = chrono::Utc::now().timestamp();
         match db.get_due_tasks(now) {
             Ok(tasks) => {

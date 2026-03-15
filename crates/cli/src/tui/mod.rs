@@ -6,6 +6,8 @@ mod external_editor;
 mod history;
 mod layout;
 mod markdown;
+mod plan_overlay;
+mod schedule_popup;
 mod settings_popup;
 mod spinner;
 mod theme;
@@ -31,6 +33,7 @@ use tamagotchi_core::config::Config;
 use tamagotchi_heartbeat::scheduler::{HeartbeatEvent, HeartbeatScheduler};
 
 use app::{App, AppAction};
+use history::HistoryCell;
 
 /// Guard that restores terminal state on drop (both normal exit and early error return).
 struct TerminalGuard;
@@ -136,7 +139,12 @@ pub async fn run() -> Result<()> {
 fn drain_queued_if_idle(app: &mut App<'_>) -> Result<AppAction> {
     if matches!(app.state, app::AppState::Idle) {
         if app.last_turn_errored && !app.queued_messages.is_empty() {
-            app.push_system_message("[queue paused — enter to resume, esc to clear]".to_string());
+            if !app.queue_pause_notified {
+                app.push_system_message(
+                    "[queue paused — enter to resume, esc to clear]".to_string(),
+                );
+                app.queue_pause_notified = true;
+            }
             return Ok(AppAction::Continue);
         }
         if let Some(queued) = app.pop_next_queued() {
@@ -404,16 +412,26 @@ async fn run_event_loop(
                                     Ok(install_result) => {
                                         // Record in DB + store file hashes
                                         if let Ok(db) = tamagotchi_core::db::Database::open() {
-                                            let _ = db.insert_customization(
+                                            if let Err(e) = db.insert_customization(
                                                 def.id,
                                                 def.name,
                                                 &def.kind.to_string(),
                                                 &def.category.to_string(),
-                                            );
+                                            ) {
+                                                tracing::warn!(
+                                                    "Failed to record customization: {e}"
+                                                );
+                                            }
 
                                             // Store file hashes for integrity verification
                                             for (path, hash) in &install_result.file_hashes {
-                                                let _ = db.insert_file_hash(def.id, path, hash);
+                                                if let Err(e) =
+                                                    db.insert_file_hash(def.id, path, hash)
+                                                {
+                                                    tracing::warn!(
+                                                        "Failed to store file hash for {path}: {e}"
+                                                    );
+                                                }
                                             }
 
                                             // Register installed tool/channel
@@ -423,30 +441,36 @@ async fn run_event_loop(
                                                 {
                                                     match def.kind {
                                                         tamagotchi_customizations::CustomizationKind::Tool => {
-                                                            let _ = db.insert_installed_tool(
+                                                            if let Err(e) = db.insert_installed_tool(
                                                                 item_name,
                                                                 def.description,
                                                                 "python",
                                                                 def.id,
-                                                            );
+                                                            ) {
+                                                                tracing::warn!("Failed to register tool: {e}");
+                                                            }
                                                         }
                                                         tamagotchi_customizations::CustomizationKind::Channel => {
                                                             let webhook = format!("/webhook/{item_name}");
-                                                            let _ = db.insert_installed_channel(
+                                                            if let Err(e) = db.insert_installed_channel(
                                                                 item_name,
                                                                 def.description,
                                                                 "python",
                                                                 def.id,
                                                                 &webhook,
-                                                            );
+                                                            ) {
+                                                                tracing::warn!("Failed to register channel: {e}");
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
 
-                                        // Wire credential entries into config
-                                        if !install_result.credential_entries.is_empty() {
+                                        // Wire credential entries + gateway config in one load/save
+                                        if !install_result.credential_entries.is_empty()
+                                            || def.kind == tamagotchi_customizations::CustomizationKind::Channel
+                                        {
                                             if let Ok(mut cfg) = Config::load() {
                                                 for entry in &install_result.credential_entries {
                                                     cfg.credentials.insert(
@@ -459,19 +483,12 @@ async fn run_event_loop(
                                                         ),
                                                     );
                                                 }
-                                                let _ = cfg.save();
-                                            }
-                                        }
-
-                                        // Auto-enable gateway config when installing a channel
-                                        if def.kind
-                                            == tamagotchi_customizations::CustomizationKind::Channel
-                                        {
-                                            if let Ok(mut cfg) = Config::load() {
-                                                if !cfg.gateway.enabled {
+                                                if def.kind == tamagotchi_customizations::CustomizationKind::Channel
+                                                    && !cfg.gateway.enabled
+                                                {
                                                     cfg.gateway.enabled = true;
-                                                    let _ = cfg.save();
                                                 }
+                                                let _ = cfg.save();
                                             }
                                         }
                                         let mut msg = format!("Installed {}", def.name);
@@ -550,6 +567,118 @@ async fn run_event_loop(
                     app.push_system_message(format!("Error listing sessions: {e}"));
                 }
             },
+            AppAction::PlanProceed { clear_context } => {
+                let proceed_msg = if clear_context {
+                    // Extract plan text before clearing so the agent knows what to do
+                    let plan_text = app
+                        .cells
+                        .iter()
+                        .rev()
+                        .find_map(|c| {
+                            if let HistoryCell::Assistant { text, .. } = c {
+                                if !text.trim().is_empty() {
+                                    return Some(text.clone());
+                                }
+                            }
+                            None
+                        })
+                        .unwrap_or_default();
+
+                    let mut agent = agent.lock().await;
+                    agent.clear_history();
+                    app.cells.clear();
+                    app.session_prompt_tokens = 0;
+                    app.session_completion_tokens = 0;
+
+                    if plan_text.is_empty() {
+                        "Proceed with the plan as outlined.".to_string()
+                    } else {
+                        format!(
+                            "Here is the plan we agreed on:\n\n{plan_text}\n\nProceed with this plan."
+                        )
+                    }
+                } else {
+                    "Proceed with the plan as outlined.".to_string()
+                };
+                app.queued_messages.push_front(proceed_msg);
+            }
+            AppAction::RunScheduleActions { actions } => {
+                let mut results: Vec<String> = Vec::new();
+                if let Ok(db) = tamagotchi_core::db::Database::open() {
+                    for action in actions {
+                        match action {
+                            schedule_popup::ScheduleAction::ToggleStatus {
+                                task_id,
+                                new_status,
+                            } => match db.update_task_status(&task_id, &new_status) {
+                                Ok(true) => {
+                                    results.push(format!(
+                                        "Task {} {new_status}",
+                                        &task_id[..8.min(task_id.len())]
+                                    ));
+                                }
+                                Ok(false) => {
+                                    results.push(format!(
+                                        "Task {} not found",
+                                        &task_id[..8.min(task_id.len())]
+                                    ));
+                                }
+                                Err(e) => results.push(format!("Error: {e}")),
+                            },
+                            schedule_popup::ScheduleAction::UpdateSchedule {
+                                task_id,
+                                schedule_type,
+                                new_expr,
+                            } => {
+                                let update = tamagotchi_core::db::UpdateTask {
+                                    name: None,
+                                    prompt: None,
+                                    schedule_type: Some(&schedule_type),
+                                    schedule_expr: Some(&new_expr),
+                                    timezone: None,
+                                };
+                                match db.update_task(&task_id, &update) {
+                                    Ok(true) => {
+                                        results.push(format!(
+                                            "Task {} schedule updated to {new_expr}",
+                                            &task_id[..8.min(task_id.len())]
+                                        ));
+                                    }
+                                    Ok(false) => {
+                                        results.push(format!(
+                                            "Task {} not found",
+                                            &task_id[..8.min(task_id.len())]
+                                        ));
+                                    }
+                                    Err(e) => results.push(format!("Error: {e}")),
+                                }
+                            }
+                            schedule_popup::ScheduleAction::DeleteTask { task_id } => {
+                                match db.delete_task(&task_id) {
+                                    Ok(true) => {
+                                        results.push(format!(
+                                            "Task {} deleted",
+                                            &task_id[..8.min(task_id.len())]
+                                        ));
+                                    }
+                                    Ok(false) => {
+                                        results.push(format!(
+                                            "Task {} not found",
+                                            &task_id[..8.min(task_id.len())]
+                                        ));
+                                    }
+                                    Err(e) => results.push(format!("Error: {e}")),
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    results.push("Error: could not open database".to_string());
+                }
+                if !results.is_empty() {
+                    app.push_system_message(results.join("\n"));
+                }
+            }
             AppAction::Continue => {}
         }
     }
