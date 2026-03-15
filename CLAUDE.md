@@ -36,7 +36,7 @@ Binary name is `tamagotchi`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_K
 - `tamagotchi ask "message"` — one-shot query
 - `tamagotchi init` — interactive onboarding wizard (name, personality, provider, model selection)
 - `tamagotchi gateway` — start webhook gateway server for messaging channels
-- `tamagotchi doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget)
+- `tamagotchi doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
 
 ## Agent Loop
 
@@ -63,6 +63,7 @@ System prompt assembled each turn: `SOUL.md` + current time + memory context + s
 | `read_pdf` | Extract text from a PDF file with token-aware truncation |
 | `create_channel` | Create/modify channel integrations in `~/.tamagotchi/channels/` via patch DSL |
 | `list_channels` | List all messaging channels with status and webhook paths |
+| `security_audit` | Run host security audit (firewall, ports, SSH, permissions, encryption, updates, services). Requires `security.host_audit = true` |
 
 ## User Tools
 
@@ -149,10 +150,17 @@ max_context_tokens = 4000
 [security]
 secret_detection = true
 blocked_paths = [".ssh", ".aws", ".gnupg", ".config/gh", ".env", "credentials", "private_key"]
+host_audit = true                # enable host security checks in doctor + security_audit tool
 
 [budget]
 monthly_token_limit = 1000000    # 0 = unlimited
 warning_threshold = 0.8          # warn at 80% usage
+
+[credentials]
+JIRA_API_TOKEN = "JIRA_API_TOKEN"                    # legacy: bare string = env var name
+SLACK_BOT_TOKEN = { source = "exec", command = "security", args = ["find-generic-password", "-s", "slack", "-w"] }
+GITHUB_TOKEN = { source = "file", path = "~/.config/gh/token" }
+MY_SECRET = { source = "env", var = "MY_SECRET" }    # explicit env SecretRef
 ```
 
 ## Memory System
@@ -176,7 +184,8 @@ Skills are instruction bundles (SKILL.md files with YAML frontmatter) that teach
 - **Built-in skills**: Embedded via `include_str!` in `crates/core/skills/*/SKILL.md` (slack, discord, github, weather, skill-creator, git, http, search, docker, database, notes, calendar, 1password, browser)
 - **User skills**: `~/.tamagotchi/skills/<name>/SKILL.md` — created via `apply_skill_patch`
 - User skills with the same name override built-in skills
-- Requirements (bins/env vars) are checked at load time; unavailable skills are still listed but flagged
+- Requirements (bins/env vars) are checked at load time against both process env and `[credentials]` store; unavailable skills are still listed but flagged
+- **Credential injection**: Resolved credentials from `[credentials]` are injected as env vars into `run_shell` commands, so skills can reference them without the user exporting them in the shell
 - **Progressive loading**: Metadata (name + description) always loaded for all skills (~50 tokens each); full SKILL.md body loaded only for available skills within token budget
 - **References**: User skills can have `references/*.md` files stored on the Skill struct (not auto-loaded into context)
 - **Scripts**: User skills can have `scripts/` directories; paths stored on the Skill struct for use with `run_shell`
@@ -258,7 +267,7 @@ Hooks implement the `Hook` trait and are registered on the agent via `agent.hook
 
 ## Doctor Command
 
-`crates/core/src/doctor.rs` — diagnostic checks for config, provider, sandbox, tools, skills, memory, data directory, and budget.
+`crates/core/src/doctor.rs` — diagnostic checks for config, provider, sandbox, tools, skills, memory, data directory, budget, and host security.
 
 Available via `tamagotchi doctor` CLI subcommand or `/doctor` TUI command.
 
@@ -311,6 +320,7 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 | `crates/core/src/skills.rs` | Skills loading, parsing, progressive token budgeting |
 | `crates/core/src/hooks.rs` | Lifecycle hook system (trait, registry, dispatch) |
 | `crates/core/src/doctor.rs` | Diagnostic checks and report formatting |
+| `crates/core/src/host_audit.rs` | Host security audit checks (firewall, ports, SSH, permissions, encryption, updates, services) |
 | `crates/core/src/db.rs` | SQLite database with versioned migrations |
 | `crates/core/src/types.rs` | Message (with timestamps), ToolCall, ToolDefinition |
 | `crates/heartbeat/src/scheduler.rs` | Interval + quiet hours + dedup |

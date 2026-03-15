@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use std::str::FromStr;
@@ -7,6 +8,27 @@ use std::str::FromStr;
 use crate::policy::ExecutionPolicy;
 use crate::provider::Provider;
 use crate::secrets_resolve::SecretRef;
+
+/// A credential value that can be either a plain env var name (legacy) or a full SecretRef.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CredentialValue {
+    /// Legacy: bare string = env var name (backward compat)
+    EnvVar(String),
+    /// Full SecretRef (env, file, exec)
+    Ref(SecretRef),
+}
+
+impl CredentialValue {
+    pub fn resolve(&self) -> Result<String> {
+        match self {
+            CredentialValue::EnvVar(var) => {
+                std::env::var(var).with_context(|| format!("Env var {var} not set"))
+            }
+            CredentialValue::Ref(sr) => sr.resolve(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -41,7 +63,7 @@ pub struct Config {
     #[serde(default)]
     pub gateway: GatewayConfig,
     #[serde(default)]
-    pub credentials: std::collections::HashMap<String, String>,
+    pub credentials: HashMap<String, CredentialValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +204,7 @@ pub struct DebugConfig {
 pub struct SecurityConfig {
     pub secret_detection: bool,
     pub blocked_paths: Vec<String>,
+    pub host_audit: bool,
 }
 
 impl Default for LlmConfig {
@@ -270,6 +293,7 @@ impl Default for SecurityConfig {
                 "credentials".into(),
                 "private_key".into(),
             ],
+            host_audit: true,
         }
     }
 }
@@ -376,6 +400,7 @@ impl Config {
              conversation.max_iterations = {}\n  \
              conversation.show_thinking = {}\n  \
              security.secret_detection = {}\n  \
+             security.host_audit = {}\n  \
              budget.monthly_token_limit = {}\n  \
              budget.warning_threshold = {}",
             self.llm.model,
@@ -389,6 +414,7 @@ impl Config {
             self.conversation.max_iterations,
             self.conversation.show_thinking,
             self.security.secret_detection,
+            self.security.host_audit,
             self.budget.monthly_token_limit,
             self.budget.warning_threshold,
         )
@@ -472,6 +498,13 @@ impl Config {
                 self.security.secret_detection = v;
                 Ok(format!("security.secret_detection = {v}"))
             }
+            "security.host_audit" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for host_audit")?;
+                self.security.host_audit = v;
+                Ok(format!("security.host_audit = {v}"))
+            }
             "budget.monthly_token_limit" => {
                 let v: u64 = value
                     .parse()
@@ -493,7 +526,7 @@ impl Config {
                 "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
                  sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled, \
                  skills.max_context_tokens, conversation.max_iterations, conversation.show_thinking, \
-                 security.secret_detection, budget.monthly_token_limit, budget.warning_threshold"
+                 security.secret_detection, security.host_audit, budget.monthly_token_limit, budget.warning_threshold"
             ),
         }
     }
@@ -611,6 +644,21 @@ impl Config {
         // Fall back to single key via resolve_provider
         let (provider, key) = self.resolve_provider()?;
         Ok((provider, vec![key]))
+    }
+
+    /// Resolve all credentials to their plaintext values.
+    /// Logs warnings for credentials that fail to resolve.
+    pub fn resolve_credentials(&self) -> HashMap<String, String> {
+        self.credentials
+            .iter()
+            .filter_map(|(name, cv)| match cv.resolve() {
+                Ok(v) => Some((name.clone(), v)),
+                Err(e) => {
+                    tracing::warn!("Failed to resolve credential '{name}': {e}");
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -1122,8 +1170,10 @@ model = "test-model"
         ];
         cfg.user.name = Some("Test".to_string());
         cfg.user.agent_name = Some("Buddy".to_string());
-        cfg.credentials
-            .insert("test".to_string(), "value".to_string());
+        cfg.credentials.insert(
+            "test".to_string(),
+            CredentialValue::EnvVar("value".to_string()),
+        );
         cfg.budget.monthly_token_limit = 1_000_000;
 
         let serialized = toml::to_string_pretty(&cfg).expect("serialize");
@@ -1215,5 +1265,93 @@ request_timeout_ms = 120000
         assert_eq!(cfg.llm.model, "anthropic/claude-sonnet-4");
         assert_eq!(cfg.llm.api_key_env, "OPENROUTER_API_KEY");
         assert!(cfg.llm.api_key.is_none());
+    }
+
+    #[test]
+    fn parse_credentials_legacy_string() {
+        let toml_str = r#"
+[credentials]
+JIRA_API_TOKEN = "JIRA_API_TOKEN"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(cfg.credentials.contains_key("JIRA_API_TOKEN"));
+        if let CredentialValue::EnvVar(var) = &cfg.credentials["JIRA_API_TOKEN"] {
+            assert_eq!(var, "JIRA_API_TOKEN");
+        } else {
+            panic!("expected EnvVar variant for legacy string");
+        }
+    }
+
+    #[test]
+    fn parse_credentials_secret_ref() {
+        let toml_str = r#"
+[credentials]
+SLACK_TOKEN = { source = "exec", command = "echo", args = ["slack-secret"] }
+GH_TOKEN = { source = "file", path = "/tmp/token" }
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(cfg.credentials.contains_key("SLACK_TOKEN"));
+        assert!(cfg.credentials.contains_key("GH_TOKEN"));
+        if let CredentialValue::Ref(SecretRef::Exec { command, .. }) =
+            &cfg.credentials["SLACK_TOKEN"]
+        {
+            assert_eq!(command, "echo");
+        } else {
+            panic!("expected Ref(Exec) variant");
+        }
+    }
+
+    #[test]
+    fn resolve_credentials_filters_failures() {
+        let mut cfg = Config::default();
+        cfg.credentials.insert(
+            "GOOD".to_string(),
+            CredentialValue::Ref(SecretRef::Exec {
+                command: "echo".to_string(),
+                args: vec!["good-value".to_string()],
+            }),
+        );
+        cfg.credentials.insert(
+            "BAD".to_string(),
+            CredentialValue::EnvVar("DEFINITELY_NOT_SET_XYZ_12345".to_string()),
+        );
+        let resolved = cfg.resolve_credentials();
+        assert_eq!(resolved.get("GOOD").unwrap(), "good-value");
+        assert!(!resolved.contains_key("BAD"));
+    }
+
+    #[test]
+    fn credential_value_round_trip() {
+        let mut cfg = Config::default();
+        cfg.credentials.insert(
+            "LEGACY".to_string(),
+            CredentialValue::EnvVar("MY_VAR".to_string()),
+        );
+        cfg.credentials.insert(
+            "EXEC_CRED".to_string(),
+            CredentialValue::Ref(SecretRef::Exec {
+                command: "security".to_string(),
+                args: vec!["find-generic-password".to_string(), "-w".to_string()],
+            }),
+        );
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        let parsed: Config = toml::from_str(&serialized).expect("deserialize");
+        assert!(parsed.credentials.contains_key("LEGACY"));
+        assert!(parsed.credentials.contains_key("EXEC_CRED"));
+    }
+
+    #[test]
+    fn parse_credentials_secret_ref_env_variant() {
+        let toml_str = r#"
+[credentials]
+MY_KEY = { source = "env", var = "MY_KEY_VAR" }
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        match &cfg.credentials["MY_KEY"] {
+            CredentialValue::Ref(SecretRef::Env { var }) => {
+                assert_eq!(var, "MY_KEY_VAR");
+            }
+            other => panic!("expected Ref(Env), got {other:?}"),
+        }
     }
 }
