@@ -2324,6 +2324,7 @@ dependencies = [
  "tamagotchi-core",
  "tamagotchi-heartbeat",
  "tamagotchi-tools",
+ "tempfile",
  "textwrap",
  "tokio",
  "tokio-util",

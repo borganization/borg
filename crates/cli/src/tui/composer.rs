@@ -1,6 +1,6 @@
 use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::widgets::Block;
 use ratatui::Frame;
 use tui_textarea::TextArea;
@@ -82,7 +82,6 @@ impl InputHistory {
 
 pub struct Composer<'a> {
     textarea: TextArea<'a>,
-    disabled: bool,
     history: InputHistory,
 }
 
@@ -98,36 +97,11 @@ impl<'a> Composer<'a> {
         );
         Self {
             textarea,
-            disabled: false,
             history: InputHistory::new(),
         }
     }
 
-    pub fn set_disabled(&mut self, disabled: bool) {
-        self.disabled = disabled;
-        let border_color = if disabled {
-            theme::DIM_WHITE
-        } else {
-            theme::BORDER
-        };
-        self.textarea.set_block(
-            Block::bordered()
-                .title(format!("{} ", theme::INPUT_PROMPT))
-                .border_style(Style::default().fg(border_color)),
-        );
-        if disabled {
-            self.textarea.set_cursor_style(Style::default());
-        } else {
-            self.textarea
-                .set_cursor_style(Style::default().bg(Color::White).fg(Color::Black));
-        }
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<String> {
-        if self.disabled {
-            return None;
-        }
-
         use crossterm::event::{KeyCode, KeyModifiers};
 
         match (key.code, key.modifiers) {
@@ -159,6 +133,30 @@ impl<'a> Composer<'a> {
                 None
             }
             (KeyCode::Down, KeyModifiers::NONE) if self.history.is_browsing() => {
+                match self.history.down() {
+                    Some(Some(entry)) => {
+                        let entry = entry.to_string();
+                        self.set_text(&entry);
+                    }
+                    Some(None) => {
+                        let draft = self.history.draft().to_string();
+                        self.set_text(&draft);
+                    }
+                    None => {}
+                }
+                None
+            }
+            // Ctrl+P — emacs-style history back (same as Up when single-line)
+            (KeyCode::Char('p'), m) if m.contains(KeyModifiers::CONTROL) && self.is_single_line() => {
+                let current = self.textarea.lines().join("\n");
+                if let Some(entry) = self.history.up(&current) {
+                    let entry = entry.to_string();
+                    self.set_text(&entry);
+                }
+                None
+            }
+            // Ctrl+N — emacs-style history forward (same as Down when browsing)
+            (KeyCode::Char('n'), m) if m.contains(KeyModifiers::CONTROL) && self.history.is_browsing() => {
                 match self.history.down() {
                     Some(Some(entry)) => {
                         let entry = entry.to_string();
