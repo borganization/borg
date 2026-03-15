@@ -27,6 +27,7 @@ const BUILTIN_NOTES: &str = include_str!("../skills/notes/SKILL.md");
 const BUILTIN_CALENDAR: &str = include_str!("../skills/calendar/SKILL.md");
 const BUILTIN_1PASSWORD: &str = include_str!("../skills/1password/SKILL.md");
 const BUILTIN_BROWSER: &str = include_str!("../skills/browser/SKILL.md");
+const BUILTIN_SCHEDULER: &str = include_str!("../skills/scheduler/SKILL.md");
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SkillSource {
@@ -192,6 +193,7 @@ pub fn load_all_skills(
         BUILTIN_CALENDAR,
         BUILTIN_1PASSWORD,
         BUILTIN_BROWSER,
+        BUILTIN_SCHEDULER,
     ];
 
     let mut skills: Vec<Skill> = Vec::new();
@@ -436,6 +438,7 @@ Body here.
             ("calendar", BUILTIN_CALENDAR),
             ("1password", BUILTIN_1PASSWORD),
             ("browser", BUILTIN_BROWSER),
+            ("scheduler", BUILTIN_SCHEDULER),
         ] {
             let (manifest, body) = parse_skill_md(content)
                 .unwrap_or_else(|e| panic!("Built-in skill '{name}' failed to parse: {e}"));
@@ -489,6 +492,7 @@ Short body.
         assert!(names.contains(&"calendar"));
         assert!(names.contains(&"1password"));
         assert!(names.contains(&"browser"));
+        assert!(names.contains(&"scheduler"));
     }
 
     #[test]

@@ -77,8 +77,16 @@ const COMMANDS: &[SlashCommandDef] = &[
         description: "Integration marketplace",
     },
     SlashCommandDef {
+        name: "/schedule-tasks",
+        description: "Manage scheduled tasks",
+    },
+    SlashCommandDef {
         name: "/logs",
         description: "Show recent logs",
+    },
+    SlashCommandDef {
+        name: "/plan",
+        description: "Send message in plan mode (review before proceeding)",
     },
 ];
 

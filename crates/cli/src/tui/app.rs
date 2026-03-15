@@ -19,6 +19,8 @@ use super::composer::Composer;
 use super::customize_popup::{CustomizeAction, CustomizePopup};
 use super::history::{ApprovalStatus, HistoryCell};
 use super::layout;
+use super::plan_overlay::{PlanOption, PlanOverlay};
+use super::schedule_popup::{ScheduleAction, SchedulePopup};
 use super::settings_popup::SettingsPopup;
 use super::spinner;
 use super::theme;
@@ -31,6 +33,7 @@ pub enum AppState {
     AwaitingApproval {
         respond: Option<oneshot::Sender<bool>>,
     },
+    PlanReview,
 }
 
 pub enum AppAction {
@@ -60,6 +63,12 @@ pub enum AppAction {
     RunCustomize {
         actions: Vec<CustomizeAction>,
     },
+    PlanProceed {
+        clear_context: bool,
+    },
+    RunScheduleActions {
+        actions: Vec<ScheduleAction>,
+    },
 }
 
 pub struct App<'a> {
@@ -83,6 +92,11 @@ pub struct App<'a> {
     pub queued_messages: VecDeque<String>,
     /// Whether the last agent turn ended with an error (pauses queue drain)
     pub last_turn_errored: bool,
+    /// Whether the "[queue paused]" message has already been shown (prevents duplicates)
+    pub queue_pause_notified: bool,
+    pub plan_overlay: PlanOverlay,
+    pub plan_mode: bool,
+    pub schedule_popup: SchedulePopup,
 }
 
 impl<'a> App<'a> {
@@ -105,6 +119,10 @@ impl<'a> App<'a> {
             session_completion_tokens: 0,
             queued_messages: VecDeque::new(),
             last_turn_errored: false,
+            queue_pause_notified: false,
+            plan_overlay: PlanOverlay::new(),
+            plan_mode: false,
+            schedule_popup: SchedulePopup::new(),
         }
     }
 
@@ -137,6 +155,47 @@ impl<'a> App<'a> {
                 }
                 _ => {}
             },
+            AppState::PlanReview => {
+                match key.code {
+                    KeyCode::BackTab => {
+                        self.plan_overlay.cycle();
+                    }
+                    KeyCode::Char('1') => {
+                        self.plan_overlay.select(PlanOption::ClearAndProceed);
+                    }
+                    KeyCode::Char('2') => {
+                        self.plan_overlay.select(PlanOption::ProceedWithContext);
+                    }
+                    KeyCode::Char('3') => {
+                        self.plan_overlay.select(PlanOption::TypeFeedback);
+                    }
+                    KeyCode::Enter => {
+                        let selected = self.plan_overlay.selected();
+                        self.plan_overlay.dismiss();
+                        self.state = AppState::Idle;
+                        match selected {
+                            PlanOption::ClearAndProceed => {
+                                return Ok(AppAction::PlanProceed {
+                                    clear_context: true,
+                                });
+                            }
+                            PlanOption::ProceedWithContext => {
+                                return Ok(AppAction::PlanProceed {
+                                    clear_context: false,
+                                });
+                            }
+                            PlanOption::TypeFeedback => {
+                                // Dismiss to idle so user can type feedback
+                            }
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.plan_overlay.dismiss();
+                        self.state = AppState::Idle;
+                    }
+                    _ => {}
+                }
+            }
             AppState::Streaming { .. } => {
                 if key.code == KeyCode::Esc
                     || (key.code == KeyCode::Char('c')
@@ -157,6 +216,7 @@ impl<'a> App<'a> {
                     self.cells.push(HistoryCell::System {
                         text: "[interrupted]".to_string(),
                     });
+                    self.plan_mode = false;
                     self.state = AppState::Idle;
                 } else if key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::ALT) {
                     // Pop last queued message back into composer for editing
@@ -182,6 +242,28 @@ impl<'a> App<'a> {
                     return Ok(AppAction::Quit);
                 }
 
+                // Handle error-paused queue: Enter resumes, Esc clears
+                if self.last_turn_errored && !self.queued_messages.is_empty() {
+                    match key.code {
+                        KeyCode::Enter => {
+                            self.last_turn_errored = false;
+                            self.queue_pause_notified = false;
+                            if let Some(queued) = self.queued_messages.pop_front() {
+                                return self.handle_submit(&queued);
+                            }
+                            return Ok(AppAction::Continue);
+                        }
+                        KeyCode::Esc => {
+                            self.last_turn_errored = false;
+                            self.queue_pause_notified = false;
+                            self.queued_messages.clear();
+                            self.push_system_message("[queue cleared]".to_string());
+                            return Ok(AppAction::Continue);
+                        }
+                        _ => {}
+                    }
+                }
+
                 // Ctrl+L — clear visual transcript
                 if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.cells.clear();
@@ -203,6 +285,17 @@ impl<'a> App<'a> {
                     return Ok(AppAction::LaunchExternalEditor);
                 }
 
+                // Shift+Tab — toggle plan mode
+                if key.code == KeyCode::BackTab {
+                    self.plan_mode = !self.plan_mode;
+                    if self.plan_mode {
+                        self.push_system_message("[plan mode on]".to_string());
+                    } else {
+                        self.push_system_message("[plan mode off]".to_string());
+                    }
+                    return Ok(AppAction::Continue);
+                }
+
                 if self.settings_popup.is_visible() {
                     if let Some(action) = self.settings_popup.handle_key(key, &mut self.config)? {
                         return Ok(action);
@@ -213,6 +306,13 @@ impl<'a> App<'a> {
                 if self.customize_popup.is_visible() {
                     if let Some(actions) = self.customize_popup.handle_key(key) {
                         return Ok(AppAction::RunCustomize { actions });
+                    }
+                    return Ok(AppAction::Continue);
+                }
+
+                if self.schedule_popup.is_visible() {
+                    if let Some(actions) = self.schedule_popup.handle_key(key) {
+                        return Ok(AppAction::RunScheduleActions { actions });
                     }
                     return Ok(AppAction::Continue);
                 }
@@ -280,6 +380,7 @@ impl<'a> App<'a> {
                          Tab          — Queue message while streaming\n  \
                          Alt+Up       — Edit last queued message\n  \
                          Ctrl+C       — Cancel / Quit\n  \
+                         Shift+Tab    — Toggle plan mode\n  \
                          PageUp/Down  — Scroll transcript\n  \
                          /            — Show command menu"
                             .to_string(),
@@ -358,7 +459,9 @@ impl<'a> App<'a> {
                      /load <id> - Load a saved session\n  \
                      /new       - Start new session\n  \
                      /customize - Integration marketplace\n  \
+                     /schedule-tasks - Manage scheduled tasks\n  \
                      /logs      - Show recent logs\n  \
+                     /plan      - Send message in plan mode\n  \
                      quit/exit  - Exit"
                         .to_string(),
                 );
@@ -478,6 +581,10 @@ impl<'a> App<'a> {
                 }
                 return Ok(AppAction::Continue);
             }
+            "/schedule-tasks" => {
+                self.schedule_popup.show();
+                return Ok(AppAction::Continue);
+            }
             "/compact" => {
                 return Ok(AppAction::CompactHistory);
             }
@@ -506,6 +613,26 @@ impl<'a> App<'a> {
                 return Ok(AppAction::NewSession);
             }
             _ => {}
+        }
+
+        // /plan — toggle plan mode or send message in plan mode
+        if trimmed == "/plan" {
+            self.plan_mode = !self.plan_mode;
+            if self.plan_mode {
+                self.push_system_message("[plan mode on]".to_string());
+            } else {
+                self.push_system_message("[plan mode off]".to_string());
+            }
+            return Ok(AppAction::Continue);
+        }
+        if let Some(rest) = trimmed.strip_prefix("/plan ") {
+            self.plan_mode = true;
+            let message = rest.trim();
+            if message.is_empty() {
+                self.push_system_message("[plan mode on]".to_string());
+                return Ok(AppAction::Continue);
+            }
+            return self.handle_submit(message);
         }
 
         // Prefix command: /memory cleanup — list memory files for cleanup
@@ -706,7 +833,21 @@ impl<'a> App<'a> {
                     }
                 }
                 self.last_turn_errored = false;
-                self.state = AppState::Idle;
+                self.queue_pause_notified = false;
+                if self.plan_mode {
+                    self.plan_mode = false;
+                    let pct = self.compute_context_pct();
+                    let name = self
+                        .config
+                        .user
+                        .agent_name
+                        .clone()
+                        .unwrap_or_else(|| "Tamagotchi".to_string());
+                    self.plan_overlay.show(pct, name);
+                    self.state = AppState::PlanReview;
+                } else {
+                    self.state = AppState::Idle;
+                }
             }
             AgentEvent::Error(e) => {
                 self.cells.push(HistoryCell::System {
@@ -719,6 +860,7 @@ impl<'a> App<'a> {
                     }
                 }
                 self.last_turn_errored = true;
+                self.plan_mode = false;
                 self.state = AppState::Idle;
             }
         }
@@ -733,6 +875,7 @@ impl<'a> App<'a> {
                 break;
             }
         }
+        self.plan_mode = false;
         if !matches!(self.state, AppState::Idle) {
             self.state = AppState::Idle;
         }
@@ -766,9 +909,20 @@ impl<'a> App<'a> {
         }
         self.composer.render(frame, app_layout.composer);
         self.render_footer(frame, app_layout.footer);
+        self.plan_overlay.render(frame, app_layout.composer);
         self.command_popup.render(frame, app_layout.composer);
         self.settings_popup.render(frame, &self.config);
         self.customize_popup.render(frame);
+        self.schedule_popup.render(frame);
+    }
+
+    fn compute_context_pct(&self) -> u8 {
+        let max = self.config.conversation.max_history_tokens;
+        if max == 0 {
+            return 0;
+        }
+        let used = self.session_prompt_tokens + self.session_completion_tokens;
+        ((used as f64 / max as f64) * 100.0).min(100.0) as u8
     }
 
     fn render_transcript(&mut self, frame: &mut Frame, area: Rect) {
@@ -841,6 +995,10 @@ impl<'a> App<'a> {
                 format!(" {} Approval needed — press y or n", theme::BULLET),
                 theme::error_style(),
             )]),
+            AppState::PlanReview => Line::from(vec![Span::styled(
+                format!(" {} Plan ready — choose an action", theme::BULLET),
+                theme::tool_style(),
+            )]),
             AppState::Idle => Line::default(),
         };
         frame.render_widget(Paragraph::new(line), area);
@@ -858,6 +1016,9 @@ impl<'a> App<'a> {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let left = match &self.state {
+            AppState::Idle if self.plan_mode => {
+                "[plan]  •  shift+tab to toggle off  •  ? for shortcuts".to_string()
+            }
             AppState::Idle => "? for shortcuts  •  quit to exit".to_string(),
             AppState::Streaming { .. } => {
                 let count = self.queued_messages.len();
@@ -868,6 +1029,9 @@ impl<'a> App<'a> {
                 }
             }
             AppState::AwaitingApproval { .. } => "y to approve  •  n to deny".to_string(),
+            AppState::PlanReview => {
+                "shift+tab: cycle  •  1-3: jump  •  enter: confirm  •  esc: dismiss".to_string()
+            }
         };
         let line = Line::from(Span::styled(format!(" {left}"), theme::dim()));
         frame.render_widget(Paragraph::new(line), area);
@@ -899,7 +1063,13 @@ impl<'a> App<'a> {
         let shown = count.min(3);
         for msg in self.queued_messages.iter().take(shown) {
             let truncated = if msg.len() > 60 {
-                format!("{}...", &msg[..57])
+                let end = msg
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .take_while(|&i| i <= 57)
+                    .last()
+                    .unwrap_or(0);
+                format!("{}...", &msg[..end])
             } else {
                 msg.clone()
             };

@@ -27,6 +27,22 @@ use tamagotchi_tools::registry::ToolRegistry;
 /// Max tokens for tool output before truncation (head + tail preserved).
 const TOOL_OUTPUT_MAX_TOKENS: usize = 4000;
 
+/// Check integrity of a customization-installed tool. Returns a block message if tampered.
+fn check_tool_integrity(name: &str) -> Option<String> {
+    let db = Database::open().ok()?;
+    let cust_id = db.get_tool_customization_id(name).ok()??;
+    let data_dir = Config::data_dir().ok()?;
+    let result = crate::integrity::verify_integrity(&db, &cust_id, &data_dir).ok()?;
+    if result.ok {
+        return None;
+    }
+    let tampered_files = [&result.tampered[..], &result.missing[..]].concat();
+    Some(format!(
+        "Blocked: tool '{name}' failed integrity check. Tampered files: {}. Re-install via /customize to fix.",
+        tampered_files.join(", ")
+    ))
+}
+
 /// Strip `<internal>...</internal>` blocks from text to prevent chain-of-thought leakage.
 fn strip_internal_tags(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
@@ -926,59 +942,143 @@ impl Agent {
                     Err(e) => Ok(format!("Error searching: {e}")),
                 }
             }
-            "schedule_task" => {
-                let task_name = require_str_param(&args, "name")?;
-                let prompt = require_str_param(&args, "prompt")?;
-                let schedule_type = args["schedule_type"].as_str().unwrap_or("interval");
-                let schedule_expr = require_str_param(&args, "schedule_expr")?;
-                let timezone = args["timezone"].as_str().unwrap_or("local");
-                let next_run = match tasks::calculate_next_run(schedule_type, schedule_expr) {
-                    Ok(nr) => nr,
-                    Err(e) => return Ok(format!("Error: Invalid schedule: {e}")),
-                };
-                let id = uuid::Uuid::new_v4().to_string();
-                match Database::open() {
-                    Ok(db) => match db.create_task(&crate::db::NewTask {
-                        id: &id,
-                        name: task_name,
-                        prompt,
-                        schedule_type,
-                        schedule_expr,
-                        timezone,
-                        next_run,
-                    }) {
-                        Ok(()) => Ok(format!(
-                            "Scheduled task created: {task_name} (id: {})",
-                            &id[..8]
-                        )),
-                        Err(e) => Ok(format!("Error creating task: {e}")),
-                    },
-                    Err(e) => Ok(format!("Error opening database: {e}")),
+            "manage_tasks" => {
+                if !self.config.tasks.enabled {
+                    return Ok(
+                        "Task scheduling is disabled. Enable it in config: tasks.enabled = true"
+                            .to_string(),
+                    );
                 }
-            }
-            "list_scheduled_tasks" => match Database::open() {
-                Ok(db) => match db.list_tasks() {
-                    Ok(tl) if tl.is_empty() => Ok("No scheduled tasks.".to_string()),
-                    Ok(tl) => Ok(tl
-                        .iter()
-                        .map(tasks::format_task)
-                        .collect::<Vec<_>>()
-                        .join("\n\n")),
-                    Err(e) => Ok(format!("Error listing tasks: {e}")),
-                },
-                Err(e) => Ok(format!("Error opening database: {e}")),
-            },
-            "pause_task" => {
-                let task_id = require_str_param(&args, "task_id")?;
-                update_task_status(task_id, "paused", "paused")
-            }
-            "resume_task" => {
-                let task_id = require_str_param(&args, "task_id")?;
-                update_task_status(task_id, "active", "resumed")
-            }
-            "cancel_task" => {
-                let task_id = require_str_param(&args, "task_id")?;
-                update_task_status(task_id, "cancelled", "cancelled")
+                let action = require_str_param(&args, "action")?;
+                match action {
+                    "create" => {
+                        let task_name = require_str_param(&args, "name")?;
+                        let prompt = require_str_param(&args, "prompt")?;
+                        let schedule_type = args["schedule_type"].as_str().unwrap_or("interval");
+                        let schedule_expr = require_str_param(&args, "schedule_expr")?;
+                        let timezone = args["timezone"].as_str().unwrap_or("local");
+                        if let Err(e) = tasks::validate_schedule(schedule_type, schedule_expr) {
+                            return Ok(format!("Error: Invalid schedule: {e}"));
+                        }
+                        let next_run = match tasks::calculate_next_run(schedule_type, schedule_expr) {
+                            Ok(nr) => nr,
+                            Err(e) => return Ok(format!("Error: Invalid schedule: {e}")),
+                        };
+                        let id = uuid::Uuid::new_v4().to_string();
+                        match Database::open() {
+                            Ok(db) => match db.create_task(&crate::db::NewTask {
+                                id: &id,
+                                name: task_name,
+                                prompt,
+                                schedule_type,
+                                schedule_expr,
+                                timezone,
+                                next_run,
+                            }) {
+                                Ok(()) => Ok(format!(
+                                    "Scheduled task created: {task_name} (id: {})",
+                                    &id[..8]
+                                )),
+                                Err(e) => Ok(format!("Error creating task: {e}")),
+                            },
+                            Err(e) => Ok(format!("Error opening database: {e}")),
+                        }
+                    }
+                    "list" => match Database::open() {
+                        Ok(db) => match db.list_tasks() {
+                            Ok(tl) if tl.is_empty() => Ok("No scheduled tasks.".to_string()),
+                            Ok(tl) => Ok(tl
+                                .iter()
+                                .map(tasks::format_task)
+                                .collect::<Vec<_>>()
+                                .join("\n\n")),
+                            Err(e) => Ok(format!("Error listing tasks: {e}")),
+                        },
+                        Err(e) => Ok(format!("Error opening database: {e}")),
+                    },
+                    "get" => {
+                        let task_id = require_str_param(&args, "task_id")?;
+                        match Database::open() {
+                            Ok(db) => match db.get_task_by_id(task_id) {
+                                Ok(Some(task)) => {
+                                    let mut output = tasks::format_task(&task);
+                                    if let Ok(Some(run)) = db.last_task_run(task_id) {
+                                        let status = if run.error.is_some() { "error" } else { "ok" };
+                                        let when = chrono::DateTime::from_timestamp(run.started_at, 0)
+                                            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                                            .unwrap_or_else(|| run.started_at.to_string());
+                                        output.push_str(&format!("\n    Last run: {status} at {when} ({} ms)", run.duration_ms));
+                                    }
+                                    Ok(output)
+                                }
+                                Ok(None) => Ok(format!("Task {task_id} not found.")),
+                                Err(e) => Ok(format!("Error: {e}")),
+                            },
+                            Err(e) => Ok(format!("Error opening database: {e}")),
+                        }
+                    }
+                    "update" => {
+                        let task_id = require_str_param(&args, "task_id")?;
+                        let update = crate::db::UpdateTask {
+                            name: args["name"].as_str(),
+                            prompt: args["prompt"].as_str(),
+                            schedule_type: args["schedule_type"].as_str(),
+                            schedule_expr: args["schedule_expr"].as_str(),
+                            timezone: args["timezone"].as_str(),
+                        };
+                        if let Some(st) = update.schedule_type {
+                            let expr = update.schedule_expr.unwrap_or("");
+                            if let Err(e) = tasks::validate_schedule(st, expr) {
+                                return Ok(format!("Error: Invalid schedule: {e}"));
+                            }
+                        } else if let Some(expr) = update.schedule_expr {
+                            match Database::open() {
+                                Ok(db) => match db.get_task_by_id(task_id) {
+                                    Ok(Some(existing)) => {
+                                        if let Err(e) = tasks::validate_schedule(&existing.schedule_type, expr) {
+                                            return Ok(format!("Error: Invalid schedule: {e}"));
+                                        }
+                                    }
+                                    Ok(None) => return Ok(format!("Task {task_id} not found.")),
+                                    Err(e) => return Ok(format!("Error: {e}")),
+                                },
+                                Err(e) => return Ok(format!("Error opening database: {e}")),
+                            }
+                        }
+                        match Database::open() {
+                            Ok(db) => match db.update_task(task_id, &update) {
+                                Ok(true) => Ok(format!("Task {task_id} updated.")),
+                                Ok(false) => Ok(format!("Task {task_id} not found.")),
+                                Err(e) => Ok(format!("Error: {e}")),
+                            },
+                            Err(e) => Ok(format!("Error opening database: {e}")),
+                        }
+                    }
+                    "pause" => {
+                        let task_id = require_str_param(&args, "task_id")?;
+                        update_task_status(task_id, "paused", "paused")
+                    }
+                    "resume" => {
+                        let task_id = require_str_param(&args, "task_id")?;
+                        update_task_status(task_id, "active", "resumed")
+                    }
+                    "cancel" => {
+                        let task_id = require_str_param(&args, "task_id")?;
+                        update_task_status(task_id, "cancelled", "cancelled")
+                    }
+                    "delete" => {
+                        let task_id = require_str_param(&args, "task_id")?;
+                        match Database::open() {
+                            Ok(db) => match db.delete_task(task_id) {
+                                Ok(true) => Ok(format!("Task {task_id} deleted.")),
+                                Ok(false) => Ok(format!("Task {task_id} not found.")),
+                                Err(e) => Ok(format!("Error: {e}")),
+                            },
+                            Err(e) => Ok(format!("Error opening database: {e}")),
+                        }
+                    }
+                    other => Ok(format!("Unknown action: {other}. Use: create, list, get, update, pause, resume, cancel, delete.")),
+                }
             }
             "read_pdf" => {
                 let file_path = require_str_param(&args, "file_path")?;
@@ -1030,24 +1130,8 @@ impl Agent {
                 Ok(report.format())
             }
             _ => {
-                // Integrity check for customization-installed tools
-                if let Ok(db) = crate::db::Database::open() {
-                    if let Ok(Some(cust_id)) = db.get_tool_customization_id(name) {
-                        if let Ok(data_dir) = Config::data_dir() {
-                            if let Ok(result) =
-                                crate::integrity::verify_integrity(&db, &cust_id, &data_dir)
-                            {
-                                if !result.ok {
-                                    let tampered_files =
-                                        [&result.tampered[..], &result.missing[..]].concat();
-                                    return Ok(format!(
-                                        "Blocked: tool '{}' failed integrity check. Tampered files: {}. Re-install via /customize to fix.",
-                                        name, tampered_files.join(", ")
-                                    ));
-                                }
-                            }
-                        }
-                    }
+                if let Some(block_msg) = check_tool_integrity(name) {
+                    return Ok(block_msg);
                 }
 
                 let cred_names = self.tool_registry.tool_credentials(name);
@@ -1245,15 +1329,7 @@ fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         defs.push(ToolDefinition::new("web_search", "Search the web and return results with titles, URLs, and snippets.", serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"The search query"}},"required":["query"]})));
     }
 
-    defs.push(ToolDefinition::new("schedule_task", "Create a scheduled task that runs automatically.", serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"A short name for the task"},"prompt":{"type":"string","description":"The prompt to execute on each run"},"schedule_type":{"type":"string","enum":["cron","interval","once"],"description":"Type of schedule"},"schedule_expr":{"type":"string","description":"Schedule expression (cron string or interval like '30m', '2h')"},"timezone":{"type":"string","description":"Timezone (default: 'local')","default":"local"}},"required":["name","prompt","schedule_type","schedule_expr"]})));
-    defs.push(ToolDefinition::new(
-        "list_scheduled_tasks",
-        "List all scheduled tasks with their status and next run time.",
-        serde_json::json!({"type":"object","properties":{}}),
-    ));
-    defs.push(ToolDefinition::new("pause_task", "Pause a scheduled task.", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string","description":"The task ID to pause"}},"required":["task_id"]})));
-    defs.push(ToolDefinition::new("resume_task", "Resume a paused scheduled task.", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string","description":"The task ID to resume"}},"required":["task_id"]})));
-    defs.push(ToolDefinition::new("cancel_task", "Cancel a scheduled task permanently.", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string","description":"The task ID to cancel"}},"required":["task_id"]})));
+    defs.push(ToolDefinition::new("manage_tasks", "Manage scheduled tasks. Actions: create, list, get, update, pause, resume, cancel, delete.", serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["create","list","get","update","pause","resume","cancel","delete"],"description":"Action to perform"},"task_id":{"type":"string","description":"Task ID (required for get/update/pause/resume/cancel/delete)"},"name":{"type":"string","description":"Task name (required for create, optional for update)"},"prompt":{"type":"string","description":"Prompt to execute (required for create, optional for update)"},"schedule_type":{"type":"string","enum":["cron","interval","once"],"description":"Schedule type (required for create, optional for update)"},"schedule_expr":{"type":"string","description":"Cron expression or interval (required for create, optional for update)"},"timezone":{"type":"string","description":"Timezone (default: local)"}},"required":["action"]})));
 
     if config.security.host_audit {
         defs.push(ToolDefinition::new(
