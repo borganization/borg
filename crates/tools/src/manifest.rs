@@ -15,6 +15,8 @@ pub struct ToolManifest {
     pub sandbox: SandboxSection,
     #[serde(default)]
     pub parameters: ParametersSection,
+    #[serde(default)]
+    pub credentials: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

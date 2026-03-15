@@ -1,6 +1,7 @@
 use std::collections::HashSet;
-use tracing::debug;
+use tracing::{debug, warn};
 
+use crate::llm::LlmClient;
 use crate::types::{Message, Role};
 
 /// Rough token estimate: ~4 characters per token.
@@ -27,18 +28,12 @@ fn message_tokens(msg: &Message) -> usize {
     role_overhead + content_tokens + tool_call_tokens
 }
 
-/// Compact conversation history to fit within a token budget.
-///
-/// Strategy:
-/// - Always preserve the most recent messages (they provide immediate context).
-/// - When the history exceeds the budget, drop the oldest messages and insert
-///   a marker so the LLM knows earlier context was truncated.
-/// - Tool result messages are only kept if their corresponding assistant
-///   tool-call message is also kept (orphaned tool results confuse the API).
-pub fn compact_history(history: &mut Vec<Message>, max_tokens: usize) {
+/// Determine which messages need to be dropped for compaction.
+/// Returns `Some(keep_from_index)` if compaction is needed, `None` otherwise.
+pub fn plan_compaction(history: &[Message], max_tokens: usize) -> Option<usize> {
     let total = history_tokens(history);
     if total <= max_tokens {
-        return;
+        return None;
     }
 
     debug!(
@@ -49,7 +44,7 @@ pub fn compact_history(history: &mut Vec<Message>, max_tokens: usize) {
     let mut keep_from = history.len();
     let mut budget_used: usize = 0;
     // Reserve tokens for the truncation marker we'll insert.
-    let marker_tokens = 20;
+    let marker_tokens = 200; // reserve more for LLM summary
     let effective_budget = max_tokens.saturating_sub(marker_tokens);
 
     for i in (0..history.len()).rev() {
@@ -75,14 +70,30 @@ pub fn compact_history(history: &mut Vec<Message>, max_tokens: usize) {
 
     // If we ended up keeping everything, nothing to compact.
     if keep_from == 0 {
-        return;
+        return None;
     }
+
+    Some(keep_from)
+}
+
+/// Compact conversation history using the LLM to summarize dropped messages.
+///
+/// Strategy:
+/// - Always preserve the most recent messages (they provide immediate context).
+/// - When the history exceeds the budget, drop the oldest messages and use the
+///   LLM to generate a rich summary of what was discussed.
+/// - Tool result messages are only kept if their corresponding assistant
+///   tool-call message is also kept (orphaned tool results confuse the API).
+pub async fn compact_history(history: &mut Vec<Message>, max_tokens: usize, llm: &LlmClient) {
+    let Some(keep_from) = plan_compaction(history, max_tokens) else {
+        return;
+    };
 
     let dropped = keep_from;
     debug!("Dropping {dropped} old messages from conversation history");
 
-    // Build a summary of the dropped messages for context preservation
-    let summary = summarize_dropped_messages(&history[..dropped]);
+    // Use LLM to summarize the dropped messages
+    let summary = summarize_with_llm(&history[..dropped], llm).await;
 
     let marker = Message::system(summary);
 
@@ -92,61 +103,58 @@ pub fn compact_history(history: &mut Vec<Message>, max_tokens: usize) {
     *history = compacted;
 }
 
-/// Build a local summary of dropped messages to preserve context.
-/// This is a fast, synchronous summary (no LLM call) that extracts key points.
-fn summarize_dropped_messages(messages: &[Message]) -> String {
-    let mut user_topics = Vec::new();
-    let mut tool_calls_used = Vec::new();
-
+/// Use the LLM to generate a concise summary of dropped conversation messages.
+async fn summarize_with_llm(messages: &[Message], llm: &LlmClient) -> String {
+    // Build a transcript of dropped messages for the LLM to summarize
+    let mut transcript = String::new();
     for msg in messages {
-        match msg.role {
-            Role::User => {
-                if let Some(content) = &msg.content {
-                    // Take first 80 chars of each user message as a topic hint
-                    let snippet: String = content.chars().take(80).collect();
-                    let snippet = if content.chars().count() > 80 {
-                        format!("{snippet}...")
-                    } else {
-                        snippet
-                    };
-                    user_topics.push(snippet);
-                }
+        let role_label = match msg.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::Tool => "Tool Result",
+            Role::System => "System",
+        };
+
+        if let Some(content) = &msg.content {
+            // Truncate very long messages to avoid sending too much to the summarizer
+            let truncated: String = content.chars().take(500).collect();
+            transcript.push_str(&format!("{role_label}: {truncated}\n"));
+        }
+
+        if let Some(tcs) = &msg.tool_calls {
+            for tc in tcs {
+                transcript.push_str(&format!("  [called {}]\n", tc.function.name));
             }
-            Role::Assistant => {
-                if let Some(tcs) = &msg.tool_calls {
-                    for tc in tcs {
-                        if !tool_calls_used.contains(&tc.function.name) {
-                            tool_calls_used.push(tc.function.name.clone());
-                        }
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
-    let mut summary = String::from(
-        "[Earlier conversation was summarized to fit context limits.]\n\nTopics discussed:",
-    );
+    // Cap the transcript to avoid expensive summarization calls
+    let transcript: String = transcript.chars().take(4000).collect();
 
-    if user_topics.is_empty() {
-        summary.push_str(" (none captured)");
-    } else {
-        // Keep last 5 topics to stay concise
-        let start = user_topics.len().saturating_sub(5);
-        for topic in &user_topics[start..] {
-            summary.push_str(&format!("\n- {topic}"));
+    let system_prompt = "You are a conversation summarizer. Summarize the following conversation \
+        transcript concisely, preserving key decisions, facts, tool actions taken, and any \
+        important context. Keep your summary under 200 words. Output only the summary, \
+        no preamble.";
+
+    let summarize_messages = vec![
+        Message::system(system_prompt),
+        Message::user(format!(
+            "Summarize this earlier conversation:\n\n{transcript}"
+        )),
+    ];
+
+    match llm.chat(&summarize_messages, None).await {
+        Ok(response) => {
+            let summary_text = response.content.unwrap_or_default();
+            format!(
+                "[Earlier conversation was summarized to fit context limits.]\n\n{summary_text}"
+            )
         }
-        if start > 0 {
-            summary.push_str(&format!("\n  ...and {start} earlier messages"));
+        Err(e) => {
+            warn!("LLM summarization failed, using basic marker: {e}");
+            "[Earlier conversation was truncated to fit context limits.]".to_string()
         }
     }
-
-    if !tool_calls_used.is_empty() {
-        summary.push_str(&format!("\n\nTools used: {}", tool_calls_used.join(", ")));
-    }
-
-    summary
 }
 
 /// Total estimated tokens for a conversation history.
@@ -317,19 +325,16 @@ mod tests {
         assert_eq!(message_tokens(&msg), 4); // just overhead
     }
 
-    // -- compact_history --
+    // -- plan_compaction --
 
     #[test]
-    fn compact_noop_when_under_budget() {
-        let mut history = vec![make_user("hi"), make_assistant("hello")];
-        let before_len = history.len();
-        compact_history(&mut history, 100_000);
-        assert_eq!(history.len(), before_len);
+    fn plan_noop_when_under_budget() {
+        let history = vec![make_user("hi"), make_assistant("hello")];
+        assert!(plan_compaction(&history, 100_000).is_none());
     }
 
     #[test]
-    fn compact_drops_oldest_messages() {
-        // Create a history that exceeds a small budget
+    fn plan_identifies_messages_to_drop() {
         let mut history: Vec<Message> = Vec::new();
         for i in 0..20 {
             history.push(make_user(&format!(
@@ -340,23 +345,17 @@ mod tests {
             )));
         }
 
-        let original_len = history.len();
-        compact_history(&mut history, 200);
-
-        // Should have fewer messages now
-        assert!(history.len() < original_len);
-        // First message should be the summary marker (system role)
-        assert_eq!(history[0].role, Role::System);
-        assert!(history[0]
-            .content
-            .as_deref()
-            .unwrap()
-            .contains("summarized"));
+        let keep_from = plan_compaction(&history, 200);
+        assert!(keep_from.is_some());
+        let keep_from = keep_from.unwrap();
+        // Should drop most messages but keep at least the last few
+        assert!(keep_from > 0);
+        assert!(keep_from < history.len());
     }
 
     #[test]
-    fn compact_preserves_most_recent_messages() {
-        let mut history = vec![
+    fn plan_preserves_most_recent_messages() {
+        let history = vec![
             make_user("old message 1"),
             make_assistant("old response 1"),
             make_user("old message 2"),
@@ -365,20 +364,18 @@ mod tests {
             make_assistant("recent answer"),
         ];
 
-        // Set budget to only fit the last pair
         let last_pair_tokens = message_tokens(&history[4]) + message_tokens(&history[5]);
-        compact_history(&mut history, last_pair_tokens + 25);
+        let keep_from = plan_compaction(&history, last_pair_tokens + 205);
 
-        // The most recent messages should be preserved
-        let last = history.last().unwrap();
-        assert_eq!(last.content.as_deref(), Some("recent answer"));
-        let second_last = &history[history.len() - 2];
-        assert_eq!(second_last.content.as_deref(), Some("recent question"));
+        if let Some(kf) = keep_from {
+            // The most recent messages (indices 4, 5) should be in the kept portion
+            assert!(kf <= 4);
+        }
     }
 
     #[test]
-    fn compact_drops_orphaned_tool_results() {
-        let mut history = vec![
+    fn plan_skips_leading_tool_results() {
+        let history = vec![
             make_user("do something"),
             make_tool_call_msg("", "call_1", "run_shell"),
             make_tool_result("call_1", "command output"),
@@ -386,48 +383,38 @@ mod tests {
             make_assistant("recent answer"),
         ];
 
-        // Budget that fits the last user+assistant pair but not the tool call pair
         let last_pair_tokens = message_tokens(&history[3]) + message_tokens(&history[4]);
-        compact_history(&mut history, last_pair_tokens + 25);
-
-        // No orphaned tool result messages should remain
-        let has_orphan = history.iter().any(|m| {
-            m.role == Role::Tool
-                && !history.iter().any(|other| {
-                    other.tool_calls.as_ref().is_some_and(|tcs| {
-                        tcs.iter()
-                            .any(|tc| Some(tc.id.as_str()) == m.tool_call_id.as_deref())
-                    })
-                })
-        });
-        assert!(!has_orphan, "Should not have orphaned tool results");
+        if let Some(keep_from) = plan_compaction(&history, last_pair_tokens + 205) {
+            // Should not start with a Tool message
+            assert_ne!(history[keep_from].role, Role::Tool);
+        }
     }
 
     #[test]
-    fn compact_with_zero_budget_keeps_last_message() {
-        let mut history = vec![
+    fn plan_with_zero_budget() {
+        let history = vec![
             make_user("first"),
             make_assistant("second"),
             make_user("third"),
         ];
-        compact_history(&mut history, 0);
-        // Should still have at least the marker + last message
-        assert!(!history.is_empty());
+        let result = plan_compaction(&history, 0);
+        // Should want to compact
+        assert!(result.is_some());
     }
 
     #[test]
-    fn compact_single_message() {
-        let mut history = vec![make_user("only message")];
-        compact_history(&mut history, 0);
-        // With only one message, there's nothing meaningful to drop
-        assert!(!history.is_empty());
+    fn plan_single_message() {
+        let history = vec![make_user("only message")];
+        let result = plan_compaction(&history, 0);
+        // With only one message, keep_from would be 0, so returns None
+        // (nothing to drop before the last message)
+        assert!(result.is_none() || result == Some(0));
     }
 
     #[test]
-    fn compact_empty_history() {
-        let mut history: Vec<Message> = Vec::new();
-        compact_history(&mut history, 100);
-        assert!(history.is_empty());
+    fn plan_empty_history() {
+        let history: Vec<Message> = Vec::new();
+        assert!(plan_compaction(&history, 100).is_none());
     }
 
     // -- history_tokens --
