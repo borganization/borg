@@ -63,7 +63,27 @@ pub struct Config {
     #[serde(default)]
     pub gateway: GatewayConfig,
     #[serde(default)]
+    pub customizations: CustomizationsConfig,
+    #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomizationsConfig {
+    pub enabled: bool,
+    pub auto_verify: bool,
+    pub max_parallel_installs: usize,
+}
+
+impl Default for CustomizationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_verify: true,
+            max_parallel_installs: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

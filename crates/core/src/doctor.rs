@@ -104,6 +104,9 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
     // Budget checks
     check_budget(config, &mut checks);
 
+    // Customizations checks
+    check_customizations(&mut checks);
+
     // Host security checks
     if config.security.host_audit {
         crate::host_audit::run_host_security_checks(&mut checks);
@@ -649,6 +652,62 @@ fn check_budget(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
                 category: "Budget",
                 name: "monthly usage".to_string(),
                 status: CheckStatus::Warn(format!("database unavailable: {e}")),
+            });
+        }
+    }
+}
+
+fn check_customizations(checks: &mut Vec<DiagnosticCheck>) {
+    match Database::open() {
+        Ok(db) => match db.list_customizations() {
+            Ok(customizations) => {
+                if customizations.is_empty() {
+                    checks.push(DiagnosticCheck {
+                        category: "Customizations",
+                        name: "installed integrations".to_string(),
+                        status: CheckStatus::Warn("none installed (use /customize)".to_string()),
+                    });
+                } else {
+                    let verified = customizations
+                        .iter()
+                        .filter(|c| c.verified_at.is_some())
+                        .count();
+                    checks.push(DiagnosticCheck {
+                        category: "Customizations",
+                        name: format!(
+                            "{} integration(s) installed, {verified} verified",
+                            customizations.len()
+                        ),
+                        status: CheckStatus::Pass,
+                    });
+
+                    for c in &customizations {
+                        let status = if c.verified_at.is_some() {
+                            CheckStatus::Pass
+                        } else {
+                            CheckStatus::Warn("not verified".to_string())
+                        };
+                        checks.push(DiagnosticCheck {
+                            category: "Customizations",
+                            name: format!("{} ({})", c.name, c.kind),
+                            status,
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                checks.push(DiagnosticCheck {
+                    category: "Customizations",
+                    name: "customizations table".to_string(),
+                    status: CheckStatus::Warn(format!("could not query: {e}")),
+                });
+            }
+        },
+        Err(e) => {
+            checks.push(DiagnosticCheck {
+                category: "Customizations",
+                name: "database".to_string(),
+                status: CheckStatus::Warn(format!("unavailable: {e}")),
             });
         }
     }

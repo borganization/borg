@@ -15,6 +15,7 @@ tamagotchi-core = { path = "../core" }
 tamagotchi-heartbeat = { path = "../heartbeat" }
 tamagotchi-tools = { path = "../tools" }
 tamagotchi-gateway = { path = "../gateway" }
+tamagotchi-customizations = { path = "../customizations" }
 tokio = { workspace = true }
 clap = { workspace = true }
 crossterm = { workspace = true }
