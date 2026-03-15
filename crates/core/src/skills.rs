@@ -128,7 +128,7 @@ fn load_builtin_skill(content: &str) -> Result<Skill> {
 }
 
 pub fn skills_dir() -> Result<PathBuf> {
-    Ok(Config::data_dir()?.join("skills"))
+    Config::skills_dir()
 }
 
 pub fn load_all_skills() -> Result<Vec<Skill>> {

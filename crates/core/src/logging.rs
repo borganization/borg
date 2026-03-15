@@ -40,7 +40,7 @@ struct LogToolCall {
 }
 
 fn log_dir() -> Result<PathBuf> {
-    let dir = Config::data_dir()?.join("logs");
+    let dir = Config::logs_dir()?;
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }

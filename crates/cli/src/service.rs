@@ -144,7 +144,7 @@ pub fn install_service() -> Result<()> {
     let binary_path = find_binary_path()?;
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-    let log_dir = Config::data_dir()?.join("logs");
+    let log_dir = Config::logs_dir()?;
     std::fs::create_dir_all(&log_dir)?;
 
     if cfg!(target_os = "macos") {

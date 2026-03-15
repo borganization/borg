@@ -473,9 +473,7 @@ impl<'a> App<'a> {
                     } else {
                         None
                     }
-                } else if len == 1
-                    && matches!(self.cells[0], HistoryCell::Thinking { .. })
-                {
+                } else if len == 1 && matches!(self.cells[0], HistoryCell::Thinking { .. }) {
                     Some(0)
                 } else {
                     None

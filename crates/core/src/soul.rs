@@ -28,7 +28,7 @@ You are a helpful, friendly AI personal assistant. You live on your owner's comp
 "#;
 
 pub fn soul_path() -> Result<PathBuf> {
-    Ok(Config::data_dir()?.join("SOUL.md"))
+    Config::soul_path()
 }
 
 pub fn load_soul() -> Result<String> {

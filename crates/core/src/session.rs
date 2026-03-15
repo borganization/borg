@@ -23,7 +23,7 @@ pub struct Session {
 }
 
 fn sessions_dir() -> Result<PathBuf> {
-    let dir = Config::data_dir()?.join("sessions");
+    let dir = Config::sessions_dir()?;
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
