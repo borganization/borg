@@ -15,6 +15,8 @@ use tracing::{info, warn};
 use tamagotchi_core::config::Config;
 
 use crate::handler;
+use crate::handler::InboundMessage;
+use crate::manifest::ChannelMode;
 use crate::registry::ChannelRegistry;
 
 struct AppState {
@@ -53,17 +55,139 @@ impl GatewayServer {
             .route("/channels", get(list_channels_handler))
             .route("/webhook/{name}", post(webhook_handler))
             .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
-            .with_state(state);
+            .with_state(state.clone());
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         info!("Gateway listening on {addr} with {channel_count} channel(s)");
 
+        // Spawn poll loops for poll-mode channels
+        let mut poll_handles = Vec::new();
+        for channel in state.registry.all_channels() {
+            if channel.manifest.settings.mode != ChannelMode::Poll {
+                continue;
+            }
+
+            let poll_interval_ms = channel.manifest.settings.poll_interval_ms.unwrap_or(5000);
+            let channel_name = channel.manifest.name.clone();
+            let channel_dir = channel.dir.clone();
+            let manifest = channel.manifest.clone();
+            let config = state.config.clone();
+            let shutdown = self.shutdown.clone();
+
+            info!(
+                "Starting poll loop for channel '{}' (interval: {}ms)",
+                channel_name, poll_interval_ms
+            );
+
+            let request_timeout = state.request_timeout;
+            let handle = tokio::spawn(async move {
+                let start =
+                    tokio::time::Instant::now() + Duration::from_millis(poll_interval_ms);
+                let mut interval =
+                    tokio::time::interval_at(start, Duration::from_millis(poll_interval_ms));
+
+                loop {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => {
+                            info!("Poll loop for '{}' shutting down", channel_name);
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let executor =
+                                crate::executor::ChannelExecutor::new(&manifest, &channel_dir);
+                            let blocked_paths = &config.security.blocked_paths;
+
+                            let input = serde_json::json!({
+                                "channel_dir": channel_dir.to_string_lossy(),
+                            });
+
+                            let poll_result = executor
+                                .poll(&input.to_string(), blocked_paths)
+                                .await;
+
+                            let output = match poll_result {
+                                Ok(o) => o,
+                                Err(e) => {
+                                    warn!("Poll error for '{}': {e}", channel_name);
+                                    continue;
+                                }
+                            };
+
+                            let trimmed = output.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+
+                            let messages: Vec<InboundMessage> =
+                                match serde_json::from_str(trimmed) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to parse poll output for '{}': {e}",
+                                            channel_name
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                            if messages.is_empty() {
+                                continue;
+                            }
+
+                            info!(
+                                "Poll for '{}' returned {} message(s)",
+                                channel_name,
+                                messages.len()
+                            );
+
+                            let reg_channel = crate::registry::RegisteredChannel {
+                                manifest: manifest.clone(),
+                                dir: channel_dir.clone(),
+                            };
+
+                            for msg in messages {
+                                let result = tokio::time::timeout(
+                                    request_timeout,
+                                    handler::handle_polled_message(
+                                        &reg_channel,
+                                        msg,
+                                        &config,
+                                    ),
+                                )
+                                .await;
+
+                                match result {
+                                    Ok(Err(e)) => warn!(
+                                        "Failed to handle polled message for '{}': {e}",
+                                        channel_name
+                                    ),
+                                    Err(_) => warn!(
+                                        "Polled message for '{}' timed out",
+                                        channel_name
+                                    ),
+                                    Ok(Ok(_)) => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            poll_handles.push(handle);
+        }
+
+        let shutdown = self.shutdown.clone();
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
-                self.shutdown.cancelled().await;
+                shutdown.cancelled().await;
                 info!("Gateway shutting down");
             })
             .await?;
+
+        // Wait for poll tasks to finish after server shutdown
+        for handle in poll_handles {
+            let _ = handle.await;
+        }
 
         Ok(())
     }

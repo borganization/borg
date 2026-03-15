@@ -1,0 +1,18 @@
+name = "imessage"
+description = "Bidirectional iMessage via macOS Messages (macOS only)"
+runtime = "python"
+
+[scripts]
+poll = "poll_messages.py"
+outbound = "send_outbound.sh"
+
+[sandbox]
+network = false
+fs_read = ["~/Library/Messages"]
+fs_write = ["~/.tamagotchi/channels/imessage"]
+
+[settings]
+mode = "poll"
+poll_interval_ms = 5000
+timeout_ms = 15000
+max_concurrent = 3
