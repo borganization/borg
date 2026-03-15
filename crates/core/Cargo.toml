@@ -28,6 +28,10 @@ which = { workspace = true }
 tiktoken-rs = { workspace = true }
 tokio-util = "0.7"
 rand = "0.9"
+rusqlite = { workspace = true }
+scraper = { workspace = true }
+cron = { workspace = true }
+regex = { workspace = true }
 
 [lints]
 workspace = true

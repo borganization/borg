@@ -461,6 +461,16 @@ impl<'a> App<'a> {
                     self.scroll_offset = 0;
                 }
             }
+            AgentEvent::ThinkingDelta(delta) => {
+                if let Some(HistoryCell::Thinking { text, .. }) = self.cells.last_mut() {
+                    text.push_str(&delta);
+                } else {
+                    self.cells.push(HistoryCell::Thinking { text: delta });
+                }
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
             AgentEvent::ToolExecuting { name, args } => {
                 self.cells.push(HistoryCell::ToolStart { name, args });
                 if self.auto_scroll {

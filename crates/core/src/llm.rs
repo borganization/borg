@@ -97,6 +97,7 @@ pub struct UsageData {
 #[derive(Debug)]
 pub enum StreamEvent {
     TextDelta(String),
+    ThinkingDelta(String),
     ToolCallDelta {
         index: usize,
         id: Option<String>,
@@ -585,6 +586,7 @@ impl LlmClient {
         let mut buffer = String::new();
         let mut current_tool_index: usize = 0;
         let mut current_block_is_tool = false;
+        let mut current_block_is_thinking = false;
 
         loop {
             let chunk = tokio::select! {
@@ -627,20 +629,27 @@ impl LlmClient {
                         match event_type {
                             "content_block_start" => {
                                 let block = &event["content_block"];
-                                if block["type"].as_str() == Some("tool_use") {
-                                    current_block_is_tool = true;
-                                    let id = block["id"].as_str().map(String::from);
-                                    let name = block["name"].as_str().map(String::from);
-                                    let _ = tx
-                                        .send(StreamEvent::ToolCallDelta {
-                                            index: current_tool_index,
-                                            id,
-                                            name,
-                                            arguments_delta: String::new(),
-                                        })
-                                        .await;
-                                } else {
-                                    current_block_is_tool = false;
+                                let block_type = block["type"].as_str().unwrap_or("");
+                                current_block_is_tool = false;
+                                current_block_is_thinking = false;
+                                match block_type {
+                                    "tool_use" => {
+                                        current_block_is_tool = true;
+                                        let id = block["id"].as_str().map(String::from);
+                                        let name = block["name"].as_str().map(String::from);
+                                        let _ = tx
+                                            .send(StreamEvent::ToolCallDelta {
+                                                index: current_tool_index,
+                                                id,
+                                                name,
+                                                arguments_delta: String::new(),
+                                            })
+                                            .await;
+                                    }
+                                    "thinking" => {
+                                        current_block_is_thinking = true;
+                                    }
+                                    _ => {}
                                 }
                             }
                             "content_block_delta" => {
@@ -650,6 +659,13 @@ impl LlmClient {
                                         if let Some(text) = delta["text"].as_str() {
                                             let _ = tx
                                                 .send(StreamEvent::TextDelta(text.to_string()))
+                                                .await;
+                                        }
+                                    }
+                                    Some("thinking_delta") => {
+                                        if let Some(text) = delta["thinking"].as_str() {
+                                            let _ = tx
+                                                .send(StreamEvent::ThinkingDelta(text.to_string()))
                                                 .await;
                                         }
                                     }
@@ -665,7 +681,18 @@ impl LlmClient {
                                                 .await;
                                         }
                                     }
-                                    _ => {}
+                                    _ => {
+                                        // For thinking blocks, text comes as text_delta
+                                        if current_block_is_thinking {
+                                            if let Some(text) = delta["text"].as_str() {
+                                                let _ = tx
+                                                    .send(StreamEvent::ThinkingDelta(
+                                                        text.to_string(),
+                                                    ))
+                                                    .await;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             "content_block_stop" => {

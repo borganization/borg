@@ -42,6 +42,9 @@ pub enum HistoryCell {
     System {
         text: String,
     },
+    Thinking {
+        text: String,
+    },
 }
 
 /// Truncate a string to at most `max_bytes` bytes at a valid UTF-8 boundary.
@@ -196,6 +199,16 @@ impl HistoryCell {
                     .map(|l| Line::from(Span::styled(l.to_string(), theme::dim())))
                     .collect();
                 lines.push(Line::default());
+                lines
+            }
+            HistoryCell::Thinking { text } => {
+                let style = ratatui::style::Style::default()
+                    .fg(ratatui::style::Color::DarkGray)
+                    .add_modifier(ratatui::style::Modifier::ITALIC);
+                let mut lines = vec![Line::from(Span::styled("thinking...", style))];
+                for l in text.lines() {
+                    lines.push(Line::from(Span::styled(l.to_string(), style)));
+                }
                 lines
             }
         }

@@ -103,13 +103,29 @@ impl ToolRegistry {
     }
 
     pub async fn execute_tool(&self, name: &str, args_json: &str) -> Result<String> {
+        self.execute_tool_with_env(name, args_json, &[]).await
+    }
+
+    pub async fn execute_tool_with_env(
+        &self,
+        name: &str,
+        args_json: &str,
+        extra_env: &[(String, String)],
+    ) -> Result<String> {
         let tool = self
             .tools
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {name}"))?;
 
         let executor = ToolExecutor::new(&tool.manifest, &tool.dir);
-        executor.execute(args_json).await
+        executor.execute_with_env(args_json, extra_env).await
+    }
+
+    pub fn tool_credentials(&self, name: &str) -> Vec<String> {
+        self.tools
+            .get(name)
+            .map(|t| t.manifest.credentials.clone())
+            .unwrap_or_default()
     }
 }
 

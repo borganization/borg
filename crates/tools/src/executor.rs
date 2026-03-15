@@ -16,6 +16,14 @@ impl<'a> ToolExecutor<'a> {
     }
 
     pub async fn execute(&self, args_json: &str) -> Result<String> {
+        self.execute_with_env(args_json, &[]).await
+    }
+
+    pub async fn execute_with_env(
+        &self,
+        args_json: &str,
+        extra_env: &[(String, String)],
+    ) -> Result<String> {
         let (program, base_args) = self.resolve_runtime()?;
         let entrypoint = self.tool_dir.join(&self.manifest.entrypoint);
 
@@ -37,19 +45,21 @@ impl<'a> ToolExecutor<'a> {
 
         let timeout = std::time::Duration::from_millis(self.manifest.timeout_ms);
 
-        let child = Command::new(&sandboxed.program)
-            .args(&sandboxed.args)
+        let mut cmd = Command::new(&sandboxed.program);
+        cmd.args(&sandboxed.args)
             .current_dir(self.tool_dir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "Failed to spawn tool '{}' (runtime: {})",
-                    self.manifest.name, self.manifest.runtime
-                )
-            })?;
+            .stderr(std::process::Stdio::piped());
+        for (key, val) in extra_env {
+            cmd.env(key, val);
+        }
+        let child = cmd.spawn().with_context(|| {
+            format!(
+                "Failed to spawn tool '{}' (runtime: {})",
+                self.manifest.name, self.manifest.runtime
+            )
+        })?;
 
         // Write args to stdin
         let mut child = child;

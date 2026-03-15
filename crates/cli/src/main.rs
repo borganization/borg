@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 mod logo;
 mod onboarding;
 mod repl;
+mod service;
 mod tui;
 
 #[derive(Parser)]
@@ -31,6 +32,23 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Run as a background daemon (executes scheduled tasks and heartbeat)
+    Daemon,
+    /// Manage the daemon as a system service
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Install the daemon as a system service (launchd on macOS, systemd on Linux)
+    Install,
+    /// Uninstall the daemon service
+    Uninstall,
+    /// Show the daemon service status
+    Status,
 }
 
 #[tokio::main]
@@ -53,6 +71,12 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Init) => init_data_dir()?,
         Some(Commands::Ask { message, yes, json }) => repl::one_shot(&message, yes, json).await?,
+        Some(Commands::Daemon) => service::run_daemon().await?,
+        Some(Commands::Service { action }) => match action {
+            ServiceAction::Install => service::install_service()?,
+            ServiceAction::Uninstall => service::uninstall_service()?,
+            ServiceAction::Status => service::service_status()?,
+        },
         Some(Commands::Chat) | None => repl::run().await?,
     }
 
