@@ -63,6 +63,21 @@ pub async fn one_shot(message: &str, auto_approve: bool, json_output: bool) -> R
                     eprintln!("Error: {e}");
                     exit_code = 1;
                 }
+                AgentEvent::ToolExecuting { name, .. } => {
+                    if !json_output {
+                        eprintln!("[running {name}]");
+                    }
+                }
+                AgentEvent::ToolResult { name, result } => {
+                    if !json_output {
+                        let preview = if result.len() > 200 {
+                            &result[..200]
+                        } else {
+                            &result
+                        };
+                        eprintln!("[{name} done] {preview}");
+                    }
+                }
                 _ => {}
             }
         }
