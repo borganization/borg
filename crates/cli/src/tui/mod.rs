@@ -41,7 +41,20 @@ impl Drop for TerminalGuard {
 
 pub async fn run() -> Result<()> {
     let config = Config::load()?;
-    let agent = Agent::new(config.clone())?;
+    let mut agent = Agent::new(config.clone())?;
+
+    // Try to resume the last session
+    let mut resumed_info: Option<(String, usize)> = None;
+    if let Ok(Some(session)) = tamagotchi_core::session::load_last_session() {
+        if !session.messages.is_empty() {
+            let title = session.meta.title.clone();
+            let count = session.meta.message_count;
+            if agent.load_session(&session.meta.id).is_ok() {
+                resumed_info = Some((title, count));
+            }
+        }
+    }
+
     let agent = Arc::new(Mutex::new(agent));
 
     // Start heartbeat if enabled
@@ -76,6 +89,9 @@ pub async fn run() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(config, heartbeat_rx);
+    if let Some((title, count)) = resumed_info {
+        app.push_system_message(format!("Resumed session: {title} ({count} messages)"));
+    }
     let mut event_stream = EventStream::new();
     let tick_rate = Duration::from_millis(100);
 
@@ -189,7 +205,14 @@ async fn run_event_loop(
                 let (msg_count, token_count) = agent.conversation_stats();
                 drop(agent);
 
-                let mut text = format!("Session: {msg_count} messages, ~{token_count} tokens\n");
+                let prompt_tok = app.session_prompt_tokens;
+                let completion_tok = app.session_completion_tokens;
+                let total_tok = prompt_tok + completion_tok;
+
+                let mut text = format!(
+                    "Session: {msg_count} messages, ~{token_count} estimated tokens\n\
+                     LLM usage: {prompt_tok} prompt + {completion_tok} completion = {total_tok} total tokens\n"
+                );
 
                 for (label, days) in [("24h", 1), ("7d", 7), ("30d", 30)] {
                     match tamagotchi_core::logging::count_messages_for_period(days) {
@@ -223,6 +246,80 @@ async fn run_event_loop(
                     app.push_system_message(format!("Warning: failed to sync agent config: {e}"));
                 }
             }
+            AppAction::SaveSession => {
+                let mut agent = agent.lock().await;
+                agent.auto_save();
+                let session = agent.session();
+                app.push_system_message(format!(
+                    "Session saved: {} ({})",
+                    session.meta.title, session.meta.id
+                ));
+            }
+            AppAction::NewSession => {
+                let mut agent = agent.lock().await;
+                agent.new_session();
+                app.push_system_message("New session started.".to_string());
+            }
+            AppAction::LoadSession { id } => {
+                // Support partial ID matching (prefix)
+                let full_id = match tamagotchi_core::session::list_sessions() {
+                    Ok(sessions) => {
+                        let matches: Vec<_> =
+                            sessions.iter().filter(|s| s.id.starts_with(&id)).collect();
+                        match matches.len() {
+                            0 => None,
+                            1 => Some(matches[0].id.clone()),
+                            _ => {
+                                app.push_system_message(format!(
+                                    "Ambiguous session ID '{id}' — matches {} sessions. Be more specific.",
+                                    matches.len()
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    Err(_) => None,
+                };
+                let load_id = full_id.as_deref().unwrap_or(&id);
+
+                let mut agent = agent.lock().await;
+                match agent.load_session(load_id) {
+                    Ok(()) => {
+                        let session = agent.session();
+                        let title = session.meta.title.clone();
+                        let count = session.meta.message_count;
+                        app.push_system_message(format!(
+                            "Loaded session: {title} ({count} messages)"
+                        ));
+                    }
+                    Err(e) => {
+                        app.push_system_message(format!("Failed to load session: {e}"));
+                    }
+                }
+            }
+            AppAction::ListSessions => match tamagotchi_core::session::list_sessions() {
+                Ok(sessions) => {
+                    if sessions.is_empty() {
+                        app.push_system_message("No saved sessions.".to_string());
+                    } else {
+                        let mut text = String::from("Saved sessions:\n");
+                        for (i, s) in sessions.iter().take(20).enumerate() {
+                            text.push_str(&format!(
+                                "  {}. {} ({} msgs) - {}\n     /load {}\n",
+                                i + 1,
+                                s.title,
+                                s.message_count,
+                                &s.updated_at[..19.min(s.updated_at.len())],
+                                &s.id[..8.min(s.id.len())],
+                            ));
+                        }
+                        app.push_system_message(text.trim_end().to_string());
+                    }
+                }
+                Err(e) => {
+                    app.push_system_message(format!("Error listing sessions: {e}"));
+                }
+            },
             AppAction::Continue => {}
         }
     }

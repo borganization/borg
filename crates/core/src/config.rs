@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use std::str::FromStr;
 
+use crate::policy::ExecutionPolicy;
 use crate::provider::Provider;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -24,6 +25,10 @@ pub struct Config {
     pub conversation: ConversationConfig,
     #[serde(default)]
     pub user: UserConfig,
+    #[serde(default)]
+    pub policy: ExecutionPolicy,
+    #[serde(default)]
+    pub debug: DebugConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +105,13 @@ pub struct UserConfig {
     pub name: Option<String>,
     #[serde(default)]
     pub agent_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DebugConfig {
+    /// When true, log full LLM request/response to ~/.tamagotchi/logs/debug/
+    #[serde(default)]
+    pub llm_logging: bool,
 }
 
 fn default_api_key_env() -> String {

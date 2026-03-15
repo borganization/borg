@@ -7,9 +7,11 @@ use tracing::warn;
 
 use crate::config::Config;
 use crate::conversation::{compact_history, history_tokens, normalize_history, undo_last_turn};
-use crate::llm::{LlmClient, StreamEvent};
+use crate::llm::{LlmClient, StreamEvent, UsageData};
 use crate::logging::log_message;
 use crate::memory::{load_memory_context, read_memory, write_memory};
+use crate::policy::ExecutionPolicy;
+use crate::session::Session;
 use crate::skills::{load_all_skills, load_skills_context, Skill};
 use crate::soul::load_soul;
 use crate::truncate::truncate_output;
@@ -35,6 +37,7 @@ pub enum AgentEvent {
         command: String,
         respond: oneshot::Sender<bool>,
     },
+    Usage(UsageData),
     TurnComplete,
     Error(String),
 }
@@ -44,18 +47,49 @@ pub struct Agent {
     _llm: LlmClient,
     history: Vec<Message>,
     tool_registry: ToolRegistry,
+    session: Session,
+    policy: ExecutionPolicy,
 }
 
 impl Agent {
     pub fn new(config: Config) -> Result<Self> {
         let _llm = LlmClient::new(config.clone())?;
         let tool_registry = ToolRegistry::new()?;
+        let policy = config.policy.clone();
         Ok(Self {
             config,
             _llm,
             history: Vec::new(),
             tool_registry,
+            session: Session::new(),
+            policy,
         })
+    }
+
+    /// Restore a session's history into this agent.
+    pub fn load_session(&mut self, id: &str) -> Result<()> {
+        let session = Session::load(id)?;
+        self.history = session.messages.clone();
+        self.session = session;
+        Ok(())
+    }
+
+    /// Start a new session, clearing history.
+    pub fn new_session(&mut self) {
+        self.history.clear();
+        self.session = Session::new();
+    }
+
+    /// Auto-save current session state.
+    pub fn auto_save(&mut self) {
+        self.session.update_from_history(&self.history);
+        if let Err(e) = self.session.save() {
+            warn!("Failed to auto-save session: {e}");
+        }
+    }
+
+    pub fn session(&self) -> &Session {
+        &self.session
     }
 
     pub fn history(&self) -> &[Message] {
@@ -245,6 +279,9 @@ impl Agent {
                                 }
                                 tool_calls[index].arguments.push_str(&arguments_delta);
                             }
+                            Some(StreamEvent::Usage(usage)) => {
+                                let _ = event_tx.send(AgentEvent::Usage(usage)).await;
+                            }
                             Some(StreamEvent::Done) => break,
                             Some(StreamEvent::Error(e)) => {
                                 let _ = event_tx.send(AgentEvent::Error(e)).await;
@@ -262,6 +299,7 @@ impl Agent {
                 let msg = Message::assistant(&text_content);
                 log_message(&msg);
                 self.history.push(msg);
+                self.auto_save();
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
             }
@@ -325,9 +363,10 @@ impl Agent {
             log_message(&assistant_msg);
             self.history.push(assistant_msg);
 
+            // Execute tool calls sequentially to preserve LLM-intended ordering.
+            // Reordering could break dependencies between tool calls.
             for tool_call in &tc {
                 if cancel.is_cancelled() {
-                    // Synthesize results for remaining tool calls
                     let remaining_msg =
                         Message::tool_result(&tool_call.id, "[tool call cancelled by user]");
                     log_message(&remaining_msg);
@@ -350,7 +389,6 @@ impl Agent {
                     .await
                     .unwrap_or_else(|e| format!("Error: {e}"));
 
-                // Truncate large tool outputs to prevent blowing the context window
                 let result = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
 
                 let _ = event_tx
@@ -463,22 +501,33 @@ impl Agent {
                 let timeout_ms = self.config.tools.default_timeout_ms;
                 let timeout_dur = Duration::from_millis(timeout_ms);
 
-                // Request confirmation from the user
-                let (confirm_tx, confirm_rx) = oneshot::channel();
-                let _ = event_tx
-                    .send(AgentEvent::ShellConfirmation {
-                        command: command.to_string(),
-                        respond: confirm_tx,
-                    })
-                    .await;
-
-                match confirm_rx.await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Ok("Shell command denied by user.".to_string());
+                // Check execution policy before prompting user
+                match self.policy.check(command) {
+                    crate::policy::PolicyDecision::Deny => {
+                        return Ok("Shell command denied by policy.".to_string());
                     }
-                    Err(_) => {
-                        return Ok("Shell command cancelled (no response).".to_string());
+                    crate::policy::PolicyDecision::AutoApprove => {
+                        // Skip user confirmation
+                    }
+                    crate::policy::PolicyDecision::Prompt => {
+                        // Request confirmation from the user
+                        let (confirm_tx, confirm_rx) = oneshot::channel();
+                        let _ = event_tx
+                            .send(AgentEvent::ShellConfirmation {
+                                command: command.to_string(),
+                                respond: confirm_tx,
+                            })
+                            .await;
+
+                        match confirm_rx.await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return Ok("Shell command denied by user.".to_string());
+                            }
+                            Err(_) => {
+                                return Ok("Shell command cancelled (no response).".to_string());
+                            }
+                        }
                     }
                 }
 

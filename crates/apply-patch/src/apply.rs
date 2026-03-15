@@ -42,14 +42,68 @@ fn validate_patch_path(path: &str, base_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
-    let mut affected_files = Vec::new();
+/// Snapshot of a file's state before patch application, for rollback.
+enum FileSnapshot {
+    /// File existed with this content.
+    Existed(String),
+    /// File did not exist (was created by the patch).
+    DidNotExist,
+}
 
+pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
+    // Validate all paths up front before making any changes
+    for op in &patch.operations {
+        let path = match op {
+            PatchOperation::AddFile { path, .. }
+            | PatchOperation::UpdateFile { path, .. }
+            | PatchOperation::DeleteFile { path } => path,
+        };
+        validate_patch_path(path, base_dir)?;
+    }
+
+    let mut affected_files = Vec::new();
+    let mut snapshots: Vec<(String, FileSnapshot)> = Vec::new();
+
+    let result = apply_patch_inner(patch, base_dir, &mut affected_files, &mut snapshots);
+
+    if let Err(e) = result {
+        // Rollback: restore all snapshotted files
+        info!("Patch failed, rolling back {} files", snapshots.len());
+        for (path, snapshot) in snapshots.into_iter().rev() {
+            let full_path = base_dir.join(&path);
+            match snapshot {
+                FileSnapshot::Existed(content) => {
+                    let _ = std::fs::write(&full_path, content);
+                }
+                FileSnapshot::DidNotExist => {
+                    let _ = std::fs::remove_file(&full_path);
+                }
+            }
+        }
+        return Err(e);
+    }
+
+    Ok(affected_files)
+}
+
+fn apply_patch_inner(
+    patch: &Patch,
+    base_dir: &Path,
+    affected_files: &mut Vec<String>,
+    snapshots: &mut Vec<(String, FileSnapshot)>,
+) -> Result<()> {
     for op in &patch.operations {
         match op {
             PatchOperation::AddFile { path, content } => {
-                validate_patch_path(path, base_dir)?;
                 let full_path = base_dir.join(path);
+                // Snapshot existing file if it exists (overwrite case)
+                if full_path.exists() {
+                    let existing = std::fs::read_to_string(&full_path)
+                        .with_context(|| format!("Failed to read existing {path}"))?;
+                    snapshots.push((path.clone(), FileSnapshot::Existed(existing)));
+                } else {
+                    snapshots.push((path.clone(), FileSnapshot::DidNotExist));
+                }
                 if let Some(parent) = full_path.parent() {
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("Failed to create directory for {path}"))?;
@@ -60,15 +114,16 @@ pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
                 affected_files.push(path.clone());
             }
             PatchOperation::UpdateFile { path, hunks } => {
-                validate_patch_path(path, base_dir)?;
                 let full_path = base_dir.join(path);
                 if !full_path.exists() {
                     bail!("Cannot update non-existent file: {path}");
                 }
 
-                let mut content = std::fs::read_to_string(&full_path)
+                let original = std::fs::read_to_string(&full_path)
                     .with_context(|| format!("Failed to read {path}"))?;
+                snapshots.push((path.clone(), FileSnapshot::Existed(original.clone())));
 
+                let mut content = original;
                 for hunk in hunks {
                     content = apply_hunk(&content, hunk)
                         .with_context(|| format!("Failed to apply hunk to {path}"))?;
@@ -80,9 +135,11 @@ pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
                 affected_files.push(path.clone());
             }
             PatchOperation::DeleteFile { path } => {
-                validate_patch_path(path, base_dir)?;
                 let full_path = base_dir.join(path);
                 if full_path.exists() {
+                    let content = std::fs::read_to_string(&full_path)
+                        .with_context(|| format!("Failed to read {path} for snapshot"))?;
+                    snapshots.push((path.clone(), FileSnapshot::Existed(content)));
                     std::fs::remove_file(&full_path)
                         .with_context(|| format!("Failed to delete {path}"))?;
                     info!("Deleted file: {path}");
@@ -94,7 +151,7 @@ pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
         }
     }
 
-    Ok(affected_files)
+    Ok(())
 }
 
 fn apply_hunk(content: &str, hunk: &Hunk) -> Result<String> {
