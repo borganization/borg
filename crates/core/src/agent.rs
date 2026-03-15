@@ -301,7 +301,9 @@ impl Agent {
         }
 
         if self.config.skills.enabled {
-            let skills = load_skills_context(self.config.skills.max_context_tokens)?;
+            let resolved_creds = self.config.resolve_credentials();
+            let skills =
+                load_skills_context(self.config.skills.max_context_tokens, &resolved_creds)?;
             if !skills.is_empty() {
                 system.push_str(&format!("\n{skills}\n"));
             }
@@ -755,7 +757,8 @@ impl Agent {
                 })
             }
             "list_skills" => {
-                let skills = load_all_skills()?;
+                let resolved_creds = self.config.resolve_credentials();
+                let skills = load_all_skills(&resolved_creds)?;
                 if skills.is_empty() {
                     Ok("No skills installed.".to_string())
                 } else {
@@ -873,10 +876,13 @@ impl Agent {
                     }
                 }
 
-                let child = tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(command)
-                    .output();
+                let resolved_creds = self.config.resolve_credentials();
+                let mut cmd = tokio::process::Command::new("sh");
+                cmd.arg("-c").arg(command);
+                for (key, val) in &resolved_creds {
+                    cmd.env(key, val);
+                }
+                let child = cmd.output();
 
                 match tokio::time::timeout(timeout_dur, child).await {
                     Ok(Ok(output)) => {
@@ -996,13 +1002,41 @@ impl Agent {
                     Err(e) => Ok(format!("Error reading PDF: {e}")),
                 }
             }
+            "security_audit" => {
+                if !self.config.security.host_audit {
+                    return Ok(
+                        "Host audit is disabled. Enable it in config: security.host_audit = true"
+                            .to_string(),
+                    );
+                }
+                use crate::doctor::DiagnosticReport;
+                use crate::host_audit;
+
+                let mut audit_checks = Vec::new();
+                match args.get("category").and_then(|v| v.as_str()) {
+                    Some("firewall") => host_audit::check_firewall(&mut audit_checks),
+                    Some("ports") => host_audit::check_listening_ports(&mut audit_checks),
+                    Some("ssh") => host_audit::check_ssh_config(&mut audit_checks),
+                    Some("permissions") => host_audit::check_sensitive_permissions(&mut audit_checks),
+                    Some("encryption") => host_audit::check_disk_encryption(&mut audit_checks),
+                    Some("updates") => host_audit::check_os_updates(&mut audit_checks),
+                    Some("services") => host_audit::check_running_services(&mut audit_checks),
+                    Some(other) => return Ok(format!("Unknown audit category: {other}. Valid: firewall, ports, ssh, permissions, encryption, updates, services")),
+                    None => host_audit::run_host_security_checks(&mut audit_checks),
+                }
+                let report = DiagnosticReport {
+                    checks: audit_checks,
+                };
+                Ok(report.format())
+            }
             _ => {
                 let cred_names = self.tool_registry.tool_credentials(name);
                 let extra_env: Vec<(String, String)> = cred_names
                     .iter()
                     .filter_map(|cred_name| {
-                        self.config.credentials.get(cred_name).and_then(|env_var| {
-                            std::env::var(env_var)
+                        self.config.credentials.get(cred_name).and_then(|cred_val| {
+                            cred_val
+                                .resolve()
                                 .ok()
                                 .map(|val| (cred_name.to_uppercase(), val))
                         })
@@ -1200,6 +1234,14 @@ fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     defs.push(ToolDefinition::new("pause_task", "Pause a scheduled task.", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string","description":"The task ID to pause"}},"required":["task_id"]})));
     defs.push(ToolDefinition::new("resume_task", "Resume a paused scheduled task.", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string","description":"The task ID to resume"}},"required":["task_id"]})));
     defs.push(ToolDefinition::new("cancel_task", "Cancel a scheduled task permanently.", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string","description":"The task ID to cancel"}},"required":["task_id"]})));
+
+    if config.security.host_audit {
+        defs.push(ToolDefinition::new(
+            "security_audit",
+            "Run a host security audit. Returns diagnostic findings about firewall, open ports, SSH config, file permissions, disk encryption, OS updates, and running services. Review findings and suggest fixes — the user must approve each change.",
+            serde_json::json!({"type":"object","properties":{"category":{"type":"string","description":"Run only a specific check (omit for all)","enum":["firewall","ports","ssh","permissions","encryption","updates","services"]}}}),
+        ));
+    }
 
     defs
 }
