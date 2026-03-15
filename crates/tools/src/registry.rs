@@ -32,6 +32,16 @@ impl ToolRegistry {
         Ok(registry)
     }
 
+    pub fn with_dir(dir: PathBuf) -> Result<Self> {
+        let mut registry = Self {
+            tools: HashMap::new(),
+            tools_dir: dir,
+        };
+
+        registry.scan()?;
+        Ok(registry)
+    }
+
     pub fn scan(&mut self) -> Result<()> {
         self.tools.clear();
 
@@ -145,6 +155,112 @@ impl ToolRegistry {
             .get(name)
             .map(|t| t.manifest.credentials.clone())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_tool_toml(dir: &std::path::Path, name: &str, description: &str) {
+        let tool_dir = dir.join(name);
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("tool.toml"),
+            format!(
+                "name = \"{name}\"\ndescription = \"{description}\"\nruntime = \"bash\"\nentrypoint = \"run.sh\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scan_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert!(registry.list_tools().is_empty());
+    }
+
+    #[test]
+    fn scan_nonexistent_dir() {
+        let registry =
+            ToolRegistry::with_dir(PathBuf::from("/tmp/nonexistent_tools_dir_xyz")).unwrap();
+        assert!(registry.list_tools().is_empty());
+    }
+
+    #[test]
+    fn scan_valid_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tool_toml(dir.path(), "hello", "Says hello");
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(registry.list_tools().len(), 1);
+        assert!(registry.list_tools()[0].contains("hello"));
+        assert!(registry.list_tools()[0].contains("Says hello"));
+    }
+
+    #[test]
+    fn scan_skips_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("not_a_dir.txt"), "just a file").unwrap();
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert!(registry.list_tools().is_empty());
+    }
+
+    #[test]
+    fn scan_skips_missing_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("no-manifest")).unwrap();
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert!(registry.list_tools().is_empty());
+    }
+
+    #[test]
+    fn scan_skips_invalid_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("bad-tool");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(tool_dir.join("tool.toml"), "not valid toml {{{{").unwrap();
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert!(registry.list_tools().is_empty());
+    }
+
+    #[test]
+    fn list_tools_format() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tool_toml(dir.path(), "weather", "Get the weather");
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        let list = registry.list_tools();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0], "weather: Get the weather");
+    }
+
+    #[test]
+    fn tool_definitions_produces_valid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tool_toml(dir.path(), "mytool", "A tool");
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        let defs = registry.tool_definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].tool_type, "function");
+        assert_eq!(defs[0].function.name, "mytool");
+        assert_eq!(defs[0].function.description, "A tool");
+        assert_eq!(defs[0].function.parameters["type"], "object");
+    }
+
+    #[tokio::test]
+    async fn execute_unknown_tool_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        let result = registry.execute_tool("nonexistent", "{}").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown tool"));
+    }
+
+    #[test]
+    fn tool_credentials_unknown_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert!(registry.tool_credentials("nonexistent").is_empty());
     }
 }
 

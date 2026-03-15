@@ -172,3 +172,45 @@ impl<'a> ChannelExecutor<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::ChannelManifest;
+
+    fn bash_channel_manifest(name: &str, inbound: &str) -> ChannelManifest {
+        toml::from_str(&format!(
+            "name = \"{name}\"\ndescription = \"test\"\nruntime = \"bash\"\n\n[scripts]\ninbound = \"{inbound}\"\noutbound = \"out.sh\"\n"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn run_bash_script_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("echo.sh");
+        std::fs::write(&script, "#!/bin/bash\ncat\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let manifest = bash_channel_manifest("test-chan", "echo.sh");
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor
+            .parse_inbound(r#"{"text":"hi"}"#, &[])
+            .await
+            .unwrap();
+        assert_eq!(result, r#"{"text":"hi"}"#);
+    }
+
+    #[tokio::test]
+    async fn run_nonexistent_script_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = bash_channel_manifest("test-chan", "missing.sh");
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor.parse_inbound("{}", &[]).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+}

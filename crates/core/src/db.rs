@@ -804,4 +804,73 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].tool_calls_json.as_deref(), Some(tc_json));
     }
+
+    #[test]
+    fn resolve_channel_session_creates_new() {
+        let db = test_db();
+        let session_id = db
+            .resolve_channel_session("slack", "user1")
+            .expect("resolve");
+        assert!(!session_id.is_empty());
+        // UUID v4 format
+        assert_eq!(session_id.len(), 36);
+    }
+
+    #[test]
+    fn resolve_channel_session_returns_existing() {
+        let db = test_db();
+        let first = db.resolve_channel_session("slack", "user1").expect("first");
+        let second = db
+            .resolve_channel_session("slack", "user1")
+            .expect("second");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn resolve_channel_session_different_senders() {
+        let db = test_db();
+        let s1 = db.resolve_channel_session("slack", "alice").expect("alice");
+        let s2 = db.resolve_channel_session("slack", "bob").expect("bob");
+        assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn log_channel_message_and_count() {
+        let db = test_db();
+        let id1 = db
+            .log_channel_message("slack", "user1", "inbound", Some("hello"), None, None)
+            .expect("log 1");
+        let id2 = db
+            .log_channel_message("slack", "user1", "outbound", Some("hi back"), None, None)
+            .expect("log 2");
+        assert!(id1 > 0);
+        assert!(id2 > id1);
+    }
+
+    #[test]
+    fn insert_message_with_tool_call_id() {
+        let db = test_db();
+        db.insert_message(
+            "s1",
+            "tool",
+            Some("result data"),
+            None,
+            Some("call_abc123"),
+            None,
+        )
+        .expect("insert");
+        let msgs = db.load_session_messages("s1").expect("load");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].tool_call_id.as_deref(), Some("call_abc123"));
+        assert_eq!(msgs[0].content.as_deref(), Some("result data"));
+    }
+
+    #[test]
+    fn delete_messages_nonexistent_session() {
+        let db = test_db();
+        let deleted = db
+            .delete_session_messages("no-such-session")
+            .expect("delete");
+        assert_eq!(deleted, 0);
+    }
 }

@@ -135,3 +135,63 @@ impl<'a> ToolExecutor<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::ToolManifest;
+
+    fn bash_manifest(name: &str, entrypoint: &str) -> ToolManifest {
+        toml::from_str(&format!(
+            "name = \"{name}\"\ndescription = \"test\"\nruntime = \"bash\"\nentrypoint = \"{entrypoint}\"\n"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn execute_missing_entrypoint_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = bash_manifest("test", "nonexistent.sh");
+        let executor = ToolExecutor::new(&manifest, dir.path());
+        let result = executor.execute("{}").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn execute_bash_tool_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("echo.sh");
+        std::fs::write(&script, "#!/bin/bash\ncat\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let manifest = bash_manifest("echo-tool", "echo.sh");
+        let executor = ToolExecutor::new(&manifest, dir.path());
+        let result = executor.execute(r#"{"hello":"world"}"#).await.unwrap();
+        assert_eq!(result, r#"{"hello":"world"}"#);
+    }
+
+    #[tokio::test]
+    async fn execute_bash_tool_nonzero_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fail.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/bash\necho 'something went wrong' >&2\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let manifest = bash_manifest("fail-tool", "fail.sh");
+        let executor = ToolExecutor::new(&manifest, dir.path());
+        let result = executor.execute("{}").await.unwrap();
+        assert!(result.contains("Error"));
+        assert!(result.contains("something went wrong"));
+    }
+}
