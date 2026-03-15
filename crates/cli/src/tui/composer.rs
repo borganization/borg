@@ -85,6 +85,16 @@ impl<'a> Composer<'a> {
         }
     }
 
+    pub fn text(&self) -> String {
+        self.textarea.lines().join("\n")
+    }
+
+    pub fn set_text(&mut self, text: &str) {
+        self.textarea.select_all();
+        self.textarea.cut();
+        self.textarea.insert_str(text);
+    }
+
     pub fn height(&self) -> u16 {
         let content_lines = self.textarea.lines().len() as u16;
         // 2 for border, min 1 content line
