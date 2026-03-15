@@ -585,9 +585,15 @@ impl Config {
     /// Returns the provider and a list of resolved keys (for multi-key fallback).
     /// Falls back to a single key from `resolve_provider` if no `api_keys` are configured.
     pub fn resolve_api_keys(&self) -> Result<(Provider, Vec<String>)> {
-        // Resolve provider and primary key once to avoid duplicate SecretRef resolution
-        let (provider, primary_key) = self.resolve_provider()?;
+        // Determine provider first (without requiring a key)
+        let provider = if let Some(ref provider_str) = self.llm.provider {
+            Provider::from_str(provider_str)?
+        } else {
+            // Will be resolved along with the key below
+            Provider::OpenRouter // placeholder, overridden by resolve_provider fallback
+        };
 
+        // Try multi-key resolution first
         if !self.llm.api_keys.is_empty() {
             let mut keys = Vec::new();
             for secret_ref in &self.llm.api_keys {
@@ -598,12 +604,21 @@ impl Config {
                 }
             }
             if !keys.is_empty() {
-                return Ok((provider, keys));
+                // If provider was explicit, use it; otherwise infer
+                let final_provider = if self.llm.provider.is_some() {
+                    provider
+                } else {
+                    self.resolve_provider()
+                        .map(|(p, _)| p)
+                        .unwrap_or(provider)
+                };
+                return Ok((final_provider, keys));
             }
         }
 
-        // Fall back to single key from resolve_provider
-        Ok((provider, vec![primary_key]))
+        // Fall back to single key via resolve_provider
+        let (provider, key) = self.resolve_provider()?;
+        Ok((provider, vec![key]))
     }
 }
 
