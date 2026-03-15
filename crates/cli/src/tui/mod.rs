@@ -227,6 +227,24 @@ async fn run_event_loop(
                         }
                     }
                 }
+
+                // Show monthly budget info
+                let budget_limit = app.config.budget.monthly_token_limit;
+                if budget_limit > 0 {
+                    if let Ok(db) = tamagotchi_core::db::Database::open() {
+                        if let Ok(used) = db.monthly_token_total() {
+                            let pct = if budget_limit > 0 {
+                                (used as f64 / budget_limit as f64 * 100.0) as u64
+                            } else {
+                                0
+                            };
+                            text.push_str(&format!(
+                                "Budget: {used}/{budget_limit} tokens ({pct}%) used this month\n"
+                            ));
+                        }
+                    }
+                }
+
                 app.push_system_message(text.trim_end().to_string());
             }
             AppAction::UndoLastTurn => {
