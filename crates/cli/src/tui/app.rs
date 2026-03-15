@@ -193,7 +193,9 @@ impl<'a> App<'a> {
                 }
 
                 match key.code {
-                    KeyCode::Up if !self.composer.is_empty() && !self.composer.is_browsing_history() => {
+                    KeyCode::Up
+                        if !self.composer.is_empty() && !self.composer.is_browsing_history() =>
+                    {
                         self.scroll_offset = self.scroll_offset.saturating_add(1);
                         self.auto_scroll = false;
                         return Ok(AppAction::Continue);
@@ -532,6 +534,13 @@ impl<'a> App<'a> {
             AgentEvent::Usage(usage) => {
                 self.session_prompt_tokens += usage.prompt_tokens;
                 self.session_completion_tokens += usage.completion_tokens;
+                if let Ok(db) = tamagotchi_core::db::Database::open() {
+                    let _ = db.log_token_usage(
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        usage.prompt_tokens + usage.completion_tokens,
+                    );
+                }
             }
             AgentEvent::TurnComplete => {
                 for cell in self.cells.iter_mut().rev() {
