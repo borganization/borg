@@ -1,6 +1,7 @@
 mod app;
 mod command_popup;
 mod composer;
+mod external_editor;
 mod history;
 mod layout;
 mod markdown;
@@ -106,6 +107,16 @@ pub async fn run() -> Result<()> {
     .await
 }
 
+/// If the app just became idle and has a queued message, auto-submit it.
+fn drain_queued_if_idle(app: &mut App<'_>) -> Result<AppAction> {
+    if matches!(app.state, app::AppState::Idle) {
+        if let Some(queued) = app.take_queued_message() {
+            return app.handle_queued_submit(&queued);
+        }
+    }
+    Ok(AppAction::Continue)
+}
+
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App<'_>,
@@ -132,12 +143,12 @@ async fn run_event_loop(
                 match event {
                     Some(ev) => {
                         app.process_agent_event(ev);
-                        AppAction::Continue
+                        drain_queued_if_idle(app)?
                     }
                     None => {
                         // Channel closed (agent task finished or panicked)
                         app.handle_agent_channel_closed();
-                        AppAction::Continue
+                        drain_queued_if_idle(app)?
                     }
                 }
             }
@@ -313,6 +324,29 @@ async fn run_event_loop(
                     }
                     Err(e) => {
                         app.push_system_message(format!("Failed to load session: {e}"));
+                    }
+                }
+            }
+            AppAction::LaunchExternalEditor => {
+                let current_text = app.composer.text();
+                // Leave alternate screen and disable raw mode for editor
+                let _ = disable_raw_mode();
+                let _ = stdout().execute(LeaveAlternateScreen);
+
+                let result = external_editor::open_external_editor(&current_text);
+
+                // Restore terminal
+                let _ = enable_raw_mode();
+                let _ = stdout().execute(EnterAlternateScreen);
+                terminal.clear()?;
+
+                match result {
+                    Ok(text) => {
+                        let trimmed = text.trim_end();
+                        app.composer.set_text(trimmed);
+                    }
+                    Err(e) => {
+                        app.push_system_message(format!("Editor error: {e}"));
                     }
                 }
             }

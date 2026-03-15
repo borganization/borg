@@ -43,6 +43,7 @@ pub enum AppAction {
     ClearHistory,
     ShowUsage,
     UndoLastTurn,
+    LaunchExternalEditor,
     UpdateSetting {
         key: String,
         value: String,
@@ -71,6 +72,8 @@ pub struct App<'a> {
     /// Accumulated token usage for the current session
     pub session_prompt_tokens: u64,
     pub session_completion_tokens: u64,
+    /// Message queued by Tab during streaming, auto-submitted on turn complete
+    pub queued_message: Option<String>,
 }
 
 impl<'a> App<'a> {
@@ -90,6 +93,7 @@ impl<'a> App<'a> {
             auto_scroll: true,
             session_prompt_tokens: 0,
             session_completion_tokens: 0,
+            queued_message: None,
         }
     }
 
@@ -142,12 +146,47 @@ impl<'a> App<'a> {
                         text: "[interrupted]".to_string(),
                     });
                     self.state = AppState::Idle;
-                    self.composer.set_disabled(false);
+                } else if key.code == KeyCode::Tab {
+                    // Queue current composer text to auto-submit after turn completes
+                    let text = self.composer.text().trim().to_string();
+                    if !text.is_empty() {
+                        self.queued_message = Some(text);
+                        self.composer.set_text("");
+                        self.cells.push(HistoryCell::System {
+                            text: "[message queued]".to_string(),
+                        });
+                    }
+                } else if key.code == KeyCode::Enter {
+                    // No-op during streaming
+                } else {
+                    // Pass other keys to composer so user can type ahead
+                    self.composer.handle_key(key);
                 }
             }
             AppState::Idle => {
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(AppAction::Quit);
+                }
+
+                // Ctrl+L — clear visual transcript
+                if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.cells.clear();
+                    self.scroll_offset = 0;
+                    self.auto_scroll = true;
+                    return Ok(AppAction::Continue);
+                }
+
+                // Ctrl+D — quit when composer is empty (EOF)
+                if key.code == KeyCode::Char('d')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.composer.is_empty()
+                {
+                    return Ok(AppAction::Quit);
+                }
+
+                // Ctrl+G — launch external editor
+                if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return Ok(AppAction::LaunchExternalEditor);
                 }
 
                 if self.settings_popup.is_visible() {
@@ -200,6 +239,30 @@ impl<'a> App<'a> {
                             return Ok(AppAction::Continue);
                         }
                     }
+                }
+
+                // ? — show keyboard shortcuts when composer is empty
+                if key.code == KeyCode::Char('?')
+                    && key.modifiers == KeyModifiers::NONE
+                    && self.composer.is_empty()
+                {
+                    self.push_system_message(
+                        "Keyboard Shortcuts:\n  \
+                         Enter        — Send message\n  \
+                         Shift+Enter  — New line\n  \
+                         Up / Ctrl+P  — Previous history entry\n  \
+                         Down / Ctrl+N — Next history entry\n  \
+                         Esc          — Clear input\n  \
+                         Ctrl+L       — Clear screen\n  \
+                         Ctrl+D       — Quit (when empty)\n  \
+                         Ctrl+G       — Open external editor ($EDITOR)\n  \
+                         Tab          — Queue message while streaming\n  \
+                         Ctrl+C       — Cancel / Quit\n  \
+                         PageUp/Down  — Scroll transcript\n  \
+                         /            — Show command menu"
+                            .to_string(),
+                    );
+                    return Ok(AppAction::Continue);
                 }
 
                 match key.code {
@@ -453,7 +516,6 @@ impl<'a> App<'a> {
         self.state = AppState::Streaming {
             start: Instant::now(),
         };
-        self.composer.set_disabled(true);
         self.auto_scroll = true;
 
         Ok(AppAction::SendMessage {
@@ -560,7 +622,6 @@ impl<'a> App<'a> {
                     }
                 }
                 self.state = AppState::Idle;
-                self.composer.set_disabled(false);
             }
             AgentEvent::Error(e) => {
                 self.cells.push(HistoryCell::System {
@@ -573,7 +634,6 @@ impl<'a> App<'a> {
                     }
                 }
                 self.state = AppState::Idle;
-                self.composer.set_disabled(false);
             }
         }
     }
@@ -589,7 +649,6 @@ impl<'a> App<'a> {
         }
         if !matches!(self.state, AppState::Idle) {
             self.state = AppState::Idle;
-            self.composer.set_disabled(false);
         }
     }
 
@@ -695,10 +754,20 @@ impl<'a> App<'a> {
         frame.render_widget(Paragraph::new(line), area);
     }
 
+    /// Take the queued message (if any), clearing it from the app.
+    pub fn take_queued_message(&mut self) -> Option<String> {
+        self.queued_message.take()
+    }
+
+    /// Submit a queued message (called from the event loop when a turn completes).
+    pub fn handle_queued_submit(&mut self, input: &str) -> Result<AppAction> {
+        self.handle_submit(input)
+    }
+
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let left = match &self.state {
             AppState::Idle => "? for shortcuts  •  quit to exit",
-            AppState::Streaming { .. } => "esc to cancel",
+            AppState::Streaming { .. } => "esc to cancel  •  tab to queue message",
             AppState::AwaitingApproval { .. } => "y to approve  •  n to deny",
         };
         let line = Line::from(Span::styled(format!(" {left}"), theme::dim()));
