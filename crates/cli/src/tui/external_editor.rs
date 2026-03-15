@@ -28,10 +28,7 @@ pub fn open_external_editor(initial_text: &str) -> Result<String> {
     let parts: Vec<&str> = editor.split_whitespace().collect();
     let (cmd, args) = parts.split_first().unwrap_or((&"vi", &[]));
 
-    let status = Command::new(cmd)
-        .args(args)
-        .arg(&path)
-        .status()?;
+    let status = Command::new(cmd).args(args).arg(&path).status()?;
 
     if !status.success() {
         bail!("Editor exited with status: {status}");

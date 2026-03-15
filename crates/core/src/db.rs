@@ -46,6 +46,19 @@ pub struct TaskRunRow {
     pub error: Option<String>,
 }
 
+/// Persisted message row from SQLite.
+#[derive(Debug, Clone)]
+pub struct MessageRow {
+    pub id: i64,
+    pub session_id: String,
+    pub role: String,
+    pub content: Option<String>,
+    pub tool_calls_json: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub timestamp: Option<String>,
+    pub created_at: i64,
+}
+
 /// Parameters for creating a new scheduled task.
 pub struct NewTask<'a> {
     pub id: &'a str,
@@ -76,7 +89,51 @@ impl Database {
         Config::db_path()
     }
 
+    /// Current schema version. Bump this when adding new migrations.
+    const CURRENT_VERSION: u32 = 2;
+
     fn run_migrations(&self) -> Result<()> {
+        // Ensure meta table exists for version tracking
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
+        )?;
+
+        let current = self.schema_version()?;
+
+        if current < 1 {
+            self.migrate_v1()?;
+        }
+        if current < 2 {
+            self.migrate_v2()?;
+        }
+
+        self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
+        Ok(())
+    }
+
+    fn schema_version(&self) -> Result<u32> {
+        match self.get_meta("schema_version")? {
+            Some(v) => Ok(v.parse().unwrap_or(0)),
+            None => {
+                // Check if tables already exist (pre-versioning database)
+                let mut stmt = self.conn.prepare(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
+                )?;
+                let count: i64 = stmt.query_row([], |row| row.get(0))?;
+                if count > 0 {
+                    Ok(1) // Legacy DB with original tables
+                } else {
+                    Ok(0) // Fresh database
+                }
+            }
+        }
+    }
+
+    /// V1: Original schema — sessions, scheduled_tasks, task_runs, meta, token_usage
+    fn migrate_v1(&self) -> Result<()> {
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS sessions (
@@ -109,11 +166,6 @@ impl Database {
                 error TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS token_usage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp INTEGER NOT NULL,
@@ -124,6 +176,39 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(timestamp);
             ",
         )?;
+        Ok(())
+    }
+
+    /// V2: Add messages table for message persistence + retry_count for tasks
+    fn migrate_v2(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_calls_json TEXT,
+                tool_call_id TEXT,
+                timestamp TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
+
+            -- Add retry_count to scheduled_tasks if not present
+            ALTER TABLE scheduled_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+            ",
+            )
+            .or_else(|e| {
+                // ALTER TABLE fails if column already exists — that's OK
+                let msg = e.to_string();
+                if msg.contains("duplicate column") || msg.contains("already exists") {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
         Ok(())
     }
 
@@ -166,6 +251,56 @@ impl Database {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    // ── Message persistence ──
+
+    pub fn insert_message(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: Option<&str>,
+        tool_calls_json: Option<&str>,
+        tool_call_id: Option<&str>,
+        timestamp: Option<&str>,
+    ) -> Result<i64> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls_json, tool_call_id, timestamp, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![session_id, role, content, tool_calls_json, tool_call_id, timestamp, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn load_session_messages(&self, session_id: &str) -> Result<Vec<MessageRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, role, content, tool_calls_json, tool_call_id, timestamp, created_at
+             FROM messages WHERE session_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                Ok(MessageRow {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    role: row.get(2)?,
+                    content: row.get(3)?,
+                    tool_calls_json: row.get(4)?,
+                    tool_call_id: row.get(5)?,
+                    timestamp: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_session_messages(&self, session_id: &str) -> Result<usize> {
+        let count = self.conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(count)
     }
 
     // ── Scheduled tasks ──
@@ -521,5 +656,68 @@ mod tests {
         let total = db.monthly_token_total().expect("query");
         // Old entry should be excluded, only current entry counts
         assert_eq!(total, 150);
+    }
+
+    #[test]
+    fn schema_version_tracking() {
+        let db = test_db();
+        let version = db.schema_version().expect("get version");
+        assert_eq!(version, Database::CURRENT_VERSION);
+    }
+
+    #[test]
+    fn insert_and_load_messages() {
+        let db = test_db();
+        db.insert_message(
+            "s1",
+            "user",
+            Some("Hello"),
+            None,
+            None,
+            Some("2026-01-01T00:00:00Z"),
+        )
+        .expect("insert user msg");
+        db.insert_message(
+            "s1",
+            "assistant",
+            Some("Hi there"),
+            None,
+            None,
+            Some("2026-01-01T00:00:01Z"),
+        )
+        .expect("insert assistant msg");
+        db.insert_message("s2", "user", Some("Other session"), None, None, None)
+            .expect("insert other session msg");
+
+        let msgs = db.load_session_messages("s1").expect("load");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].content.as_deref(), Some("Hello"));
+        assert_eq!(msgs[1].role, "assistant");
+    }
+
+    #[test]
+    fn delete_session_messages() {
+        let db = test_db();
+        db.insert_message("s1", "user", Some("msg1"), None, None, None)
+            .expect("insert");
+        db.insert_message("s1", "user", Some("msg2"), None, None, None)
+            .expect("insert");
+        let deleted = db.delete_session_messages("s1").expect("delete");
+        assert_eq!(deleted, 2);
+        let msgs = db.load_session_messages("s1").expect("load");
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn messages_with_tool_calls() {
+        let db = test_db();
+        let tc_json =
+            r#"[{"id":"c1","type":"function","function":{"name":"test","arguments":"{}"}}]"#;
+        db.insert_message("s1", "assistant", None, Some(tc_json), None, None)
+            .expect("insert");
+        let msgs = db.load_session_messages("s1").expect("load");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].tool_calls_json.as_deref(), Some(tc_json));
     }
 }

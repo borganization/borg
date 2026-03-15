@@ -907,6 +907,7 @@ fn parse_anthropic_response(resp: &serde_json::Value) -> Result<Message> {
         content,
         tool_calls,
         tool_call_id: None,
+        timestamp: Some(chrono::Local::now().to_rfc3339()),
     })
 }
 
@@ -957,6 +958,7 @@ mod tests {
                     },
                 }]),
                 tool_call_id: None,
+                timestamp: None,
             },
             Message::tool_result("call_1", "file contents here"),
         ];
@@ -1027,6 +1029,7 @@ mod tests {
                     },
                 ]),
                 tool_call_id: None,
+                timestamp: None,
             },
             Message::tool_result("call_1", "result a"),
             Message::tool_result("call_2", "result b"),

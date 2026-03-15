@@ -31,39 +31,36 @@ pub fn load_memory_context(max_tokens: usize) -> Result<String> {
 
     // Load memory/*.md files, sorted by modification time (most recent first)
     let mem_dir = memory_dir()?;
-    if mem_dir.exists() {
-        let mut entries: Vec<_> = std::fs::read_dir(&mem_dir)?
-            .filter_map(std::result::Result::ok)
-            .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
-            .collect();
+    load_memory_files_from_dir(
+        &mem_dir,
+        "Memory",
+        max_tokens,
+        &mut estimated_tokens,
+        &mut parts,
+    )?;
 
-        entries.sort_by(|a, b| {
-            let time_a = a.metadata().and_then(|m| m.modified()).ok();
-            let time_b = b.metadata().and_then(|m| m.modified()).ok();
-            time_b.cmp(&time_a)
-        });
-
-        for entry in entries {
-            let content = std::fs::read_to_string(entry.path())?;
-            let tokens = estimate_tokens(&content);
-
-            if estimated_tokens + tokens > max_tokens {
-                debug!(
-                    "Skipping {} (would exceed token budget)",
-                    entry.path().display()
-                );
-                continue;
+    // Load local project memory from CWD/.tamagotchi/memory/ if it exists
+    if let Ok(cwd) = std::env::current_dir() {
+        let local_mem_dir = cwd.join(".tamagotchi").join("memory");
+        if local_mem_dir.exists() {
+            // Also load local MEMORY.md if present
+            let local_index = cwd.join(".tamagotchi").join("MEMORY.md");
+            if local_index.exists() {
+                let content = std::fs::read_to_string(&local_index)?;
+                let tokens = estimate_tokens(&content);
+                if estimated_tokens + tokens <= max_tokens {
+                    parts.push(format!("## Local MEMORY.md\n\n{content}"));
+                    estimated_tokens += tokens;
+                    debug!("Loaded local MEMORY.md ({tokens} estimated tokens)");
+                }
             }
-
-            let filename = entry
-                .path()
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            parts.push(format!("## Memory: {filename}\n\n{content}"));
-            estimated_tokens += tokens;
-            debug!("Loaded memory/{}.md ({tokens} estimated tokens)", filename);
+            load_memory_files_from_dir(
+                &local_mem_dir,
+                "Local Memory",
+                max_tokens,
+                &mut estimated_tokens,
+                &mut parts,
+            )?;
         }
     }
 
@@ -72,6 +69,58 @@ pub fn load_memory_context(max_tokens: usize) -> Result<String> {
     } else {
         Ok(format!("# Your Memory\n\n{}\n", parts.join("\n\n---\n\n")))
     }
+}
+
+fn load_memory_files_from_dir(
+    dir: &std::path::Path,
+    label: &str,
+    max_tokens: usize,
+    estimated_tokens: &mut usize,
+    parts: &mut Vec<String>,
+) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
+        .collect();
+
+    entries.sort_by(|a, b| {
+        let time_a = a.metadata().and_then(|m| m.modified()).ok();
+        let time_b = b.metadata().and_then(|m| m.modified()).ok();
+        time_b.cmp(&time_a)
+    });
+
+    for entry in entries {
+        let content = std::fs::read_to_string(entry.path())?;
+        let tokens = estimate_tokens(&content);
+
+        if *estimated_tokens + tokens > max_tokens {
+            debug!(
+                "Skipping {} (would exceed token budget)",
+                entry.path().display()
+            );
+            continue;
+        }
+
+        let filename = entry
+            .path()
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        parts.push(format!("## {label}: {filename}\n\n{content}"));
+        *estimated_tokens += tokens;
+        debug!(
+            "Loaded {}/{}.md ({tokens} estimated tokens)",
+            dir.display(),
+            filename
+        );
+    }
+
+    Ok(())
 }
 
 fn validate_memory_filename(filename: &str) -> Result<()> {
@@ -94,7 +143,26 @@ fn resolve_memory_path(filename: &str) -> Result<PathBuf> {
 }
 
 pub fn write_memory(filename: &str, content: &str, append: bool) -> Result<String> {
-    let path = resolve_memory_path(filename)?;
+    write_memory_scoped(filename, content, append, "global")
+}
+
+pub fn write_memory_scoped(
+    filename: &str,
+    content: &str,
+    append: bool,
+    scope: &str,
+) -> Result<String> {
+    let path = if scope == "local" {
+        let cwd = std::env::current_dir()?;
+        let local_dir = cwd.join(".tamagotchi");
+        validate_memory_filename(filename)?;
+        match filename {
+            "MEMORY.md" => local_dir.join("MEMORY.md"),
+            _ => local_dir.join("memory").join(filename),
+        }
+    } else {
+        resolve_memory_path(filename)?
+    };
 
     if append && path.exists() {
         let existing = std::fs::read_to_string(&path)?;

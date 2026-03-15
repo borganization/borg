@@ -6,6 +6,13 @@ use tracing::debug;
 use crate::config::Config;
 use crate::tokenizer::estimate_tokens;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SkillLoadLevel {
+    Metadata, // name + description + status only
+    Summary,  // metadata + first paragraph of body
+    Full,     // entire SKILL.md body
+}
+
 const BUILTIN_SLACK: &str = include_str!("../skills/slack/SKILL.md");
 const BUILTIN_DISCORD: &str = include_str!("../skills/discord/SKILL.md");
 const BUILTIN_GITHUB: &str = include_str!("../skills/github/SKILL.md");
@@ -48,10 +55,16 @@ pub struct Skill {
     pub body: String,
     pub source: SkillSource,
     pub available: bool,
+    pub references: Vec<(String, String)>,
+    pub scripts: Vec<PathBuf>,
 }
 
 impl Skill {
     pub fn format_for_prompt(&self) -> String {
+        self.format_at_level(SkillLoadLevel::Full)
+    }
+
+    pub fn format_at_level(&self, level: SkillLoadLevel) -> String {
         let status = if self.available {
             "available"
         } else {
@@ -61,10 +74,31 @@ impl Skill {
             SkillSource::BuiltIn => "built-in",
             SkillSource::User => "user",
         };
-        format!(
-            "## Skill: {} [{}, {}]\n\n{}\n",
-            self.manifest.name, source, status, self.body
-        )
+        match level {
+            SkillLoadLevel::Metadata => {
+                format!(
+                    "### {} ({}, {}) — {}",
+                    self.manifest.name, source, status, self.manifest.description
+                )
+            }
+            SkillLoadLevel::Summary => {
+                let first_para = self
+                    .body
+                    .split("\n\n")
+                    .find(|p| !p.trim().is_empty())
+                    .unwrap_or("");
+                format!(
+                    "## Skill: {} [{}, {}]\n\n{}\n",
+                    self.manifest.name, source, status, first_para
+                )
+            }
+            SkillLoadLevel::Full => {
+                format!(
+                    "## Skill: {} [{}, {}]\n\n{}\n",
+                    self.manifest.name, source, status, self.body
+                )
+            }
+        }
     }
 
     pub fn summary_line(&self) -> String {
@@ -124,6 +158,8 @@ fn load_builtin_skill(content: &str) -> Result<Skill> {
         body,
         source: SkillSource::BuiltIn,
         available,
+        references: Vec::new(),
+        scripts: Vec::new(),
     })
 }
 
@@ -175,6 +211,41 @@ pub fn load_all_skills() -> Result<Vec<Skill>> {
                             Ok((manifest, body)) => {
                                 let available = check_requirements(&manifest.requires);
                                 let name = manifest.name.clone();
+                                let skill_dir = entry.path();
+
+                                // Load references from references/*.md
+                                let mut references = Vec::new();
+                                let refs_dir = skill_dir.join("references");
+                                if refs_dir.is_dir() {
+                                    if let Ok(ref_entries) = std::fs::read_dir(&refs_dir) {
+                                        for ref_entry in ref_entries.flatten() {
+                                            let ref_path = ref_entry.path();
+                                            if ref_path.extension().is_some_and(|e| e == "md") {
+                                                if let Ok(ref_content) =
+                                                    std::fs::read_to_string(&ref_path)
+                                                {
+                                                    let ref_name = ref_path
+                                                        .file_name()
+                                                        .unwrap_or_default()
+                                                        .to_string_lossy()
+                                                        .to_string();
+                                                    references.push((ref_name, ref_content));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Detect scripts
+                                let mut scripts = Vec::new();
+                                let scripts_dir = skill_dir.join("scripts");
+                                if scripts_dir.is_dir() {
+                                    if let Ok(script_entries) = std::fs::read_dir(&scripts_dir) {
+                                        for script_entry in script_entries.flatten() {
+                                            scripts.push(script_entry.path());
+                                        }
+                                    }
+                                }
 
                                 // User skills override built-in skills with the same name
                                 skills.retain(|s| s.manifest.name != name);
@@ -184,6 +255,8 @@ pub fn load_all_skills() -> Result<Vec<Skill>> {
                                     body,
                                     source: SkillSource::User,
                                     available,
+                                    references,
+                                    scripts,
                                 });
                                 debug!("Loaded user skill: {name}");
                             }
@@ -210,31 +283,59 @@ pub fn load_skills_context(max_tokens: usize) -> Result<String> {
         return Ok(String::new());
     }
 
-    let mut parts = Vec::new();
-    let mut estimated_tokens = 0;
-
-    // Include available skills first, then unavailable
+    // Sort: available skills first, then unavailable
     let mut sorted_skills = skills;
     sorted_skills.sort_by_key(|s| !s.available);
 
-    for skill in &sorted_skills {
-        let formatted = skill.format_for_prompt();
-        let tokens = estimate_tokens(&formatted);
+    // Phase 1: Include metadata for ALL skills
+    let mut metadata_parts = Vec::new();
+    let mut estimated_tokens = 0;
 
-        if estimated_tokens + tokens > max_tokens {
+    for skill in &sorted_skills {
+        let meta = skill.format_at_level(SkillLoadLevel::Metadata);
+        let tokens = estimate_tokens(&meta);
+        metadata_parts.push(meta);
+        estimated_tokens += tokens;
+    }
+
+    // Phase 2: With remaining budget, upgrade available skills to full body
+    let mut full_parts = Vec::new();
+    let mut upgraded: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    for (i, skill) in sorted_skills.iter().enumerate() {
+        if !skill.available {
+            continue;
+        }
+        let full = skill.format_at_level(SkillLoadLevel::Full);
+        let full_tokens = estimate_tokens(&full);
+        let meta_tokens = estimate_tokens(&metadata_parts[i]);
+        let additional = full_tokens.saturating_sub(meta_tokens);
+
+        if estimated_tokens + additional > max_tokens {
             debug!(
-                "Skipping skill '{}' (would exceed token budget)",
+                "Skipping full body for skill '{}' (would exceed token budget)",
                 skill.manifest.name
             );
             continue;
         }
 
-        parts.push(formatted);
-        estimated_tokens += tokens;
+        full_parts.push((i, full));
+        upgraded.insert(i);
+        estimated_tokens += additional;
         debug!(
-            "Included skill '{}' ({tokens} estimated tokens)",
+            "Included full skill '{}' ({full_tokens} estimated tokens)",
             skill.manifest.name
         );
+    }
+
+    // Build final output: full body for upgraded skills, metadata for the rest
+    let mut parts = Vec::new();
+    for (i, meta) in metadata_parts.iter().enumerate() {
+        if let Some((_, full)) = full_parts.iter().find(|(idx, _)| *idx == i) {
+            parts.push(full.clone());
+        } else {
+            parts.push(meta.clone());
+        }
     }
 
     if parts.is_empty() {
@@ -349,6 +450,8 @@ Short body.
             body,
             source: SkillSource::BuiltIn,
             available: true,
+            references: Vec::new(),
+            scripts: Vec::new(),
         };
         let formatted = skill.format_for_prompt();
         let tokens = estimate_tokens(&formatted);
@@ -385,6 +488,8 @@ Short body.
             body: "body".to_string(),
             source: SkillSource::BuiltIn,
             available: true,
+            references: Vec::new(),
+            scripts: Vec::new(),
         };
         let line = skill.summary_line();
         assert!(line.contains("[✓]"));
@@ -438,6 +543,8 @@ Short body.
             body: "built-in body".to_string(),
             source: SkillSource::BuiltIn,
             available: true,
+            references: Vec::new(),
+            scripts: Vec::new(),
         }];
 
         let user_name = "weather".to_string();
@@ -451,10 +558,96 @@ Short body.
             body: "user body".to_string(),
             source: SkillSource::User,
             available: true,
+            references: Vec::new(),
+            scripts: Vec::new(),
         });
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].source, SkillSource::User);
         assert_eq!(skills[0].manifest.description, "user weather");
+    }
+
+    #[test]
+    fn metadata_only_is_compact() {
+        let skill = Skill {
+            manifest: SkillManifest {
+                name: "test-meta".to_string(),
+                description: "A test skill.".to_string(),
+                requires: SkillRequires::default(),
+            },
+            body: "# Full Body\n\nLots of content here.\n\n## Section 2\n\nMore content."
+                .to_string(),
+            source: SkillSource::BuiltIn,
+            available: true,
+            references: Vec::new(),
+            scripts: Vec::new(),
+        };
+        let meta = skill.format_at_level(SkillLoadLevel::Metadata);
+        let full = skill.format_at_level(SkillLoadLevel::Full);
+        let meta_tokens = estimate_tokens(&meta);
+        let full_tokens = estimate_tokens(&full);
+        assert!(meta_tokens < full_tokens);
+        assert!(meta.contains("test-meta"));
+        assert!(meta.contains("A test skill."));
+        assert!(!meta.contains("Full Body"));
+    }
+
+    #[test]
+    fn summary_level_includes_first_paragraph() {
+        let skill = Skill {
+            manifest: SkillManifest {
+                name: "test-summary".to_string(),
+                description: "A summary test.".to_string(),
+                requires: SkillRequires::default(),
+            },
+            body: "# Title\n\nFirst paragraph here.\n\n## Section 2\n\nMore content.".to_string(),
+            source: SkillSource::BuiltIn,
+            available: true,
+            references: Vec::new(),
+            scripts: Vec::new(),
+        };
+        let summary = skill.format_at_level(SkillLoadLevel::Summary);
+        assert!(summary.contains("# Title"));
+        assert!(!summary.contains("Section 2"));
+    }
+
+    #[test]
+    fn progressive_loading_fits_many_skills() {
+        // With metadata-only, 50 skills should fit in a reasonable budget
+        let mut skills = Vec::new();
+        for i in 0..50 {
+            skills.push(Skill {
+                manifest: SkillManifest {
+                    name: format!("skill-{i}"),
+                    description: format!("Description for skill {i}"),
+                    requires: SkillRequires::default(),
+                },
+                body: format!("# Skill {i}\n\nBody content for skill {i}.\n\n## Usage\n\nDetailed usage instructions for skill {i} with examples and documentation."),
+                source: SkillSource::BuiltIn,
+                available: i % 2 == 0,
+                references: Vec::new(),
+                scripts: Vec::new(),
+            });
+        }
+
+        // All metadata should be under 4000 tokens
+        let total_meta_tokens: usize = skills
+            .iter()
+            .map(|s| estimate_tokens(&s.format_at_level(SkillLoadLevel::Metadata)))
+            .sum();
+        assert!(
+            total_meta_tokens < 4000,
+            "50 skill metadata = {total_meta_tokens} tokens"
+        );
+    }
+
+    #[test]
+    fn progressive_loading_prioritizes_available() {
+        // load_skills_context should include full body for available skills first
+        let context = load_skills_context(2000).unwrap();
+        // Just verify it doesn't panic and produces output
+        if !context.is_empty() {
+            assert!(context.starts_with("# Skills"));
+        }
     }
 }

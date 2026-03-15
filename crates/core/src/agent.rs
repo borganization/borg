@@ -8,9 +8,10 @@ use tracing::warn;
 use crate::config::Config;
 use crate::conversation::{compact_history, history_tokens, normalize_history, undo_last_turn};
 use crate::db::Database;
+use crate::hooks::{HookAction, HookContext, HookData, HookPoint, HookRegistry};
 use crate::llm::{LlmClient, StreamEvent, UsageData};
 use crate::logging::log_message;
-use crate::memory::{load_memory_context, read_memory, write_memory};
+use crate::memory::{load_memory_context, read_memory, write_memory_scoped};
 use crate::policy::ExecutionPolicy;
 use crate::secrets::redact_secrets;
 use crate::session::Session;
@@ -25,6 +26,97 @@ use tamagotchi_tools::registry::ToolRegistry;
 
 /// Max tokens for tool output before truncation (head + tail preserved).
 const TOOL_OUTPUT_MAX_TOKENS: usize = 4000;
+
+/// Strip `<internal>...</internal>` blocks from text to prevent chain-of-thought leakage.
+fn strip_internal_tags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(start) = remaining.find("<internal>") {
+        result.push_str(&remaining[..start]);
+        if let Some(end) = remaining[start..].find("</internal>") {
+            remaining = &remaining[start + end + "</internal>".len()..];
+        } else {
+            // Unclosed tag — strip everything from <internal> onward
+            return result;
+        }
+    }
+    result.push_str(remaining);
+    result
+}
+
+/// Streaming filter that buffers text to strip `<internal>` blocks in real-time.
+struct InternalTagFilter {
+    raw: String,
+    emitted_len: usize,
+}
+
+impl InternalTagFilter {
+    fn new() -> Self {
+        Self {
+            raw: String::new(),
+            emitted_len: 0,
+        }
+    }
+
+    /// Append new text and return the portion safe to emit.
+    fn push(&mut self, delta: &str) -> Option<String> {
+        self.raw.push_str(delta);
+        let cleaned = strip_internal_tags(&self.raw);
+        // Don't emit past an unclosed <internal> tag
+        let safe_end = if let Some(pos) = self.raw.rfind("<internal") {
+            // Check if this opening tag has a matching close
+            if self.raw[pos..].contains("</internal>") {
+                cleaned.len()
+            } else {
+                // Unclosed — only emit up to the tag start in cleaned text
+                let raw_before_tag = &self.raw[..pos];
+                strip_internal_tags(raw_before_tag).len()
+            }
+        } else {
+            // Also hold back if we might be starting a tag (partial `<inter...`)
+            let hold_back = partial_tag_overlap(&self.raw);
+            cleaned.len().saturating_sub(hold_back)
+        };
+
+        if safe_end > self.emitted_len {
+            let new_text = cleaned[self.emitted_len..safe_end].to_string();
+            self.emitted_len = safe_end;
+            Some(new_text)
+        } else {
+            None
+        }
+    }
+
+    /// Flush remaining buffered text (called when stream ends).
+    fn flush(&mut self) -> Option<String> {
+        let cleaned = strip_internal_tags(&self.raw);
+        if cleaned.len() > self.emitted_len {
+            let remaining = cleaned[self.emitted_len..].to_string();
+            self.emitted_len = cleaned.len();
+            Some(remaining)
+        } else {
+            None
+        }
+    }
+
+    /// Return the full cleaned text.
+    fn full_clean(&self) -> String {
+        strip_internal_tags(&self.raw)
+    }
+}
+
+/// Check if the end of `text` is a partial match for `<internal>`.
+fn partial_tag_overlap(text: &str) -> usize {
+    let tag = "<internal>";
+    let text_bytes = text.as_bytes();
+    let tag_bytes = tag.as_bytes();
+    for len in (1..tag_bytes.len()).rev() {
+        if text_bytes.len() >= len && text_bytes[text_bytes.len() - len..] == tag_bytes[..len] {
+            return len;
+        }
+    }
+    0
+}
 
 pub enum AgentEvent {
     TextDelta(String),
@@ -53,6 +145,8 @@ pub struct Agent {
     tool_registry: ToolRegistry,
     session: Session,
     policy: ExecutionPolicy,
+    hook_registry: HookRegistry,
+    turn_count: u32,
 }
 
 impl Agent {
@@ -67,7 +161,13 @@ impl Agent {
             tool_registry,
             session: Session::new(),
             policy,
+            hook_registry: HookRegistry::new(),
+            turn_count: 0,
         })
+    }
+
+    pub fn hook_registry_mut(&mut self) -> &mut HookRegistry {
+        &mut self.hook_registry
     }
 
     /// Restore a session's history into this agent.
@@ -90,6 +190,32 @@ impl Agent {
         if let Err(e) = self.session.save() {
             warn!("Failed to auto-save session: {e}");
         }
+    }
+
+    /// Push a message to history and persist it to SQLite for crash recovery.
+    fn persist_message(&mut self, msg: Message) {
+        let session_id = self.session.meta.id.clone();
+        let role = match msg.role {
+            crate::types::Role::System => "system",
+            crate::types::Role::User => "user",
+            crate::types::Role::Assistant => "assistant",
+            crate::types::Role::Tool => "tool",
+        };
+        let tool_calls_json = msg
+            .tool_calls
+            .as_ref()
+            .and_then(|tc| serde_json::to_string(tc).ok());
+        if let Ok(db) = Database::open() {
+            let _ = db.insert_message(
+                &session_id,
+                role,
+                msg.content.as_deref(),
+                tool_calls_json.as_deref(),
+                msg.tool_call_id.as_deref(),
+                msg.timestamp.as_deref(),
+            );
+        }
+        self.history.push(msg);
     }
 
     pub fn session(&self) -> &Session {
@@ -213,7 +339,8 @@ impl Agent {
     ) -> Result<()> {
         let msg = Message::user(user_input);
         log_message(&msg);
-        self.history.push(msg);
+        self.persist_message(msg);
+        self.turn_count += 1;
         self.run_agent_loop(event_tx, cancel).await
     }
 
@@ -284,8 +411,41 @@ impl Agent {
                 .await;
             }
 
-            let system_prompt = self.build_system_prompt()?;
+            let mut system_prompt = self.build_system_prompt()?;
             let tool_defs = self.build_tool_definitions();
+
+            // Fire BeforeAgentStart (first iteration) or BeforeLlmCall
+            let hook_point = if iteration == 1 {
+                HookPoint::BeforeAgentStart
+            } else {
+                HookPoint::BeforeLlmCall
+            };
+            let user_msg = self
+                .history
+                .iter()
+                .rev()
+                .find(|m| m.role == crate::types::Role::User)
+                .and_then(|m| m.content.clone())
+                .unwrap_or_default();
+            let hook_data = if iteration == 1 {
+                HookData::AgentStart {
+                    user_message: user_msg,
+                }
+            } else {
+                HookData::LlmCall {
+                    message_count: self.history.len(),
+                }
+            };
+            let hook_ctx = HookContext {
+                point: hook_point,
+                session_id: self.session.meta.id.clone(),
+                turn_count: self.turn_count,
+                data: hook_data,
+            };
+            if let HookAction::InjectContext(extra) = self.hook_registry.dispatch(&hook_ctx) {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(&extra);
+            }
 
             let mut messages = vec![Message::system(&system_prompt)];
             messages.extend(self.history.clone());
@@ -317,18 +477,18 @@ impl Agent {
                 })
             };
 
-            let mut text_content = String::new();
+            let mut tag_filter = InternalTagFilter::new();
             let mut tool_calls: Vec<PartialToolCall> = Vec::new();
 
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
+                        let text_content = tag_filter.full_clean();
                         if !text_content.is_empty() {
-                            let mut content = text_content.clone();
-                            content.push_str("\n\n[response interrupted]");
+                            let content = format!("{text_content}\n\n[response interrupted]");
                             let msg = Message::assistant(&content);
                             log_message(&msg);
-                            self.history.push(msg);
+                            self.persist_message(msg);
                         }
                         let _ = event_tx.send(AgentEvent::TurnComplete).await;
                         let _ = stream_handle.await;
@@ -337,8 +497,9 @@ impl Agent {
                     event = stream_rx.recv() => {
                         match event {
                             Some(StreamEvent::TextDelta(delta)) => {
-                                text_content.push_str(&delta);
-                                let _ = event_tx.send(AgentEvent::TextDelta(delta)).await;
+                                if let Some(filtered) = tag_filter.push(&delta) {
+                                    let _ = event_tx.send(AgentEvent::TextDelta(filtered)).await;
+                                }
                             }
                             Some(StreamEvent::ToolCallDelta {
                                 index, id, name, arguments_delta,
@@ -375,10 +536,39 @@ impl Agent {
 
             let _ = stream_handle.await;
 
+            // Flush any remaining buffered text from the internal-tag filter
+            if let Some(remaining) = tag_filter.flush() {
+                let _ = event_tx.send(AgentEvent::TextDelta(remaining)).await;
+            }
+            let text_content = tag_filter.full_clean();
+
+            // Fire AfterLlmResponse hook
+            let hook_ctx = HookContext {
+                point: HookPoint::AfterLlmResponse,
+                session_id: self.session.meta.id.clone(),
+                turn_count: self.turn_count,
+                data: HookData::LlmResponse {
+                    has_tool_calls: !tool_calls.is_empty(),
+                    text_length: text_content.len(),
+                },
+            };
+            self.hook_registry.dispatch(&hook_ctx);
+
             if tool_calls.is_empty() {
+                // Fire TurnComplete hook
+                let hook_ctx = HookContext {
+                    point: HookPoint::TurnComplete,
+                    session_id: self.session.meta.id.clone(),
+                    turn_count: self.turn_count,
+                    data: HookData::TurnEnd {
+                        total_tool_calls: 0,
+                    },
+                };
+                self.hook_registry.dispatch(&hook_ctx);
+
                 let msg = Message::assistant(&text_content);
                 log_message(&msg);
-                self.history.push(msg);
+                self.persist_message(msg);
                 self.auto_save();
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
@@ -418,7 +608,7 @@ impl Agent {
                 };
                 let msg = Message::assistant(&content);
                 log_message(&msg);
-                self.history.push(msg);
+                self.persist_message(msg);
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
             }
@@ -429,6 +619,7 @@ impl Agent {
                     content: None,
                     tool_calls: Some(tc.clone()),
                     tool_call_id: None,
+                    timestamp: Some(chrono::Local::now().to_rfc3339()),
                 }
             } else {
                 Message {
@@ -436,10 +627,11 @@ impl Agent {
                     content: Some(text_content.clone()),
                     tool_calls: Some(tc.clone()),
                     tool_call_id: None,
+                    timestamp: Some(chrono::Local::now().to_rfc3339()),
                 }
             };
             log_message(&assistant_msg);
-            self.history.push(assistant_msg);
+            self.persist_message(assistant_msg);
 
             let (sequential, parallel): (Vec<_>, Vec<_>) =
                 tc.iter().partition(|t| t.function.name == "run_shell");
@@ -460,12 +652,30 @@ impl Agent {
                 let remaining_msg =
                     Message::tool_result(&tool_call.id, "[tool call cancelled by user]");
                 log_message(&remaining_msg);
-                self.history.push(remaining_msg);
+                self.persist_message(remaining_msg);
                 continue;
             }
 
             let name = &tool_call.function.name;
             let args = &tool_call.function.arguments;
+
+            // Fire BeforeToolCall hook
+            let hook_ctx = HookContext {
+                point: HookPoint::BeforeToolCall,
+                session_id: self.session.meta.id.clone(),
+                turn_count: self.turn_count,
+                data: HookData::ToolCall {
+                    name: name.clone(),
+                    args: args.clone(),
+                },
+            };
+            if matches!(self.hook_registry.dispatch(&hook_ctx), HookAction::Skip) {
+                let skip_msg = Message::tool_result(&tool_call.id, "[tool call skipped by hook]");
+                log_message(&skip_msg);
+                self.persist_message(skip_msg);
+                continue;
+            }
+
             let _ = event_tx
                 .send(AgentEvent::ToolExecuting {
                     name: name.clone(),
@@ -484,6 +694,19 @@ impl Agent {
                 truncated
             };
 
+            // Fire AfterToolCall hook
+            let hook_ctx = HookContext {
+                point: HookPoint::AfterToolCall,
+                session_id: self.session.meta.id.clone(),
+                turn_count: self.turn_count,
+                data: HookData::ToolResult {
+                    name: name.clone(),
+                    result: result.clone(),
+                    is_error: result.starts_with("Error:"),
+                },
+            };
+            self.hook_registry.dispatch(&hook_ctx);
+
             let _ = event_tx
                 .send(AgentEvent::ToolResult {
                     name: name.clone(),
@@ -492,7 +715,7 @@ impl Agent {
                 .await;
             let msg = Message::tool_result(&tool_call.id, &result);
             log_message(&msg);
-            self.history.push(msg);
+            self.persist_message(msg);
         }
     }
 
@@ -516,7 +739,8 @@ impl Agent {
                 let filename = require_str_param(&args, "filename")?;
                 let content = require_str_param(&args, "content")?;
                 let append = args["append"].as_bool().unwrap_or(false);
-                write_memory(filename, content, append)
+                let scope = args["scope"].as_str().unwrap_or("global");
+                write_memory_scoped(filename, content, append, scope)
             }
             "read_memory" => {
                 let filename = require_str_param(&args, "filename")?;
@@ -706,6 +930,28 @@ impl Agent {
                 let task_id = require_str_param(&args, "task_id")?;
                 update_task_status(task_id, "cancelled", "cancelled")
             }
+            "read_pdf" => {
+                let file_path = require_str_param(&args, "file_path")?;
+                let max_chars = args["max_chars"].as_u64().unwrap_or(50000) as usize;
+                let path = std::path::Path::new(file_path);
+                if !path.exists() {
+                    return Ok(format!("File not found: {file_path}"));
+                }
+                match pdf_extract::extract_text(path) {
+                    Ok(text) => {
+                        if text.len() > max_chars {
+                            let truncated: String = text.chars().take(max_chars).collect();
+                            Ok(format!(
+                                "{truncated}\n\n[truncated — {max_chars}/{} chars shown]",
+                                text.len()
+                            ))
+                        } else {
+                            Ok(text)
+                        }
+                    }
+                    Err(e) => Ok(format!("Error reading PDF: {e}")),
+                }
+            }
             _ => {
                 let cred_names = self.tool_registry.tool_credentials(name);
                 let extra_env: Vec<(String, String)> = cred_names
@@ -720,7 +966,12 @@ impl Agent {
                     .collect();
                 match self
                     .tool_registry
-                    .execute_tool_with_env(name, args_json, &extra_env)
+                    .execute_tool_full(
+                        name,
+                        args_json,
+                        &extra_env,
+                        &self.config.security.blocked_paths,
+                    )
                     .await
                 {
                     Ok(result) => Ok(result),
@@ -758,6 +1009,71 @@ struct PartialToolCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_internal_tags_basic() {
+        let input = "Hello <internal>secret thinking</internal> world";
+        assert_eq!(strip_internal_tags(input), "Hello  world");
+    }
+
+    #[test]
+    fn strip_internal_tags_multiple() {
+        let input = "A <internal>x</internal> B <internal>y</internal> C";
+        assert_eq!(strip_internal_tags(input), "A  B  C");
+    }
+
+    #[test]
+    fn strip_internal_tags_multiline() {
+        let input = "Hello <internal>\nthinking\nacross lines\n</internal> world";
+        assert_eq!(strip_internal_tags(input), "Hello  world");
+    }
+
+    #[test]
+    fn strip_internal_tags_no_tags() {
+        let input = "Hello world";
+        assert_eq!(strip_internal_tags(input), "Hello world");
+    }
+
+    #[test]
+    fn strip_internal_tags_unclosed() {
+        let input = "Hello <internal>never closed";
+        assert_eq!(strip_internal_tags(input), "Hello ");
+    }
+
+    #[test]
+    fn strip_internal_tags_empty() {
+        assert_eq!(strip_internal_tags(""), "");
+    }
+
+    #[test]
+    fn internal_tag_filter_streaming() {
+        let mut filter = InternalTagFilter::new();
+        // Simulate streaming: "Hello <internal>secret</internal> world"
+        let r1 = filter.push("Hello ");
+        assert_eq!(r1, Some("Hello ".to_string()));
+
+        let r2 = filter.push("<internal>sec");
+        assert_eq!(r2, None); // buffered, inside tag
+
+        let r3 = filter.push("ret</internal> world");
+        assert!(r3.is_some());
+        assert_eq!(r3.as_deref(), Some(" world"));
+    }
+
+    #[test]
+    fn internal_tag_filter_no_tags() {
+        let mut filter = InternalTagFilter::new();
+        let r = filter.push("Hello world");
+        assert_eq!(r, Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn partial_tag_overlap_basic() {
+        assert_eq!(partial_tag_overlap("text<"), 1);
+        assert_eq!(partial_tag_overlap("text<int"), 4);
+        assert_eq!(partial_tag_overlap("text<internal"), 9);
+        assert_eq!(partial_tag_overlap("text"), 0);
+    }
 
     #[test]
     fn require_str_param_present() {
@@ -813,7 +1129,7 @@ mod tests {
 
 fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     let mut defs = vec![
-        ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'SOUL.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories.", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false}},"required":["filename","content"]})),
+        ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'SOUL.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories. Use scope='local' to write to project-local memory (.tamagotchi/ in CWD).", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false},"scope":{"type":"string","enum":["global","local"],"description":"Memory scope: 'global' (default, ~/.tamagotchi/) or 'local' (CWD/.tamagotchi/)","default":"global"}},"required":["filename","content"]})),
         ToolDefinition::new("read_memory", "Read a memory file.", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file to read"}},"required":["filename"]})),
         ToolDefinition::new("list_tools", "List all available user-created tools.", serde_json::json!({"type":"object","properties":{}})),
         ToolDefinition::new("apply_patch", "Create, update, or delete files in the current working directory using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
@@ -821,6 +1137,7 @@ fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         ToolDefinition::new("run_shell", "Execute a shell command. Requires user confirmation before execution.", serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]})),
         ToolDefinition::new("list_skills", "List all available skills with their status and source.", serde_json::json!({"type":"object","properties":{}})),
         ToolDefinition::new("apply_skill_patch", "Create or modify skill files in the skills directory using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
+        ToolDefinition::new("read_pdf", "Read and extract text from a PDF file.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the PDF file"},"max_chars":{"type":"integer","description":"Maximum characters to return (default: 50000)","default":50000}},"required":["file_path"]})),
     ];
 
     if config.web.enabled {
