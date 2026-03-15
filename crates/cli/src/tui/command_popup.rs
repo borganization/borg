@@ -76,6 +76,10 @@ const COMMANDS: &[SlashCommandDef] = &[
         name: "/customize",
         description: "Integration marketplace",
     },
+    SlashCommandDef {
+        name: "/logs",
+        description: "Show recent logs",
+    },
 ];
 
 pub struct CommandPopup {

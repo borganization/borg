@@ -130,10 +130,16 @@ pub async fn run() -> Result<()> {
     .await
 }
 
-/// If the app just became idle and has a queued message, auto-submit it.
+/// If the app just became idle and has queued messages, auto-submit the next one.
+/// Remaining messages stay in the queue and drain on subsequent TurnComplete events.
+/// If the last turn errored, pause the queue and notify the user.
 fn drain_queued_if_idle(app: &mut App<'_>) -> Result<AppAction> {
     if matches!(app.state, app::AppState::Idle) {
-        if let Some(queued) = app.take_queued_message() {
+        if app.last_turn_errored && !app.queued_messages.is_empty() {
+            app.push_system_message("[queue paused — enter to resume, esc to clear]".to_string());
+            return Ok(AppAction::Continue);
+        }
+        if let Some(queued) = app.pop_next_queued() {
             return app.handle_queued_submit(&queued);
         }
     }
@@ -385,18 +391,18 @@ async fn run_event_loop(
 
                 for action in actions {
                     match action {
-                        customize_popup::CustomizeAction::Install { id } => {
+                        customize_popup::CustomizeAction::Install { id, credentials } => {
                             if let Some(def) = tamagotchi_customizations::catalog::find_by_id(&id) {
                                 match tamagotchi_customizations::installer::install(
                                     def,
                                     &data_dir,
-                                    &[],
+                                    &credentials,
                                     None,
                                 )
                                 .await
                                 {
                                     Ok(install_result) => {
-                                        // Record in DB
+                                        // Record in DB + store file hashes
                                         if let Ok(db) = tamagotchi_core::db::Database::open() {
                                             let _ = db.insert_customization(
                                                 def.id,
@@ -404,9 +410,63 @@ async fn run_event_loop(
                                                 &def.kind.to_string(),
                                                 &def.category.to_string(),
                                             );
+
+                                            // Store file hashes for integrity verification
+                                            for (path, hash) in &install_result.file_hashes {
+                                                let _ = db.insert_file_hash(def.id, path, hash);
+                                            }
+
+                                            // Register installed tool/channel
+                                            if let Some(first_tmpl) = def.templates.first() {
+                                                if let Some(item_name) =
+                                                    first_tmpl.relative_path.split('/').next()
+                                                {
+                                                    match def.kind {
+                                                        tamagotchi_customizations::CustomizationKind::Tool => {
+                                                            let _ = db.insert_installed_tool(
+                                                                item_name,
+                                                                def.description,
+                                                                "python",
+                                                                def.id,
+                                                            );
+                                                        }
+                                                        tamagotchi_customizations::CustomizationKind::Channel => {
+                                                            let webhook = format!("/webhook/{item_name}");
+                                                            let _ = db.insert_installed_channel(
+                                                                item_name,
+                                                                def.description,
+                                                                "python",
+                                                                def.id,
+                                                                &webhook,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
+
+                                        // Wire credential entries into config
+                                        if !install_result.credential_entries.is_empty() {
+                                            if let Ok(mut cfg) = Config::load() {
+                                                for entry in &install_result.credential_entries {
+                                                    cfg.credentials.insert(
+                                                        entry.key.clone(),
+                                                        tamagotchi_core::config::CredentialValue::Ref(
+                                                            tamagotchi_core::secrets_resolve::SecretRef::Keychain {
+                                                                service: entry.service.clone(),
+                                                                account: entry.account.clone(),
+                                                            },
+                                                        ),
+                                                    );
+                                                }
+                                                let _ = cfg.save();
+                                            }
+                                        }
+
                                         // Auto-enable gateway config when installing a channel
-                                        if def.kind == tamagotchi_customizations::CustomizationKind::Channel {
+                                        if def.kind
+                                            == tamagotchi_customizations::CustomizationKind::Channel
+                                        {
                                             if let Ok(mut cfg) = Config::load() {
                                                 if !cfg.gateway.enabled {
                                                     cfg.gateway.enabled = true;
@@ -418,8 +478,12 @@ async fn run_event_loop(
                                         for note in &install_result.notes {
                                             msg.push_str(&format!("\n  {note}"));
                                         }
-                                        if def.kind == tamagotchi_customizations::CustomizationKind::Channel {
-                                            msg.push_str("\n  Restart Tamagotchi to activate the gateway");
+                                        if def.kind
+                                            == tamagotchi_customizations::CustomizationKind::Channel
+                                        {
+                                            msg.push_str(
+                                                "\n  Restart Tamagotchi to activate the gateway",
+                                            );
                                         }
                                         results.push(msg);
                                     }
@@ -438,6 +502,15 @@ async fn run_event_loop(
                                     Ok(()) => {
                                         if let Ok(db) = tamagotchi_core::db::Database::open() {
                                             let _ = db.delete_customization(def.id);
+                                        }
+                                        // Remove credential entries from config
+                                        if !def.required_credentials.is_empty() {
+                                            if let Ok(mut cfg) = Config::load() {
+                                                for cred in def.required_credentials {
+                                                    cfg.credentials.remove(cred.key);
+                                                }
+                                                let _ = cfg.save();
+                                            }
                                         }
                                         results.push(format!("Removed {}", def.name));
                                     }

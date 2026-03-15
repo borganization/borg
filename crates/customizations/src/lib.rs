@@ -86,10 +86,20 @@ pub enum TemplateTarget {
     Tools,
 }
 
+/// Metadata about a credential stored in the OS keychain during installation.
+#[derive(Debug, Clone)]
+pub struct CredentialEntry {
+    pub key: String,
+    pub service: String,
+    pub account: String,
+}
+
 /// Result returned from a successful installation with user-facing notes.
 #[derive(Debug, Clone, Default)]
 pub struct InstallResult {
     pub notes: Vec<String>,
+    pub credential_entries: Vec<CredentialEntry>,
+    pub file_hashes: Vec<(String, String)>,
 }
 
 /// Events emitted during installation for progress display.
