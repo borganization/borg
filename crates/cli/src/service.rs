@@ -63,6 +63,23 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
     let max_concurrent = config.tasks.max_concurrent;
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
+    // Start gateway server if enabled
+    if config.gateway.enabled {
+        let gw_config = config.clone();
+        let gw_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            match tamagotchi_gateway::GatewayServer::new(gw_config, gw_shutdown) {
+                Ok(gateway) => {
+                    if let Err(e) = gateway.run().await {
+                        tracing::warn!("Gateway server error: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!("Failed to create gateway server: {e}"),
+            }
+        });
+        println!("Gateway server started.");
+    }
+
     println!("Daemon running. Press Ctrl+C to stop.");
 
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));

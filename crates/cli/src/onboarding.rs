@@ -116,6 +116,15 @@ const STYLES: &[PersonalityStyle] = &[
     },
 ];
 
+/// How the API key should be stored.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyStorage {
+    /// Store in ~/.tamagotchi/.env (legacy plaintext)
+    EnvFile,
+    /// Store in OS keychain (macOS Keychain / Linux secret-tool)
+    Keychain,
+}
+
 /// Assembled choices from the onboarding wizard.
 pub struct OnboardingResult {
     pub user_name: String,
@@ -123,6 +132,7 @@ pub struct OnboardingResult {
     pub style_index: usize,
     pub model_id: String,
     pub api_key: Option<String>,
+    pub key_storage: KeyStorage,
     pub provider: String,
     pub monthly_token_limit: u64,
 }
@@ -275,9 +285,9 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         None
     };
 
-    let api_key = if existing_key.is_some() {
+    let (api_key, key_storage) = if existing_key.is_some() {
         println!("  API key already configured in {}", env_path.display());
-        None
+        (None, KeyStorage::EnvFile)
     } else {
         let prompt_label = format!("{} API key:", provider_id_to_display(provider_id));
         let help_msg = format!(
@@ -289,9 +299,28 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
             .without_confirmation()
             .prompt());
         if key.trim().is_empty() {
-            None
+            (None, KeyStorage::EnvFile)
         } else {
-            Some(key.trim().to_string())
+            let storage = if keychain_available() {
+                let storage_options = vec![
+                    "OS Keychain (recommended — encrypted, no plaintext on disk)".to_string(),
+                    ".env file (plaintext in ~/.tamagotchi/.env)".to_string(),
+                ];
+                let chosen = prompt_or_cancel!(Select::new(
+                    "Where should the API key be stored?",
+                    storage_options
+                )
+                .with_help_message("Keychain uses macOS Keychain or Linux secret-tool")
+                .prompt());
+                if chosen.starts_with("OS Keychain") {
+                    KeyStorage::Keychain
+                } else {
+                    KeyStorage::EnvFile
+                }
+            } else {
+                KeyStorage::EnvFile
+            };
+            (Some(key.trim().to_string()), storage)
         }
     };
 
@@ -366,6 +395,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         style_index,
         model_id,
         api_key,
+        key_storage,
         provider: provider_id.to_string(),
         monthly_token_limit,
     }))
@@ -418,6 +448,69 @@ fn format_number(n: u64) -> String {
     result.chars().rev().collect()
 }
 
+/// Check if a system keychain is available for secret storage.
+fn keychain_available() -> bool {
+    if cfg!(target_os = "macos") {
+        which::which("security").is_ok()
+    } else if cfg!(target_os = "linux") {
+        which::which("secret-tool").is_ok()
+    } else {
+        false
+    }
+}
+
+/// Store an API key in the OS keychain.
+fn store_in_keychain(provider_id: &str, api_key: &str) -> Result<()> {
+    let service_name = format!("tamagotchi-{provider_id}");
+    if cfg!(target_os = "macos") {
+        let status = std::process::Command::new("security")
+            .args([
+                "add-generic-password",
+                "-s",
+                &service_name,
+                "-a",
+                "tamagotchi",
+                "-w",
+                api_key,
+                "-U", // update if exists
+            ])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!(
+                "Failed to store key in macOS Keychain (exit {})",
+                status.code().unwrap_or(-1)
+            );
+        }
+    } else if cfg!(target_os = "linux") {
+        let mut child = std::process::Command::new("secret-tool")
+            .args([
+                "store",
+                "--label",
+                &format!("Tamagotchi {provider_id} API key"),
+                "service",
+                "tamagotchi",
+                "provider",
+                provider_id,
+            ])
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        if let Some(ref mut stdin) = child.stdin {
+            use std::io::Write;
+            stdin.write_all(api_key.as_bytes())?;
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            anyhow::bail!(
+                "Failed to store key via secret-tool (exit {})",
+                status.code().unwrap_or(-1)
+            );
+        }
+    } else {
+        anyhow::bail!("Keychain storage not supported on this platform");
+    }
+    Ok(())
+}
+
 /// Validate that a model ID is safe for TOML interpolation (alphanumeric, slashes, hyphens, dots).
 fn validate_model_id(model_id: &str) -> Result<()> {
     if model_id.is_empty() {
@@ -440,11 +533,30 @@ pub fn generate_config(
     user_name: &str,
     agent_name: &str,
     monthly_token_limit: u64,
+    key_storage: &KeyStorage,
 ) -> Result<String> {
     validate_model_id(model_id)?;
 
     let provider = Provider::from_str(provider_id)?;
     let env_var = provider.default_env_var();
+
+    let api_key_line = match key_storage {
+        KeyStorage::Keychain => {
+            let service_name = format!("tamagotchi-{provider_id}");
+            if cfg!(target_os = "macos") {
+                format!(
+                    r#"api_key = {{ source = "exec", command = "security", args = ["find-generic-password", "-s", "{service_name}", "-a", "tamagotchi", "-w"] }}"#,
+                )
+            } else {
+                format!(
+                    r#"api_key = {{ source = "exec", command = "secret-tool", args = ["lookup", "service", "tamagotchi", "provider", "{provider_id}"] }}"#,
+                )
+            }
+        }
+        KeyStorage::EnvFile => {
+            format!(r#"api_key_env = "{env_var}""#)
+        }
+    };
 
     Ok(format!(
         r#"[user]
@@ -453,7 +565,7 @@ agent_name = "{agent_name}"
 
 [llm]
 provider = "{provider_id}"
-api_key_env = "{env_var}"
+{api_key_line}
 model = "{model_id}"
 temperature = 0.7
 max_tokens = 4096
@@ -505,6 +617,7 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
             &result.user_name,
             &result.agent_name,
             result.monthly_token_limit,
+            &result.key_storage,
         )?;
         std::fs::write(&config_path, &config_content)?;
         println!("  Created {}", config_path.display());
@@ -530,13 +643,53 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
         println!("  Created {}", memory_path.display());
     }
 
-    // Write .env with API key (skip if not provided)
+    // Store API key based on chosen storage method
     if let Some(ref api_key) = result.api_key {
-        let provider = Provider::from_str(&result.provider)?;
-        let env_var = provider.default_env_var();
-        let env_path = data_dir.join(".env");
-        std::fs::write(&env_path, format!("{env_var}={api_key}\n"))?;
-        println!("  Created {}", env_path.display());
+        match result.key_storage {
+            KeyStorage::Keychain => match store_in_keychain(&result.provider, api_key) {
+                Ok(()) => {
+                    println!(
+                        "  Stored API key in OS keychain (service: tamagotchi-{})",
+                        result.provider
+                    );
+                }
+                Err(e) => {
+                    eprintln!("  Warning: Failed to store in keychain: {e}");
+                    eprintln!("  Falling back to .env file");
+                    // Rewrite config to use api_key_env instead of SecretRef exec,
+                    // so the config matches the actual storage location.
+                    let fallback_config = generate_config(
+                        &result.model_id,
+                        &result.provider,
+                        &result.user_name,
+                        &result.agent_name,
+                        result.monthly_token_limit,
+                        &KeyStorage::EnvFile,
+                    )?;
+                    std::fs::write(&config_path, &fallback_config)?;
+                    let provider = Provider::from_str(&result.provider)?;
+                    let env_var = provider.default_env_var();
+                    let env_path = data_dir.join(".env");
+                    std::fs::write(&env_path, format!("{env_var}={api_key}\n"))?;
+                    println!("  Updated config to use .env file");
+                    println!("  Created {}", env_path.display());
+                }
+            },
+            KeyStorage::EnvFile => {
+                let provider = Provider::from_str(&result.provider)?;
+                let env_var = provider.default_env_var();
+                let env_path = data_dir.join(".env");
+                std::fs::write(&env_path, format!("{env_var}={api_key}\n"))?;
+                // Restrict permissions on .env file
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600));
+                }
+                println!("  Created {}", env_path.display());
+            }
+        }
     }
 
     Ok(())
@@ -577,6 +730,7 @@ mod tests {
             "Mike",
             "Buddy",
             1_000_000,
+            &KeyStorage::EnvFile,
         )
         .expect("valid model");
         assert!(config.contains("model = \"anthropic/claude-sonnet-4\""));
@@ -594,6 +748,7 @@ mod tests {
             "Mike",
             "Buddy",
             1_000_000,
+            &KeyStorage::EnvFile,
         )
         .expect("valid model");
         assert!(config.contains("[user]"));
@@ -603,30 +758,54 @@ mod tests {
 
     #[test]
     fn generate_config_anthropic_provider() {
-        let config = generate_config("claude-sonnet-4", "anthropic", "User", "Agent", 500_000)
-            .expect("valid");
+        let config = generate_config(
+            "claude-sonnet-4",
+            "anthropic",
+            "User",
+            "Agent",
+            500_000,
+            &KeyStorage::EnvFile,
+        )
+        .expect("valid");
         assert!(config.contains("provider = \"anthropic\""));
         assert!(config.contains("api_key_env = \"ANTHROPIC_API_KEY\""));
     }
 
     #[test]
     fn generate_config_openai_provider() {
-        let config = generate_config("gpt-4.1", "openai", "User", "Agent", 0).expect("valid");
+        let config = generate_config(
+            "gpt-4.1",
+            "openai",
+            "User",
+            "Agent",
+            0,
+            &KeyStorage::EnvFile,
+        )
+        .expect("valid");
         assert!(config.contains("provider = \"openai\""));
         assert!(config.contains("api_key_env = \"OPENAI_API_KEY\""));
     }
 
     #[test]
     fn generate_config_gemini_provider() {
-        let config =
-            generate_config("gemini-2.5-pro", "gemini", "User", "Agent", 0).expect("valid");
+        let config = generate_config(
+            "gemini-2.5-pro",
+            "gemini",
+            "User",
+            "Agent",
+            0,
+            &KeyStorage::EnvFile,
+        )
+        .expect("valid");
         assert!(config.contains("provider = \"gemini\""));
         assert!(config.contains("api_key_env = \"GEMINI_API_KEY\""));
     }
 
     #[test]
     fn generate_config_rejects_empty_model() {
-        assert!(generate_config("", "openrouter", "User", "Agent", 0).is_err());
+        assert!(
+            generate_config("", "openrouter", "User", "Agent", 0, &KeyStorage::EnvFile).is_err()
+        );
     }
 
     #[test]
@@ -636,7 +815,8 @@ mod tests {
             "openrouter",
             "User",
             "Agent",
-            0
+            0,
+            &KeyStorage::EnvFile,
         )
         .is_err());
     }
@@ -682,6 +862,7 @@ mod tests {
             "Mike",
             "Buddy",
             1_000_000,
+            &KeyStorage::EnvFile,
         )
         .expect("valid");
         assert!(config.contains("[budget]"));
@@ -697,8 +878,32 @@ mod tests {
             "User",
             "Agent",
             0,
+            &KeyStorage::EnvFile,
         )
         .expect("valid");
         assert!(config.contains("monthly_token_limit = 0"));
+    }
+
+    #[test]
+    fn generate_config_keychain_storage() {
+        let config = generate_config(
+            "anthropic/claude-sonnet-4",
+            "openrouter",
+            "User",
+            "Agent",
+            0,
+            &KeyStorage::Keychain,
+        )
+        .expect("valid");
+        assert!(config.contains("api_key = {"));
+        assert!(config.contains("source = \"exec\""));
+        // Should NOT contain api_key_env when using keychain
+        assert!(!config.contains("api_key_env"));
+    }
+
+    #[test]
+    fn keychain_available_returns_bool() {
+        // Just verify it doesn't panic — actual availability depends on platform
+        let _available = keychain_available();
     }
 }

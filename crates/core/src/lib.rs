@@ -11,6 +11,7 @@ pub mod policy;
 pub mod provider;
 pub mod retry;
 pub mod secrets;
+pub mod secrets_resolve;
 pub mod session;
 pub mod skills;
 pub mod soul;
