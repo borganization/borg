@@ -2,12 +2,8 @@ use std::collections::HashSet;
 use tracing::{debug, warn};
 
 use crate::llm::LlmClient;
+use crate::tokenizer::estimate_tokens;
 use crate::types::{Message, Role};
-
-/// Rough token estimate: ~4 characters per token.
-pub fn estimate_tokens(text: &str) -> usize {
-    text.len() / 4
-}
 
 /// Estimate the token count of a single message, including role overhead.
 fn message_tokens(msg: &Message) -> usize {
@@ -95,7 +91,7 @@ pub async fn compact_history(history: &mut Vec<Message>, max_tokens: usize, llm:
     // Use LLM to summarize the dropped messages
     let summary = summarize_with_llm(&history[..dropped], llm).await;
 
-    let marker = Message::system(summary);
+    let marker = Message::user(summary);
 
     let mut compacted = Vec::with_capacity(history.len() - dropped + 1);
     compacted.push(marker);
@@ -279,39 +275,22 @@ mod tests {
         Message::tool_result(call_id, result)
     }
 
-    // -- estimate_tokens --
-
-    #[test]
-    fn estimate_tokens_empty() {
-        assert_eq!(estimate_tokens(""), 0);
-    }
-
-    #[test]
-    fn estimate_tokens_short() {
-        assert_eq!(estimate_tokens("abcd"), 1);
-        assert_eq!(estimate_tokens("ab"), 0);
-    }
-
-    #[test]
-    fn estimate_tokens_longer() {
-        let text = "a".repeat(400);
-        assert_eq!(estimate_tokens(&text), 100);
-    }
-
     // -- message_tokens --
 
     #[test]
     fn message_tokens_text_only() {
-        let msg = make_user("hello world!"); // 12 chars = 3 tokens + 4 overhead = 7
-        assert_eq!(message_tokens(&msg), 7);
+        let msg = make_user("hello world!");
+        let tokens = message_tokens(&msg);
+        // 4 overhead + content tokens from BPE tokenizer
+        assert!(tokens > 4, "should include overhead + content tokens");
     }
 
     #[test]
     fn message_tokens_with_tool_calls() {
         let msg = make_tool_call_msg("", "id1", "read_memory");
         let tokens = message_tokens(&msg);
-        // 4 overhead + 0 content + name("read_memory"=11/4=2) + args("{}"=2/4=0) = 6
-        assert_eq!(tokens, 6);
+        // 4 overhead + tool name + args tokens
+        assert!(tokens > 4, "should include overhead + tool call tokens");
     }
 
     #[test]

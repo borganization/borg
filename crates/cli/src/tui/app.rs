@@ -462,10 +462,41 @@ impl<'a> App<'a> {
                 }
             }
             AgentEvent::ThinkingDelta(delta) => {
-                if let Some(HistoryCell::Thinking { text, .. }) = self.cells.last_mut() {
-                    text.push_str(&delta);
+                // Check if the second-to-last cell is a Thinking cell (last is the
+                // streaming Assistant cell), or if the last cell itself is Thinking.
+                let len = self.cells.len();
+                let thinking_idx = if len >= 2 {
+                    if matches!(self.cells[len - 2], HistoryCell::Thinking { .. }) {
+                        Some(len - 2)
+                    } else if matches!(self.cells[len - 1], HistoryCell::Thinking { .. }) {
+                        Some(len - 1)
+                    } else {
+                        None
+                    }
+                } else if len == 1
+                    && matches!(self.cells[0], HistoryCell::Thinking { .. })
+                {
+                    Some(0)
                 } else {
-                    self.cells.push(HistoryCell::Thinking { text: delta });
+                    None
+                };
+
+                if let Some(idx) = thinking_idx {
+                    if let HistoryCell::Thinking { text, .. } = &mut self.cells[idx] {
+                        text.push_str(&delta);
+                    }
+                } else {
+                    // Insert thinking cell before the trailing Assistant cell so
+                    // text deltas continue appending to the Assistant cell at the end.
+                    let insert_pos = if len > 0
+                        && matches!(self.cells[len - 1], HistoryCell::Assistant { .. })
+                    {
+                        len - 1
+                    } else {
+                        len
+                    };
+                    self.cells
+                        .insert(insert_pos, HistoryCell::Thinking { text: delta });
                 }
                 if self.auto_scroll {
                     self.scroll_offset = 0;
