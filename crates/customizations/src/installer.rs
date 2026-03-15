@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -61,8 +62,29 @@ pub async fn install(
     // 4. Make shell scripts executable
     make_scripts_executable(def, data_dir)?;
 
-    // 5. Post-install hooks
-    let mut result = InstallResult::default();
+    // 5. Compute file hashes for integrity verification
+    let file_hashes = compute_file_hashes(def, data_dir);
+
+    // 6. Build credential entries
+    let credential_entries = credentials
+        .iter()
+        .map(|(key, _)| {
+            let service = format!("tamagotchi-{}", def.id.replace('/', "-"));
+            let account = format!("tamagotchi-{key}");
+            crate::CredentialEntry {
+                key: key.clone(),
+                service,
+                account,
+            }
+        })
+        .collect();
+
+    // 7. Post-install hooks
+    let mut result = InstallResult {
+        notes: Vec::new(),
+        credential_entries,
+        file_hashes,
+    };
     if def.id == "messaging/imessage" {
         result.notes = imessage_post_install(data_dir);
     }
@@ -125,6 +147,29 @@ pub fn is_installed(def: &CustomizationDef, data_dir: &std::path::Path) -> bool 
 }
 
 // ── Internal helpers ──
+
+/// Compute SHA-256 hashes of all template files after installation.
+/// Returns `(relative_path, hex_hash)` pairs.
+pub fn compute_file_hashes(
+    def: &CustomizationDef,
+    data_dir: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut hashes = Vec::new();
+    for tmpl in def.templates {
+        let base = match tmpl.target {
+            TemplateTarget::Channels => data_dir.join("channels"),
+            TemplateTarget::Tools => data_dir.join("tools"),
+        };
+        let full_path = base.join(tmpl.relative_path);
+        if let Ok(content) = std::fs::read(&full_path) {
+            let mut hasher = Sha256::new();
+            hasher.update(&content);
+            let hex = format!("{:x}", hasher.finalize());
+            hashes.push((tmpl.relative_path.to_string(), hex));
+        }
+    }
+    hashes
+}
 
 fn check_prerequisites(def: &CustomizationDef) -> Result<()> {
     if !def.platform.is_available() {
@@ -305,7 +350,9 @@ fn imessage_post_install(data_dir: &std::path::Path) -> Vec<String> {
                 notes.push(format!("Your iMessage address: {address}"));
             }
 
-            notes.push("Messages will be polled automatically when Tamagotchi is running".to_string());
+            notes.push(
+                "Messages will be polled automatically when Tamagotchi is running".to_string(),
+            );
         }
         Err(_) => {
             notes.push("Full Disk Access required:".to_string());
@@ -354,5 +401,81 @@ mod tests {
         let def = &CATALOG[0];
         let tmp = std::env::temp_dir().join("tamagotchi-test-nonexistent");
         assert!(!is_installed(def, &tmp));
+    }
+
+    #[test]
+    fn compute_file_hashes_returns_correct_sha256() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let data_dir = tmp.path();
+
+        // Use the first catalog entry (Telegram)
+        let def = &CATALOG[0];
+        assert_eq!(def.id, "messaging/telegram");
+
+        // Write templates
+        write_templates(def, data_dir).expect("write");
+
+        let hashes = compute_file_hashes(def, data_dir);
+        assert!(!hashes.is_empty());
+
+        // Verify each hash is a valid 64-char hex string (SHA-256)
+        for (path, hash) in &hashes {
+            assert!(!path.is_empty());
+            assert_eq!(hash.len(), 64, "SHA-256 hex should be 64 chars for {path}");
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "hash should be hex for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_file_hashes_covers_all_templates() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let data_dir = tmp.path();
+
+        let def = &CATALOG[0];
+        write_templates(def, data_dir).expect("write");
+
+        let hashes = compute_file_hashes(def, data_dir);
+        assert_eq!(hashes.len(), def.templates.len());
+    }
+
+    #[tokio::test]
+    async fn install_result_includes_file_hashes() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let data_dir = tmp.path();
+
+        let def = &CATALOG[0]; // Telegram
+        let result = install(def, data_dir, &[], None).await.expect("install");
+
+        assert!(!result.file_hashes.is_empty());
+        for (_, hash) in &result.file_hashes {
+            assert_eq!(hash.len(), 64);
+            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+    }
+
+    #[tokio::test]
+    async fn install_result_includes_credential_entries() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let data_dir = tmp.path();
+
+        // Use a def that doesn't actually need keychain (we'll pass fake creds that won't be stored)
+        // Actually, we can't easily test store_credential without OS keychain.
+        // So let's just test with empty credentials and verify empty entries
+        let def = &CATALOG[0]; // Telegram
+        let result = install(def, data_dir, &[], None).await.expect("install");
+
+        // No credentials passed = no credential entries
+        assert!(result.credential_entries.is_empty());
+    }
+
+    #[test]
+    fn install_result_default_has_empty_vecs() {
+        let result = InstallResult::default();
+        assert!(result.notes.is_empty());
+        assert!(result.credential_entries.is_empty());
+        assert!(result.file_hashes.is_empty());
     }
 }

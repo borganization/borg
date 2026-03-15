@@ -16,9 +16,17 @@ struct CustomizeItem {
 }
 
 /// Phase of the customize popup.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 enum CustomizePhase {
     Browsing,
+    CredentialInput {
+        action_queue: Vec<(String, &'static [tamagotchi_customizations::CredentialSpec])>,
+        current_def_idx: usize,
+        current_cred_idx: usize,
+        buffer: String,
+        collected: Vec<(String, String)>,
+        all_credentials: Vec<(String, Vec<(String, String)>)>,
+    },
 }
 
 pub struct CustomizePopup {
@@ -31,8 +39,13 @@ pub struct CustomizePopup {
 
 /// Actions that the customize popup can request from the event loop.
 pub enum CustomizeAction {
-    Install { id: String },
-    Uninstall { id: String },
+    Install {
+        id: String,
+        credentials: Vec<(String, String)>,
+    },
+    Uninstall {
+        id: String,
+    },
 }
 
 impl CustomizePopup {
@@ -84,7 +97,7 @@ impl CustomizePopup {
             return None;
         }
 
-        match &self.phase {
+        match &mut self.phase {
             CustomizePhase::Browsing => match key.code {
                 KeyCode::Esc => {
                     self.dismiss();
@@ -129,30 +142,150 @@ impl CustomizePopup {
                     None
                 }
                 KeyCode::Tab => {
-                    let actions = self.compute_actions();
+                    let actions = self.compute_pending_actions();
                     if actions.is_empty() {
                         self.status_message = Some(("No changes to apply.".to_string(), false));
                         return None;
                     }
-                    self.dismiss();
-                    Some(actions)
+
+                    // Check if any install actions need credentials
+                    let mut needs_creds: Vec<(
+                        String,
+                        &'static [tamagotchi_customizations::CredentialSpec],
+                    )> = Vec::new();
+                    let mut immediate_actions: Vec<CustomizeAction> = Vec::new();
+
+                    for (id, is_install) in &actions {
+                        if *is_install {
+                            if let Some(def) = tamagotchi_customizations::catalog::find_by_id(id) {
+                                let has_required =
+                                    def.required_credentials.iter().any(|c| !c.is_optional);
+                                if !has_required {
+                                    immediate_actions.push(CustomizeAction::Install {
+                                        id: id.clone(),
+                                        credentials: Vec::new(),
+                                    });
+                                } else {
+                                    needs_creds.push((id.clone(), def.required_credentials));
+                                }
+                            }
+                        } else {
+                            immediate_actions.push(CustomizeAction::Uninstall { id: id.clone() });
+                        }
+                    }
+
+                    if needs_creds.is_empty() {
+                        self.dismiss();
+                        return Some(immediate_actions);
+                    }
+
+                    // Transition to credential input phase
+                    let mut all_credentials: Vec<(String, Vec<(String, String)>)> = Vec::new();
+                    // Pre-populate with immediate actions' empty credential lists
+                    for action in &immediate_actions {
+                        if let CustomizeAction::Install { id, credentials } = action {
+                            all_credentials.push((id.clone(), credentials.clone()));
+                        }
+                    }
+
+                    self.phase = CustomizePhase::CredentialInput {
+                        action_queue: needs_creds,
+                        current_def_idx: 0,
+                        current_cred_idx: 0,
+                        buffer: String::new(),
+                        collected: Vec::new(),
+                        all_credentials,
+                    };
+                    self.status_message = None;
+                    None
+                }
+                _ => None,
+            },
+            CustomizePhase::CredentialInput {
+                ref mut action_queue,
+                ref mut current_def_idx,
+                ref mut current_cred_idx,
+                ref mut buffer,
+                ref mut collected,
+                ref mut all_credentials,
+            } => match key.code {
+                KeyCode::Esc => {
+                    self.phase = CustomizePhase::Browsing;
+                    self.status_message = None;
+                    None
+                }
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    None
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                    None
+                }
+                KeyCode::Enter => {
+                    if buffer.is_empty() {
+                        self.status_message =
+                            Some(("Credential value cannot be empty.".to_string(), false));
+                        return None;
+                    }
+
+                    let cred_specs = action_queue[*current_def_idx].1;
+                    let key = cred_specs[*current_cred_idx].key.to_string();
+                    collected.push((key, buffer.clone()));
+                    buffer.clear();
+                    self.status_message = None;
+
+                    *current_cred_idx += 1;
+
+                    // Check if we've collected all creds for this customization
+                    if *current_cred_idx >= cred_specs.len() {
+                        let id = action_queue[*current_def_idx].0.clone();
+                        all_credentials.push((id, collected.clone()));
+                        collected.clear();
+                        *current_def_idx += 1;
+                        *current_cred_idx = 0;
+                    }
+
+                    // Check if we've finished all customizations
+                    if *current_def_idx >= action_queue.len() {
+                        let mut final_actions: Vec<CustomizeAction> = Vec::new();
+
+                        // Add uninstall actions from original pending
+                        for item in &self.items {
+                            if !item.is_selected && item.is_installed {
+                                final_actions.push(CustomizeAction::Uninstall {
+                                    id: item.def.id.to_string(),
+                                });
+                            }
+                        }
+
+                        // Add install actions with collected credentials
+                        for (id, creds) in all_credentials.drain(..) {
+                            final_actions.push(CustomizeAction::Install {
+                                id,
+                                credentials: creds,
+                            });
+                        }
+
+                        self.dismiss();
+                        return Some(final_actions);
+                    }
+
+                    None
                 }
                 _ => None,
             },
         }
     }
 
-    fn compute_actions(&self) -> Vec<CustomizeAction> {
+    /// Returns (id, is_install) pairs for pending changes.
+    fn compute_pending_actions(&self) -> Vec<(String, bool)> {
         let mut actions = Vec::new();
         for item in &self.items {
             if item.is_selected && !item.is_installed {
-                actions.push(CustomizeAction::Install {
-                    id: item.def.id.to_string(),
-                });
+                actions.push((item.def.id.to_string(), true));
             } else if !item.is_selected && item.is_installed {
-                actions.push(CustomizeAction::Uninstall {
-                    id: item.def.id.to_string(),
-                });
+                actions.push((item.def.id.to_string(), false));
             }
         }
         actions
@@ -283,8 +416,49 @@ impl CustomizePopup {
             );
         }
 
+        // Credential input overlay
+        if let CustomizePhase::CredentialInput {
+            ref action_queue,
+            current_def_idx,
+            current_cred_idx,
+            ref buffer,
+            ..
+        } = self.phase
+        {
+            if let Some((ref id, cred_specs)) = action_queue.get(current_def_idx) {
+                if let Some(cred) = cred_specs.get(current_cred_idx) {
+                    let label_line = Line::from(vec![
+                        Span::styled(" Enter ", theme::bold()),
+                        Span::styled(cred.label.to_string(), theme::popup_selected()),
+                        Span::styled(format!(" for {id}:"), theme::dim()),
+                    ]);
+                    let help_line = Line::from(Span::styled(
+                        format!("   Get it at: {}", cred.help_url),
+                        theme::dim(),
+                    ));
+                    let masked: String = "*".repeat(buffer.len()) + "_";
+                    let input_line = Line::from(Span::styled(
+                        format!("   > {masked}"),
+                        theme::popup_selected(),
+                    ));
+
+                    let cred_y = inner.y + inner.height.saturating_sub(5);
+                    let cred_area = Rect::new(inner.x, cred_y, inner.width, 3);
+                    frame.render_widget(Clear, cred_area);
+                    frame.render_widget(
+                        Paragraph::new(vec![label_line, help_line, input_line]),
+                        cred_area,
+                    );
+                }
+            }
+        }
+
         // Footer hint
-        let hint = " Enter: toggle  Tab: apply  Esc: close";
+        let hint = if matches!(self.phase, CustomizePhase::CredentialInput { .. }) {
+            " Enter: submit  Esc: cancel"
+        } else {
+            " Enter: toggle  Tab: apply  Esc: close"
+        };
         let footer_y = inner.y + inner.height - 1;
         let footer_area = Rect::new(inner.x, footer_y, inner.width, 1);
         frame.render_widget(
@@ -359,8 +533,172 @@ mod tests {
         popup.handle_key(enter);
         assert!(popup.items[0].is_selected);
 
-        let actions = popup.compute_actions();
+        let actions = popup.compute_pending_actions();
         assert_eq!(actions.len(), 1);
-        assert!(matches!(&actions[0], CustomizeAction::Install { .. }));
+        assert!(actions[0].1); // is_install = true
+    }
+
+    #[test]
+    fn no_credential_input_for_zero_cred_defs() {
+        let mut popup = CustomizePopup::new();
+        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-nocred");
+        popup.show(&tmp);
+
+        // Find iMessage (no required credentials) and select it
+        let imessage_idx = popup
+            .items
+            .iter()
+            .position(|i| i.def.id == "messaging/imessage")
+            .expect("iMessage should be in catalog");
+        popup.cursor = imessage_idx;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        popup.handle_key(enter);
+        assert!(popup.items[imessage_idx].is_selected);
+
+        // Tab should produce actions immediately (no credential input phase)
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let result = popup.handle_key(tab);
+        assert!(result.is_some());
+        let actions = result.expect("should have actions");
+        assert!(!actions.is_empty());
+        assert!(matches!(
+            &actions[0],
+            CustomizeAction::Install {
+                credentials,
+                ..
+            } if credentials.is_empty()
+        ));
+    }
+
+    #[test]
+    fn credential_input_phase_transitions() {
+        let mut popup = CustomizePopup::new();
+        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-cred-phase");
+        popup.show(&tmp);
+
+        // Telegram requires credentials — select it
+        let telegram_idx = popup
+            .items
+            .iter()
+            .position(|i| i.def.id == "messaging/telegram")
+            .expect("Telegram should be in catalog");
+        popup.cursor = telegram_idx;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        popup.handle_key(enter);
+
+        // Tab should transition to CredentialInput
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let result = popup.handle_key(tab);
+        assert!(result.is_none()); // No actions yet
+        assert!(matches!(
+            popup.phase,
+            CustomizePhase::CredentialInput { .. }
+        ));
+    }
+
+    #[test]
+    fn credential_input_esc_cancels() {
+        let mut popup = CustomizePopup::new();
+        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-cred-esc");
+        popup.show(&tmp);
+
+        let telegram_idx = popup
+            .items
+            .iter()
+            .position(|i| i.def.id == "messaging/telegram")
+            .expect("Telegram should be in catalog");
+        popup.cursor = telegram_idx;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(
+            popup.phase,
+            CustomizePhase::CredentialInput { .. }
+        ));
+
+        popup.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(popup.phase, CustomizePhase::Browsing));
+    }
+
+    #[test]
+    fn credential_input_backspace() {
+        let mut popup = CustomizePopup::new();
+        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-cred-bs");
+        popup.show(&tmp);
+
+        let telegram_idx = popup
+            .items
+            .iter()
+            .position(|i| i.def.id == "messaging/telegram")
+            .expect("Telegram should be in catalog");
+        popup.cursor = telegram_idx;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        // Type some characters
+        popup.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        popup.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        popup.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        if let CustomizePhase::CredentialInput { ref buffer, .. } = popup.phase {
+            assert_eq!(buffer, "abc");
+        } else {
+            panic!("expected CredentialInput phase");
+        }
+
+        popup.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+        if let CustomizePhase::CredentialInput { ref buffer, .. } = popup.phase {
+            assert_eq!(buffer, "ab");
+        } else {
+            panic!("expected CredentialInput phase");
+        }
+    }
+
+    #[test]
+    fn credential_input_enter_produces_install_action() {
+        let mut popup = CustomizePopup::new();
+        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-cred-enter");
+        popup.show(&tmp);
+
+        // Telegram has 1 required credential
+        let telegram_idx = popup
+            .items
+            .iter()
+            .position(|i| i.def.id == "messaging/telegram")
+            .expect("Telegram should be in catalog");
+        popup.cursor = telegram_idx;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        // Type credential value
+        for c in "my-bot-token".chars() {
+            popup.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        // Submit with Enter
+        let result = popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Telegram has 1 credential, so this should complete
+        assert!(result.is_some());
+        let actions = result.expect("should have actions");
+        let install_action = actions
+            .iter()
+            .find(|a| matches!(a, CustomizeAction::Install { .. }))
+            .expect("should have install action");
+        if let CustomizeAction::Install { credentials, .. } = install_action {
+            assert_eq!(credentials.len(), 1);
+            assert_eq!(credentials[0].0, "TELEGRAM_BOT_TOKEN");
+            assert_eq!(credentials[0].1, "my-bot-token");
+        }
     }
 }

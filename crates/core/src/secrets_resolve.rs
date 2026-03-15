@@ -26,6 +26,10 @@ pub enum SecretRef {
         #[serde(default)]
         args: Vec<String>,
     },
+
+    /// Look up a credential in the OS keychain (macOS Keychain / Linux secret-tool).
+    #[serde(rename = "keychain")]
+    Keychain { service: String, account: String },
 }
 
 impl SecretRef {
@@ -73,6 +77,42 @@ impl SecretRef {
                 let secret = String::from_utf8(output.stdout)
                     .context("Secret command output is not valid UTF-8")?;
                 Ok(secret.trim().to_string())
+            }
+
+            SecretRef::Keychain { service, account } => {
+                if cfg!(target_os = "macos") {
+                    let output = Command::new("security")
+                        .args(["find-generic-password", "-s", service, "-a", account, "-w"])
+                        .output()
+                        .with_context(|| format!("Failed to query macOS Keychain for service={service} account={account}"))?;
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        bail!("Keychain lookup failed for service={service} account={account}: {stderr}");
+                    }
+                    let secret = String::from_utf8(output.stdout)
+                        .context("Keychain value is not valid UTF-8")?;
+                    Ok(secret.trim().to_string())
+                } else if cfg!(target_os = "linux") {
+                    let output = Command::new("secret-tool")
+                        .args(["lookup", "service", service, "key", account])
+                        .output()
+                        .with_context(|| {
+                            format!(
+                                "Failed to query secret-tool for service={service} key={account}"
+                            )
+                        })?;
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        bail!("secret-tool lookup failed for service={service} key={account}: {stderr}");
+                    }
+                    let secret = String::from_utf8(output.stdout)
+                        .context("secret-tool value is not valid UTF-8")?;
+                    Ok(secret.trim().to_string())
+                } else {
+                    bail!(
+                        "Keychain lookup is not supported on this platform (only macOS and Linux)"
+                    )
+                }
             }
         }
     }
@@ -297,5 +337,46 @@ mod tests {
         } else {
             panic!("expected Exec variant");
         }
+    }
+
+    #[test]
+    fn serde_roundtrip_keychain() {
+        let sr = SecretRef::Keychain {
+            service: "tamagotchi-messaging-telegram".to_string(),
+            account: "tamagotchi-TELEGRAM_BOT_TOKEN".to_string(),
+        };
+        let toml_str = toml::to_string(&sr).expect("serialize");
+        let parsed: SecretRef = toml::from_str(&toml_str).expect("deserialize");
+        if let SecretRef::Keychain { service, account } = parsed {
+            assert_eq!(service, "tamagotchi-messaging-telegram");
+            assert_eq!(account, "tamagotchi-TELEGRAM_BOT_TOKEN");
+        } else {
+            panic!("expected Keychain variant");
+        }
+    }
+
+    #[test]
+    fn deserialize_inline_table_keychain() {
+        let toml_str = r#"secret = { source = "keychain", service = "tamagotchi-svc", account = "tamagotchi-acct" }"#;
+        #[derive(Deserialize)]
+        struct Wrapper {
+            secret: SecretRef,
+        }
+        let w: Wrapper = toml::from_str(toml_str).expect("parse");
+        if let SecretRef::Keychain { service, account } = w.secret {
+            assert_eq!(service, "tamagotchi-svc");
+            assert_eq!(account, "tamagotchi-acct");
+        } else {
+            panic!("expected Keychain variant");
+        }
+    }
+
+    #[test]
+    fn resolve_keychain_missing_entry() {
+        let sr = SecretRef::Keychain {
+            service: "tamagotchi-nonexistent-test-service-12345".to_string(),
+            account: "tamagotchi-nonexistent-test-account-12345".to_string(),
+        };
+        assert!(sr.resolve().is_err());
     }
 }

@@ -34,6 +34,7 @@ cron = { workspace = true }
 regex = { workspace = true }
 pdf-extract = { workspace = true }
 shellexpand = { workspace = true }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

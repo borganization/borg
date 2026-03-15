@@ -1,7 +1,9 @@
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use anyhow::Result;
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 use ratatui::Frame;
@@ -77,8 +79,10 @@ pub struct App<'a> {
     /// Accumulated token usage for the current session
     pub session_prompt_tokens: u64,
     pub session_completion_tokens: u64,
-    /// Message queued by Tab during streaming, auto-submitted on turn complete
-    pub queued_message: Option<String>,
+    /// Messages queued by Tab during streaming, auto-submitted FIFO on turn complete
+    pub queued_messages: VecDeque<String>,
+    /// Whether the last agent turn ended with an error (pauses queue drain)
+    pub last_turn_errored: bool,
 }
 
 impl<'a> App<'a> {
@@ -99,7 +103,8 @@ impl<'a> App<'a> {
             auto_scroll: true,
             session_prompt_tokens: 0,
             session_completion_tokens: 0,
-            queued_message: None,
+            queued_messages: VecDeque::new(),
+            last_turn_errored: false,
         }
     }
 
@@ -142,6 +147,7 @@ impl<'a> App<'a> {
                         token.cancel();
                     }
                     self.event_rx = None;
+                    self.queued_messages.clear();
                     for cell in self.cells.iter_mut().rev() {
                         if let HistoryCell::Assistant { streaming, .. } = cell {
                             *streaming = false;
@@ -152,15 +158,17 @@ impl<'a> App<'a> {
                         text: "[interrupted]".to_string(),
                     });
                     self.state = AppState::Idle;
+                } else if key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::ALT) {
+                    // Pop last queued message back into composer for editing
+                    if let Some(msg) = self.queued_messages.pop_back() {
+                        self.composer.set_text(&msg);
+                    }
                 } else if key.code == KeyCode::Tab {
                     // Queue current composer text to auto-submit after turn completes
                     let text = self.composer.text().trim().to_string();
                     if !text.is_empty() {
-                        self.queued_message = Some(text);
+                        self.queued_messages.push_back(text);
                         self.composer.set_text("");
-                        self.cells.push(HistoryCell::System {
-                            text: "[message queued]".to_string(),
-                        });
                     }
                 } else if key.code == KeyCode::Enter {
                     // No-op during streaming
@@ -270,6 +278,7 @@ impl<'a> App<'a> {
                          Ctrl+D       — Quit (when empty)\n  \
                          Ctrl+G       — Open external editor ($EDITOR)\n  \
                          Tab          — Queue message while streaming\n  \
+                         Alt+Up       — Edit last queued message\n  \
                          Ctrl+C       — Cancel / Quit\n  \
                          PageUp/Down  — Scroll transcript\n  \
                          /            — Show command menu"
@@ -349,6 +358,7 @@ impl<'a> App<'a> {
                      /load <id> - Load a saved session\n  \
                      /new       - Start new session\n  \
                      /customize - Integration marketplace\n  \
+                     /logs      - Show recent logs\n  \
                      quit/exit  - Exit"
                         .to_string(),
                 );
@@ -408,6 +418,47 @@ impl<'a> App<'a> {
                 }
                 return Ok(AppAction::Continue);
             }
+            "/logs" => {
+                let log_path = match tamagotchi_core::config::Config::logs_dir() {
+                    Ok(d) => d.join("tui.log"),
+                    Err(e) => {
+                        self.push_system_message(format!("Error resolving log directory: {e}"));
+                        return Ok(AppAction::Continue);
+                    }
+                };
+                let text = if log_path.exists() {
+                    use std::io::{Read, Seek, SeekFrom};
+                    const TAIL_BYTES: u64 = 32_768;
+                    match std::fs::File::open(&log_path) {
+                        Ok(mut f) => {
+                            let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                            if len > TAIL_BYTES {
+                                let _ = f.seek(SeekFrom::End(-(TAIL_BYTES as i64)));
+                            }
+                            let mut buf = String::new();
+                            let _ = f.read_to_string(&mut buf);
+                            let lines: Vec<&str> = buf.lines().collect();
+                            let start = if len > TAIL_BYTES {
+                                1 // skip partial first line after seek
+                            } else {
+                                lines.len().saturating_sub(50)
+                            };
+                            let tail: Vec<&str> = lines[start..].to_vec();
+                            let tail = &tail[tail.len().saturating_sub(50)..];
+                            tail.join("\n")
+                        }
+                        Err(e) => format!("Error reading log file: {e}"),
+                    }
+                } else {
+                    "No log file found.".to_string()
+                };
+                self.push_system_message(if text.is_empty() {
+                    "Log file is empty.".to_string()
+                } else {
+                    text
+                });
+                return Ok(AppAction::Continue);
+            }
             "/doctor" => {
                 let report = tamagotchi_core::doctor::run_diagnostics(&self.config);
                 self.push_system_message(report.format());
@@ -432,6 +483,7 @@ impl<'a> App<'a> {
             }
             "/clear" => {
                 self.cells.clear();
+                self.queued_messages.clear();
                 return Ok(AppAction::ClearHistory);
             }
             "/usage" => {
@@ -448,6 +500,7 @@ impl<'a> App<'a> {
             }
             "/new" => {
                 self.cells.clear();
+                self.queued_messages.clear();
                 self.session_prompt_tokens = 0;
                 self.session_completion_tokens = 0;
                 return Ok(AppAction::NewSession);
@@ -652,6 +705,7 @@ impl<'a> App<'a> {
                         break;
                     }
                 }
+                self.last_turn_errored = false;
                 self.state = AppState::Idle;
             }
             AgentEvent::Error(e) => {
@@ -664,6 +718,7 @@ impl<'a> App<'a> {
                         break;
                     }
                 }
+                self.last_turn_errored = true;
                 self.state = AppState::Idle;
             }
         }
@@ -698,11 +753,16 @@ impl<'a> App<'a> {
         let area = frame.area();
         let show_status = !matches!(self.state, AppState::Idle);
         let composer_height = self.composer.height();
-        let app_layout = layout::compute_layout(area, composer_height, show_status);
+        let queue_preview_height = self.compute_queue_preview_height();
+        let app_layout =
+            layout::compute_layout(area, composer_height, show_status, queue_preview_height);
 
         self.render_transcript(frame, app_layout.transcript);
         if show_status {
             self.render_status(frame, app_layout.status);
+        }
+        if queue_preview_height > 0 {
+            self.render_queue_preview(frame, app_layout.queue_preview);
         }
         self.composer.render(frame, app_layout.composer);
         self.render_footer(frame, app_layout.footer);
@@ -786,9 +846,9 @@ impl<'a> App<'a> {
         frame.render_widget(Paragraph::new(line), area);
     }
 
-    /// Take the queued message (if any), clearing it from the app.
-    pub fn take_queued_message(&mut self) -> Option<String> {
-        self.queued_message.take()
+    /// Pop the next queued message (FIFO) for dispatch.
+    pub fn pop_next_queued(&mut self) -> Option<String> {
+        self.queued_messages.pop_front()
     }
 
     /// Submit a queued message (called from the event loop when a turn completes).
@@ -798,11 +858,152 @@ impl<'a> App<'a> {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let left = match &self.state {
-            AppState::Idle => "? for shortcuts  •  quit to exit",
-            AppState::Streaming { .. } => "esc to cancel  •  tab to queue message",
-            AppState::AwaitingApproval { .. } => "y to approve  •  n to deny",
+            AppState::Idle => "? for shortcuts  •  quit to exit".to_string(),
+            AppState::Streaming { .. } => {
+                let count = self.queued_messages.len();
+                if count > 0 {
+                    format!("esc to cancel  •  tab to queue  •  ({count} queued)")
+                } else {
+                    "esc to cancel  •  tab to queue message".to_string()
+                }
+            }
+            AppState::AwaitingApproval { .. } => "y to approve  •  n to deny".to_string(),
         };
         let line = Line::from(Span::styled(format!(" {left}"), theme::dim()));
         frame.render_widget(Paragraph::new(line), area);
+    }
+
+    fn compute_queue_preview_height(&self) -> u16 {
+        let count = self.queued_messages.len();
+        if count == 0 {
+            return 0;
+        }
+        let shown = count.min(3) as u16;
+        let overflow = if count > 3 { 1u16 } else { 0 };
+        // header + shown messages + overflow + hint
+        1 + shown + overflow + 1
+    }
+
+    fn render_queue_preview(&self, frame: &mut Frame, area: Rect) {
+        let dim_italic = Style::default()
+            .fg(theme::DIM_WHITE)
+            .add_modifier(Modifier::ITALIC);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        lines.push(Line::from(Span::styled(
+            " Queued messages:".to_string(),
+            theme::dim(),
+        )));
+
+        let count = self.queued_messages.len();
+        let shown = count.min(3);
+        for msg in self.queued_messages.iter().take(shown) {
+            let truncated = if msg.len() > 60 {
+                format!("{}...", &msg[..57])
+            } else {
+                msg.clone()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {} {truncated}", theme::TREE_END),
+                dim_italic,
+            )));
+        }
+
+        if count > 3 {
+            lines.push(Line::from(Span::styled(
+                format!("  ... and {} more", count - 3),
+                theme::dim(),
+            )));
+        }
+
+        lines.push(Line::from(Span::styled(
+            "  Alt+Up to edit last".to_string(),
+            theme::dim(),
+        )));
+
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_app() -> App<'static> {
+        let config = Config::default();
+        App::new(config, None)
+    }
+
+    #[test]
+    fn test_tab_queues_multiple() {
+        let mut app = make_app();
+        app.queued_messages.push_back("first".to_string());
+        app.queued_messages.push_back("second".to_string());
+        app.queued_messages.push_back("third".to_string());
+
+        assert_eq!(app.queued_messages.len(), 3);
+        assert_eq!(app.pop_next_queued(), Some("first".to_string()));
+        assert_eq!(app.pop_next_queued(), Some("second".to_string()));
+        assert_eq!(app.pop_next_queued(), Some("third".to_string()));
+        assert_eq!(app.pop_next_queued(), None);
+    }
+
+    #[test]
+    fn test_esc_clears_queue() {
+        let mut app = make_app();
+        app.queued_messages.push_back("a".to_string());
+        app.queued_messages.push_back("b".to_string());
+
+        app.queued_messages.clear();
+
+        assert!(app.queued_messages.is_empty());
+    }
+
+    #[test]
+    fn test_alt_up_pops_last() {
+        let mut app = make_app();
+        app.queued_messages.push_back("a".to_string());
+        app.queued_messages.push_back("b".to_string());
+        app.queued_messages.push_back("c".to_string());
+
+        let last = app.queued_messages.pop_back();
+        assert_eq!(last, Some("c".to_string()));
+        assert_eq!(app.queued_messages.len(), 2);
+        assert_eq!(app.queued_messages[0], "a");
+        assert_eq!(app.queued_messages[1], "b");
+    }
+
+    #[test]
+    fn test_drain_pops_front() {
+        let mut app = make_app();
+        app.queued_messages.push_back("first".to_string());
+        app.queued_messages.push_back("second".to_string());
+
+        let popped = app.pop_next_queued();
+        assert_eq!(popped, Some("first".to_string()));
+        assert_eq!(app.queued_messages.len(), 1);
+        assert_eq!(app.queued_messages[0], "second");
+    }
+
+    #[test]
+    fn test_queue_preview_height() {
+        let mut app = make_app();
+
+        // Empty queue
+        assert_eq!(app.compute_queue_preview_height(), 0);
+
+        // 1 message: header(1) + shown(1) + hint(1) = 3
+        app.queued_messages.push_back("a".to_string());
+        assert_eq!(app.compute_queue_preview_height(), 3);
+
+        // 3 messages: header(1) + shown(3) + hint(1) = 5
+        app.queued_messages.push_back("b".to_string());
+        app.queued_messages.push_back("c".to_string());
+        assert_eq!(app.compute_queue_preview_height(), 5);
+
+        // 5 messages: header(1) + shown(3) + overflow(1) + hint(1) = 6
+        app.queued_messages.push_back("d".to_string());
+        app.queued_messages.push_back("e".to_string());
+        assert_eq!(app.compute_queue_preview_height(), 6);
     }
 }

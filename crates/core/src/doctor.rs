@@ -692,6 +692,37 @@ fn check_customizations(checks: &mut Vec<DiagnosticCheck>) {
                             name: format!("{} ({})", c.name, c.kind),
                             status,
                         });
+
+                        // Integrity check
+                        if let Ok(data_dir) = Config::data_dir() {
+                            if let Ok(result) =
+                                crate::integrity::verify_integrity(&db, &c.id, &data_dir)
+                            {
+                                let integrity_status = if result.ok {
+                                    CheckStatus::Pass
+                                } else {
+                                    let mut issues = Vec::new();
+                                    if !result.tampered.is_empty() {
+                                        issues.push(format!(
+                                            "tampered: {}",
+                                            result.tampered.join(", ")
+                                        ));
+                                    }
+                                    if !result.missing.is_empty() {
+                                        issues.push(format!(
+                                            "missing: {}",
+                                            result.missing.join(", ")
+                                        ));
+                                    }
+                                    CheckStatus::Fail(issues.join("; "))
+                                };
+                                checks.push(DiagnosticCheck {
+                                    category: "Customizations",
+                                    name: format!("{} file integrity", c.name),
+                                    status: integrity_status,
+                                });
+                            }
+                        }
                     }
                 }
             }
