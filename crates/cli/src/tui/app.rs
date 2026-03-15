@@ -468,14 +468,52 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/tools" => {
-                let registry = tamagotchi_tools::registry::ToolRegistry::new()?;
-                let tools = registry.list_tools();
-                let text = if tools.is_empty() {
-                    "No user tools installed.".to_string()
-                } else {
-                    tools.join("\n")
-                };
-                self.push_system_message(text);
+                let mut text = String::from("Built-in tools:\n");
+                let builtins = [
+                    ("write_memory", "Write/append to memory files"),
+                    ("read_memory", "Read a memory file"),
+                    ("list_tools", "List user-created tools"),
+                    ("apply_patch", "Create/update/delete files via patch DSL"),
+                    ("create_tool", "Create/modify user tools via patch DSL"),
+                    ("run_shell", "Execute a shell command"),
+                    ("list_skills", "List skills with status"),
+                    ("apply_skill_patch", "Create/modify skill files via patch DSL"),
+                    ("read_pdf", "Extract text from a PDF file"),
+                    ("create_channel", "Create/modify channel integrations"),
+                    ("list_channels", "List messaging channels"),
+                    ("manage_tasks", "Manage scheduled tasks"),
+                ];
+                for (name, desc) in &builtins {
+                    text.push_str(&format!("  {name:<20} {desc}\n"));
+                }
+                if self.config.web.enabled {
+                    text.push_str(&format!("  {:<20} Fetch a URL\n", "web_fetch"));
+                    text.push_str(&format!("  {:<20} Search the web\n", "web_search"));
+                }
+                if self.config.security.host_audit {
+                    text.push_str(&format!(
+                        "  {:<20} Run host security audit\n",
+                        "security_audit"
+                    ));
+                }
+
+                text.push_str("\nUser tools:\n");
+                match tamagotchi_tools::registry::ToolRegistry::new() {
+                    Ok(registry) => {
+                        let tools = registry.list_tools();
+                        if tools.is_empty() {
+                            text.push_str("  (none installed)");
+                        } else {
+                            for t in &tools {
+                                text.push_str(&format!("  {t}\n"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        text.push_str(&format!("  Error loading tools: {e}"));
+                    }
+                }
+                self.push_system_message(text.trim_end().to_string());
                 return Ok(AppAction::Continue);
             }
             "/memory" => {
@@ -1318,5 +1356,81 @@ mod tests {
         app.queued_messages.push_back("d".to_string());
         app.queued_messages.push_back("e".to_string());
         assert_eq!(app.compute_queue_preview_height(), 6);
+    }
+
+    // --- /tools command ---
+
+    fn last_system_text(app: &App) -> Option<String> {
+        app.cells.iter().rev().find_map(|c| match c {
+            HistoryCell::System { text } => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn tools_command_shows_builtin_tools() {
+        let mut app = make_app();
+        let action = app.handle_submit("/tools").unwrap();
+        assert!(matches!(action, AppAction::Continue));
+
+        let text = last_system_text(&app).expect("should have system message");
+        assert!(text.contains("Built-in tools:"));
+        assert!(text.contains("write_memory"));
+        assert!(text.contains("read_memory"));
+        assert!(text.contains("run_shell"));
+        assert!(text.contains("apply_patch"));
+        assert!(text.contains("read_pdf"));
+        assert!(text.contains("manage_tasks"));
+    }
+
+    #[test]
+    fn tools_command_shows_user_tools_section() {
+        let mut app = make_app();
+        app.handle_submit("/tools").unwrap();
+
+        let text = last_system_text(&app).expect("should have system message");
+        assert!(text.contains("User tools:"));
+    }
+
+    #[test]
+    fn tools_command_hides_web_tools_when_disabled() {
+        let mut app = make_app();
+        app.config.web.enabled = false;
+        app.handle_submit("/tools").unwrap();
+
+        let text = last_system_text(&app).expect("should have system message");
+        assert!(!text.contains("web_fetch"));
+        assert!(!text.contains("web_search"));
+    }
+
+    #[test]
+    fn tools_command_shows_web_tools_when_enabled() {
+        let mut app = make_app();
+        app.config.web.enabled = true;
+        app.handle_submit("/tools").unwrap();
+
+        let text = last_system_text(&app).expect("should have system message");
+        assert!(text.contains("web_fetch"));
+        assert!(text.contains("web_search"));
+    }
+
+    #[test]
+    fn tools_command_hides_security_audit_when_disabled() {
+        let mut app = make_app();
+        app.config.security.host_audit = false;
+        app.handle_submit("/tools").unwrap();
+
+        let text = last_system_text(&app).expect("should have system message");
+        assert!(!text.contains("security_audit"));
+    }
+
+    #[test]
+    fn tools_command_shows_security_audit_when_enabled() {
+        let mut app = make_app();
+        app.config.security.host_audit = true;
+        app.handle_submit("/tools").unwrap();
+
+        let text = last_system_text(&app).expect("should have system message");
+        assert!(text.contains("security_audit"));
     }
 }
