@@ -12,6 +12,7 @@ use tamagotchi_core::agent::AgentEvent;
 use tamagotchi_core::config::Config;
 use tamagotchi_heartbeat::scheduler::HeartbeatEvent;
 
+use super::command_popup::CommandPopup;
 use super::composer::Composer;
 use super::history::{ApprovalStatus, HistoryCell};
 use super::layout;
@@ -51,6 +52,7 @@ pub struct App<'a> {
     pub cells: Vec<HistoryCell>,
     pub state: AppState,
     pub composer: Composer<'a>,
+    pub command_popup: CommandPopup,
     pub scroll_offset: usize,
     pub total_lines: usize,
     pub config: Config,
@@ -66,6 +68,7 @@ impl<'a> App<'a> {
             cells: Vec::new(),
             state: AppState::Idle,
             composer: Composer::new(),
+            command_popup: CommandPopup::new(),
             scroll_offset: 0,
             total_lines: 0,
             config,
@@ -133,6 +136,51 @@ impl<'a> App<'a> {
                     return Ok(AppAction::Quit);
                 }
 
+                if self.command_popup.is_visible() {
+                    match key.code {
+                        KeyCode::Up => {
+                            self.command_popup.move_up();
+                            return Ok(AppAction::Continue);
+                        }
+                        KeyCode::Down => {
+                            self.command_popup.move_down();
+                            return Ok(AppAction::Continue);
+                        }
+                        KeyCode::Tab => {
+                            if let Some(cmd) = self.command_popup.selected_command() {
+                                let name = cmd.name.to_string();
+                                self.composer.set_text(&name);
+                                self.command_popup.dismiss();
+                            }
+                            return Ok(AppAction::Continue);
+                        }
+                        KeyCode::Enter => {
+                            if let Some(cmd) = self.command_popup.selected_command() {
+                                let name = cmd.name.to_string();
+                                self.composer.set_text("");
+                                self.command_popup.dismiss();
+                                return self.handle_submit(&name);
+                            }
+                            return Ok(AppAction::Continue);
+                        }
+                        KeyCode::Esc => {
+                            self.command_popup.dismiss();
+                            self.composer.set_text("");
+                            return Ok(AppAction::Continue);
+                        }
+                        _ => {
+                            // Pass key to composer, then update filter
+                            if let Some(text) = self.composer.handle_key(key) {
+                                self.command_popup.dismiss();
+                                return self.handle_submit(&text);
+                            }
+                            let text = self.composer.text();
+                            self.command_popup.update_filter(&text);
+                            return Ok(AppAction::Continue);
+                        }
+                    }
+                }
+
                 match key.code {
                     KeyCode::Up => {
                         self.scroll_offset = self.scroll_offset.saturating_add(1);
@@ -164,6 +212,9 @@ impl<'a> App<'a> {
                 if let Some(text) = self.composer.handle_key(key) {
                     return self.handle_submit(&text);
                 }
+                // Update popup filter after normal key input
+                let text = self.composer.text();
+                self.command_popup.update_filter(&text);
             }
         }
 
@@ -432,6 +483,7 @@ impl<'a> App<'a> {
         }
         self.composer.render(frame, app_layout.composer);
         self.render_footer(frame, app_layout.footer);
+        self.command_popup.render(frame, app_layout.composer);
     }
 
     fn render_transcript(&mut self, frame: &mut Frame, area: Rect) {

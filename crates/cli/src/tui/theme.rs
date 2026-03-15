@@ -34,3 +34,7 @@ pub fn success_style() -> Style {
 pub fn error_style() -> Style {
     Style::default().fg(RED)
 }
+
+pub fn popup_selected() -> Style {
+    Style::default().bg(Color::DarkGray).fg(Color::White)
+}
