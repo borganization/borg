@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::info;
@@ -70,13 +68,14 @@ pub async fn install(
 /// Uninstall a customization: delete files and keychain entries.
 pub fn uninstall(def: &CustomizationDef, data_dir: &std::path::Path) -> Result<()> {
     // Determine the directory name from the first template
-    let dir_name = def
-        .templates
-        .first()
-        .and_then(|t| t.relative_path.split('/').next())
-        .context("no templates")?;
+    let first_tmpl = def.templates.first().context("no templates")?;
+    let dir_name = first_tmpl
+        .relative_path
+        .split('/')
+        .next()
+        .context("empty relative path")?;
 
-    let target_dir = match def.templates[0].target {
+    let target_dir = match first_tmpl.target {
         TemplateTarget::Channels => data_dir.join("channels").join(dir_name),
         TemplateTarget::Tools => data_dir.join("tools").join(dir_name),
     };
@@ -98,16 +97,17 @@ pub fn uninstall(def: &CustomizationDef, data_dir: &std::path::Path) -> Result<(
 
 /// Check if an integration is already installed on the filesystem.
 pub fn is_installed(def: &CustomizationDef, data_dir: &std::path::Path) -> bool {
-    let dir_name = match def
-        .templates
-        .first()
-        .and_then(|t| t.relative_path.split('/').next())
-    {
+    let first_tmpl = match def.templates.first() {
+        Some(t) => t,
+        None => return false,
+    };
+
+    let dir_name = match first_tmpl.relative_path.split('/').next() {
         Some(name) => name,
         None => return false,
     };
 
-    let manifest = match def.templates[0].target {
+    let manifest = match first_tmpl.target {
         TemplateTarget::Channels => data_dir
             .join("channels")
             .join(dir_name)
@@ -219,10 +219,9 @@ fn store_credential(service: &str, key: &str, value: &str) -> Result<()> {
             anyhow::bail!("Failed to store {key} via secret-tool");
         }
     } else {
-        // Fallback: write to .env file
-        let env_path = PathBuf::from(service).with_extension("env");
-        info!("Keychain not available, credential {key} not stored persistently");
-        let _ = env_path; // suppress unused warning
+        anyhow::bail!(
+            "No keychain available on this platform — cannot store credential {key} securely"
+        );
     }
     Ok(())
 }

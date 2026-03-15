@@ -401,56 +401,6 @@ impl Database {
         Ok(count)
     }
 
-    pub fn insert_installed_tool(
-        &self,
-        name: &str,
-        description: &str,
-        runtime: &str,
-        source: &str,
-        customization_id: Option<&str>,
-    ) -> Result<()> {
-        let now = chrono::Utc::now().timestamp();
-        self.conn.execute(
-            "INSERT OR REPLACE INTO installed_tools (name, description, runtime, source, customization_id, installed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![name, description, runtime, source, customization_id, now],
-        )?;
-        Ok(())
-    }
-
-    pub fn insert_installed_channel(
-        &self,
-        name: &str,
-        description: &str,
-        runtime: &str,
-        source: &str,
-        customization_id: Option<&str>,
-        webhook_path: &str,
-    ) -> Result<()> {
-        let now = chrono::Utc::now().timestamp();
-        self.conn.execute(
-            "INSERT OR REPLACE INTO installed_channels (name, description, runtime, source, customization_id, webhook_path, installed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![name, description, runtime, source, customization_id, webhook_path, now],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_installed_tool(&self, name: &str) -> Result<bool> {
-        let deleted = self
-            .conn
-            .execute("DELETE FROM installed_tools WHERE name = ?1", params![name])?;
-        Ok(deleted > 0)
-    }
-
-    pub fn delete_installed_channel(&self, name: &str) -> Result<bool> {
-        let deleted = self.conn.execute(
-            "DELETE FROM installed_channels WHERE name = ?1",
-            params![name],
-        )?;
-        Ok(deleted > 0)
-    }
-
     // ── Session metadata ──
 
     pub fn upsert_session(
@@ -1077,5 +1027,101 @@ mod tests {
             .delete_session_messages("no-such-session")
             .expect("delete");
         assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn insert_and_list_customizations() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert");
+        db.insert_customization("email/gmail", "Gmail", "tool", "email")
+            .expect("insert");
+        let list = db.list_customizations().expect("list");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "email/gmail"); // ordered by category, name
+        assert_eq!(list[1].id, "messaging/telegram");
+    }
+
+    #[test]
+    fn delete_customization() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert");
+        assert!(db
+            .delete_customization("messaging/telegram")
+            .expect("delete"));
+        assert!(!db
+            .delete_customization("nonexistent")
+            .expect("delete missing"));
+        let list = db.list_customizations().expect("list");
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn set_customization_verified() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert");
+        let list = db.list_customizations().expect("list");
+        assert!(list[0].verified_at.is_none());
+
+        db.set_customization_verified("messaging/telegram")
+            .expect("verify");
+        let list = db.list_customizations().expect("list");
+        assert!(list[0].verified_at.is_some());
+    }
+
+    #[test]
+    fn insert_and_delete_credentials() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert");
+        db.insert_credential(
+            "messaging/telegram",
+            "TELEGRAM_BOT_TOKEN",
+            "keychain",
+            Some("tamagotchi-telegram"),
+            None,
+        )
+        .expect("insert cred");
+        let deleted = db
+            .delete_credentials_for("messaging/telegram")
+            .expect("delete");
+        assert_eq!(deleted, 1);
+    }
+
+    #[test]
+    fn credential_cascade_on_customization_delete() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert");
+        db.insert_credential(
+            "messaging/telegram",
+            "TELEGRAM_BOT_TOKEN",
+            "keychain",
+            Some("tamagotchi-telegram"),
+            None,
+        )
+        .expect("insert cred");
+
+        db.delete_customization("messaging/telegram")
+            .expect("delete");
+        // Credential should be cascade-deleted
+        let deleted = db
+            .delete_credentials_for("messaging/telegram")
+            .expect("delete");
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn insert_customization_replaces_existing() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert");
+        db.insert_customization("messaging/telegram", "Telegram v2", "channel", "messaging")
+            .expect("replace");
+        let list = db.list_customizations().expect("list");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "Telegram v2");
     }
 }
