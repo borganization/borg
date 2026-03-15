@@ -352,26 +352,27 @@ async fn run_event_loop(
                 }
             }
             AppAction::RunCustomize { actions } => {
-                let data_dir = tamagotchi_core::config::Config::data_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("~/.tamagotchi"));
+                let data_dir = match tamagotchi_core::config::Config::data_dir() {
+                    Ok(dir) => dir,
+                    Err(e) => {
+                        app.push_system_message(format!("Failed to resolve data directory: {e}"));
+                        continue;
+                    }
+                };
                 let mut results: Vec<String> = Vec::new();
 
                 for action in actions {
                     match action {
                         customize_popup::CustomizeAction::Install { id } => {
                             if let Some(def) = tamagotchi_customizations::catalog::find_by_id(&id) {
-                                // For now, install without interactive credential prompts.
-                                // Credentials can be set up via `tamagotchi init` or env vars.
-                                match tokio::task::block_in_place(|| {
-                                    tokio::runtime::Handle::current().block_on(
-                                        tamagotchi_customizations::installer::install(
-                                            def,
-                                            &data_dir,
-                                            &[],
-                                            None,
-                                        ),
-                                    )
-                                }) {
+                                match tamagotchi_customizations::installer::install(
+                                    def,
+                                    &data_dir,
+                                    &[],
+                                    None,
+                                )
+                                .await
+                                {
                                     Ok(()) => {
                                         // Record in DB
                                         if let Ok(db) = tamagotchi_core::db::Database::open() {

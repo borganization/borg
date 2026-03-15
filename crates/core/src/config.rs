@@ -73,7 +73,6 @@ pub struct Config {
 pub struct CustomizationsConfig {
     pub enabled: bool,
     pub auto_verify: bool,
-    pub max_parallel_installs: usize,
 }
 
 impl Default for CustomizationsConfig {
@@ -81,7 +80,6 @@ impl Default for CustomizationsConfig {
         Self {
             enabled: true,
             auto_verify: true,
-            max_parallel_installs: 3,
         }
     }
 }

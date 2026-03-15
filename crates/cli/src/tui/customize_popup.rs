@@ -19,10 +19,6 @@ struct CustomizeItem {
 #[derive(Clone, PartialEq)]
 enum CustomizePhase {
     Browsing,
-    #[allow(dead_code)]
-    Confirming {
-        pending_message: String,
-    },
 }
 
 pub struct CustomizePopup {
@@ -143,19 +139,6 @@ impl CustomizePopup {
                 }
                 _ => None,
             },
-            CustomizePhase::Confirming { .. } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.phase = CustomizePhase::Browsing;
-                    let actions = self.compute_actions();
-                    self.dismiss();
-                    Some(actions)
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    self.phase = CustomizePhase::Browsing;
-                    None
-                }
-                _ => None,
-            },
         }
     }
 
@@ -173,11 +156,6 @@ impl CustomizePopup {
             }
         }
         actions
-    }
-
-    #[allow(dead_code)]
-    pub fn set_status(&mut self, message: String, is_success: bool) {
-        self.status_message = Some((message, is_success));
     }
 
     pub fn render(&self, frame: &mut Frame) {
@@ -295,10 +273,7 @@ impl CustomizePopup {
         }
 
         // Footer hint
-        let hint = match &self.phase {
-            CustomizePhase::Browsing => " Space: toggle  Enter: apply  Esc: close",
-            CustomizePhase::Confirming { .. } => " y: confirm  n: cancel",
-        };
+        let hint = " Space: toggle  Enter: apply  Esc: close";
         let footer_y = inner.y + inner.height - 1;
         let footer_area = Rect::new(inner.x, footer_y, inner.width, 1);
         frame.render_widget(
