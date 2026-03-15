@@ -302,7 +302,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/history" => {
-                match tamagotchi_core::logging::read_history(50) {
+                match tamagotchi_core::logging::read_history_formatted(50) {
                     Ok(lines) => {
                         let text = if lines.is_empty() {
                             "No conversation history for today.".to_string()
