@@ -2587,6 +2587,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tamagotchi-core",
+ "tamagotchi-customizations",
  "tamagotchi-gateway",
  "tamagotchi-heartbeat",
  "tamagotchi-tools",
@@ -2633,6 +2634,19 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "which",
+]
+
+[[package]]
+name = "tamagotchi-customizations"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
  "which",
 ]
 

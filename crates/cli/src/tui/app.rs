@@ -14,6 +14,7 @@ use tamagotchi_heartbeat::scheduler::HeartbeatEvent;
 
 use super::command_popup::CommandPopup;
 use super::composer::Composer;
+use super::customize_popup::{CustomizeAction, CustomizePopup};
 use super::history::{ApprovalStatus, HistoryCell};
 use super::layout;
 use super::settings_popup::SettingsPopup;
@@ -54,6 +55,9 @@ pub enum AppAction {
         id: String,
     },
     ListSessions,
+    RunCustomize {
+        actions: Vec<CustomizeAction>,
+    },
 }
 
 pub struct App<'a> {
@@ -62,6 +66,7 @@ pub struct App<'a> {
     pub composer: Composer<'a>,
     pub command_popup: CommandPopup,
     pub settings_popup: SettingsPopup,
+    pub customize_popup: CustomizePopup,
     pub scroll_offset: usize,
     pub total_lines: usize,
     pub config: Config,
@@ -84,6 +89,7 @@ impl<'a> App<'a> {
             composer: Composer::new(),
             command_popup: CommandPopup::new(),
             settings_popup: SettingsPopup::new(),
+            customize_popup: CustomizePopup::new(),
             scroll_offset: 0,
             total_lines: 0,
             config,
@@ -192,6 +198,13 @@ impl<'a> App<'a> {
                 if self.settings_popup.is_visible() {
                     if let Some(action) = self.settings_popup.handle_key(key, &mut self.config)? {
                         return Ok(action);
+                    }
+                    return Ok(AppAction::Continue);
+                }
+
+                if self.customize_popup.is_visible() {
+                    if let Some(actions) = self.customize_popup.handle_key(key) {
+                        return Ok(AppAction::RunCustomize { actions });
                     }
                     return Ok(AppAction::Continue);
                 }
@@ -335,6 +348,7 @@ impl<'a> App<'a> {
                      /save      - Save current session\n  \
                      /load <id> - Load a saved session\n  \
                      /new       - Start new session\n  \
+                     /customize - Integration marketplace\n  \
                      quit/exit  - Exit"
                         .to_string(),
                 );
@@ -401,6 +415,16 @@ impl<'a> App<'a> {
             }
             "/settings" => {
                 self.settings_popup.show();
+                return Ok(AppAction::Continue);
+            }
+            "/customize" => {
+                if let Ok(data_dir) = tamagotchi_core::config::Config::data_dir() {
+                    self.customize_popup.show(&data_dir);
+                } else {
+                    self.push_system_message(
+                        "Error: could not determine data directory".to_string(),
+                    );
+                }
                 return Ok(AppAction::Continue);
             }
             "/compact" => {
@@ -684,6 +708,7 @@ impl<'a> App<'a> {
         self.render_footer(frame, app_layout.footer);
         self.command_popup.render(frame, app_layout.composer);
         self.settings_popup.render(frame, &self.config);
+        self.customize_popup.render(frame);
     }
 
     fn render_transcript(&mut self, frame: &mut Frame, area: Rect) {

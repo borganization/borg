@@ -14,6 +14,7 @@ members = [
     "crates/sandbox",
     "crates/apply-patch",
     "crates/gateway",
+    "crates/customizations",
 ]
 
 [workspace.dependencies]
