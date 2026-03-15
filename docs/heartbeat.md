@@ -16,6 +16,7 @@ The heartbeat system enables proactive check-ins — the agent can reach out to 
 [heartbeat]
 enabled = false               # must be explicitly enabled
 interval = "30m"              # check-in interval
+cron = "0 */30 * * * *"       # optional cron expression (overrides interval)
 quiet_hours_start = "23:00"   # stop heartbeats at this time
 quiet_hours_end = "07:00"     # resume heartbeats at this time
 ```
@@ -38,6 +39,16 @@ If quiet hours are not configured, heartbeats fire at every interval.
 ## Deduplication
 
 If the LLM responds with the exact same message as the previous heartbeat, it's suppressed. This prevents repetitive notifications when nothing has changed.
+
+## Daemon mode
+
+For running heartbeat check-ins and scheduled tasks without the interactive TUI, use daemon mode:
+
+```sh
+tamagotchi daemon
+```
+
+The daemon runs in the foreground as a background-friendly process. It executes heartbeat check-ins and any scheduled tasks on their configured intervals. Combine with `tamagotchi service install` to run it as a system service (launchd on macOS, systemd on Linux).
 
 ## Heartbeat prompt
 

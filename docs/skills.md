@@ -11,7 +11,7 @@ Skills are instruction bundles that teach the agent how to use external CLI tool
 
 ## Built-in skills
 
-Five skills are embedded in the binary:
+Thirteen skills are embedded in the binary:
 
 | Skill | Requirements | Description |
 |-------|-------------|-------------|
@@ -20,6 +20,14 @@ Five skills are embedded in the binary:
 | `github` | `gh` | Interact with GitHub (issues, PRs, repos) |
 | `weather` | `curl` | Get weather information |
 | `skill-creator` | — | Meta-skill for creating new skills |
+| `git` | `git` | Git operations (commit, branch, diff, log) |
+| `http` | `curl` | HTTP requests (GET, POST, PUT, DELETE) |
+| `search` | `curl` | Web search integration |
+| `docker` | `docker` | Docker container management |
+| `database` | varies | SQL/database operations |
+| `notes` | — | Note-taking and organization |
+| `calendar` | varies | Calendar operations |
+| `1password` | `op` | 1Password secret management |
 
 ## User skills
 

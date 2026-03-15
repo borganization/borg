@@ -45,23 +45,56 @@ tamagotchi/
 │   ├── cli/                # binary crate
 │   │   └── src/
 │   │       ├── main.rs     # entry point, clap commands, init
-│   │       └── repl.rs     # interactive loop + heartbeat rendering
+│   │       ├── repl.rs     # interactive loop + heartbeat rendering
+│   │       ├── onboarding.rs # TUI onboarding wizard
+│   │       ├── logo.rs     # ASCII art rendering
+│   │       ├── service.rs  # daemon loop + launchd/systemd service management
+│   │       └── tui/        # ratatui-based TUI
+│   │           ├── mod.rs          # TUI core with event loop
+│   │           ├── app.rs          # app state and rendering
+│   │           ├── history.rs      # scrollable history view
+│   │           ├── command_popup.rs # slash command autocomplete
+│   │           ├── composer.rs     # input composition UI
+│   │           ├── markdown.rs     # markdown rendering
+│   │           ├── theme.rs        # color theme
+│   │           ├── layout.rs       # layout composition
+│   │           └── spinner.rs      # loading spinner
 │   ├── core/               # core library
 │   │   ├── src/
-│   │   │   ├── agent.rs    # conversation loop + tool dispatch
-│   │   │   ├── llm.rs      # OpenRouter SSE streaming client
-│   │   │   ├── config.rs   # config parsing with serde defaults
-│   │   │   ├── soul.rs     # SOUL.md load/save
-│   │   │   ├── memory.rs   # memory loading with token budget
-│   │   │   ├── skills.rs   # skills loading, parsing, budgeting
-│   │   │   ├── types.rs    # Message, ToolCall, ToolDefinition
+│   │   │   ├── agent.rs        # conversation loop + tool dispatch
+│   │   │   ├── llm.rs          # multi-provider SSE streaming client
+│   │   │   ├── provider.rs     # provider enum + auto-detection
+│   │   │   ├── config.rs       # config parsing with serde defaults
+│   │   │   ├── soul.rs         # SOUL.md load/save
+│   │   │   ├── memory.rs       # memory loading with token budget
+│   │   │   ├── skills.rs       # skills loading, parsing, budgeting
+│   │   │   ├── types.rs        # Message, ToolCall, ToolDefinition
+│   │   │   ├── session.rs      # session persistence + auto-titling
+│   │   │   ├── db.rs           # SQLite database (sessions, tasks)
+│   │   │   ├── conversation.rs # history compaction + normalization
+│   │   │   ├── policy.rs       # execution policy (approve/deny)
+│   │   │   ├── secrets.rs      # secret detection + redaction
+│   │   │   ├── web.rs          # web fetch + search
+│   │   │   ├── tasks.rs        # scheduled task definitions
+│   │   │   ├── logging.rs      # daily JSONL logging
+│   │   │   ├── retry.rs        # exponential backoff retry
+│   │   │   ├── tokenizer.rs    # tiktoken-rs token estimation
+│   │   │   ├── truncate.rs     # tool output truncation
 │   │   │   └── lib.rs
 │   │   └── skills/         # built-in skill definitions
 │   │       ├── slack/SKILL.md
 │   │       ├── discord/SKILL.md
 │   │       ├── github/SKILL.md
 │   │       ├── weather/SKILL.md
-│   │       └── skill-creator/SKILL.md
+│   │       ├── skill-creator/SKILL.md
+│   │       ├── git/SKILL.md
+│   │       ├── http/SKILL.md
+│   │       ├── search/SKILL.md
+│   │       ├── docker/SKILL.md
+│   │       ├── database/SKILL.md
+│   │       ├── notes/SKILL.md
+│   │       ├── calendar/SKILL.md
+│   │       └── 1password/SKILL.md
 │   ├── heartbeat/          # heartbeat scheduler
 │   │   └── src/
 │   │       ├── scheduler.rs
@@ -88,7 +121,7 @@ tamagotchi/
 
 ## Runtime requirements
 
-The binary requires `OPENROUTER_API_KEY` set at runtime. For development, create a `.env` file from the example:
+The binary requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` set at runtime. For development, create a `.env` file from the example:
 
 ```sh
 cp .env.example .env

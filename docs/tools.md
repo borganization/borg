@@ -1,11 +1,11 @@
 # User Tools
 
-The agent can create its own tools at runtime. These are sandboxed scripts that the agent writes via the `apply_patch` tool and then invokes in future conversations.
+The agent can create its own tools at runtime. These are sandboxed scripts that the agent writes via the `create_tool` tool and then invokes in future conversations.
 
 ## How it works
 
 1. During a conversation, the agent decides it needs a new capability
-2. It uses `apply_patch` to create a `tool.toml` manifest and entrypoint script in `~/.tamagotchi/tools/<name>/`
+2. It uses `create_tool` to create a `tool.toml` manifest and entrypoint script in `~/.tamagotchi/tools/<name>/`
 3. The tool registry reloads automatically
 4. The tool is now available as a callable function in all future turns
 
@@ -43,6 +43,10 @@ description = "City name"
 
 [parameters.required]
 values = ["city"]
+
+[credentials]
+# key-value pairs mapping to config [credentials] entries
+# api_key = "weather_api"
 ```
 
 ### Fields
@@ -66,6 +70,10 @@ values = ["city"]
 ### Parameters section
 
 Parameters are defined in TOML and converted to JSON Schema for the LLM. Each property needs a `type` and `description`. Required parameters are listed in `[parameters.required].values`.
+
+### Credentials section
+
+The `[credentials]` section maps tool-local names to keys in the global `[credentials]` config. This lets the tool access API keys stored as environment variable references in `config.toml`.
 
 ## Tool execution
 
@@ -102,7 +110,22 @@ These are always available and don't require tool.toml manifests:
 | `write_memory` | Write or append to memory files (SOUL.md, MEMORY.md, or topic files) |
 | `read_memory` | Read a memory file |
 | `list_tools` | List all user-created tools |
-| `apply_patch` | Create/modify files in `~/.tamagotchi/tools/` via [Patch DSL](patch-dsl.md) |
-| `run_shell` | Execute a shell command |
-| `list_skills` | List all skills with status |
+| `apply_patch` | Create/update/delete files in the current working directory via [Patch DSL](patch-dsl.md) |
+| `create_tool` | Create/modify files in `~/.tamagotchi/tools/` via [Patch DSL](patch-dsl.md) |
+| `run_shell` | Execute a shell command (subject to [execution policy](configuration.md#policy)) |
+| `list_skills` | List all skills with status and source |
 | `apply_skill_patch` | Create/modify files in `~/.tamagotchi/skills/` via [Patch DSL](patch-dsl.md) |
+
+### Conditional tools
+
+These tools are available when their corresponding config section is enabled:
+
+| Tool | Config | Description |
+|------|--------|-------------|
+| `web_fetch` | `[web] enabled = true` | Fetch a URL and convert HTML to text |
+| `web_search` | `[web] enabled = true` | Search the web (DuckDuckGo or Brave) |
+| `schedule_task` | `[tasks] enabled = true` | Create a scheduled task (cron, interval, or one-time) |
+| `list_scheduled_tasks` | `[tasks] enabled = true` | List all scheduled tasks with status |
+| `pause_task` | `[tasks] enabled = true` | Pause a running scheduled task |
+| `resume_task` | `[tasks] enabled = true` | Resume a paused scheduled task |
+| `cancel_task` | `[tasks] enabled = true` | Cancel a scheduled task |
