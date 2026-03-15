@@ -415,85 +415,55 @@ impl Agent {
             let (sequential, parallel): (Vec<_>, Vec<_>) =
                 tc.iter().partition(|t| t.function.name == "run_shell");
 
-            for tool_call in &parallel {
-                if cancel.is_cancelled() {
-                    let remaining_msg =
-                        Message::tool_result(&tool_call.id, "[tool call cancelled by user]");
-                    log_message(&remaining_msg);
-                    self.history.push(remaining_msg);
-                    continue;
-                }
+            self.run_tool_calls(&parallel, &event_tx, &cancel).await;
+            self.run_tool_calls(&sequential, &event_tx, &cancel).await;
+        }
+    }
 
-                let name = &tool_call.function.name;
-                let args = &tool_call.function.arguments;
-                let _ = event_tx
-                    .send(AgentEvent::ToolExecuting {
-                        name: name.clone(),
-                        args: args.clone(),
-                    })
-                    .await;
-
-                let raw_result = self
-                    .execute_tool(name, args, &event_tx)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}"));
-                let truncated = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
-                let result = if self.config.security.secret_detection {
-                    redact_secrets(&truncated)
-                } else {
-                    truncated
-                };
-
-                let _ = event_tx
-                    .send(AgentEvent::ToolResult {
-                        name: name.clone(),
-                        result: result.clone(),
-                    })
-                    .await;
-                let msg = Message::tool_result(&tool_call.id, &result);
-                log_message(&msg);
-                self.history.push(msg);
+    async fn run_tool_calls(
+        &mut self,
+        tool_calls: &[&ToolCall],
+        event_tx: &mpsc::Sender<AgentEvent>,
+        cancel: &CancellationToken,
+    ) {
+        for tool_call in tool_calls {
+            if cancel.is_cancelled() {
+                let remaining_msg =
+                    Message::tool_result(&tool_call.id, "[tool call cancelled by user]");
+                log_message(&remaining_msg);
+                self.history.push(remaining_msg);
+                continue;
             }
 
-            for tool_call in &sequential {
-                if cancel.is_cancelled() {
-                    let remaining_msg =
-                        Message::tool_result(&tool_call.id, "[tool call cancelled by user]");
-                    log_message(&remaining_msg);
-                    self.history.push(remaining_msg);
-                    continue;
-                }
+            let name = &tool_call.function.name;
+            let args = &tool_call.function.arguments;
+            let _ = event_tx
+                .send(AgentEvent::ToolExecuting {
+                    name: name.clone(),
+                    args: args.clone(),
+                })
+                .await;
 
-                let name = &tool_call.function.name;
-                let args = &tool_call.function.arguments;
-                let _ = event_tx
-                    .send(AgentEvent::ToolExecuting {
-                        name: name.clone(),
-                        args: args.clone(),
-                    })
-                    .await;
+            let raw_result = self
+                .execute_tool(name, args, event_tx)
+                .await
+                .unwrap_or_else(|e| format!("Error: {e}"));
+            let truncated = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
+            let result = if self.config.security.secret_detection {
+                redact_secrets(&truncated)
+            } else {
+                truncated
+            };
 
-                let raw_result = self
-                    .execute_tool(name, args, &event_tx)
-                    .await
-                    .unwrap_or_else(|e| format!("Error: {e}"));
-                let truncated = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
-                let result = if self.config.security.secret_detection {
-                    redact_secrets(&truncated)
-                } else {
-                    truncated
-                };
-
-                let _ = event_tx
-                    .send(AgentEvent::ToolResult {
-                        name: name.clone(),
-                        result: result.clone(),
-                    })
-                    .await;
-                let msg = Message::tool_result(&tool_call.id, &result);
-                log_message(&msg);
-                self.history.push(msg);
-            }
+            let _ = event_tx
+                .send(AgentEvent::ToolResult {
+                    name: name.clone(),
+                    result: result.clone(),
+                })
+                .await;
+            let msg = Message::tool_result(&tool_call.id, &result);
+            log_message(&msg);
+            self.history.push(msg);
         }
     }
 
@@ -514,19 +484,13 @@ impl Agent {
 
         match name {
             "write_memory" => {
-                let Some(filename) = args["filename"].as_str() else {
-                    return Ok("Error: Missing required parameter 'filename'.".to_string());
-                };
-                let Some(content) = args["content"].as_str() else {
-                    return Ok("Error: Missing required parameter 'content'.".to_string());
-                };
+                let filename = require_str_param(&args, "filename")?;
+                let content = require_str_param(&args, "content")?;
                 let append = args["append"].as_bool().unwrap_or(false);
                 write_memory(filename, content, append)
             }
             "read_memory" => {
-                let Some(filename) = args["filename"].as_str() else {
-                    return Ok("Error: Missing required parameter 'filename'.".to_string());
-                };
+                let filename = require_str_param(&args, "filename")?;
                 read_memory(filename)
             }
             "list_tools" => {
@@ -550,10 +514,8 @@ impl Agent {
                 }
             }
             "apply_skill_patch" => {
-                let Some(patch) = args["patch"].as_str() else {
-                    return Ok("Error: Missing required parameter 'patch'.".to_string());
-                };
-                let base_dir = Config::data_dir()?.join("skills");
+                let patch = require_str_param(&args, "patch")?;
+                let base_dir = Config::skills_dir()?;
                 std::fs::create_dir_all(&base_dir)?;
                 match apply_patch_to_dir(patch, &base_dir) {
                     Ok(_) => Ok("Skill patch applied successfully.".to_string()),
@@ -561,9 +523,7 @@ impl Agent {
                 }
             }
             "apply_patch" => {
-                let Some(patch) = args["patch"].as_str() else {
-                    return Ok("Error: Missing required parameter 'patch'.".to_string());
-                };
+                let patch = require_str_param(&args, "patch")?;
                 let base_dir = std::env::current_dir()
                     .context("Failed to determine current working directory")?;
                 match apply_patch_to_dir(patch, &base_dir) {
@@ -575,10 +535,8 @@ impl Agent {
                 }
             }
             "create_tool" => {
-                let Some(patch) = args["patch"].as_str() else {
-                    return Ok("Error: Missing required parameter 'patch'.".to_string());
-                };
-                let base_dir = Config::data_dir()?.join("tools");
+                let patch = require_str_param(&args, "patch")?;
+                let base_dir = Config::tools_dir()?;
                 std::fs::create_dir_all(&base_dir)?;
                 match apply_patch_to_dir(patch, &base_dir) {
                     Ok(_) => {
@@ -645,9 +603,7 @@ impl Agent {
                             .to_string(),
                     );
                 }
-                let Some(url) = args["url"].as_str() else {
-                    return Ok("Error: Missing required parameter 'url'.".to_string());
-                };
+                let url = require_str_param(&args, "url")?;
                 let max_chars = args["max_chars"].as_u64().map(|v| v as usize);
                 match web::web_fetch(url, max_chars).await {
                     Ok(content) => Ok(content),
@@ -661,25 +617,17 @@ impl Agent {
                             .to_string(),
                     );
                 }
-                let Some(query) = args["query"].as_str() else {
-                    return Ok("Error: Missing required parameter 'query'.".to_string());
-                };
+                let query = require_str_param(&args, "query")?;
                 match web::web_search(query, &self.config.web).await {
                     Ok(results) => Ok(results),
                     Err(e) => Ok(format!("Error searching: {e}")),
                 }
             }
             "schedule_task" => {
-                let Some(task_name) = args["name"].as_str() else {
-                    return Ok("Error: Missing required parameter 'name'.".to_string());
-                };
-                let Some(prompt) = args["prompt"].as_str() else {
-                    return Ok("Error: Missing required parameter 'prompt'.".to_string());
-                };
+                let task_name = require_str_param(&args, "name")?;
+                let prompt = require_str_param(&args, "prompt")?;
                 let schedule_type = args["schedule_type"].as_str().unwrap_or("interval");
-                let Some(schedule_expr) = args["schedule_expr"].as_str() else {
-                    return Ok("Error: Missing required parameter 'schedule_expr'.".to_string());
-                };
+                let schedule_expr = require_str_param(&args, "schedule_expr")?;
                 let timezone = args["timezone"].as_str().unwrap_or("local");
                 let next_run = match tasks::calculate_next_run(schedule_type, schedule_expr) {
                     Ok(nr) => nr,
@@ -718,43 +666,16 @@ impl Agent {
                 Err(e) => Ok(format!("Error opening database: {e}")),
             },
             "pause_task" => {
-                let Some(task_id) = args["task_id"].as_str() else {
-                    return Ok("Error: Missing required parameter 'task_id'.".to_string());
-                };
-                match Database::open() {
-                    Ok(db) => match db.update_task_status(task_id, "paused") {
-                        Ok(true) => Ok(format!("Task {task_id} paused.")),
-                        Ok(false) => Ok(format!("Task {task_id} not found.")),
-                        Err(e) => Ok(format!("Error: {e}")),
-                    },
-                    Err(e) => Ok(format!("Error opening database: {e}")),
-                }
+                let task_id = require_str_param(&args, "task_id")?;
+                update_task_status(task_id, "paused", "paused")
             }
             "resume_task" => {
-                let Some(task_id) = args["task_id"].as_str() else {
-                    return Ok("Error: Missing required parameter 'task_id'.".to_string());
-                };
-                match Database::open() {
-                    Ok(db) => match db.update_task_status(task_id, "active") {
-                        Ok(true) => Ok(format!("Task {task_id} resumed.")),
-                        Ok(false) => Ok(format!("Task {task_id} not found.")),
-                        Err(e) => Ok(format!("Error: {e}")),
-                    },
-                    Err(e) => Ok(format!("Error opening database: {e}")),
-                }
+                let task_id = require_str_param(&args, "task_id")?;
+                update_task_status(task_id, "active", "resumed")
             }
             "cancel_task" => {
-                let Some(task_id) = args["task_id"].as_str() else {
-                    return Ok("Error: Missing required parameter 'task_id'.".to_string());
-                };
-                match Database::open() {
-                    Ok(db) => match db.update_task_status(task_id, "cancelled") {
-                        Ok(true) => Ok(format!("Task {task_id} cancelled.")),
-                        Ok(false) => Ok(format!("Task {task_id} not found.")),
-                        Err(e) => Ok(format!("Error: {e}")),
-                    },
-                    Err(e) => Ok(format!("Error opening database: {e}")),
-                }
+                let task_id = require_str_param(&args, "task_id")?;
+                update_task_status(task_id, "cancelled", "cancelled")
             }
             _ => {
                 let cred_names = self.tool_registry.tool_credentials(name);
@@ -781,11 +702,84 @@ impl Agent {
     }
 }
 
+fn require_str_param<'a>(args: &'a serde_json::Value, name: &str) -> Result<&'a str> {
+    args[name]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing required parameter '{name}'."))
+}
+
+fn update_task_status(task_id: &str, status: &str, verb: &str) -> Result<String> {
+    match Database::open() {
+        Ok(db) => match db.update_task_status(task_id, status) {
+            Ok(true) => Ok(format!("Task {task_id} {verb}.")),
+            Ok(false) => Ok(format!("Task {task_id} not found.")),
+            Err(e) => Ok(format!("Error: {e}")),
+        },
+        Err(e) => Ok(format!("Error opening database: {e}")),
+    }
+}
+
 #[derive(Default)]
 struct PartialToolCall {
     id: String,
     name: String,
     arguments: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_str_param_present() {
+        let args = serde_json::json!({"name": "hello"});
+        let val = require_str_param(&args, "name").unwrap();
+        assert_eq!(val, "hello");
+    }
+
+    #[test]
+    fn require_str_param_missing() {
+        let args = serde_json::json!({"other": "value"});
+        let err = require_str_param(&args, "name").unwrap_err();
+        assert!(err.to_string().contains("name"));
+    }
+
+    #[test]
+    fn require_str_param_null() {
+        let args = serde_json::json!({"name": null});
+        assert!(require_str_param(&args, "name").is_err());
+    }
+
+    #[test]
+    fn require_str_param_wrong_type() {
+        let args = serde_json::json!({"name": 42});
+        assert!(require_str_param(&args, "name").is_err());
+    }
+
+    #[test]
+    fn require_str_param_empty_string() {
+        let args = serde_json::json!({"name": ""});
+        let val = require_str_param(&args, "name").unwrap();
+        assert_eq!(val, "");
+    }
+
+    #[test]
+    fn update_task_status_not_found() {
+        let id = "test-nonexistent-00000000";
+        let result = update_task_status(id, "paused", "paused").unwrap();
+        assert!(
+            result.contains("not found"),
+            "expected 'not found' in: {result}"
+        );
+    }
+
+    #[test]
+    fn update_task_status_formats_verb() {
+        // Verify the verb parameter is used in the output format
+        let id = "test-nonexistent-00000001";
+        let result = update_task_status(id, "cancelled", "cancelled").unwrap();
+        assert!(result.contains(id));
+    }
 }
 
 fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {

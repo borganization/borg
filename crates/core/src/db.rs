@@ -72,7 +72,7 @@ impl Database {
     }
 
     fn db_path() -> Result<PathBuf> {
-        Ok(Config::data_dir()?.join("tamagotchi.db"))
+        Config::db_path()
     }
 
     fn run_migrations(&self) -> Result<()> {
