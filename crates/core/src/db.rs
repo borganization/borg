@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::Datelike;
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 
@@ -112,6 +113,15 @@ impl Database {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS token_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                prompt_tokens INTEGER NOT NULL,
+                completion_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(timestamp);
             ",
         )?;
         Ok(())
@@ -268,6 +278,32 @@ impl Database {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    // ── Token usage ──
+
+    pub fn log_token_usage(&self, prompt: u64, completion: u64, total: u64) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO token_usage (timestamp, prompt_tokens, completion_tokens, total_tokens)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![now, prompt as i64, completion as i64, total as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn monthly_token_total(&self) -> Result<u64> {
+        let now = chrono::Utc::now();
+        let first_of_month = now.date_naive().with_day(1).unwrap_or(now.date_naive());
+        let midnight = first_of_month
+            .and_hms_opt(0, 0, 0)
+            .context("failed to construct midnight timestamp")?;
+        let start_ts = midnight.and_utc().timestamp();
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(SUM(total_tokens), 0) FROM token_usage WHERE timestamp >= ?1",
+        )?;
+        let total: i64 = stmt.query_row(params![start_ts], |row| row.get(0))?;
+        Ok(total as u64)
     }
 
     // ── Meta key-value ──
@@ -451,5 +487,39 @@ mod tests {
         assert!(!db
             .update_task_status("nonexistent", "paused")
             .expect("update"));
+    }
+
+    #[test]
+    fn log_and_query_token_usage() {
+        let db = test_db();
+        db.log_token_usage(100, 50, 150).expect("log usage");
+        db.log_token_usage(200, 100, 300).expect("log usage 2");
+        let total = db.monthly_token_total().expect("query");
+        assert_eq!(total, 450);
+    }
+
+    #[test]
+    fn monthly_token_total_empty_returns_zero() {
+        let db = test_db();
+        let total = db.monthly_token_total().expect("query");
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn monthly_token_total_excludes_old_entries() {
+        let db = test_db();
+        // Insert a row with a very old timestamp (year 2020)
+        db.conn
+            .execute(
+                "INSERT INTO token_usage (timestamp, prompt_tokens, completion_tokens, total_tokens)
+                 VALUES (?1, 500, 500, 1000)",
+                params![1577836800_i64], // 2020-01-01
+            )
+            .expect("insert old");
+        // Insert a current row
+        db.log_token_usage(100, 50, 150).expect("log current");
+        let total = db.monthly_token_total().expect("query");
+        // Old entry should be excluded, only current entry counts
+        assert_eq!(total, 150);
     }
 }

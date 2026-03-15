@@ -135,6 +135,10 @@ max_context_tokens = 8000
 [skills]
 enabled = true
 max_context_tokens = 4000
+
+[budget]
+monthly_token_limit = 1000000    # 0 = unlimited
+warning_threshold = 0.8          # warn at 80% usage
 ```
 
 ## Memory System

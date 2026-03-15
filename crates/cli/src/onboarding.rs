@@ -124,6 +124,7 @@ pub struct OnboardingResult {
     pub model_id: String,
     pub api_key: Option<String>,
     pub provider: String,
+    pub monthly_token_limit: u64,
 }
 
 /// Helper: prompt the user for input, returning `None` on cancel/interrupt.
@@ -294,6 +295,40 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         }
     };
 
+    // ── Step 7: Monthly spending cap ──
+    let budget_options = vec![
+        "500,000 tokens".to_string(),
+        "1,000,000 tokens".to_string(),
+        "5,000,000 tokens".to_string(),
+        "Unlimited".to_string(),
+        "Custom".to_string(),
+    ];
+
+    let chosen_budget = prompt_or_cancel!(Select::new(
+        "Set a monthly token budget (hard limit):",
+        budget_options
+    )
+    .with_help_message("Prevents runaway costs — you can change this later in /settings")
+    .prompt());
+
+    let monthly_token_limit: u64 = if chosen_budget.starts_with("500,000") {
+        500_000
+    } else if chosen_budget.starts_with("1,000,000") {
+        1_000_000
+    } else if chosen_budget.starts_with("5,000,000") {
+        5_000_000
+    } else if chosen_budget.starts_with("Unlimited") {
+        0
+    } else {
+        // Custom
+        let custom_input = prompt_or_cancel!(Text::new("Enter monthly token limit:").prompt());
+        custom_input
+            .trim()
+            .replace(',', "")
+            .parse::<u64>()
+            .unwrap_or(1_000_000)
+    };
+
     // ── Summary ──
     println!();
     print_checkmark(&mut stdout, "Your name: ", &user_name)?;
@@ -317,6 +352,12 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
     } else {
         print_checkmark(&mut stdout, "API key:   ", "(skipped)")?;
     }
+    let budget_display = if monthly_token_limit == 0 {
+        "Unlimited".to_string()
+    } else {
+        format!("{} tokens", format_number(monthly_token_limit))
+    };
+    print_checkmark(&mut stdout, "Budget:    ", &budget_display)?;
     println!();
 
     Ok(Some(OnboardingResult {
@@ -326,6 +367,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
         model_id,
         api_key,
         provider: provider_id.to_string(),
+        monthly_token_limit,
     }))
 }
 
@@ -363,6 +405,19 @@ You are {name}, a helpful AI personal assistant. You belong to {owner_name} and 
     ))
 }
 
+/// Format a number with comma separators (e.g. 1000000 → "1,000,000").
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
 /// Validate that a model ID is safe for TOML interpolation (alphanumeric, slashes, hyphens, dots).
 fn validate_model_id(model_id: &str) -> Result<()> {
     if model_id.is_empty() {
@@ -384,6 +439,7 @@ pub fn generate_config(
     provider_id: &str,
     user_name: &str,
     agent_name: &str,
+    monthly_token_limit: u64,
 ) -> Result<String> {
     validate_model_id(model_id)?;
 
@@ -421,6 +477,10 @@ max_context_tokens = 8000
 [skills]
 enabled = true
 max_context_tokens = 4000
+
+[budget]
+monthly_token_limit = {monthly_token_limit}
+warning_threshold = 0.8
 "#,
     ))
 }
@@ -444,6 +504,7 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
             &result.provider,
             &result.user_name,
             &result.agent_name,
+            result.monthly_token_limit,
         )?;
         std::fs::write(&config_path, &config_content)?;
         println!("  Created {}", config_path.display());
@@ -510,8 +571,14 @@ mod tests {
 
     #[test]
     fn generate_config_default_model() {
-        let config = generate_config("anthropic/claude-sonnet-4", "openrouter", "Mike", "Buddy")
-            .expect("valid model");
+        let config = generate_config(
+            "anthropic/claude-sonnet-4",
+            "openrouter",
+            "Mike",
+            "Buddy",
+            1_000_000,
+        )
+        .expect("valid model");
         assert!(config.contains("model = \"anthropic/claude-sonnet-4\""));
         assert!(config.contains("provider = \"openrouter\""));
         assert!(config.contains("api_key_env = \"OPENROUTER_API_KEY\""));
@@ -521,8 +588,14 @@ mod tests {
 
     #[test]
     fn generate_config_includes_user_section() {
-        let config = generate_config("anthropic/claude-sonnet-4", "openrouter", "Mike", "Buddy")
-            .expect("valid model");
+        let config = generate_config(
+            "anthropic/claude-sonnet-4",
+            "openrouter",
+            "Mike",
+            "Buddy",
+            1_000_000,
+        )
+        .expect("valid model");
         assert!(config.contains("[user]"));
         assert!(config.contains("name = \"Mike\""));
         assert!(config.contains("agent_name = \"Buddy\""));
@@ -530,36 +603,42 @@ mod tests {
 
     #[test]
     fn generate_config_anthropic_provider() {
-        let config =
-            generate_config("claude-sonnet-4", "anthropic", "User", "Agent").expect("valid");
+        let config = generate_config("claude-sonnet-4", "anthropic", "User", "Agent", 500_000)
+            .expect("valid");
         assert!(config.contains("provider = \"anthropic\""));
         assert!(config.contains("api_key_env = \"ANTHROPIC_API_KEY\""));
     }
 
     #[test]
     fn generate_config_openai_provider() {
-        let config = generate_config("gpt-4.1", "openai", "User", "Agent").expect("valid");
+        let config = generate_config("gpt-4.1", "openai", "User", "Agent", 0).expect("valid");
         assert!(config.contains("provider = \"openai\""));
         assert!(config.contains("api_key_env = \"OPENAI_API_KEY\""));
     }
 
     #[test]
     fn generate_config_gemini_provider() {
-        let config = generate_config("gemini-2.5-pro", "gemini", "User", "Agent").expect("valid");
+        let config =
+            generate_config("gemini-2.5-pro", "gemini", "User", "Agent", 0).expect("valid");
         assert!(config.contains("provider = \"gemini\""));
         assert!(config.contains("api_key_env = \"GEMINI_API_KEY\""));
     }
 
     #[test]
     fn generate_config_rejects_empty_model() {
-        assert!(generate_config("", "openrouter", "User", "Agent").is_err());
+        assert!(generate_config("", "openrouter", "User", "Agent", 0).is_err());
     }
 
     #[test]
     fn generate_config_rejects_injection() {
-        assert!(
-            generate_config("model\"\nmalicious = true", "openrouter", "User", "Agent").is_err()
-        );
+        assert!(generate_config(
+            "model\"\nmalicious = true",
+            "openrouter",
+            "User",
+            "Agent",
+            0
+        )
+        .is_err());
     }
 
     #[test]
@@ -583,5 +662,43 @@ mod tests {
         assert!(validate_model_id("model\"").is_err());
         assert!(validate_model_id("model\nkey=val").is_err());
         assert!(validate_model_id("model with spaces").is_err());
+    }
+
+    #[test]
+    fn format_number_basic() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(999), "999");
+        assert_eq!(format_number(1000), "1,000");
+        assert_eq!(format_number(1_000_000), "1,000,000");
+        assert_eq!(format_number(500_000), "500,000");
+        assert_eq!(format_number(5_000_000), "5,000,000");
+    }
+
+    #[test]
+    fn generate_config_includes_budget_section() {
+        let config = generate_config(
+            "anthropic/claude-sonnet-4",
+            "openrouter",
+            "Mike",
+            "Buddy",
+            1_000_000,
+        )
+        .expect("valid");
+        assert!(config.contains("[budget]"));
+        assert!(config.contains("monthly_token_limit = 1000000"));
+        assert!(config.contains("warning_threshold = 0.8"));
+    }
+
+    #[test]
+    fn generate_config_budget_unlimited() {
+        let config = generate_config(
+            "anthropic/claude-sonnet-4",
+            "openrouter",
+            "User",
+            "Agent",
+            0,
+        )
+        .expect("valid");
+        assert!(config.contains("monthly_token_limit = 0"));
     }
 }

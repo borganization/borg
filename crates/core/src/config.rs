@@ -36,6 +36,8 @@ pub struct Config {
     #[serde(default)]
     pub tasks: TasksConfig,
     #[serde(default)]
+    pub budget: BudgetConfig,
+    #[serde(default)]
     pub credentials: std::collections::HashMap<String, String>,
 }
 
@@ -117,6 +119,24 @@ pub struct WebConfig {
 pub struct TasksConfig {
     pub enabled: bool,
     pub max_concurrent: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BudgetConfig {
+    /// Monthly token limit. 0 = unlimited.
+    pub monthly_token_limit: u64,
+    /// Fraction of budget at which to warn (0.0–1.0).
+    pub warning_threshold: f64,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            monthly_token_limit: 0,
+            warning_threshold: 0.8,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -308,7 +328,9 @@ impl Config {
              skills.max_context_tokens = {}\n  \
              conversation.max_iterations = {}\n  \
              conversation.show_thinking = {}\n  \
-             security.secret_detection = {}",
+             security.secret_detection = {}\n  \
+             budget.monthly_token_limit = {}\n  \
+             budget.warning_threshold = {}",
             self.llm.model,
             self.llm.temperature,
             self.llm.max_tokens,
@@ -320,6 +342,8 @@ impl Config {
             self.conversation.max_iterations,
             self.conversation.show_thinking,
             self.security.secret_detection,
+            self.budget.monthly_token_limit,
+            self.budget.warning_threshold,
         )
     }
 
@@ -394,10 +418,28 @@ impl Config {
                 self.security.secret_detection = v;
                 Ok(format!("security.secret_detection = {v}"))
             }
+            "budget.monthly_token_limit" => {
+                let v: u64 = value
+                    .parse()
+                    .with_context(|| "Invalid integer for monthly_token_limit")?;
+                self.budget.monthly_token_limit = v;
+                Ok(format!("budget.monthly_token_limit = {v}"))
+            }
+            "budget.warning_threshold" => {
+                let v: f64 = value
+                    .parse()
+                    .with_context(|| "Invalid float for warning_threshold")?;
+                if !(0.0..=1.0).contains(&v) {
+                    anyhow::bail!("warning_threshold must be between 0.0 and 1.0");
+                }
+                self.budget.warning_threshold = v;
+                Ok(format!("budget.warning_threshold = {v}"))
+            }
             _ => anyhow::bail!(
                 "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
                  sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled, \
-                 conversation.max_iterations, conversation.show_thinking, security.secret_detection"
+                 conversation.max_iterations, conversation.show_thinking, security.secret_detection, \
+                 budget.monthly_token_limit, budget.warning_threshold"
             ),
         }
     }
@@ -753,5 +795,66 @@ enabled = true
         let loaded = Config::load_from(&config_path).expect("reload");
         assert_eq!(loaded.llm.model, "test-round-trip");
         assert!((loaded.llm.temperature - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn default_budget_config_values() {
+        let cfg = BudgetConfig::default();
+        assert_eq!(cfg.monthly_token_limit, 0);
+        assert!((cfg.warning_threshold - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_budget_config_from_toml() {
+        let toml_str = r#"
+[budget]
+monthly_token_limit = 5000000
+warning_threshold = 0.9
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.budget.monthly_token_limit, 5_000_000);
+        assert!((cfg.budget.warning_threshold - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_budget_config_defaults_when_absent() {
+        let cfg: Config = toml::from_str("").expect("should parse");
+        assert_eq!(cfg.budget.monthly_token_limit, 0);
+        assert!((cfg.budget.warning_threshold - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_setting_budget_monthly_token_limit() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("budget.monthly_token_limit", "1000000")
+            .expect("should succeed");
+        assert_eq!(cfg.budget.monthly_token_limit, 1_000_000);
+    }
+
+    #[test]
+    fn apply_setting_budget_warning_threshold() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("budget.warning_threshold", "0.9")
+            .expect("should succeed");
+        assert!((cfg.budget.warning_threshold - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_setting_budget_warning_threshold_out_of_range() {
+        let mut cfg = Config::default();
+        assert!(cfg
+            .apply_setting("budget.warning_threshold", "1.5")
+            .is_err());
+        assert!(cfg
+            .apply_setting("budget.warning_threshold", "-0.1")
+            .is_err());
+    }
+
+    #[test]
+    fn display_settings_contains_budget() {
+        let cfg = Config::default();
+        let display = cfg.display_settings();
+        assert!(display.contains("budget.monthly_token_limit"));
+        assert!(display.contains("budget.warning_threshold"));
     }
 }
