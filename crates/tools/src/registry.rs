@@ -118,13 +118,26 @@ impl ToolRegistry {
         args_json: &str,
         extra_env: &[(String, String)],
     ) -> Result<String> {
+        self.execute_tool_full(name, args_json, extra_env, &[])
+            .await
+    }
+
+    pub async fn execute_tool_full(
+        &self,
+        name: &str,
+        args_json: &str,
+        extra_env: &[(String, String)],
+        blocked_paths: &[String],
+    ) -> Result<String> {
         let tool = self
             .tools
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {name}"))?;
 
         let executor = ToolExecutor::new(&tool.manifest, &tool.dir);
-        executor.execute_with_env(args_json, extra_env).await
+        executor
+            .execute_with_blocked_paths(args_json, extra_env, blocked_paths)
+            .await
     }
 
     pub fn tool_credentials(&self, name: &str) -> Vec<String> {

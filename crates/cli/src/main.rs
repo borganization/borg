@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 mod logo;
@@ -32,6 +33,8 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Run diagnostics to check configuration, connectivity, and dependencies
+    Doctor,
     /// Run as a background daemon (executes scheduled tasks and heartbeat)
     Daemon,
     /// Manage the daemon as a system service
@@ -70,10 +73,39 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Set up a global cancellation token for graceful shutdown
+    let shutdown = CancellationToken::new();
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+                    // If SIGTERM handler fails, just listen for ctrl_c
+                    let _ = ctrl_c.await;
+                    shutdown.cancel();
+                    return;
+                };
+                tokio::select! {
+                    _ = ctrl_c => {},
+                    _ = sigterm.recv() => {},
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = ctrl_c.await;
+            }
+            shutdown.cancel();
+        });
+    }
+
     match cli.command {
         Some(Commands::Init) => init_data_dir()?,
         Some(Commands::Ask { message, yes, json }) => repl::one_shot(&message, yes, json).await?,
-        Some(Commands::Daemon) => service::run_daemon().await?,
+        Some(Commands::Doctor) => run_doctor()?,
+        Some(Commands::Daemon) => service::run_daemon(shutdown).await?,
         Some(Commands::Service { action }) => match action {
             ServiceAction::Install => service::install_service()?,
             ServiceAction::Uninstall => service::uninstall_service()?,
@@ -82,6 +114,17 @@ async fn main() -> Result<()> {
         Some(Commands::Chat) | None => repl::run().await?,
     }
 
+    Ok(())
+}
+
+fn run_doctor() -> Result<()> {
+    let config = tamagotchi_core::config::Config::load().unwrap_or_default();
+    let report = tamagotchi_core::doctor::run_diagnostics(&config);
+    println!("{}", report.format());
+    let (_pass, _warn, fail) = report.counts();
+    if fail > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }
 

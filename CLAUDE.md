@@ -34,10 +34,15 @@ Binary name is `tamagotchi`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_K
 - `tamagotchi` or `tamagotchi chat` — interactive REPL
 - `tamagotchi ask "message"` — one-shot query
 - `tamagotchi init` — interactive onboarding wizard (name, personality, provider, model selection)
+- `tamagotchi doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, budget)
 
 ## Agent Loop
 
 `core/agent.rs` — streams LLM response, parses tool calls, executes them, appends results, loops until text-only response.
+
+- **Internal tag stripping**: `<internal>...</internal>` blocks are stripped from output in real-time during streaming (prevents chain-of-thought leakage)
+- **Message persistence**: Each message is written to SQLite (`messages` table) immediately when added to history, enabling crash recovery
+- **Message timestamps**: All messages carry RFC3339 timestamps for temporal reasoning and compaction summaries
 
 System prompt assembled each turn: `SOUL.md` + current time + memory context + skills context (all token-budgeted).
 
@@ -45,7 +50,7 @@ System prompt assembled each turn: `SOUL.md` + current time + memory context + s
 
 | Tool | Purpose |
 |------|---------|
-| `write_memory` | Write/append to memory files (SOUL.md, MEMORY.md, or topic files) |
+| `write_memory` | Write/append to memory files (SOUL.md, MEMORY.md, or topic files). Supports `scope` param (`global`/`local`) |
 | `read_memory` | Read a memory file |
 | `list_tools` | List user-created tools |
 | `apply_patch` | Create/update/delete files in the current working directory via patch DSL |
@@ -53,6 +58,7 @@ System prompt assembled each turn: `SOUL.md` + current time + memory context + s
 | `run_shell` | Execute a shell command |
 | `list_skills` | List all skills with status and source |
 | `apply_skill_patch` | Create/modify files in `~/.tamagotchi/skills/` via patch DSL |
+| `read_pdf` | Extract text from a PDF file with token-aware truncation |
 
 ## User Tools
 
@@ -136,6 +142,10 @@ max_context_tokens = 8000
 enabled = true
 max_context_tokens = 4000
 
+[security]
+secret_detection = true
+blocked_paths = [".ssh", ".aws", ".gnupg", ".config/gh", ".env", "credentials", "private_key"]
+
 [budget]
 monthly_token_limit = 1000000    # 0 = unlimited
 warning_threshold = 0.8          # warn at 80% usage
@@ -145,6 +155,8 @@ warning_threshold = 0.8          # warn at 80% usage
 
 - `~/.tamagotchi/MEMORY.md` — loaded every turn
 - `~/.tamagotchi/memory/*.md` — loaded by recency until token budget exhausted
+- **Per-project local memory**: `$CWD/.tamagotchi/memory/*.md` — loaded in addition to global memory when present
+- `write_memory` tool accepts `scope: "local"` to write to project-local memory
 - Token estimation via `tiktoken-rs` (cl100k_base BPE tokenizer)
 
 ## Personality (SOUL.md)
@@ -161,6 +173,9 @@ Skills are instruction bundles (SKILL.md files with YAML frontmatter) that teach
 - **User skills**: `~/.tamagotchi/skills/<name>/SKILL.md` — created via `apply_skill_patch`
 - User skills with the same name override built-in skills
 - Requirements (bins/env vars) are checked at load time; unavailable skills are still listed but flagged
+- **Progressive loading**: Metadata (name + description) always loaded for all skills (~50 tokens each); full SKILL.md body loaded only for available skills within token budget
+- **References**: User skills can have `references/*.md` files stored on the Skill struct (not auto-loaded into context)
+- **Scripts**: User skills can have `scripts/` directories; paths stored on the Skill struct for use with `run_shell`
 
 **SKILL.md format:**
 ```markdown
@@ -177,6 +192,41 @@ requires:
 Instructions and command examples here.
 ```
 
+## Lifecycle Hooks
+
+`crates/core/src/hooks.rs` — extensible hook system for intercepting agent loop events.
+
+**Hook points**: `BeforeAgentStart`, `BeforeLlmCall`, `AfterLlmResponse`, `BeforeToolCall`, `AfterToolCall`, `TurnComplete`, `OnError`
+
+**Hook actions**: `Continue` (no-op), `InjectContext(String)` (append to system prompt), `Skip` (skip current action, e.g. tool call)
+
+Hooks implement the `Hook` trait and are registered on the agent via `agent.hook_registry_mut().register(...)`. Multiple hooks can be registered; `InjectContext` results are merged, `Skip` short-circuits.
+
+## Doctor Command
+
+`crates/core/src/doctor.rs` — diagnostic checks for config, provider, sandbox, tools, skills, memory, data directory, and budget.
+
+Available via `tamagotchi doctor` CLI subcommand or `/doctor` TUI command.
+
+## Database
+
+SQLite at `~/.tamagotchi/tamagotchi.db` with versioned migrations:
+- **V1**: sessions, scheduled_tasks, task_runs, meta, token_usage tables
+- **V2**: messages table (crash recovery), retry_count on scheduled_tasks
+- Schema version tracked in `meta` table; migrations run automatically on `Database::open()`
+
+## Signal Handling & Graceful Shutdown
+
+- Global `CancellationToken` wired to SIGINT (Ctrl+C) and SIGTERM (Unix)
+- Daemon drains in-progress tasks via semaphore before exiting
+- Agent loop respects cancellation between iterations
+
+## Daemon & Concurrent Tasks
+
+- Daemon uses `tokio::sync::Semaphore` (capacity from `tasks.max_concurrent`, default 3)
+- Each task spawned as independent tokio task with 5-minute timeout
+- Failed tasks are recorded with error details in `task_runs` table
+
 ## Heartbeat
 
 Separate tokio task. Fires at configured interval, skips during quiet hours, suppresses duplicate/empty responses. Renders in cyan in the REPL.
@@ -186,6 +236,7 @@ Separate tokio task. Fires at configured interval, skips during quiet hours, sup
 User tools run sandboxed:
 - **macOS**: `sandbox-exec` with generated Seatbelt profile (deny-all default, explicit allows)
 - **Linux**: `bwrap` with namespace isolation (read-only mounts, network unshare)
+- **Filesystem blocklist**: Paths in `[security] blocked_paths` (defaults: `.ssh`, `.aws`, `.gnupg`, etc.) are filtered from tool `fs_read`/`fs_write` before sandbox profile generation
 
 Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 
@@ -202,8 +253,11 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 | `crates/core/src/config.rs` | Config parsing with defaults |
 | `crates/core/src/soul.rs` | SOUL.md load/save |
 | `crates/core/src/memory.rs` | Memory loading with token budget |
-| `crates/core/src/skills.rs` | Skills loading, parsing, token budgeting |
-| `crates/core/src/types.rs` | Message, ToolCall, ToolDefinition |
+| `crates/core/src/skills.rs` | Skills loading, parsing, progressive token budgeting |
+| `crates/core/src/hooks.rs` | Lifecycle hook system (trait, registry, dispatch) |
+| `crates/core/src/doctor.rs` | Diagnostic checks and report formatting |
+| `crates/core/src/db.rs` | SQLite database with versioned migrations |
+| `crates/core/src/types.rs` | Message (with timestamps), ToolCall, ToolDefinition |
 | `crates/heartbeat/src/scheduler.rs` | Interval + quiet hours + dedup |
 | `crates/tools/src/manifest.rs` | tool.toml parsing |
 | `crates/tools/src/registry.rs` | Scan + register user tools |
@@ -217,7 +271,7 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 ## Testing
 
 ```sh
-cargo test                          # all 20 tests
+cargo test                          # all tests
 cargo test -p tamagotchi-apply-patch  # 13 patch tests
 cargo test -p tamagotchi-core         # config + skills tests
 ```

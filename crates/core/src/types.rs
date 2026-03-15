@@ -17,6 +17,8 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,12 +57,17 @@ pub struct FunctionDefinition {
 }
 
 impl Message {
+    fn now_rfc3339() -> String {
+        chrono::Local::now().to_rfc3339()
+    }
+
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: Role::System,
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            timestamp: None, // system prompts don't need timestamps
         }
     }
 
@@ -70,6 +77,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            timestamp: Some(Self::now_rfc3339()),
         }
     }
 
@@ -79,6 +87,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            timestamp: Some(Self::now_rfc3339()),
         }
     }
 
@@ -88,6 +97,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            timestamp: Some(Self::now_rfc3339()),
         }
     }
 }

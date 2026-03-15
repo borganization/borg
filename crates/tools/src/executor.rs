@@ -24,6 +24,16 @@ impl<'a> ToolExecutor<'a> {
         args_json: &str,
         extra_env: &[(String, String)],
     ) -> Result<String> {
+        self.execute_with_blocked_paths(args_json, extra_env, &[])
+            .await
+    }
+
+    pub async fn execute_with_blocked_paths(
+        &self,
+        args_json: &str,
+        extra_env: &[(String, String)],
+        blocked_paths: &[String],
+    ) -> Result<String> {
         let (program, base_args) = self.resolve_runtime()?;
         let entrypoint = self.tool_dir.join(&self.manifest.entrypoint);
 
@@ -34,8 +44,11 @@ impl<'a> ToolExecutor<'a> {
         let mut cmd_args = base_args;
         cmd_args.push(entrypoint.to_string_lossy().to_string());
 
-        // Apply sandbox wrapping
-        let sandbox_policy = self.manifest.sandbox_policy();
+        // Apply sandbox wrapping with blocklist filtering
+        let sandbox_policy = self
+            .manifest
+            .sandbox_policy()
+            .with_blocked_paths_filtered(blocked_paths);
         let sandboxed = sandbox_policy.wrap_command(&program, &cmd_args, self.tool_dir);
 
         debug!(

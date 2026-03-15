@@ -5,7 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::types::{Message, Role};
+use crate::db::Database;
+use crate::types::{Message, Role, ToolCall};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -132,6 +133,39 @@ pub fn load_last_session() -> Result<Option<Session>> {
 #[derive(Deserialize)]
 struct SessionMetaOnly {
     meta: SessionMeta,
+}
+
+/// Attempt to recover a session's messages from SQLite if the JSON file is stale or missing.
+pub fn recover_session_from_db(session_id: &str) -> Result<Option<Vec<Message>>> {
+    let db = Database::open()?;
+    let rows = db.load_session_messages(session_id)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let mut messages = Vec::with_capacity(rows.len());
+    for row in rows {
+        let role = match row.role.as_str() {
+            "system" => Role::System,
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            "tool" => Role::Tool,
+            _ => continue,
+        };
+        let tool_calls: Option<Vec<ToolCall>> = row
+            .tool_calls_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok());
+        messages.push(Message {
+            role,
+            content: row.content,
+            tool_calls,
+            tool_call_id: row.tool_call_id,
+            timestamp: row.timestamp,
+        });
+    }
+
+    Ok(Some(messages))
 }
 
 pub fn list_sessions() -> Result<Vec<SessionMeta>> {

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use tokio_util::sync::CancellationToken;
 
 use tamagotchi_core::config::Config;
 
@@ -48,7 +49,7 @@ WantedBy=default.target
 "#;
 
 /// Run the daemon loop: executes scheduled tasks and heartbeat without a TUI.
-pub async fn run_daemon() -> Result<()> {
+pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
     let config = Config::load()?;
 
     println!("Tamagotchi daemon starting...");
@@ -56,80 +57,126 @@ pub async fn run_daemon() -> Result<()> {
     // Open database for task scheduling
     let db = tamagotchi_core::db::Database::open()?;
 
-    // Create LLM client for task execution
-    let llm = tamagotchi_core::llm::LlmClient::new(config.clone())?;
+    // Validate that LLM client can be constructed
+    let _ = tamagotchi_core::llm::LlmClient::new(config.clone())?;
+
+    let max_concurrent = config.tasks.max_concurrent;
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
     println!("Daemon running. Press Ctrl+C to stop.");
 
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                println!("Daemon shutting down gracefully...");
+                // Wait for in-progress tasks to finish (acquire all permits)
+                for _ in 0..max_concurrent {
+                    let _ = semaphore.acquire().await;
+                }
+                println!("All tasks drained. Goodbye.");
+                return Ok(());
+            }
+            _ = interval.tick() => {}
+        }
 
         // Check for due tasks
         let now = chrono::Utc::now().timestamp();
         match db.get_due_tasks(now) {
             Ok(tasks) => {
-                for task in &tasks {
-                    tracing::info!("Executing scheduled task: {} ({})", task.name, task.id);
-                    let started_at = chrono::Utc::now().timestamp();
-
-                    let soul = tamagotchi_core::soul::load_soul().unwrap_or_default();
-                    let memory =
-                        tamagotchi_core::memory::load_memory_context(4000).unwrap_or_default();
-                    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-
-                    let system = format!(
-                        "{soul}\n\n# Current Time\n{time}\n\n{memory}\n\n\
-                         # Scheduled Task\nYou are executing a scheduled task: \"{}\"\n\
-                         Respond with the task result. Be concise.",
-                        task.name
-                    );
-
-                    let messages = vec![
-                        tamagotchi_core::types::Message::system(system),
-                        tamagotchi_core::types::Message::user(&task.prompt),
-                    ];
-
-                    match llm.chat(&messages, None).await {
-                        Ok(response) => {
-                            let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
-                            let result_text = response.content.as_deref().unwrap_or("");
-                            if let Err(e) = db.record_task_run(
-                                &task.id,
-                                started_at,
-                                duration_ms,
-                                Some(result_text),
-                                None,
-                            ) {
-                                tracing::warn!("Failed to record task run: {e}");
-                            }
-                            tracing::info!(
-                                "Task '{}' completed: {}",
-                                task.name,
-                                &result_text[..result_text.len().min(100)]
-                            );
-                        }
-                        Err(e) => {
-                            let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
-                            let err_str = format!("{e}");
-                            if let Err(e2) = db.record_task_run(
-                                &task.id,
-                                started_at,
-                                duration_ms,
-                                None,
-                                Some(&err_str),
-                            ) {
-                                tracing::warn!("Failed to record task error: {e2}");
-                            }
-                            tracing::warn!("Task '{}' failed: {e}", task.name);
-                        }
-                    }
-
-                    // Advance next_run
-                    if let Err(e) = tamagotchi_core::tasks::advance_next_run(task, &db) {
+                for task in tasks {
+                    // Advance next_run immediately to prevent re-execution
+                    if let Err(e) = tamagotchi_core::tasks::advance_next_run(&task, &db) {
                         tracing::warn!("Failed to advance task next_run: {e}");
                     }
+
+                    let permit = semaphore.clone().acquire_owned().await;
+                    let task_config = config.clone();
+                    let task_name = task.name.clone();
+                    let task_id = task.id.clone();
+                    let task_prompt = task.prompt.clone();
+                    let task_timeout = std::time::Duration::from_secs(300); // 5 min per task
+
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        tracing::info!("Executing scheduled task: {task_name} ({task_id})");
+                        let started_at = chrono::Utc::now().timestamp();
+
+                        let soul = tamagotchi_core::soul::load_soul().unwrap_or_default();
+                        let memory =
+                            tamagotchi_core::memory::load_memory_context(4000).unwrap_or_default();
+                        let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+
+                        let system = format!(
+                            "{soul}\n\n# Current Time\n{time}\n\n{memory}\n\n\
+                             # Scheduled Task\nYou are executing a scheduled task: \"{task_name}\"\n\
+                             Respond with the task result. Be concise."
+                        );
+
+                        let messages = vec![
+                            tamagotchi_core::types::Message::system(system),
+                            tamagotchi_core::types::Message::user(&task_prompt),
+                        ];
+
+                        let llm = match tamagotchi_core::llm::LlmClient::new(task_config) {
+                            Ok(l) => l,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to create LLM client for task '{task_name}': {e}"
+                                );
+                                return;
+                            }
+                        };
+                        let result =
+                            tokio::time::timeout(task_timeout, llm.chat(&messages, None)).await;
+
+                        if let Ok(db) = tamagotchi_core::db::Database::open() {
+                            match result {
+                                Ok(Ok(response)) => {
+                                    let duration_ms =
+                                        (chrono::Utc::now().timestamp() - started_at) * 1000;
+                                    let result_text = response.content.as_deref().unwrap_or("");
+                                    let _ = db.record_task_run(
+                                        &task_id,
+                                        started_at,
+                                        duration_ms,
+                                        Some(result_text),
+                                        None,
+                                    );
+                                    tracing::info!(
+                                        "Task '{task_name}' completed: {}",
+                                        &result_text[..result_text.len().min(100)]
+                                    );
+                                }
+                                Ok(Err(e)) => {
+                                    let duration_ms =
+                                        (chrono::Utc::now().timestamp() - started_at) * 1000;
+                                    let err_str = format!("{e}");
+                                    let _ = db.record_task_run(
+                                        &task_id,
+                                        started_at,
+                                        duration_ms,
+                                        None,
+                                        Some(&err_str),
+                                    );
+                                    tracing::warn!("Task '{task_name}' failed: {e}");
+                                }
+                                Err(_) => {
+                                    let duration_ms =
+                                        (chrono::Utc::now().timestamp() - started_at) * 1000;
+                                    let _ = db.record_task_run(
+                                        &task_id,
+                                        started_at,
+                                        duration_ms,
+                                        None,
+                                        Some("Task timed out"),
+                                    );
+                                    tracing::warn!("Task '{task_name}' timed out");
+                                }
+                            }
+                        }
+                    });
                 }
             }
             Err(e) => {

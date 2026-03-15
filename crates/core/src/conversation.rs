@@ -114,7 +114,12 @@ async fn summarize_with_llm(messages: &[Message], llm: &LlmClient) -> String {
         if let Some(content) = &msg.content {
             // Truncate very long messages to avoid sending too much to the summarizer
             let truncated: String = content.chars().take(500).collect();
-            transcript.push_str(&format!("{role_label}: {truncated}\n"));
+            let ts = msg
+                .timestamp
+                .as_deref()
+                .map(|t| format!(" [{t}]"))
+                .unwrap_or_default();
+            transcript.push_str(&format!("{role_label}{ts}: {truncated}\n"));
         }
 
         if let Some(tcs) = &msg.tool_calls {
@@ -268,6 +273,7 @@ mod tests {
                 },
             }]),
             tool_call_id: None,
+            timestamp: None,
         }
     }
 
@@ -300,6 +306,7 @@ mod tests {
             content: None,
             tool_calls: None,
             tool_call_id: None,
+            timestamp: None,
         };
         assert_eq!(message_tokens(&msg), 4); // just overhead
     }
