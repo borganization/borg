@@ -57,6 +57,8 @@ async fn main() -> Result<()> {
     // Also load .env from the data directory (~/.tamagotchi/.env)
     if let Ok(data_dir) = tamagotchi_core::config::Config::data_dir() {
         let _ = dotenvy::from_path(data_dir.join(".env"));
+        // Harden data directory permissions (owner-only access)
+        harden_data_dir(&data_dir);
     }
 
     tracing_subscriber::fmt()
@@ -116,6 +118,22 @@ fn init_data_dir() -> Result<()> {
     Ok(())
 }
 
+/// Set `~/.tamagotchi/` to mode 0700 so only the owner can access it.
+/// This protects SOUL.md, memory, config, conversation logs, and API key env files.
+#[cfg(unix)]
+fn harden_data_dir(data_dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if data_dir.exists() {
+        let perms = std::fs::Permissions::from_mode(0o700);
+        let _ = std::fs::set_permissions(data_dir, perms);
+    }
+}
+
+#[cfg(not(unix))]
+fn harden_data_dir(_data_dir: &std::path::Path) {
+    // No-op on non-Unix platforms
+}
+
 /// Non-interactive fallback: write default config files without the wizard.
 fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
     for sub in &["memory", "tools", "skills", "logs", "cache"] {
@@ -125,7 +143,7 @@ fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
     let config_path = data_dir.join("config.toml");
     if !config_path.exists() {
         let config_content =
-            onboarding::generate_config("anthropic/claude-sonnet-4", "openrouter", "", "")?;
+            onboarding::generate_config("anthropic/claude-sonnet-4", "openrouter", "", "", 0)?;
         std::fs::write(&config_path, config_content)?;
         println!("  Created {}", config_path.display());
     }

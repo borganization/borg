@@ -193,7 +193,8 @@ impl LlmClient {
         let _ = std::fs::create_dir_all(&dir);
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         let path = dir.join(format!("{timestamp}_{label}.json"));
-        let _ = std::fs::write(&path, content);
+        let redacted = crate::secrets::redact_secrets(content);
+        let _ = std::fs::write(&path, redacted);
     }
 
     pub async fn stream_chat(
