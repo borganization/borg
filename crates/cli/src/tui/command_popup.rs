@@ -52,6 +52,22 @@ const COMMANDS: &[SlashCommandDef] = &[
         name: "/history",
         description: "Show recent history",
     },
+    SlashCommandDef {
+        name: "/sessions",
+        description: "List saved sessions",
+    },
+    SlashCommandDef {
+        name: "/save",
+        description: "Save current session",
+    },
+    SlashCommandDef {
+        name: "/new",
+        description: "Start new session",
+    },
+    SlashCommandDef {
+        name: "/load",
+        description: "Load session by ID",
+    },
 ];
 
 pub struct CommandPopup {

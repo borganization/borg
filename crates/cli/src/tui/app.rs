@@ -46,6 +46,12 @@ pub enum AppAction {
         key: String,
         value: String,
     },
+    SaveSession,
+    NewSession,
+    LoadSession {
+        id: String,
+    },
+    ListSessions,
 }
 
 pub struct App<'a> {
@@ -60,6 +66,9 @@ pub struct App<'a> {
     pub heartbeat_rx: Option<mpsc::Receiver<HeartbeatEvent>>,
     pub cancel_token: Option<CancellationToken>,
     auto_scroll: bool,
+    /// Accumulated token usage for the current session
+    pub session_prompt_tokens: u64,
+    pub session_completion_tokens: u64,
 }
 
 impl<'a> App<'a> {
@@ -76,6 +85,8 @@ impl<'a> App<'a> {
             heartbeat_rx,
             cancel_token: None,
             auto_scroll: true,
+            session_prompt_tokens: 0,
+            session_completion_tokens: 0,
         }
     }
 
@@ -243,7 +254,11 @@ impl<'a> App<'a> {
                      /tools     - List tools\n  \
                      /memory    - Show memory\n  \
                      /skills    - List skills\n  \
-                     /history   - Show history\n  \
+                     /history   - Show recent history\n  \
+                     /sessions  - List saved sessions\n  \
+                     /save      - Save current session\n  \
+                     /load <id> - Load a saved session\n  \
+                     /new       - Start new session\n  \
                      quit/exit  - Exit"
                         .to_string(),
                 );
@@ -319,7 +334,63 @@ impl<'a> App<'a> {
             "/undo" => {
                 return Ok(AppAction::UndoLastTurn);
             }
+            "/sessions" => {
+                return Ok(AppAction::ListSessions);
+            }
+            "/save" => {
+                return Ok(AppAction::SaveSession);
+            }
+            "/new" => {
+                self.cells.clear();
+                self.session_prompt_tokens = 0;
+                self.session_completion_tokens = 0;
+                return Ok(AppAction::NewSession);
+            }
             _ => {}
+        }
+
+        // Prefix command: /memory cleanup — list memory files for cleanup
+        if trimmed == "/memory cleanup" {
+            match tamagotchi_core::memory::list_memory_files() {
+                Ok(files) => {
+                    if files.is_empty() {
+                        self.push_system_message("No memory files found.".to_string());
+                    } else {
+                        let mut text = String::from("Memory files (oldest first):\n");
+                        for f in &files {
+                            let modified = f
+                                .modified_at
+                                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            text.push_str(&format!(
+                                "  {} ({} bytes, modified: {modified})\n",
+                                f.filename, f.size_bytes
+                            ));
+                        }
+                        text.push_str(
+                            "\nTo delete a memory file, ask the agent to use write_memory.",
+                        );
+                        self.push_system_message(text.trim_end().to_string());
+                    }
+                }
+                Err(e) => {
+                    self.push_system_message(format!("Error listing memory files: {e}"));
+                }
+            }
+            return Ok(AppAction::Continue);
+        }
+
+        // Prefix command: /load <session_id>
+        if let Some(rest) = trimmed.strip_prefix("/load ") {
+            let id = rest.trim().to_string();
+            if id.is_empty() {
+                self.push_system_message("Usage: /load <session_id>".to_string());
+                return Ok(AppAction::Continue);
+            }
+            self.cells.clear();
+            self.session_prompt_tokens = 0;
+            self.session_completion_tokens = 0;
+            return Ok(AppAction::LoadSession { id });
         }
 
         // Prefix commands: /settings <key> <value>
@@ -418,6 +489,10 @@ impl<'a> App<'a> {
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
+            }
+            AgentEvent::Usage(usage) => {
+                self.session_prompt_tokens += usage.prompt_tokens;
+                self.session_completion_tokens += usage.completion_tokens;
             }
             AgentEvent::TurnComplete => {
                 for cell in self.cells.iter_mut().rev() {

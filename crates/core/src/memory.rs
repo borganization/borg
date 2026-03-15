@@ -128,6 +128,63 @@ pub fn read_memory(filename: &str) -> Result<String> {
     }
 }
 
+/// List all memory files with metadata for cleanup/management.
+pub fn list_memory_files() -> Result<Vec<MemoryFileInfo>> {
+    let mut files = Vec::new();
+    let mem_dir = memory_dir()?;
+
+    // Include MEMORY.md
+    let index_path = memory_index_path()?;
+    if index_path.exists() {
+        let meta = std::fs::metadata(&index_path)?;
+        let modified = meta
+            .modified()
+            .ok()
+            .map(chrono::DateTime::<chrono::Local>::from);
+        let size = meta.len();
+        files.push(MemoryFileInfo {
+            filename: "MEMORY.md".to_string(),
+            size_bytes: size,
+            modified_at: modified,
+        });
+    }
+
+    // Include memory/*.md files
+    if mem_dir.exists() {
+        for entry in std::fs::read_dir(&mem_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                let meta = entry.metadata()?;
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .map(chrono::DateTime::<chrono::Local>::from);
+                let filename = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                files.push(MemoryFileInfo {
+                    filename,
+                    size_bytes: meta.len(),
+                    modified_at: modified,
+                });
+            }
+        }
+    }
+
+    // Sort by modified time (oldest first — candidates for cleanup)
+    files.sort_by(|a, b| a.modified_at.cmp(&b.modified_at));
+    Ok(files)
+}
+
+pub struct MemoryFileInfo {
+    pub filename: String,
+    pub size_bytes: u64,
+    pub modified_at: Option<chrono::DateTime<chrono::Local>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -24,6 +24,12 @@ enum Commands {
     Ask {
         /// The message to send
         message: String,
+        /// Auto-approve all tool/shell calls (no user prompts)
+        #[arg(long)]
+        yes: bool,
+        /// Output raw JSON instead of streaming text
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -46,7 +52,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Init) => init_data_dir()?,
-        Some(Commands::Ask { message }) => repl::one_shot(&message).await?,
+        Some(Commands::Ask { message, yes, json }) => repl::one_shot(&message, yes, json).await?,
         Some(Commands::Chat) | None => repl::run().await?,
     }
 
