@@ -389,9 +389,38 @@ impl Config {
         }
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config from {}", path.display()))?;
+        let content = Self::dedup_toml_tables(&content);
         let config: Config =
             toml::from_str(&content).with_context(|| "Failed to parse config.toml")?;
         Ok(config)
+    }
+
+    /// Remove duplicate TOML table headers that would cause parse errors.
+    /// Keeps the first occurrence of each `[table]` header and drops subsequent
+    /// duplicates along with their content until the next section header.
+    fn dedup_toml_tables(input: &str) -> String {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        let mut output = String::with_capacity(input.len());
+        let mut skip = false;
+
+        for line in input.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && !trimmed.starts_with("[[") {
+                if seen.contains(trimmed) {
+                    skip = true;
+                    continue;
+                }
+                seen.insert(trimmed.to_string());
+                skip = false;
+            } else if skip {
+                continue;
+            }
+
+            output.push_str(line);
+            output.push('\n');
+        }
+        output
     }
 
     pub fn save(&self) -> Result<()> {
@@ -1356,6 +1385,136 @@ GH_TOKEN = { source = "file", path = "/tmp/token" }
         let parsed: Config = toml::from_str(&serialized).expect("deserialize");
         assert!(parsed.credentials.contains_key("LEGACY"));
         assert!(parsed.credentials.contains_key("EXEC_CRED"));
+    }
+
+    #[test]
+    fn save_round_trip_no_duplicate_credentials() {
+        // Simulate the customization install flow: load config, add a keychain credential, save.
+        // Verify the serialized output is valid TOML (no duplicate [credentials] section).
+        let mut cfg = Config::default();
+        cfg.llm.model = "test-model".to_string();
+        cfg.credentials.insert(
+            "TELEGRAM_BOT_TOKEN".to_string(),
+            CredentialValue::Ref(SecretRef::Keychain {
+                service: "tamagotchi-messaging-telegram".to_string(),
+                account: "tamagotchi-TELEGRAM_BOT_TOKEN".to_string(),
+            }),
+        );
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        // Must be valid TOML on re-parse
+        let reparsed: Config = toml::from_str(&serialized)
+            .unwrap_or_else(|e| panic!("serialized config is invalid TOML: {e}\n---\n{serialized}"));
+        assert!(reparsed.credentials.contains_key("TELEGRAM_BOT_TOKEN"));
+
+        // No duplicate [credentials] header
+        let count = serialized.lines().filter(|l| l.trim() == "[credentials]").count();
+        assert!(
+            count <= 1,
+            "expected at most 1 [credentials] section, got {count}\n---\n{serialized}"
+        );
+    }
+
+    #[test]
+    fn save_round_trip_with_existing_credentials_section() {
+        // Reproduce the bug: config already has an empty [credentials] section,
+        // then we load, add a credential, and re-serialize.
+        let original = r#"
+[llm]
+model = "test"
+
+[credentials]
+"#;
+        let mut cfg: Config = toml::from_str(original).expect("parse original");
+        cfg.credentials.insert(
+            "MY_KEY".to_string(),
+            CredentialValue::Ref(SecretRef::Keychain {
+                service: "svc".to_string(),
+                account: "acct".to_string(),
+            }),
+        );
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize");
+        // Must still be valid TOML
+        let _reparsed: Config = toml::from_str(&serialized)
+            .unwrap_or_else(|e| panic!("re-serialized config is invalid TOML: {e}\n---\n{serialized}"));
+
+        let count = serialized
+            .lines()
+            .filter(|l| l.trim() == "[credentials]" || l.trim().starts_with("[credentials."))
+            .count();
+        assert!(
+            count <= 1,
+            "expected at most 1 credentials header, got {count}\n---\n{serialized}"
+        );
+    }
+
+    #[test]
+    fn dedup_toml_tables_removes_duplicate_credentials() {
+        let input = r#"[llm]
+model = "test"
+
+[credentials]
+
+[credentials]
+"#;
+        let output = Config::dedup_toml_tables(input);
+        let count = output.lines().filter(|l| l.trim() == "[credentials]").count();
+        assert_eq!(count, 1, "should have exactly 1 [credentials]\n---\n{output}");
+        // Must parse successfully
+        let _cfg: Config = toml::from_str(&output).expect("deduped config should parse");
+    }
+
+    #[test]
+    fn dedup_toml_tables_keeps_distinct_sections() {
+        let input = r#"[llm]
+model = "test"
+
+[credentials]
+KEY = "val"
+
+[security]
+secret_detection = true
+"#;
+        let output = Config::dedup_toml_tables(input);
+        assert!(output.contains("[credentials]"));
+        assert!(output.contains("[security]"));
+        assert!(output.contains("KEY = \"val\""));
+    }
+
+    #[test]
+    fn dedup_toml_tables_drops_duplicate_content() {
+        let input = r#"[gateway]
+enabled = true
+
+[gateway]
+enabled = false
+"#;
+        let output = Config::dedup_toml_tables(input);
+        let count = output.lines().filter(|l| l.trim() == "[gateway]").count();
+        assert_eq!(count, 1);
+        // The first occurrence's content is kept
+        assert!(output.contains("enabled = true"));
+        // The duplicate's content is dropped
+        assert!(!output.contains("enabled = false"));
+    }
+
+    #[test]
+    fn load_from_handles_duplicate_credentials() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let config_path = dir.path().join("config.toml");
+        // Write a config with duplicate [credentials] — the exact bug scenario
+        std::fs::write(
+            &config_path,
+            r#"[llm]
+model = "test"
+
+[credentials]
+
+[credentials]
+"#,
+        )
+        .expect("write");
+        let cfg = Config::load_from(&config_path).expect("load should succeed despite duplicates");
+        assert_eq!(cfg.llm.model, "test");
     }
 
     #[test]
