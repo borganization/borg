@@ -4,17 +4,18 @@ AI personal assistant agent built in Rust. The agent itself is the plugin system
 
 ## Architecture
 
-Cargo workspace with 7 crates:
+Cargo workspace with 8 crates:
 
 ```
 crates/
-  cli/          Binary: REPL, clap args, heartbeat display, onboarding TUI
-  core/         Library: agent loop, multi-provider LLM client, memory, soul, config
-  heartbeat/    Library: proactive scheduler with quiet hours + dedup
-  tools/        Library: tool manifest parsing, registry, subprocess executor
-  sandbox/      Library: macOS Seatbelt + Linux Bubblewrap policies
-  apply-patch/  Library: patch DSL parser + filesystem applicator
-  gateway/      Library: webhook gateway for messaging channel integrations
+  cli/              Binary: REPL, clap args, heartbeat display, onboarding TUI
+  core/             Library: agent loop, multi-provider LLM client, memory, soul, config
+  heartbeat/        Library: proactive scheduler with quiet hours + dedup
+  tools/            Library: tool manifest parsing, registry, subprocess executor
+  sandbox/          Library: macOS Seatbelt + Linux Bubblewrap policies
+  apply-patch/      Library: patch DSL parser + filesystem applicator
+  gateway/          Library: webhook gateway for messaging channel integrations
+  customizations/   Library: marketplace catalog, template installer, TUI integration
 ```
 
 **Data directory:** `~/.tamagotchi/` — config, personality, memory, user-created tools, logs.
@@ -37,6 +38,11 @@ Binary name is `tamagotchi`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_K
 - `tamagotchi init` — interactive onboarding wizard (name, personality, provider, model selection)
 - `tamagotchi gateway` — start webhook gateway server for messaging channels
 - `tamagotchi doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
+- `/customize` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
+
+## Customizations
+
+Template marketplace for one-click installation of channel and tool integrations. Templates are embedded in the binary via `include_str!` and installed to `~/.tamagotchi/channels/` or `~/.tamagotchi/tools/`. Categories: Messaging (Telegram, WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear).
 
 ## Agent Loop
 
@@ -341,8 +347,9 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 ## Testing
 
 ```sh
-cargo test                          # all tests
-cargo test -p tamagotchi-apply-patch  # 13 patch tests
-cargo test -p tamagotchi-core         # config + skills tests
-cargo test -p tamagotchi-gateway      # channel manifest + registry tests
+cargo test                              # all tests
+cargo test -p tamagotchi-apply-patch    # 13 patch tests
+cargo test -p tamagotchi-core           # config + skills tests
+cargo test -p tamagotchi-gateway        # channel manifest + registry tests
+cargo test -p tamagotchi-customizations # catalog + installer tests
 ```

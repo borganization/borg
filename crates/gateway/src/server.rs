@@ -81,8 +81,7 @@ impl GatewayServer {
 
             let request_timeout = state.request_timeout;
             let handle = tokio::spawn(async move {
-                let start =
-                    tokio::time::Instant::now() + Duration::from_millis(poll_interval_ms);
+                let start = tokio::time::Instant::now() + Duration::from_millis(poll_interval_ms);
                 let mut interval =
                     tokio::time::interval_at(start, Duration::from_millis(poll_interval_ms));
 
