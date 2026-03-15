@@ -1,6 +1,7 @@
 mod app;
 mod command_popup;
 mod composer;
+mod customize_popup;
 mod external_editor;
 mod history;
 mod layout;
@@ -348,6 +349,70 @@ async fn run_event_loop(
                     Err(e) => {
                         app.push_system_message(format!("Editor error: {e}"));
                     }
+                }
+            }
+            AppAction::RunCustomize { actions } => {
+                let data_dir = tamagotchi_core::config::Config::data_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("~/.tamagotchi"));
+                let mut results: Vec<String> = Vec::new();
+
+                for action in actions {
+                    match action {
+                        customize_popup::CustomizeAction::Install { id } => {
+                            if let Some(def) = tamagotchi_customizations::catalog::find_by_id(&id) {
+                                // For now, install without interactive credential prompts.
+                                // Credentials can be set up via `tamagotchi init` or env vars.
+                                match tokio::task::block_in_place(|| {
+                                    tokio::runtime::Handle::current().block_on(
+                                        tamagotchi_customizations::installer::install(
+                                            def,
+                                            &data_dir,
+                                            &[],
+                                            None,
+                                        ),
+                                    )
+                                }) {
+                                    Ok(()) => {
+                                        // Record in DB
+                                        if let Ok(db) = tamagotchi_core::db::Database::open() {
+                                            let _ = db.insert_customization(
+                                                def.id,
+                                                def.name,
+                                                &def.kind.to_string(),
+                                                &def.category.to_string(),
+                                            );
+                                        }
+                                        results.push(format!("Installed {}", def.name));
+                                    }
+                                    Err(e) => {
+                                        results
+                                            .push(format!("Failed to install {}: {e}", def.name));
+                                    }
+                                }
+                            }
+                        }
+                        customize_popup::CustomizeAction::Uninstall { id } => {
+                            if let Some(def) = tamagotchi_customizations::catalog::find_by_id(&id) {
+                                match tamagotchi_customizations::installer::uninstall(
+                                    def, &data_dir,
+                                ) {
+                                    Ok(()) => {
+                                        if let Ok(db) = tamagotchi_core::db::Database::open() {
+                                            let _ = db.delete_customization(def.id);
+                                        }
+                                        results.push(format!("Removed {}", def.name));
+                                    }
+                                    Err(e) => {
+                                        results.push(format!("Failed to remove {}: {e}", def.name));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !results.is_empty() {
+                    app.push_system_message(results.join("\n"));
                 }
             }
             AppAction::ListSessions => match tamagotchi_core::session::list_sessions() {

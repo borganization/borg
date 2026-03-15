@@ -1,0 +1,21 @@
+name = "sms"
+description = "SMS integration via Twilio"
+runtime = "python"
+
+[scripts]
+inbound = "parse_inbound.py"
+outbound = "send_outbound.py"
+
+[sandbox]
+network = true
+fs_read = ["/etc/ssl"]
+fs_write = []
+
+[auth]
+secret_env = "TWILIO_AUTH_TOKEN"
+token_env = "TWILIO_ACCOUNT_SID"
+
+[settings]
+webhook_path = "/webhook/sms"
+timeout_ms = 15000
+max_concurrent = 5
