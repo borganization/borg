@@ -46,7 +46,7 @@ impl LlmError {
     }
 }
 
-fn classify_status(status: reqwest::StatusCode, body: &str, provider: &Provider) -> LlmError {
+fn classify_status(status: reqwest::StatusCode, body: &str, provider: Provider) -> LlmError {
     let retry_after = parse_retry_after(body);
 
     match status.as_u16() {
@@ -87,6 +87,13 @@ fn parse_retry_after(body: &str) -> Option<Duration> {
     None
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct UsageData {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
 #[derive(Debug)]
 pub enum StreamEvent {
     TextDelta(String),
@@ -96,6 +103,7 @@ pub enum StreamEvent {
         name: Option<String>,
         arguments_delta: String,
     },
+    Usage(UsageData),
     Done,
     Error(String),
 }
@@ -116,6 +124,14 @@ struct ChatRequest {
 #[derive(Debug, Deserialize)]
 struct StreamChunk {
     choices: Option<Vec<StreamChoice>>,
+    usage: Option<StreamUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,18 +164,35 @@ pub struct LlmClient {
     config: Config,
     provider: Provider,
     api_key: String,
+    debug_logging: bool,
 }
 
 impl LlmClient {
     pub fn new(config: Config) -> Result<Self> {
         let (provider, api_key) = config.resolve_provider()?;
+        let debug_logging = config.debug.llm_logging;
         let client = Client::new();
         Ok(Self {
             client,
             config,
             provider,
             api_key,
+            debug_logging,
         })
+    }
+
+    fn debug_log(&self, label: &str, content: &str) {
+        if !self.debug_logging {
+            return;
+        }
+        let dir = match crate::config::Config::data_dir() {
+            Ok(d) => d.join("logs").join("debug"),
+            Err(_) => return,
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
+        let path = dir.join(format!("{timestamp}_{label}.json"));
+        let _ = std::fs::write(&path, content);
     }
 
     pub async fn stream_chat(
@@ -299,7 +332,7 @@ impl LlmClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(classify_status(status, &body, &self.provider));
+            return Err(classify_status(status, &body, self.provider));
         }
 
         Ok(response)
@@ -326,6 +359,12 @@ impl LlmClient {
             "Sending streaming request to {} (model: {})",
             self.provider, model
         );
+
+        if self.debug_logging {
+            if let Ok(json) = serde_json::to_string_pretty(&request) {
+                self.debug_log("request_openai", &json);
+            }
+        }
 
         let response = self.send_request(&request, cancel).await?;
 
@@ -373,6 +412,16 @@ impl LlmClient {
 
                     match serde_json::from_str::<StreamChunk>(data) {
                         Ok(chunk) => {
+                            // Parse usage data if present
+                            if let Some(usage) = chunk.usage {
+                                let _ = tx
+                                    .send(StreamEvent::Usage(UsageData {
+                                        prompt_tokens: usage.prompt_tokens.unwrap_or(0),
+                                        completion_tokens: usage.completion_tokens.unwrap_or(0),
+                                        total_tokens: usage.total_tokens.unwrap_or(0),
+                                    }))
+                                    .await;
+                            }
                             if let Some(choices) = chunk.choices {
                                 for choice in choices {
                                     if let Some(delta) = choice.delta {
@@ -524,6 +573,12 @@ impl LlmClient {
 
         debug!("Sending streaming request to Anthropic (model: {})", model);
 
+        if self.debug_logging {
+            if let Ok(json) = serde_json::to_string_pretty(&body) {
+                self.debug_log("request_anthropic", &json);
+            }
+        }
+
         let response = self.send_request(&body, cancel).await?;
 
         let mut stream = response.bytes_stream();
@@ -623,6 +678,22 @@ impl LlmClient {
                                 return Ok(());
                             }
                             "message_delta" => {
+                                // Parse usage from message_delta
+                                if let Some(usage) = event["usage"].as_object() {
+                                    let _ = tx
+                                        .send(StreamEvent::Usage(UsageData {
+                                            prompt_tokens: usage
+                                                .get("input_tokens")
+                                                .and_then(serde_json::Value::as_u64)
+                                                .unwrap_or(0),
+                                            completion_tokens: usage
+                                                .get("output_tokens")
+                                                .and_then(serde_json::Value::as_u64)
+                                                .unwrap_or(0),
+                                            total_tokens: 0,
+                                        }))
+                                        .await;
+                                }
                                 // message_delta with stop_reason indicates end
                                 if event["delta"]["stop_reason"].as_str().is_some() {
                                     let _ = tx.send(StreamEvent::Done).await;
@@ -989,7 +1060,7 @@ mod tests {
         let err = classify_status(
             reqwest::StatusCode::TOO_MANY_REQUESTS,
             "rate limited",
-            &Provider::OpenRouter,
+            Provider::OpenRouter,
         );
         assert!(err.is_retryable());
     }
@@ -999,7 +1070,7 @@ mod tests {
         let err = classify_status(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             "server error",
-            &Provider::OpenRouter,
+            Provider::OpenRouter,
         );
         assert!(err.is_retryable());
     }
@@ -1009,7 +1080,7 @@ mod tests {
         let err = classify_status(
             reqwest::StatusCode::UNAUTHORIZED,
             "bad key",
-            &Provider::OpenRouter,
+            Provider::OpenRouter,
         );
         assert!(!err.is_retryable());
     }
@@ -1019,7 +1090,7 @@ mod tests {
         let err = classify_status(
             reqwest::StatusCode::BAD_REQUEST,
             "bad request",
-            &Provider::OpenRouter,
+            Provider::OpenRouter,
         );
         assert!(!err.is_retryable());
     }

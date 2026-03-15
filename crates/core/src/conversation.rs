@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use tracing::debug;
 
-use crate::types::Message;
+use crate::types::{Message, Role};
 
 /// Rough token estimate: ~4 characters per token.
 pub fn estimate_tokens(text: &str) -> usize {
@@ -81,16 +81,72 @@ pub fn compact_history(history: &mut Vec<Message>, max_tokens: usize) {
     let dropped = keep_from;
     debug!("Dropping {dropped} old messages from conversation history");
 
-    // Build compacted history: marker + kept tail.
-    let marker = Message::system(
-        "[Earlier conversation history was truncated to fit context limits. \
-         The conversation continues below.]",
-    );
+    // Build a summary of the dropped messages for context preservation
+    let summary = summarize_dropped_messages(&history[..dropped]);
+
+    let marker = Message::system(summary);
 
     let mut compacted = Vec::with_capacity(history.len() - dropped + 1);
     compacted.push(marker);
     compacted.extend(history.drain(dropped..));
     *history = compacted;
+}
+
+/// Build a local summary of dropped messages to preserve context.
+/// This is a fast, synchronous summary (no LLM call) that extracts key points.
+fn summarize_dropped_messages(messages: &[Message]) -> String {
+    let mut user_topics = Vec::new();
+    let mut tool_calls_used = Vec::new();
+
+    for msg in messages {
+        match msg.role {
+            Role::User => {
+                if let Some(content) = &msg.content {
+                    // Take first 80 chars of each user message as a topic hint
+                    let snippet: String = content.chars().take(80).collect();
+                    let snippet = if content.chars().count() > 80 {
+                        format!("{snippet}...")
+                    } else {
+                        snippet
+                    };
+                    user_topics.push(snippet);
+                }
+            }
+            Role::Assistant => {
+                if let Some(tcs) = &msg.tool_calls {
+                    for tc in tcs {
+                        if !tool_calls_used.contains(&tc.function.name) {
+                            tool_calls_used.push(tc.function.name.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut summary = String::from(
+        "[Earlier conversation was summarized to fit context limits.]\n\nTopics discussed:",
+    );
+
+    if user_topics.is_empty() {
+        summary.push_str(" (none captured)");
+    } else {
+        // Keep last 5 topics to stay concise
+        let start = user_topics.len().saturating_sub(5);
+        for topic in &user_topics[start..] {
+            summary.push_str(&format!("\n- {topic}"));
+        }
+        if start > 0 {
+            summary.push_str(&format!("\n  ...and {start} earlier messages"));
+        }
+    }
+
+    if !tool_calls_used.is_empty() {
+        summary.push_str(&format!("\n\nTools used: {}", tool_calls_used.join(", ")));
+    }
+
+    summary
 }
 
 /// Total estimated tokens for a conversation history.
@@ -289,9 +345,13 @@ mod tests {
 
         // Should have fewer messages now
         assert!(history.len() < original_len);
-        // First message should be the truncation marker (system role)
+        // First message should be the summary marker (system role)
         assert_eq!(history[0].role, Role::System);
-        assert!(history[0].content.as_deref().unwrap().contains("truncated"));
+        assert!(history[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("summarized"));
     }
 
     #[test]
