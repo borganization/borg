@@ -41,7 +41,16 @@ impl SandboxPolicy {
         tool_dir: &std::path::Path,
     ) -> SandboxCommand {
         use crate::seatbelt::generate_profile;
-        let profile = generate_profile(self, tool_dir);
+        let profile = match generate_profile(self, tool_dir, Some(program)) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Failed to generate sandbox profile: {e}. Running unsandboxed.");
+                return SandboxCommand {
+                    program: program.to_string(),
+                    args: args.to_vec(),
+                };
+            }
+        };
 
         let mut sandbox_args = vec!["-p".to_string(), profile, program.to_string()];
         sandbox_args.extend(args.iter().cloned());
