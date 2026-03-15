@@ -48,6 +48,7 @@ impl<'a> ToolExecutor<'a> {
         let sandbox_policy = self
             .manifest
             .sandbox_policy()
+            .with_tildes_expanded()
             .with_blocked_paths_filtered(blocked_paths);
         let sandboxed = sandbox_policy.wrap_command(&program, &cmd_args, self.tool_dir);
 

@@ -2690,6 +2690,7 @@ name = "tamagotchi-sandbox"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "serde",
  "thiserror",
  "tokio",

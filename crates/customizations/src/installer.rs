@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::catalog::CustomizationDef;
-use crate::{InstallEvent, TemplateTarget};
+use crate::{InstallEvent, InstallResult, TemplateTarget};
 
 /// Install a customization: extract templates, set up credentials, record in DB.
 ///
@@ -14,7 +14,7 @@ pub async fn install(
     data_dir: &std::path::Path,
     credentials: &[(String, String)],
     progress_tx: Option<&mpsc::Sender<InstallEvent>>,
-) -> Result<()> {
+) -> Result<InstallResult> {
     let id = def.id.to_string();
     let name = def.name.to_string();
 
@@ -62,12 +62,13 @@ pub async fn install(
     make_scripts_executable(def, data_dir)?;
 
     // 5. Post-install hooks
+    let mut result = InstallResult::default();
     if def.id == "messaging/imessage" {
-        imessage_post_install(data_dir);
+        result.notes = imessage_post_install(data_dir);
     }
 
     send_event(progress_tx, InstallEvent::Complete { id }).await;
-    Ok(())
+    Ok(result)
 }
 
 /// Uninstall a customization: delete files and keychain entries.
@@ -253,8 +254,9 @@ fn remove_credential(service: &str, key: &str) -> Result<()> {
 }
 
 /// Post-install hook for iMessage: initialize state.json with current max ROWID
-/// so only future messages are processed.
-fn imessage_post_install(data_dir: &std::path::Path) {
+/// so only future messages are processed. Returns user-facing notes.
+fn imessage_post_install(data_dir: &std::path::Path) -> Vec<String> {
+    let mut notes = Vec::new();
     let state_path = data_dir
         .join("channels")
         .join("imessage")
@@ -264,11 +266,10 @@ fn imessage_post_install(data_dir: &std::path::Path) {
         .unwrap_or_default();
 
     if !db_path.exists() {
-        info!(
-            "Messages database not found at {}. Grant Full Disk Access in System Settings > Privacy & Security > Full Disk Access.",
-            db_path.display()
-        );
-        return;
+        notes.push("Full Disk Access required:".to_string());
+        notes.push("  System Settings > Privacy & Security > Full Disk Access".to_string());
+        notes.push("  Add your terminal app, then restart Tamagotchi".to_string());
+        return notes;
     }
 
     let db_uri = format!("file:{}?mode=ro", db_path.display());
@@ -277,33 +278,43 @@ fn imessage_post_install(data_dir: &std::path::Path) {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     ) {
         Ok(conn) => {
+            // Initialize state with current max ROWID
             match conn.query_row("SELECT MAX(ROWID) FROM message", [], |row| {
                 row.get::<_, Option<i64>>(0)
             }) {
                 Ok(Some(max_rowid)) => {
                     let state = format!("{{\"last_rowid\": {max_rowid}}}");
                     if let Err(e) = std::fs::write(&state_path, &state) {
-                        info!("Failed to write iMessage state: {e}");
-                    } else {
-                        info!(
-                            "iMessage state initialized at ROWID {max_rowid} (only new messages will be processed)"
-                        );
+                        notes.push(format!("Warning: failed to write state file: {e}"));
                     }
                 }
-                Ok(None) => {
-                    info!("Messages database is empty, starting from ROWID 0");
-                }
+                Ok(None) => {}
                 Err(e) => {
-                    info!("Failed to query Messages database: {e}. Ensure Full Disk Access is granted in System Settings > Privacy & Security.");
+                    notes.push(format!("Warning: could not query Messages DB: {e}"));
                 }
             }
+
+            notes.push("Full Disk Access detected".to_string());
+
+            // Try to detect the user's iMessage address
+            if let Ok(address) = conn.query_row(
+                "SELECT DISTINCT h.id FROM message m JOIN handle h ON m.handle_id = h.ROWID WHERE m.is_from_me = 1 LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            ) {
+                notes.push(format!("Your iMessage address: {address}"));
+            }
+
+            notes.push("Messages will be polled automatically when Tamagotchi is running".to_string());
         }
-        Err(e) => {
-            info!(
-                "Cannot open Messages database: {e}. Grant Full Disk Access in System Settings > Privacy & Security > Full Disk Access."
-            );
+        Err(_) => {
+            notes.push("Full Disk Access required:".to_string());
+            notes.push("  System Settings > Privacy & Security > Full Disk Access".to_string());
+            notes.push("  Add your terminal app, then restart Tamagotchi".to_string());
         }
     }
+
+    notes
 }
 
 async fn send_event(tx: Option<&mpsc::Sender<InstallEvent>>, event: InstallEvent) {
