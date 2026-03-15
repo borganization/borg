@@ -364,7 +364,8 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/skills" => {
-                let skills = tamagotchi_core::skills::load_all_skills()?;
+                let resolved_creds = self.config.resolve_credentials();
+                let skills = tamagotchi_core::skills::load_all_skills(&resolved_creds)?;
                 let text = if skills.is_empty() {
                     "No skills installed.".to_string()
                 } else {
