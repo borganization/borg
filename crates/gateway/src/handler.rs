@@ -71,15 +71,46 @@ pub async fn handle_webhook(
         .await
         .context("Inbound parsing failed")?;
 
-    let inbound: InboundMessage =
+    let parsed: serde_json::Value =
         serde_json::from_str(&inbound_output).context("Invalid inbound script output JSON")?;
+    if parsed
+        .get("skip")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok("(skipped)".to_string());
+    }
+    let inbound: InboundMessage =
+        serde_json::from_value(parsed).context("Invalid inbound message structure")?;
+
+    // Steps 3-5: shared processing
+    process_message(channel, inbound, config).await
+}
+
+/// Process a polled message that is already normalized (no verify/parse needed).
+pub async fn handle_polled_message(
+    channel: &RegisteredChannel,
+    message: InboundMessage,
+    config: &Config,
+) -> Result<String> {
+    process_message(channel, message, config).await
+}
+
+/// Shared message processing: session resolution, agent invocation, outbound.
+async fn process_message(
+    channel: &RegisteredChannel,
+    inbound: InboundMessage,
+    config: &Config,
+) -> Result<String> {
+    let executor = ChannelExecutor::new(&channel.manifest, &channel.dir);
+    let blocked_paths = &config.security.blocked_paths;
 
     info!(
         "Channel '{}' received message from '{}'",
         channel.manifest.name, inbound.sender_id
     );
 
-    // Step 3: Resolve session
+    // Resolve session
     let db = Database::open().context("Failed to open database")?;
     let session_id = db
         .resolve_channel_session(&channel.manifest.name, &inbound.sender_id)
@@ -95,7 +126,7 @@ pub async fn handle_webhook(
         Some(&session_id),
     );
 
-    // Step 4: Create Agent, load session, send message
+    // Create Agent, load session, send message
     let mut agent = Agent::new(config.clone()).context("Failed to create agent")?;
 
     if let Err(e) = agent.load_session(&session_id) {
@@ -151,11 +182,19 @@ pub async fn handle_webhook(
         Some(&session_id),
     );
 
-    // Step 5: Send outbound response via channel script
+    // Send outbound response via channel script
     let token = channel
         .manifest
         .auth
         .token_env
+        .as_deref()
+        .and_then(|env| std::env::var(env).ok())
+        .unwrap_or_default();
+
+    let secret = channel
+        .manifest
+        .auth
+        .secret_env
         .as_deref()
         .and_then(|env| std::env::var(env).ok())
         .unwrap_or_default();
@@ -165,6 +204,7 @@ pub async fn handle_webhook(
         "sender_id": inbound.sender_id,
         "channel_id": inbound.channel_id,
         "token": token,
+        "secret": secret,
     });
 
     match executor

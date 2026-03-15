@@ -61,6 +61,11 @@ pub async fn install(
     // 4. Make shell scripts executable
     make_scripts_executable(def, data_dir)?;
 
+    // 5. Post-install hooks
+    if def.id == "messaging/imessage" {
+        imessage_post_install(data_dir);
+    }
+
     send_event(progress_tx, InstallEvent::Complete { id }).await;
     Ok(())
 }
@@ -130,7 +135,13 @@ fn check_prerequisites(def: &CustomizationDef) -> Result<()> {
     }
 
     for bin in def.required_bins {
-        which::which(bin).with_context(|| format!("Required binary not found: {bin}"))?;
+        which::which(bin).with_context(|| {
+            if *bin == "python3" {
+                format!("Required binary not found: {bin}. Install via: brew install python3 (macOS) or apt install python3 (Linux)")
+            } else {
+                format!("Required binary not found: {bin}")
+            }
+        })?;
     }
 
     Ok(())
@@ -239,6 +250,60 @@ fn remove_credential(service: &str, key: &str) -> Result<()> {
             .status();
     }
     Ok(())
+}
+
+/// Post-install hook for iMessage: initialize state.json with current max ROWID
+/// so only future messages are processed.
+fn imessage_post_install(data_dir: &std::path::Path) {
+    let state_path = data_dir
+        .join("channels")
+        .join("imessage")
+        .join("state.json");
+    let db_path = dirs::home_dir()
+        .map(|h| h.join("Library/Messages/chat.db"))
+        .unwrap_or_default();
+
+    if !db_path.exists() {
+        info!(
+            "Messages database not found at {}. Grant Full Disk Access in System Settings > Privacy & Security > Full Disk Access.",
+            db_path.display()
+        );
+        return;
+    }
+
+    let db_uri = format!("file:{}?mode=ro", db_path.display());
+    match rusqlite::Connection::open_with_flags(
+        &db_uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    ) {
+        Ok(conn) => {
+            match conn.query_row("SELECT MAX(ROWID) FROM message", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            }) {
+                Ok(Some(max_rowid)) => {
+                    let state = format!("{{\"last_rowid\": {max_rowid}}}");
+                    if let Err(e) = std::fs::write(&state_path, &state) {
+                        info!("Failed to write iMessage state: {e}");
+                    } else {
+                        info!(
+                            "iMessage state initialized at ROWID {max_rowid} (only new messages will be processed)"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    info!("Messages database is empty, starting from ROWID 0");
+                }
+                Err(e) => {
+                    info!("Failed to query Messages database: {e}. Ensure Full Disk Access is granted in System Settings > Privacy & Security.");
+                }
+            }
+        }
+        Err(e) => {
+            info!(
+                "Cannot open Messages database: {e}. Grant Full Disk Access in System Settings > Privacy & Security > Full Disk Access."
+            );
+        }
+    }
 }
 
 async fn send_event(tx: Option<&mpsc::Sender<InstallEvent>>, event: InstallEvent) {

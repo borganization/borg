@@ -33,13 +33,17 @@ const WHATSAPP_SEND_OUTBOUND: &str =
 const WHATSAPP_VERIFY: &str = include_str!("../templates/messaging/whatsapp/verify.py");
 
 // iMessage
-const IMESSAGE_TOOL_TOML: &str = include_str!("../templates/messaging/imessage/tool.toml");
-const IMESSAGE_MAIN: &str = include_str!("../templates/messaging/imessage/main.sh");
+const IMESSAGE_CHANNEL_TOML: &str = include_str!("../templates/messaging/imessage/channel.toml");
+const IMESSAGE_POLL: &str = include_str!("../templates/messaging/imessage/poll_messages.py");
+const IMESSAGE_OUTBOUND: &str = include_str!("../templates/messaging/imessage/send_outbound.sh");
+const IMESSAGE_POLICY: &str = include_str!("../templates/messaging/imessage/policy.json");
+const IMESSAGE_STATE: &str = include_str!("../templates/messaging/imessage/state.json");
 
 // SMS
 const SMS_CHANNEL_TOML: &str = include_str!("../templates/messaging/sms/channel.toml");
 const SMS_PARSE_INBOUND: &str = include_str!("../templates/messaging/sms/parse_inbound.py");
 const SMS_SEND_OUTBOUND: &str = include_str!("../templates/messaging/sms/send_outbound.py");
+const SMS_VERIFY: &str = include_str!("../templates/messaging/sms/verify.py");
 
 // Gmail
 const GMAIL_TOOL_TOML: &str = include_str!("../templates/email/gmail/tool.toml");
@@ -151,20 +155,35 @@ pub static CATALOG: &[CustomizationDef] = &[
         id: "messaging/imessage",
         name: "iMessage",
         category: Category::Messaging,
-        kind: CustomizationKind::Tool,
-        description: "Send and read iMessages via AppleScript (macOS only)",
+        kind: CustomizationKind::Channel,
+        description: "Bidirectional iMessage via macOS Messages (macOS only)",
         required_credentials: &[],
-        required_bins: &["osascript"],
+        required_bins: &["osascript", "python3"],
         templates: &[
             TemplateFile {
-                relative_path: "imessage/tool.toml",
-                content: IMESSAGE_TOOL_TOML,
-                target: TemplateTarget::Tools,
+                relative_path: "imessage/channel.toml",
+                content: IMESSAGE_CHANNEL_TOML,
+                target: TemplateTarget::Channels,
             },
             TemplateFile {
-                relative_path: "imessage/main.sh",
-                content: IMESSAGE_MAIN,
-                target: TemplateTarget::Tools,
+                relative_path: "imessage/poll_messages.py",
+                content: IMESSAGE_POLL,
+                target: TemplateTarget::Channels,
+            },
+            TemplateFile {
+                relative_path: "imessage/send_outbound.sh",
+                content: IMESSAGE_OUTBOUND,
+                target: TemplateTarget::Channels,
+            },
+            TemplateFile {
+                relative_path: "imessage/policy.json",
+                content: IMESSAGE_POLICY,
+                target: TemplateTarget::Channels,
+            },
+            TemplateFile {
+                relative_path: "imessage/state.json",
+                content: IMESSAGE_STATE,
+                target: TemplateTarget::Channels,
             },
         ],
         platform: Platform::MacOS,
@@ -204,6 +223,11 @@ pub static CATALOG: &[CustomizationDef] = &[
             TemplateFile {
                 relative_path: "sms/send_outbound.py",
                 content: SMS_SEND_OUTBOUND,
+                target: TemplateTarget::Channels,
+            },
+            TemplateFile {
+                relative_path: "sms/verify.py",
+                content: SMS_VERIFY,
                 target: TemplateTarget::Channels,
             },
         ],

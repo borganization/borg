@@ -30,6 +30,13 @@ impl<'a> ChannelExecutor<'a> {
             .run_script(script_name, input_json, blocked_paths)
             .await?;
         let trimmed = output.trim();
+        // Try JSON first: {"valid": true/false}
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(valid) = parsed.get("valid").and_then(serde_json::Value::as_bool) {
+                return Ok(valid);
+            }
+        }
+        // Fall back to bare string matching
         Ok(trimmed == "true" || trimmed == "ok" || trimmed == "1")
     }
 
@@ -41,6 +48,20 @@ impl<'a> ChannelExecutor<'a> {
         blocked_paths: &[String],
     ) -> Result<String> {
         self.run_script(&self.manifest.scripts.inbound, input_json, blocked_paths)
+            .await
+    }
+
+    /// Run the poll script with input JSON on stdin.
+    /// Returns the script's stdout (expected to be a JSON array of messages).
+    pub async fn poll(&self, input_json: &str, blocked_paths: &[String]) -> Result<String> {
+        let script_name = match &self.manifest.scripts.poll {
+            Some(p) => p.clone(),
+            None => bail!(
+                "Channel '{}' has no poll script configured",
+                self.manifest.name
+            ),
+        };
+        self.run_script(&script_name, input_json, blocked_paths)
             .await
     }
 

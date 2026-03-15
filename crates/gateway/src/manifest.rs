@@ -1,6 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChannelMode {
+    Webhook,
+    Poll,
+}
+
+impl Default for ChannelMode {
+    fn default() -> Self {
+        Self::Webhook
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelManifest {
     pub name: String,
@@ -25,6 +38,8 @@ pub struct ScriptsSection {
     pub outbound: String,
     #[serde(default)]
     pub verify: Option<String>,
+    #[serde(default)]
+    pub poll: Option<String>,
 }
 
 impl Default for ScriptsSection {
@@ -33,6 +48,7 @@ impl Default for ScriptsSection {
             inbound: default_inbound(),
             outbound: default_outbound(),
             verify: None,
+            poll: None,
         }
     }
 }
@@ -60,6 +76,10 @@ pub struct SettingsSection {
     pub timeout_ms: u64,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
+    #[serde(default)]
+    pub mode: ChannelMode,
+    #[serde(default)]
+    pub poll_interval_ms: Option<u64>,
 }
 
 impl Default for SettingsSection {
@@ -68,6 +88,8 @@ impl Default for SettingsSection {
             webhook_path: None,
             timeout_ms: default_timeout(),
             max_concurrent: default_max_concurrent(),
+            mode: ChannelMode::default(),
+            poll_interval_ms: None,
         }
     }
 }
@@ -93,6 +115,10 @@ impl ChannelManifest {
         let content = std::fs::read_to_string(path)?;
         let manifest: Self = toml::from_str(&content)?;
         Ok(manifest)
+    }
+
+    pub fn is_poll_mode(&self) -> bool {
+        self.settings.mode == ChannelMode::Poll
     }
 
     pub fn webhook_path(&self) -> String {
@@ -214,5 +240,47 @@ description = "Discord bot"
     fn load_nonexistent_file_errors() {
         let result = ChannelManifest::load(std::path::Path::new("/tmp/nonexistent_channel.toml"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_poll_mode_manifest() {
+        let toml_str = r#"
+name = "imessage"
+description = "Bidirectional iMessage via macOS Messages"
+runtime = "python"
+
+[scripts]
+poll = "poll_messages.py"
+outbound = "send_outbound.sh"
+
+[sandbox]
+network = false
+fs_read = ["~/Library/Messages"]
+fs_write = ["~/.tamagotchi/channels/imessage"]
+
+[settings]
+mode = "poll"
+poll_interval_ms = 5000
+timeout_ms = 15000
+max_concurrent = 3
+"#;
+        let manifest: ChannelManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.name, "imessage");
+        assert!(manifest.is_poll_mode());
+        assert_eq!(manifest.settings.poll_interval_ms, Some(5000));
+        assert_eq!(manifest.scripts.poll.as_deref(), Some("poll_messages.py"));
+        assert_eq!(manifest.scripts.outbound, "send_outbound.sh");
+        assert!(manifest.scripts.verify.is_none());
+    }
+
+    #[test]
+    fn default_mode_is_webhook() {
+        let toml_str = r#"
+name = "test"
+description = "Test"
+"#;
+        let manifest: ChannelManifest = toml::from_str(toml_str).unwrap();
+        assert!(!manifest.is_poll_mode());
+        assert_eq!(manifest.settings.mode, ChannelMode::Webhook);
     }
 }
