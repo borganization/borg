@@ -4,6 +4,7 @@ pub mod conversation;
 pub mod db;
 pub mod doctor;
 pub mod hooks;
+pub mod host_audit;
 pub mod llm;
 pub mod logging;
 pub mod memory;
