@@ -11,6 +11,14 @@ const BUILTIN_DISCORD: &str = include_str!("../skills/discord/SKILL.md");
 const BUILTIN_GITHUB: &str = include_str!("../skills/github/SKILL.md");
 const BUILTIN_WEATHER: &str = include_str!("../skills/weather/SKILL.md");
 const BUILTIN_SKILL_CREATOR: &str = include_str!("../skills/skill-creator/SKILL.md");
+const BUILTIN_GIT: &str = include_str!("../skills/git/SKILL.md");
+const BUILTIN_HTTP: &str = include_str!("../skills/http/SKILL.md");
+const BUILTIN_SEARCH: &str = include_str!("../skills/search/SKILL.md");
+const BUILTIN_DOCKER: &str = include_str!("../skills/docker/SKILL.md");
+const BUILTIN_DATABASE: &str = include_str!("../skills/database/SKILL.md");
+const BUILTIN_NOTES: &str = include_str!("../skills/notes/SKILL.md");
+const BUILTIN_CALENDAR: &str = include_str!("../skills/calendar/SKILL.md");
+const BUILTIN_1PASSWORD: &str = include_str!("../skills/1password/SKILL.md");
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SkillSource {
@@ -130,6 +138,14 @@ pub fn load_all_skills() -> Result<Vec<Skill>> {
         BUILTIN_GITHUB,
         BUILTIN_WEATHER,
         BUILTIN_SKILL_CREATOR,
+        BUILTIN_GIT,
+        BUILTIN_HTTP,
+        BUILTIN_SEARCH,
+        BUILTIN_DOCKER,
+        BUILTIN_DATABASE,
+        BUILTIN_NOTES,
+        BUILTIN_CALENDAR,
+        BUILTIN_1PASSWORD,
     ];
 
     let mut skills: Vec<Skill> = Vec::new();
@@ -298,6 +314,14 @@ Body here.
             ("github", BUILTIN_GITHUB),
             ("weather", BUILTIN_WEATHER),
             ("skill-creator", BUILTIN_SKILL_CREATOR),
+            ("git", BUILTIN_GIT),
+            ("http", BUILTIN_HTTP),
+            ("search", BUILTIN_SEARCH),
+            ("docker", BUILTIN_DOCKER),
+            ("database", BUILTIN_DATABASE),
+            ("notes", BUILTIN_NOTES),
+            ("calendar", BUILTIN_CALENDAR),
+            ("1password", BUILTIN_1PASSWORD),
         ] {
             let (manifest, body) = parse_skill_md(content)
                 .unwrap_or_else(|e| panic!("Built-in skill '{name}' failed to parse: {e}"));
@@ -340,6 +364,14 @@ Short body.
         assert!(names.contains(&"github"));
         assert!(names.contains(&"weather"));
         assert!(names.contains(&"skill-creator"));
+        assert!(names.contains(&"git"));
+        assert!(names.contains(&"http"));
+        assert!(names.contains(&"search"));
+        assert!(names.contains(&"docker"));
+        assert!(names.contains(&"database"));
+        assert!(names.contains(&"notes"));
+        assert!(names.contains(&"calendar"));
+        assert!(names.contains(&"1password"));
     }
 
     #[test]

@@ -7,15 +7,19 @@ use tracing::warn;
 
 use crate::config::Config;
 use crate::conversation::{compact_history, history_tokens, normalize_history, undo_last_turn};
+use crate::db::Database;
 use crate::llm::{LlmClient, StreamEvent, UsageData};
 use crate::logging::log_message;
 use crate::memory::{load_memory_context, read_memory, write_memory};
 use crate::policy::ExecutionPolicy;
+use crate::secrets::redact_secrets;
 use crate::session::Session;
 use crate::skills::{load_all_skills, load_skills_context, Skill};
 use crate::soul::load_soul;
+use crate::tasks;
 use crate::truncate::truncate_output;
 use crate::types::{FunctionCall, Message, ToolCall, ToolDefinition};
+use crate::web;
 use tamagotchi_apply_patch::apply_patch_to_dir;
 use tamagotchi_tools::registry::ToolRegistry;
 
@@ -24,6 +28,7 @@ const TOOL_OUTPUT_MAX_TOKENS: usize = 4000;
 
 pub enum AgentEvent {
     TextDelta(String),
+    ThinkingDelta(String),
     ToolExecuting {
         name: String,
         args: String,
@@ -44,7 +49,6 @@ pub enum AgentEvent {
 
 pub struct Agent {
     config: Config,
-    _llm: LlmClient,
     history: Vec<Message>,
     tool_registry: ToolRegistry,
     session: Session,
@@ -53,12 +57,12 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(config: Config) -> Result<Self> {
-        let _llm = LlmClient::new(config.clone())?;
+        // Validate that the LLM client can be constructed (provider + API key present)
+        let _ = LlmClient::new(config.clone())?;
         let tool_registry = ToolRegistry::new()?;
         let policy = config.policy.clone();
         Ok(Self {
             config,
-            _llm,
             history: Vec::new(),
             tool_registry,
             session: Session::new(),
@@ -104,13 +108,19 @@ impl Agent {
         &mut self.config
     }
 
-    /// Compact conversation history, returning (before_tokens, after_tokens).
-    pub fn compact(&mut self) -> (usize, usize) {
+    /// Compact conversation history using LLM summarization, returning (before_tokens, after_tokens).
+    pub async fn compact(&mut self) -> (usize, usize) {
         let before = history_tokens(&self.history);
+        let llm = match LlmClient::new(self.config.clone()) {
+            Ok(l) => l,
+            Err(_) => return (before, before),
+        };
         compact_history(
             &mut self.history,
             self.config.conversation.max_history_tokens,
-        );
+            &llm,
+        )
+        .await;
         let after = history_tokens(&self.history);
         (before, after)
     }
@@ -138,6 +148,28 @@ impl Agent {
 
         let mut system = format!("{soul}\n\n# Current Time\n{now}\n");
 
+        // Richer context: working directory, git branch, OS info
+        system.push_str("\n# Environment\n");
+        if let Ok(cwd) = std::env::current_dir() {
+            system.push_str(&format!("Working directory: {}\n", cwd.display()));
+        }
+        if let Ok(output) = std::process::Command::new("git")
+            .args(["branch", "--show-current"])
+            .output()
+        {
+            if output.status.success() {
+                let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !branch.is_empty() {
+                    system.push_str(&format!("Git branch: {branch}\n"));
+                }
+            }
+        }
+        system.push_str(&format!(
+            "OS: {} {}\n",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
+
         if !memory.is_empty() {
             system.push_str(&format!("\n{memory}\n"));
         }
@@ -153,7 +185,7 @@ impl Agent {
     }
 
     fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
-        let mut tools = core_tool_definitions();
+        let mut tools = core_tool_definitions(&self.config);
         for td in self.tool_registry.tool_definitions() {
             tools.push(ToolDefinition::new(
                 &td.function.name,
@@ -190,20 +222,36 @@ impl Agent {
         event_tx: mpsc::Sender<AgentEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
+        let max_iterations = self.config.conversation.max_iterations as usize;
+        let mut iteration: usize = 0;
+
         loop {
             if cancel.is_cancelled() {
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
             }
 
-            // Normalize history to fix structural invariants (missing/orphaned tool results)
+            iteration += 1;
+            if iteration > max_iterations {
+                let _ = event_tx
+                    .send(AgentEvent::Error(format!(
+                        "Max iterations ({max_iterations}) reached — stopping agent loop"
+                    )))
+                    .await;
+                let _ = event_tx.send(AgentEvent::TurnComplete).await;
+                return Ok(());
+            }
+
             normalize_history(&mut self.history);
 
-            // Compact history if it exceeds the token budget
+            // Use LLM-based compaction
+            let compaction_llm = LlmClient::new(self.config.clone())?;
             compact_history(
                 &mut self.history,
                 self.config.conversation.max_history_tokens,
-            );
+                &compaction_llm,
+            )
+            .await;
 
             let system_prompt = self.build_system_prompt()?;
             let tool_defs = self.build_tool_definitions();
@@ -244,7 +292,6 @@ impl Agent {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
-                        // Append whatever we have as an interrupted message
                         if !text_content.is_empty() {
                             let mut content = text_content.clone();
                             content.push_str("\n\n[response interrupted]");
@@ -263,10 +310,7 @@ impl Agent {
                                 let _ = event_tx.send(AgentEvent::TextDelta(delta)).await;
                             }
                             Some(StreamEvent::ToolCallDelta {
-                                index,
-                                id,
-                                name,
-                                arguments_delta,
+                                index, id, name, arguments_delta,
                             }) => {
                                 while tool_calls.len() <= index {
                                     tool_calls.push(PartialToolCall::default());
@@ -287,6 +331,11 @@ impl Agent {
                                 let _ = event_tx.send(AgentEvent::Error(e)).await;
                                 break;
                             }
+                            Some(StreamEvent::ThinkingDelta(delta)) => {
+                                if self.config.conversation.show_thinking {
+                                    let _ = event_tx.send(AgentEvent::ThinkingDelta(delta)).await;
+                                }
+                            }
                             None => break,
                         }
                     }
@@ -304,7 +353,6 @@ impl Agent {
                 return Ok(());
             }
 
-            // Validate tool call JSON; drop incomplete ones with a warning
             let tc: Vec<ToolCall> = tool_calls
                 .iter()
                 .filter(|ptc| {
@@ -332,7 +380,6 @@ impl Agent {
                 .collect();
 
             if tc.is_empty() {
-                // All tool calls were incomplete — treat as text-only response
                 let content = if text_content.is_empty() {
                     "[response interrupted — incomplete tool calls discarded]".to_string()
                 } else {
@@ -363,9 +410,10 @@ impl Agent {
             log_message(&assistant_msg);
             self.history.push(assistant_msg);
 
-            // Execute tool calls sequentially to preserve LLM-intended ordering.
-            // Reordering could break dependencies between tool calls.
-            for tool_call in &tc {
+            let (sequential, parallel): (Vec<_>, Vec<_>) =
+                tc.iter().partition(|t| t.function.name == "run_shell");
+
+            for tool_call in &parallel {
                 if cancel.is_cancelled() {
                     let remaining_msg =
                         Message::tool_result(&tool_call.id, "[tool call cancelled by user]");
@@ -376,7 +424,6 @@ impl Agent {
 
                 let name = &tool_call.function.name;
                 let args = &tool_call.function.arguments;
-
                 let _ = event_tx
                     .send(AgentEvent::ToolExecuting {
                         name: name.clone(),
@@ -388,8 +435,12 @@ impl Agent {
                     .execute_tool(name, args, &event_tx)
                     .await
                     .unwrap_or_else(|e| format!("Error: {e}"));
-
-                let result = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
+                let truncated = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
+                let result = if self.config.security.secret_detection {
+                    redact_secrets(&truncated)
+                } else {
+                    truncated
+                };
 
                 let _ = event_tx
                     .send(AgentEvent::ToolResult {
@@ -397,7 +448,46 @@ impl Agent {
                         result: result.clone(),
                     })
                     .await;
+                let msg = Message::tool_result(&tool_call.id, &result);
+                log_message(&msg);
+                self.history.push(msg);
+            }
 
+            for tool_call in &sequential {
+                if cancel.is_cancelled() {
+                    let remaining_msg =
+                        Message::tool_result(&tool_call.id, "[tool call cancelled by user]");
+                    log_message(&remaining_msg);
+                    self.history.push(remaining_msg);
+                    continue;
+                }
+
+                let name = &tool_call.function.name;
+                let args = &tool_call.function.arguments;
+                let _ = event_tx
+                    .send(AgentEvent::ToolExecuting {
+                        name: name.clone(),
+                        args: args.clone(),
+                    })
+                    .await;
+
+                let raw_result = self
+                    .execute_tool(name, args, &event_tx)
+                    .await
+                    .unwrap_or_else(|e| format!("Error: {e}"));
+                let truncated = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
+                let result = if self.config.security.secret_detection {
+                    redact_secrets(&truncated)
+                } else {
+                    truncated
+                };
+
+                let _ = event_tx
+                    .send(AgentEvent::ToolResult {
+                        name: name.clone(),
+                        result: result.clone(),
+                    })
+                    .await;
                 let msg = Message::tool_result(&tool_call.id, &result);
                 log_message(&msg);
                 self.history.push(msg);
@@ -438,11 +528,11 @@ impl Agent {
                 read_memory(filename)
             }
             "list_tools" => {
-                let tools = self.tool_registry.list_tools();
-                Ok(if tools.is_empty() {
+                let tool_list = self.tool_registry.list_tools();
+                Ok(if tool_list.is_empty() {
                     "No user tools installed.".to_string()
                 } else {
-                    tools.join("\n")
+                    tool_list.join("\n")
                 })
             }
             "list_skills" => {
@@ -501,16 +591,12 @@ impl Agent {
                 let timeout_ms = self.config.tools.default_timeout_ms;
                 let timeout_dur = Duration::from_millis(timeout_ms);
 
-                // Check execution policy before prompting user
                 match self.policy.check(command) {
                     crate::policy::PolicyDecision::Deny => {
                         return Ok("Shell command denied by policy.".to_string());
                     }
-                    crate::policy::PolicyDecision::AutoApprove => {
-                        // Skip user confirmation
-                    }
+                    crate::policy::PolicyDecision::AutoApprove => {}
                     crate::policy::PolicyDecision::Prompt => {
-                        // Request confirmation from the user
                         let (confirm_tx, confirm_rx) = oneshot::channel();
                         let _ = event_tx
                             .send(AgentEvent::ShellConfirmation {
@@ -518,7 +604,6 @@ impl Agent {
                                 respond: confirm_tx,
                             })
                             .await;
-
                         match confirm_rx.await {
                             Ok(true) => {}
                             Ok(false) => {
@@ -541,7 +626,6 @@ impl Agent {
                         let stdout = String::from_utf8_lossy(&output.stdout);
                         let stderr = String::from_utf8_lossy(&output.stderr);
                         let status = output.status.code().unwrap_or(-1);
-
                         Ok(format!(
                             "Exit code: {status}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
                         ))
@@ -552,10 +636,145 @@ impl Agent {
                     )),
                 }
             }
-            _ => match self.tool_registry.execute_tool(name, args_json).await {
-                Ok(result) => Ok(result),
-                Err(e) => Ok(format!("Error executing tool '{name}': {e}")),
+            "web_fetch" => {
+                if !self.config.web.enabled {
+                    return Ok(
+                        "Web access is disabled. Enable it in config: [web] enabled = true"
+                            .to_string(),
+                    );
+                }
+                let Some(url) = args["url"].as_str() else {
+                    return Ok("Error: Missing required parameter 'url'.".to_string());
+                };
+                let max_chars = args["max_chars"].as_u64().map(|v| v as usize);
+                match web::web_fetch(url, max_chars).await {
+                    Ok(content) => Ok(content),
+                    Err(e) => Ok(format!("Error fetching URL: {e}")),
+                }
+            }
+            "web_search" => {
+                if !self.config.web.enabled {
+                    return Ok(
+                        "Web access is disabled. Enable it in config: [web] enabled = true"
+                            .to_string(),
+                    );
+                }
+                let Some(query) = args["query"].as_str() else {
+                    return Ok("Error: Missing required parameter 'query'.".to_string());
+                };
+                match web::web_search(query, &self.config.web).await {
+                    Ok(results) => Ok(results),
+                    Err(e) => Ok(format!("Error searching: {e}")),
+                }
+            }
+            "schedule_task" => {
+                let Some(task_name) = args["name"].as_str() else {
+                    return Ok("Error: Missing required parameter 'name'.".to_string());
+                };
+                let Some(prompt) = args["prompt"].as_str() else {
+                    return Ok("Error: Missing required parameter 'prompt'.".to_string());
+                };
+                let schedule_type = args["schedule_type"].as_str().unwrap_or("interval");
+                let Some(schedule_expr) = args["schedule_expr"].as_str() else {
+                    return Ok("Error: Missing required parameter 'schedule_expr'.".to_string());
+                };
+                let timezone = args["timezone"].as_str().unwrap_or("local");
+                let next_run = match tasks::calculate_next_run(schedule_type, schedule_expr) {
+                    Ok(nr) => nr,
+                    Err(e) => return Ok(format!("Error: Invalid schedule: {e}")),
+                };
+                let id = uuid::Uuid::new_v4().to_string();
+                match Database::open() {
+                    Ok(db) => match db.create_task(&crate::db::NewTask {
+                        id: &id,
+                        name: task_name,
+                        prompt,
+                        schedule_type,
+                        schedule_expr,
+                        timezone,
+                        next_run,
+                    }) {
+                        Ok(()) => Ok(format!(
+                            "Scheduled task created: {task_name} (id: {})",
+                            &id[..8]
+                        )),
+                        Err(e) => Ok(format!("Error creating task: {e}")),
+                    },
+                    Err(e) => Ok(format!("Error opening database: {e}")),
+                }
+            }
+            "list_scheduled_tasks" => match Database::open() {
+                Ok(db) => match db.list_tasks() {
+                    Ok(tl) if tl.is_empty() => Ok("No scheduled tasks.".to_string()),
+                    Ok(tl) => Ok(tl
+                        .iter()
+                        .map(tasks::format_task)
+                        .collect::<Vec<_>>()
+                        .join("\n\n")),
+                    Err(e) => Ok(format!("Error listing tasks: {e}")),
+                },
+                Err(e) => Ok(format!("Error opening database: {e}")),
             },
+            "pause_task" => {
+                let Some(task_id) = args["task_id"].as_str() else {
+                    return Ok("Error: Missing required parameter 'task_id'.".to_string());
+                };
+                match Database::open() {
+                    Ok(db) => match db.update_task_status(task_id, "paused") {
+                        Ok(true) => Ok(format!("Task {task_id} paused.")),
+                        Ok(false) => Ok(format!("Task {task_id} not found.")),
+                        Err(e) => Ok(format!("Error: {e}")),
+                    },
+                    Err(e) => Ok(format!("Error opening database: {e}")),
+                }
+            }
+            "resume_task" => {
+                let Some(task_id) = args["task_id"].as_str() else {
+                    return Ok("Error: Missing required parameter 'task_id'.".to_string());
+                };
+                match Database::open() {
+                    Ok(db) => match db.update_task_status(task_id, "active") {
+                        Ok(true) => Ok(format!("Task {task_id} resumed.")),
+                        Ok(false) => Ok(format!("Task {task_id} not found.")),
+                        Err(e) => Ok(format!("Error: {e}")),
+                    },
+                    Err(e) => Ok(format!("Error opening database: {e}")),
+                }
+            }
+            "cancel_task" => {
+                let Some(task_id) = args["task_id"].as_str() else {
+                    return Ok("Error: Missing required parameter 'task_id'.".to_string());
+                };
+                match Database::open() {
+                    Ok(db) => match db.update_task_status(task_id, "cancelled") {
+                        Ok(true) => Ok(format!("Task {task_id} cancelled.")),
+                        Ok(false) => Ok(format!("Task {task_id} not found.")),
+                        Err(e) => Ok(format!("Error: {e}")),
+                    },
+                    Err(e) => Ok(format!("Error opening database: {e}")),
+                }
+            }
+            _ => {
+                let cred_names = self.tool_registry.tool_credentials(name);
+                let extra_env: Vec<(String, String)> = cred_names
+                    .iter()
+                    .filter_map(|cred_name| {
+                        self.config.credentials.get(cred_name).and_then(|env_var| {
+                            std::env::var(env_var)
+                                .ok()
+                                .map(|val| (cred_name.to_uppercase(), val))
+                        })
+                    })
+                    .collect();
+                match self
+                    .tool_registry
+                    .execute_tool_with_env(name, args_json, &extra_env)
+                    .await
+                {
+                    Ok(result) => Ok(result),
+                    Err(e) => Ok(format!("Error executing tool '{name}': {e}")),
+                }
+            }
         }
     }
 }
@@ -567,116 +786,32 @@ struct PartialToolCall {
     arguments: String,
 }
 
-fn core_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition::new(
-            "write_memory",
-            "Write or append to a memory file. Use filename 'SOUL.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "filename": {
-                        "type": "string",
-                        "description": "Name of the memory file (e.g., 'MEMORY.md', 'SOUL.md', 'user_preferences.md')"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write"
-                    },
-                    "append": {
-                        "type": "boolean",
-                        "description": "If true, append to existing file instead of overwriting",
-                        "default": false
-                    }
-                },
-                "required": ["filename", "content"]
-            }),
-        ),
-        ToolDefinition::new(
-            "read_memory",
-            "Read a memory file.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "filename": {
-                        "type": "string",
-                        "description": "Name of the memory file to read"
-                    }
-                },
-                "required": ["filename"]
-            }),
-        ),
-        ToolDefinition::new(
-            "list_tools",
-            "List all available user-created tools.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        ),
-        ToolDefinition::new(
-            "apply_patch",
-            "Create, update, or delete files in the current working directory using the patch DSL.\n\nPatch format:\n*** Begin Patch\n*** Add File: path/to/file.txt\n+<line1>\n+<line2>\n*** Update File: path/to/file.txt\n@@\n context\n-old line\n+new line\n*** Delete File: path/to/old.txt\n*** End Patch\n\nIMPORTANT: Every content line in Add File MUST start with '+'. Update File lines must start with ' ' (context), '-' (remove), or '+' (add). File paths are relative to the current working directory.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "patch": {
-                        "type": "string",
-                        "description": "The patch content in the patch DSL format"
-                    }
-                },
-                "required": ["patch"]
-            }),
-        ),
-        ToolDefinition::new(
-            "create_tool",
-            "Create or modify user tools in ~/.tamagotchi/tools/ using the patch DSL.\n\nPatch format:\n*** Begin Patch\n*** Add File: <tool-name>/tool.toml\n+<line1>\n+<line2>\n*** Add File: <tool-name>/main.py\n+<line1>\n+<line2>\n*** Update File: <tool-name>/main.py\n@@\n context\n-old line\n+new line\n*** Delete File: <tool-name>/old.py\n*** End Patch\n\nIMPORTANT: Every content line in Add File MUST start with '+'. Update File lines must start with ' ' (context), '-' (remove), or '+' (add).",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "patch": {
-                        "type": "string",
-                        "description": "The patch content in the patch DSL format"
-                    }
-                },
-                "required": ["patch"]
-            }),
-        ),
-        ToolDefinition::new(
-            "run_shell",
-            "Execute a shell command. Requires user confirmation before execution.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute"
-                    }
-                },
-                "required": ["command"]
-            }),
-        ),
-        ToolDefinition::new(
-            "list_skills",
-            "List all available skills with their status and source.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        ),
-        ToolDefinition::new(
-            "apply_skill_patch",
-            "Create or modify skill files in the skills directory using the patch DSL. Use this to create new skills.\n\nPatch format:\n*** Begin Patch\n*** Add File: <skill-name>/SKILL.md\n+<line1>\n+<line2>\n*** End Patch\n\nIMPORTANT: Every content line in Add File MUST start with '+'.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "patch": {
-                        "type": "string",
-                        "description": "The patch content in the patch DSL format"
-                    }
-                },
-                "required": ["patch"]
-            }),
-        ),
-    ]
+fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
+    let mut defs = vec![
+        ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'SOUL.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories.", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false}},"required":["filename","content"]})),
+        ToolDefinition::new("read_memory", "Read a memory file.", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file to read"}},"required":["filename"]})),
+        ToolDefinition::new("list_tools", "List all available user-created tools.", serde_json::json!({"type":"object","properties":{}})),
+        ToolDefinition::new("apply_patch", "Create, update, or delete files in the current working directory using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
+        ToolDefinition::new("create_tool", "Create or modify user tools in ~/.tamagotchi/tools/ using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
+        ToolDefinition::new("run_shell", "Execute a shell command. Requires user confirmation before execution.", serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]})),
+        ToolDefinition::new("list_skills", "List all available skills with their status and source.", serde_json::json!({"type":"object","properties":{}})),
+        ToolDefinition::new("apply_skill_patch", "Create or modify skill files in the skills directory using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
+    ];
+
+    if config.web.enabled {
+        defs.push(ToolDefinition::new("web_fetch", "Fetch a URL and return its text content. HTML pages are automatically converted to plain text.", serde_json::json!({"type":"object","properties":{"url":{"type":"string","description":"The URL to fetch"},"max_chars":{"type":"integer","description":"Maximum characters to return (default: 50000)","default":50000}},"required":["url"]})));
+        defs.push(ToolDefinition::new("web_search", "Search the web and return results with titles, URLs, and snippets.", serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"The search query"}},"required":["query"]})));
+    }
+
+    defs.push(ToolDefinition::new("schedule_task", "Create a scheduled task that runs automatically.", serde_json::json!({"type":"object","properties":{"name":{"type":"string","description":"A short name for the task"},"prompt":{"type":"string","description":"The prompt to execute on each run"},"schedule_type":{"type":"string","enum":["cron","interval","once"],"description":"Type of schedule"},"schedule_expr":{"type":"string","description":"Schedule expression (cron string or interval like '30m', '2h')"},"timezone":{"type":"string","description":"Timezone (default: 'local')","default":"local"}},"required":["name","prompt","schedule_type","schedule_expr"]})));
+    defs.push(ToolDefinition::new(
+        "list_scheduled_tasks",
+        "List all scheduled tasks with their status and next run time.",
+        serde_json::json!({"type":"object","properties":{}}),
+    ));
+    defs.push(ToolDefinition::new("pause_task", "Pause a scheduled task.", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string","description":"The task ID to pause"}},"required":["task_id"]})));
+    defs.push(ToolDefinition::new("resume_task", "Resume a paused scheduled task.", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string","description":"The task ID to resume"}},"required":["task_id"]})));
+    defs.push(ToolDefinition::new("cancel_task", "Cancel a scheduled task permanently.", serde_json::json!({"type":"object","properties":{"task_id":{"type":"string","description":"The task ID to cancel"}},"required":["task_id"]})));
+
+    defs
 }

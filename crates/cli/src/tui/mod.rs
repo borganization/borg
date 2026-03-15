@@ -189,7 +189,7 @@ async fn run_event_loop(
             }
             AppAction::CompactHistory => {
                 let mut agent = agent.lock().await;
-                let (before, after) = agent.compact();
+                let (before, after) = agent.compact().await;
                 let freed = before.saturating_sub(after);
                 app.push_system_message(format!(
                     "Compacted: {before} → {after} tokens ({freed} freed)"
