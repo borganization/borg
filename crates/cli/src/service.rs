@@ -231,6 +231,28 @@ pub fn uninstall_service() -> Result<()> {
     }
 }
 
+/// Stop the daemon service without uninstalling it.
+pub fn stop_service() -> Result<()> {
+    if cfg!(target_os = "macos") {
+        stop_launchd()
+    } else if cfg!(target_os = "linux") {
+        stop_systemd()
+    } else {
+        anyhow::bail!("Service management is only supported on macOS and Linux")
+    }
+}
+
+/// Restart the daemon service.
+pub fn restart_service() -> Result<()> {
+    if cfg!(target_os = "macos") {
+        restart_launchd()
+    } else if cfg!(target_os = "linux") {
+        restart_systemd()
+    } else {
+        anyhow::bail!("Service management is only supported on macOS and Linux")
+    }
+}
+
 /// Show the daemon service status.
 pub fn service_status() -> Result<()> {
     if cfg!(target_os = "macos") {
@@ -322,6 +344,45 @@ fn status_launchd() -> Result<()> {
     Ok(())
 }
 
+fn stop_launchd() -> Result<()> {
+    let plist_path = launchd_plist_path()?;
+    if !plist_path.exists() {
+        println!("Service not installed. Run `tamagotchi service install` first.");
+        return Ok(());
+    }
+    let status = std::process::Command::new("launchctl")
+        .args(["unload", &plist_path.to_string_lossy()])
+        .status()
+        .context("Failed to run launchctl unload")?;
+    if status.success() {
+        println!("Service stopped.");
+    } else {
+        println!("Failed to stop service (it may not be running).");
+    }
+    Ok(())
+}
+
+fn restart_launchd() -> Result<()> {
+    let plist_path = launchd_plist_path()?;
+    if !plist_path.exists() {
+        println!("Service not installed. Run `tamagotchi service install` first.");
+        return Ok(());
+    }
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", &plist_path.to_string_lossy()])
+        .status();
+    let status = std::process::Command::new("launchctl")
+        .args(["load", &plist_path.to_string_lossy()])
+        .status()
+        .context("Failed to run launchctl load")?;
+    if status.success() {
+        println!("Service restarted.");
+    } else {
+        println!("Failed to restart service.");
+    }
+    Ok(())
+}
+
 // ── Linux systemd ──
 
 fn systemd_unit_path() -> Result<PathBuf> {
@@ -395,6 +456,42 @@ fn status_systemd() -> Result<()> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     println!("{stdout}");
+    Ok(())
+}
+
+fn stop_systemd() -> Result<()> {
+    let unit_path = systemd_unit_path()?;
+    if !unit_path.exists() {
+        println!("Service not installed. Run `tamagotchi service install` first.");
+        return Ok(());
+    }
+    let status = std::process::Command::new("systemctl")
+        .args(["--user", "stop", "tamagotchi.service"])
+        .status()
+        .context("Failed to run systemctl stop")?;
+    if status.success() {
+        println!("Service stopped.");
+    } else {
+        println!("Failed to stop service (it may not be running).");
+    }
+    Ok(())
+}
+
+fn restart_systemd() -> Result<()> {
+    let unit_path = systemd_unit_path()?;
+    if !unit_path.exists() {
+        println!("Service not installed. Run `tamagotchi service install` first.");
+        return Ok(());
+    }
+    let status = std::process::Command::new("systemctl")
+        .args(["--user", "restart", "tamagotchi.service"])
+        .status()
+        .context("Failed to run systemctl restart")?;
+    if status.success() {
+        println!("Service restarted.");
+    } else {
+        println!("Failed to restart service.");
+    }
     Ok(())
 }
 

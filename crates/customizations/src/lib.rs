@@ -86,6 +86,12 @@ pub enum TemplateTarget {
     Tools,
 }
 
+/// Result returned from a successful installation with user-facing notes.
+#[derive(Debug, Clone, Default)]
+pub struct InstallResult {
+    pub notes: Vec<String>,
+}
+
 /// Events emitted during installation for progress display.
 #[derive(Debug, Clone)]
 pub enum InstallEvent {

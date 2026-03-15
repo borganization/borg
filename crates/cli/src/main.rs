@@ -18,8 +18,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start interactive REPL (default)
+    /// Start Tamagotchi — interactive TUI with auto-gateway (default)
+    Start,
+    /// Start interactive chat (alias for start)
     Chat,
+    /// Stop the background daemon service
+    Stop,
+    /// Restart the background daemon service
+    Restart,
     /// Run interactive setup wizard for ~/.tamagotchi
     Init,
     /// Send a single message and exit
@@ -104,6 +110,12 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
+        Some(Commands::Start) | Some(Commands::Chat) | None => {
+            ensure_onboarded()?;
+            repl::run().await?;
+        }
+        Some(Commands::Stop) => service::stop_service()?,
+        Some(Commands::Restart) => service::restart_service()?,
         Some(Commands::Init) => init_data_dir()?,
         Some(Commands::Ask { message, yes, json }) => repl::one_shot(&message, yes, json).await?,
         Some(Commands::Doctor) => run_doctor()?,
@@ -114,9 +126,17 @@ async fn main() -> Result<()> {
             ServiceAction::Uninstall => service::uninstall_service()?,
             ServiceAction::Status => service::service_status()?,
         },
-        Some(Commands::Chat) | None => repl::run().await?,
     }
 
+    Ok(())
+}
+
+fn ensure_onboarded() -> Result<()> {
+    let data_dir = tamagotchi_core::config::Config::data_dir()?;
+    let config_path = data_dir.join("config.toml");
+    if !config_path.exists() {
+        init_data_dir()?;
+    }
     Ok(())
 }
 

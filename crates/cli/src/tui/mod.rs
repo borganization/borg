@@ -73,6 +73,28 @@ pub async fn run() -> Result<()> {
         None
     };
 
+    // Auto-start gateway if enabled and any channels are installed
+    let gateway_shutdown = tokio_util::sync::CancellationToken::new();
+    let _gateway_guard = gateway_shutdown.clone().drop_guard();
+    if config.gateway.enabled {
+        if let Ok(registry) = tamagotchi_gateway::ChannelRegistry::new() {
+            if !registry.list_channels().is_empty() {
+                let gw_config = config.clone();
+                let gw_shutdown = gateway_shutdown.clone();
+                tokio::spawn(async move {
+                    match tamagotchi_gateway::GatewayServer::new(gw_config, gw_shutdown) {
+                        Ok(server) => {
+                            if let Err(e) = server.run().await {
+                                tracing::error!("Gateway exited with error: {e}");
+                            }
+                        }
+                        Err(e) => tracing::error!("Failed to initialize gateway: {e}"),
+                    }
+                });
+            }
+        }
+    }
+
     // Setup terminal
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -373,7 +395,7 @@ async fn run_event_loop(
                                 )
                                 .await
                                 {
-                                    Ok(()) => {
+                                    Ok(install_result) => {
                                         // Record in DB
                                         if let Ok(db) = tamagotchi_core::db::Database::open() {
                                             let _ = db.insert_customization(
@@ -383,7 +405,23 @@ async fn run_event_loop(
                                                 &def.category.to_string(),
                                             );
                                         }
-                                        results.push(format!("Installed {}", def.name));
+                                        // Auto-enable gateway config when installing a channel
+                                        if def.kind == tamagotchi_customizations::CustomizationKind::Channel {
+                                            if let Ok(mut cfg) = Config::load() {
+                                                if !cfg.gateway.enabled {
+                                                    cfg.gateway.enabled = true;
+                                                    let _ = cfg.save();
+                                                }
+                                            }
+                                        }
+                                        let mut msg = format!("Installed {}", def.name);
+                                        for note in &install_result.notes {
+                                            msg.push_str(&format!("\n  {note}"));
+                                        }
+                                        if def.kind == tamagotchi_customizations::CustomizationKind::Channel {
+                                            msg.push_str("\n  Restart Tamagotchi to activate the gateway");
+                                        }
+                                        results.push(msg);
                                     }
                                     Err(e) => {
                                         results
