@@ -69,4 +69,17 @@ Instructions and examples here.
 | `name` | Yes | Lowercase, hyphen-separated skill name |
 | `description` | Yes | What it does + when to use it (triggers skill activation) |
 | `requires.bins` | No | CLI binaries that must be installed |
-| `requires.env` | No | Environment variables that must be set |
+| `requires.env` | No | Environment variables that must be set (checked in env + credential store) |
+
+## Credential Store Integration
+
+Skills can use credentials configured in `config.toml` under `[credentials]`. When a skill declares `requires.env`, variables are checked against both the process environment and the credential store. Resolved credentials are also injected into `run_shell` commands as environment variables.
+
+```toml
+[credentials]
+JIRA_API_TOKEN = "JIRA_API_TOKEN"                                          # legacy: env var name
+SLACK_BOT_TOKEN = { source = "exec", command = "security", args = ["find-generic-password", "-s", "slack", "-w"] }
+GITHUB_TOKEN = { source = "file", path = "~/.config/gh/token" }
+```
+
+This means a skill with `requires: { env: ["SLACK_BOT_TOKEN"] }` will be marked available if `SLACK_BOT_TOKEN` is configured in the credential store, even if it's not exported in the shell.
