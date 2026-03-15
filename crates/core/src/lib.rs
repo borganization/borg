@@ -5,6 +5,7 @@ pub mod db;
 pub mod doctor;
 pub mod hooks;
 pub mod host_audit;
+pub mod integrity;
 pub mod llm;
 pub mod logging;
 pub mod memory;

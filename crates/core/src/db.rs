@@ -98,12 +98,21 @@ impl Database {
         Ok(db)
     }
 
+    /// Create a Database from an existing connection. Runs migrations.
+    /// Useful for testing with in-memory databases.
+    pub fn from_connection(conn: Connection) -> Result<Self> {
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        let db = Self { conn };
+        db.run_migrations()?;
+        Ok(db)
+    }
+
     fn db_path() -> Result<PathBuf> {
         Config::db_path()
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 4;
+    const CURRENT_VERSION: u32 = 5;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -127,6 +136,9 @@ impl Database {
         }
         if current < 4 {
             self.migrate_v4()?;
+        }
+        if current < 5 {
+            self.migrate_v5()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -314,6 +326,23 @@ impl Database {
         Ok(())
     }
 
+    /// V5: Add file_hashes table for integrity verification
+    fn migrate_v5(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS file_hashes (
+                customization_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(customization_id) REFERENCES customizations(id) ON DELETE CASCADE,
+                UNIQUE(customization_id, file_path)
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
     // ── Customizations ──
 
     pub fn insert_customization(
@@ -399,6 +428,99 @@ impl Database {
             params![customization_id],
         )?;
         Ok(count)
+    }
+
+    // ── File hashes (integrity) ──
+
+    pub fn insert_file_hash(
+        &self,
+        customization_id: &str,
+        file_path: &str,
+        sha256: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO file_hashes (customization_id, file_path, sha256, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![customization_id, file_path, sha256, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_file_hashes(&self, customization_id: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT file_path, sha256 FROM file_hashes WHERE customization_id = ?1")?;
+        let rows = stmt
+            .query_map(params![customization_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_file_hashes(&self, customization_id: &str) -> Result<usize> {
+        let count = self.conn.execute(
+            "DELETE FROM file_hashes WHERE customization_id = ?1",
+            params![customization_id],
+        )?;
+        Ok(count)
+    }
+
+    pub fn get_tool_customization_id(&self, tool_name: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT customization_id FROM installed_tools WHERE name = ?1")?;
+        let mut rows = stmt.query_map(params![tool_name], |row| row.get::<_, Option<String>>(0))?;
+        match rows.next() {
+            Some(Ok(val)) => Ok(val),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn get_channel_customization_id(&self, channel_name: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT customization_id FROM installed_channels WHERE name = ?1")?;
+        let mut rows =
+            stmt.query_map(params![channel_name], |row| row.get::<_, Option<String>>(0))?;
+        match rows.next() {
+            Some(Ok(val)) => Ok(val),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn insert_installed_tool(
+        &self,
+        name: &str,
+        description: &str,
+        runtime: &str,
+        customization_id: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO installed_tools (name, description, runtime, source, customization_id, installed_at)
+             VALUES (?1, ?2, ?3, 'customization', ?4, ?5)",
+            params![name, description, runtime, customization_id, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_installed_channel(
+        &self,
+        name: &str,
+        description: &str,
+        runtime: &str,
+        customization_id: &str,
+        webhook_path: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO installed_channels (name, description, runtime, source, customization_id, webhook_path, installed_at)
+             VALUES (?1, ?2, ?3, 'customization', ?4, ?5, ?6)",
+            params![name, description, runtime, customization_id, webhook_path, now],
+        )?;
+        Ok(())
     }
 
     // ── Session metadata ──
@@ -1123,5 +1245,118 @@ mod tests {
         let list = db.list_customizations().expect("list");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "Telegram v2");
+    }
+
+    #[test]
+    fn migrate_v5_creates_file_hashes_table() {
+        let db = test_db();
+        let mut stmt = db
+            .conn
+            .prepare("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='file_hashes'")
+            .expect("prepare");
+        let count: i64 = stmt.query_row([], |row| row.get(0)).expect("query");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn insert_and_get_file_hashes() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert cust");
+        db.insert_file_hash("messaging/telegram", "telegram/channel.toml", "abc123")
+            .expect("insert hash 1");
+        db.insert_file_hash("messaging/telegram", "telegram/parse_inbound.py", "def456")
+            .expect("insert hash 2");
+        db.insert_file_hash("messaging/telegram", "telegram/send_outbound.py", "ghi789")
+            .expect("insert hash 3");
+        let hashes = db.get_file_hashes("messaging/telegram").expect("get");
+        assert_eq!(hashes.len(), 3);
+    }
+
+    #[test]
+    fn file_hashes_cascade_delete() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert cust");
+        db.insert_file_hash("messaging/telegram", "telegram/channel.toml", "abc123")
+            .expect("insert hash");
+        db.delete_customization("messaging/telegram")
+            .expect("delete cust");
+        let hashes = db.get_file_hashes("messaging/telegram").expect("get");
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn delete_file_hashes_by_customization() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert cust 1");
+        db.insert_customization("email/gmail", "Gmail", "tool", "email")
+            .expect("insert cust 2");
+        db.insert_file_hash("messaging/telegram", "telegram/channel.toml", "abc")
+            .expect("insert hash 1");
+        db.insert_file_hash("email/gmail", "gmail/tool.toml", "def")
+            .expect("insert hash 2");
+        db.delete_file_hashes("messaging/telegram").expect("delete");
+        let t_hashes = db.get_file_hashes("messaging/telegram").expect("get");
+        let g_hashes = db.get_file_hashes("email/gmail").expect("get");
+        assert!(t_hashes.is_empty());
+        assert_eq!(g_hashes.len(), 1);
+    }
+
+    #[test]
+    fn insert_installed_tool_and_get_customization_id() {
+        let db = test_db();
+        db.insert_customization("email/gmail", "Gmail", "tool", "email")
+            .expect("insert cust");
+        db.insert_installed_tool("gmail", "Gmail integration", "python", "email/gmail")
+            .expect("insert tool");
+        let cust_id = db.get_tool_customization_id("gmail").expect("get");
+        assert_eq!(cust_id.as_deref(), Some("email/gmail"));
+    }
+
+    #[test]
+    fn get_tool_customization_id_returns_none_for_unknown() {
+        let db = test_db();
+        let cust_id = db.get_tool_customization_id("nonexistent").expect("get");
+        assert!(cust_id.is_none());
+    }
+
+    #[test]
+    fn insert_installed_channel_and_get_customization_id() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert cust");
+        db.insert_installed_channel(
+            "telegram",
+            "Telegram bot",
+            "python",
+            "messaging/telegram",
+            "/webhook/telegram",
+        )
+        .expect("insert channel");
+        let cust_id = db.get_channel_customization_id("telegram").expect("get");
+        assert_eq!(cust_id.as_deref(), Some("messaging/telegram"));
+    }
+
+    #[test]
+    fn get_channel_customization_id_returns_none_for_unknown() {
+        let db = test_db();
+        let cust_id = db.get_channel_customization_id("nonexistent").expect("get");
+        assert!(cust_id.is_none());
+    }
+
+    #[test]
+    fn file_hash_upsert_on_reinstall() {
+        let db = test_db();
+        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+            .expect("insert cust");
+        db.insert_file_hash("messaging/telegram", "telegram/channel.toml", "old_hash")
+            .expect("insert hash");
+        db.insert_file_hash("messaging/telegram", "telegram/channel.toml", "new_hash")
+            .expect("upsert hash");
+        let hashes = db.get_file_hashes("messaging/telegram").expect("get");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].1, "new_hash");
     }
 }

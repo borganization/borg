@@ -256,8 +256,14 @@ mod tests {
         let home = dirs::home_dir().expect("home dir must exist for test");
         let home_str = home.to_string_lossy();
 
-        assert_eq!(expand_tilde("~/Library/Messages"), format!("{home_str}/Library/Messages"));
-        assert_eq!(expand_tilde("~/.tamagotchi/channels"), format!("{home_str}/.tamagotchi/channels"));
+        assert_eq!(
+            expand_tilde("~/Library/Messages"),
+            format!("{home_str}/Library/Messages")
+        );
+        assert_eq!(
+            expand_tilde("~/.tamagotchi/channels"),
+            format!("{home_str}/.tamagotchi/channels")
+        );
     }
 
     #[test]
@@ -290,13 +296,17 @@ mod tests {
         };
         let expanded = policy.with_tildes_expanded();
 
-        assert_eq!(expanded.fs_read, vec![
-            format!("{home_str}/Library/Messages"),
-            "/etc/ssl".to_string(),
-        ]);
-        assert_eq!(expanded.fs_write, vec![
-            format!("{home_str}/.tamagotchi/channels/imessage"),
-        ]);
+        assert_eq!(
+            expanded.fs_read,
+            vec![
+                format!("{home_str}/Library/Messages"),
+                "/etc/ssl".to_string(),
+            ]
+        );
+        assert_eq!(
+            expanded.fs_write,
+            vec![format!("{home_str}/.tamagotchi/channels/imessage"),]
+        );
         assert!(!expanded.network);
     }
 }

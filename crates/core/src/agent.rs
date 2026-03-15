@@ -1030,6 +1030,26 @@ impl Agent {
                 Ok(report.format())
             }
             _ => {
+                // Integrity check for customization-installed tools
+                if let Ok(db) = crate::db::Database::open() {
+                    if let Ok(Some(cust_id)) = db.get_tool_customization_id(name) {
+                        if let Ok(data_dir) = Config::data_dir() {
+                            if let Ok(result) =
+                                crate::integrity::verify_integrity(&db, &cust_id, &data_dir)
+                            {
+                                if !result.ok {
+                                    let tampered_files =
+                                        [&result.tampered[..], &result.missing[..]].concat();
+                                    return Ok(format!(
+                                        "Blocked: tool '{}' failed integrity check. Tampered files: {}. Re-install via /customize to fix.",
+                                        name, tampered_files.join(", ")
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let cred_names = self.tool_registry.tool_credentials(name);
                 let extra_env: Vec<(String, String)> = cred_names
                     .iter()
