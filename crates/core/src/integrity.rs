@@ -33,7 +33,13 @@ pub fn verify_integrity(
     let mut missing = Vec::new();
 
     for (relative_path, expected_hash) in &stored_hashes {
-        let full_path = resolve_full_path(data_dir, relative_path);
+        let full_path = match resolve_full_path(data_dir, relative_path) {
+            Some(p) => p,
+            None => {
+                tampered.push(relative_path.clone());
+                continue;
+            }
+        };
 
         if !full_path.exists() {
             missing.push(relative_path.clone());
@@ -71,17 +77,21 @@ pub fn compute_sha256(data: &[u8]) -> String {
 /// Resolve the full filesystem path for a relative template path.
 /// Template paths like "telegram/channel.toml" are relative to either
 /// channels/ or tools/ under data_dir. We check both locations.
-fn resolve_full_path(data_dir: &Path, relative_path: &str) -> std::path::PathBuf {
+/// Returns None if the path contains traversal sequences.
+fn resolve_full_path(data_dir: &Path, relative_path: &str) -> Option<std::path::PathBuf> {
+    if relative_path.contains("..") {
+        return None;
+    }
     let channels_path = data_dir.join("channels").join(relative_path);
     if channels_path.exists() {
-        return channels_path;
+        return Some(channels_path);
     }
     let tools_path = data_dir.join("tools").join(relative_path);
     if tools_path.exists() {
-        return tools_path;
+        return Some(tools_path);
     }
     // Default to channels path for missing-file detection
-    channels_path
+    Some(channels_path)
 }
 
 #[cfg(test)]
