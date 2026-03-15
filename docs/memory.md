@@ -21,7 +21,7 @@ Each turn, the agent builds a memory context:
 3. Files are included one by one until the token budget is exhausted
 4. Files that would exceed the budget are skipped
 
-Token estimation uses a simple heuristic: `length_in_chars / 4`.
+Token estimation uses tiktoken-rs (cl100k_base BPE tokenizer).
 
 ### Configuration
 
@@ -70,11 +70,36 @@ Memory filenames are validated to prevent path traversal:
 - No `/` or `\` separators allowed
 - Empty filenames are rejected
 
+Secrets in tool output are automatically redacted when `security.secret_detection` is enabled (default: true).
+
 ## SOUL.md
 
 The personality file is special — it's loaded as the first part of the system prompt (before memory context). The agent can modify its own personality by writing to `SOUL.md`. Changes persist across sessions.
 
 The default `SOUL.md` is created by `tamagotchi init`.
+
+## Session persistence
+
+Conversations are automatically saved as session files in `~/.tamagotchi/sessions/`. Sessions track:
+
+- Full message history
+- Token usage
+- Model used
+- Auto-generated title
+
+Sessions are stored in the SQLite database (`tamagotchi.db`) with metadata for listing and retrieval. The most recent session can be automatically loaded on startup.
+
+## Conversation compaction
+
+When conversation history exceeds the token budget (`conversation.max_history_tokens`, default 32000), the agent can compact history by summarizing older messages while preserving recent context. This can also be triggered manually via the `/compact` slash command.
+
+## Atomic rollback
+
+The `/undo` command rolls back the last agent turn (both the assistant response and the preceding user message), allowing you to retry or rephrase.
+
+## Memory cleanup
+
+The `/memory cleanup` command helps manage memory files by identifying and removing stale or redundant entries.
 
 ## Tips
 

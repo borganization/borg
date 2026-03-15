@@ -5,7 +5,7 @@ Tamagotchi is an AI personal assistant agent built in Rust. The agent writes its
 ## Prerequisites
 
 - **Rust toolchain**: Install via [rustup](https://rustup.rs/)
-- **OpenRouter API key**: Sign up at [openrouter.ai](https://openrouter.ai/) and get an API key
+- **LLM API key**: One of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`
 - **Linux**: `bwrap` (bubblewrap) for tool sandboxing — install via your package manager
 - **macOS**: `sandbox-exec` is included with the OS
 
@@ -23,13 +23,19 @@ The binary is located at `target/release/tamagotchi`.
 
 ## Setup
 
-1. Set your API key:
+1. Set your API key (any one of the supported providers):
 
 ```sh
 export OPENROUTER_API_KEY="sk-or-..."
+# or
+export ANTHROPIC_API_KEY="sk-ant-..."
+# or
+export OPENAI_API_KEY="sk-..."
+# or
+export GEMINI_API_KEY="..."
 ```
 
-Or add it to your shell profile / `.env` file. See `.env.example` for the template.
+Or add it to your shell profile / `.env` file. See `.env.example` for the template. The provider is auto-detected based on which key is set.
 
 2. Initialize with the onboarding wizard:
 
@@ -41,7 +47,7 @@ This launches an interactive TUI that walks you through setup:
 
 - **Name your agent** — give it a custom identity (appears in SOUL.md)
 - **Pick a personality style** — Professional, Casual, Snarky, Nurturing, or Minimal
-- **Choose a model** — select from popular OpenRouter models (Claude, GPT-4.1, Gemini, Llama, etc.)
+- **Choose a provider and model** — select from OpenRouter, OpenAI, Anthropic, or Gemini models
 
 The wizard writes your choices to `config.toml` and generates a personalized `SOUL.md`. If you cancel mid-wizard, defaults are used instead.
 
@@ -55,8 +61,10 @@ This creates `~/.tamagotchi/` with your customized config, personality, and memo
 ├── memory/           # Topic-specific memories
 ├── tools/            # User-created tools
 ├── skills/           # User-created skills
-├── logs/
-└── cache/
+├── sessions/         # Session persistence (JSON files)
+├── logs/             # Daily JSONL debug logs
+├── cache/
+└── tamagotchi.db     # SQLite database (sessions, scheduled tasks)
 ```
 
 ## Usage
@@ -69,7 +77,7 @@ tamagotchi
 tamagotchi chat
 ```
 
-Start a conversation. The agent streams responses, can call tools, and remembers context across turns within a session.
+Start a conversation. The agent streams responses, can call tools, and remembers context across turns within a session. Use slash commands like `/compact`, `/undo`, `/memory cleanup`, and `/session list` for session management.
 
 ### One-shot query
 
@@ -79,17 +87,38 @@ tamagotchi ask "What's the weather in Tokyo?"
 
 Send a single message, get a response, and exit.
 
+Flags:
+- `--yes` — auto-approve all tool executions (skip confirmation prompts)
+- `--json` — output response as JSON
+
+### Daemon mode
+
+```sh
+tamagotchi daemon
+```
+
+Run the agent in the background for scheduled tasks and heartbeat check-ins without the interactive TUI.
+
+### System service
+
+```sh
+tamagotchi service install    # install as a system service (launchd/systemd)
+tamagotchi service uninstall  # remove the service
+tamagotchi service status     # check service status
+```
+
 ## What happens when you chat
 
 1. Your message is added to the conversation history
 2. A system prompt is assembled from: `SOUL.md` + current time + memory context + skills context
-3. The message is streamed to the LLM via OpenRouter
+3. The message is streamed to the LLM via the configured provider
 4. If the LLM responds with tool calls, each tool is executed and results are fed back
 5. The loop continues until the LLM responds with text only
+6. The session is auto-saved for later resumption
 
 ## Next steps
 
-- [Configuration](configuration.md) — customize the model, timeouts, and sandbox settings
+- [Configuration](configuration.md) — customize the provider, model, timeouts, and all settings
 - [Tools](tools.md) — learn how the agent creates and uses tools
 - [Skills](skills.md) — instruction bundles for teaching the agent CLI workflows
 - [Memory](memory.md) — how the agent remembers things across sessions
