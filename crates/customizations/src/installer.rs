@@ -36,6 +36,7 @@ pub async fn install(
     write_templates(def, data_dir)?;
 
     // 3. Store credentials in keychain
+    let service = format!("tamagotchi-{}", def.id.replace('/', "-"));
     for (key, value) in credentials {
         send_event(
             progress_tx,
@@ -46,7 +47,6 @@ pub async fn install(
         )
         .await;
 
-        let service = format!("tamagotchi-{}", def.id.replace('/', "-"));
         store_credential(&service, key, value)?;
 
         send_event(
@@ -69,11 +69,10 @@ pub async fn install(
     let credential_entries = credentials
         .iter()
         .map(|(key, _)| {
-            let service = format!("tamagotchi-{}", def.id.replace('/', "-"));
             let account = format!("tamagotchi-{key}");
             crate::CredentialEntry {
                 key: key.clone(),
-                service,
+                service: service.clone(),
                 account,
             }
         })
@@ -161,11 +160,16 @@ pub fn compute_file_hashes(
             TemplateTarget::Tools => data_dir.join("tools"),
         };
         let full_path = base.join(tmpl.relative_path);
-        if let Ok(content) = std::fs::read(&full_path) {
-            let mut hasher = Sha256::new();
-            hasher.update(&content);
-            let hex = format!("{:x}", hasher.finalize());
-            hashes.push((tmpl.relative_path.to_string(), hex));
+        match std::fs::read(&full_path) {
+            Ok(content) => {
+                let mut hasher = Sha256::new();
+                hasher.update(&content);
+                let hex = format!("{:x}", hasher.finalize());
+                hashes.push((tmpl.relative_path.to_string(), hex));
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read {} for hashing: {e}", full_path.display());
+            }
         }
     }
     hashes
