@@ -5,6 +5,7 @@ pub mod llm;
 pub mod logging;
 pub mod memory;
 pub mod provider;
+pub mod retry;
 pub mod skills;
 pub mod soul;
 pub mod tokenizer;

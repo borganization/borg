@@ -1,13 +1,91 @@
+use std::fmt;
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::provider::Provider;
+use crate::retry::backoff_delay;
 use crate::types::{Message, Role, ToolCall, ToolDefinition};
+
+// ── Error classification ──
+
+#[derive(Debug)]
+pub enum LlmError {
+    Retryable {
+        source: anyhow::Error,
+        retry_after: Option<Duration>,
+    },
+    Fatal {
+        source: anyhow::Error,
+    },
+    Interrupted,
+}
+
+impl fmt::Display for LlmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retryable { source, .. } => write!(f, "{source}"),
+            Self::Fatal { source } => write!(f, "{source}"),
+            Self::Interrupted => write!(f, "request interrupted"),
+        }
+    }
+}
+
+impl std::error::Error for LlmError {}
+
+impl LlmError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Retryable { .. })
+    }
+}
+
+fn classify_status(status: reqwest::StatusCode, body: &str, provider: &Provider) -> LlmError {
+    let retry_after = parse_retry_after(body);
+
+    match status.as_u16() {
+        429 => LlmError::Retryable {
+            source: anyhow::anyhow!("{provider} returned 429 (rate limited): {body}"),
+            retry_after,
+        },
+        500 | 502 | 503 | 504 => LlmError::Retryable {
+            source: anyhow::anyhow!("{provider} returned {status}: {body}"),
+            retry_after: None,
+        },
+        401 | 403 => LlmError::Fatal {
+            source: anyhow::anyhow!("{provider} returned {status} (auth error): {body}"),
+        },
+        400 => LlmError::Fatal {
+            source: anyhow::anyhow!("{provider} returned {status} (bad request): {body}"),
+        },
+        _ => LlmError::Fatal {
+            source: anyhow::anyhow!("{provider} returned {status}: {body}"),
+        },
+    }
+}
+
+fn classify_network_error(err: anyhow::Error) -> LlmError {
+    LlmError::Retryable {
+        source: err,
+        retry_after: None,
+    }
+}
+
+fn parse_retry_after(body: &str) -> Option<Duration> {
+    // Try to extract retry_after from JSON error body
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(secs) = v["error"]["retry_after"].as_f64() {
+            return Some(Duration::from_secs_f64(secs));
+        }
+    }
+    None
+}
 
 #[derive(Debug)]
 pub enum StreamEvent {
@@ -90,11 +168,73 @@ impl LlmClient {
         tools: Option<&[ToolDefinition]>,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        if self.provider.is_openai_compatible() {
-            self.stream_chat_openai(messages, tools, tx).await
-        } else {
-            self.stream_chat_anthropic(messages, tools, tx).await
+        self.stream_chat_with_cancel(messages, tools, tx, CancellationToken::new())
+            .await
+    }
+
+    /// Stream chat with cancellation support and retry logic.
+    pub async fn stream_chat_with_cancel(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        tx: mpsc::Sender<StreamEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        let max_retries = self.config.llm.max_retries;
+        let initial_delay = Duration::from_millis(self.config.llm.initial_retry_delay_ms);
+
+        for attempt in 0..=max_retries {
+            if cancel.is_cancelled() {
+                let _ = tx.send(StreamEvent::Done).await;
+                return Ok(());
+            }
+
+            let result = if self.provider.is_openai_compatible() {
+                self.stream_chat_openai_inner(messages, tools, &tx, &cancel)
+                    .await
+            } else {
+                self.stream_chat_anthropic_inner(messages, tools, &tx, &cancel)
+                    .await
+            };
+
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if !e.is_retryable() || attempt == max_retries {
+                        let msg = format!("{e}");
+                        let _ = tx.send(StreamEvent::Error(msg.clone())).await;
+                        bail!("{msg}");
+                    }
+
+                    let delay = if let LlmError::Retryable {
+                        retry_after: Some(ra),
+                        ..
+                    } = &e
+                    {
+                        *ra
+                    } else {
+                        backoff_delay(attempt, initial_delay, 2.0)
+                    };
+
+                    info!(
+                        "Retryable error (attempt {}/{}): {e}. Retrying in {}ms...",
+                        attempt + 1,
+                        max_retries,
+                        delay.as_millis()
+                    );
+
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            let _ = tx.send(StreamEvent::Done).await;
+                            return Ok(());
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                }
+            }
         }
+
+        unreachable!()
     }
 
     /// Non-streaming call for heartbeat and simple requests
@@ -112,12 +252,66 @@ impl LlmClient {
 
     // ── OpenAI-compatible path ──
 
-    async fn stream_chat_openai(
+    async fn send_request(
+        &self,
+        body: &impl Serialize,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<reqwest::Response, LlmError> {
+        let timeout = Duration::from_millis(self.config.llm.request_timeout_ms);
+
+        let fut = self
+            .client
+            .post(self.provider.base_url())
+            .headers(
+                self.provider
+                    .build_headers(&self.api_key)
+                    .map_err(|e| LlmError::Fatal { source: e })?,
+            )
+            .json(body)
+            .send();
+
+        let response = tokio::select! {
+            _ = cancel.cancelled() => {
+                return Err(LlmError::Interrupted);
+            }
+            result = tokio::time::timeout(timeout, fut) => {
+                match result {
+                    Ok(Ok(resp)) => resp,
+                    Ok(Err(e)) => {
+                        return Err(classify_network_error(
+                            anyhow::anyhow!("Failed to connect to {}: {e}", self.provider)
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(LlmError::Retryable {
+                            source: anyhow::anyhow!(
+                                "Request to {} timed out after {}ms",
+                                self.provider,
+                                self.config.llm.request_timeout_ms
+                            ),
+                            retry_after: None,
+                        });
+                    }
+                }
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(classify_status(status, &body, &self.provider));
+        }
+
+        Ok(response)
+    }
+
+    async fn stream_chat_openai_inner(
         &self,
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
-        tx: mpsc::Sender<StreamEvent>,
-    ) -> Result<()> {
+        tx: &mpsc::Sender<StreamEvent>,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<(), LlmError> {
         let model = self.provider.normalize_model(&self.config.llm.model);
         let request = ChatRequest {
             model: model.clone(),
@@ -133,26 +327,34 @@ impl LlmClient {
             self.provider, model
         );
 
-        let response = self
-            .client
-            .post(self.provider.base_url())
-            .headers(self.provider.build_headers(&self.api_key)?)
-            .json(&request)
-            .send()
-            .await
-            .with_context(|| format!("Failed to connect to {}", self.provider))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            bail!("{} returned {status}: {body}", self.provider);
-        }
+        let response = self.send_request(&request, cancel).await?;
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("Stream read error")?;
+        loop {
+            let chunk = tokio::select! {
+                _ = cancel.cancelled() => {
+                    let _ = tx.send(StreamEvent::Done).await;
+                    return Ok(());
+                }
+                maybe_chunk = stream.next() => {
+                    match maybe_chunk {
+                        Some(Ok(c)) => c,
+                        Some(Err(e)) => {
+                            return Err(LlmError::Retryable {
+                                source: anyhow::anyhow!("Stream read error: {e}"),
+                                retry_after: None,
+                            });
+                        }
+                        None => {
+                            let _ = tx.send(StreamEvent::Done).await;
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(line_end) = buffer.find('\n') {
@@ -211,9 +413,6 @@ impl LlmClient {
                 }
             }
         }
-
-        let _ = tx.send(StreamEvent::Done).await;
-        Ok(())
     }
 
     async fn chat_openai(
@@ -313,39 +512,48 @@ impl LlmClient {
         body
     }
 
-    async fn stream_chat_anthropic(
+    async fn stream_chat_anthropic_inner(
         &self,
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
-        tx: mpsc::Sender<StreamEvent>,
-    ) -> Result<()> {
+        tx: &mpsc::Sender<StreamEvent>,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<(), LlmError> {
         let body = self.build_anthropic_request(messages, tools, true);
         let model = self.provider.normalize_model(&self.config.llm.model);
 
         debug!("Sending streaming request to Anthropic (model: {})", model);
 
-        let response = self
-            .client
-            .post(self.provider.base_url())
-            .headers(self.provider.build_headers(&self.api_key)?)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to connect to Anthropic")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            bail!("Anthropic returned {status}: {body}");
-        }
+        let response = self.send_request(&body, cancel).await?;
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut current_tool_index: usize = 0;
         let mut current_block_is_tool = false;
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("Stream read error")?;
+        loop {
+            let chunk = tokio::select! {
+                _ = cancel.cancelled() => {
+                    let _ = tx.send(StreamEvent::Done).await;
+                    return Ok(());
+                }
+                maybe_chunk = stream.next() => {
+                    match maybe_chunk {
+                        Some(Ok(c)) => c,
+                        Some(Err(e)) => {
+                            return Err(LlmError::Retryable {
+                                source: anyhow::anyhow!("Stream read error: {e}"),
+                                retry_after: None,
+                            });
+                        }
+                        None => {
+                            let _ = tx.send(StreamEvent::Done).await;
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(line_end) = buffer.find('\n') {
@@ -421,15 +629,21 @@ impl LlmClient {
                                     return Ok(());
                                 }
                             }
+                            "error" => {
+                                let err_msg = event["error"]["message"]
+                                    .as_str()
+                                    .unwrap_or("unknown error");
+                                return Err(LlmError::Retryable {
+                                    source: anyhow::anyhow!("Anthropic stream error: {err_msg}"),
+                                    retry_after: None,
+                                });
+                            }
                             _ => {}
                         }
                     }
                 }
             }
         }
-
-        let _ = tx.send(StreamEvent::Done).await;
-        Ok(())
     }
 
     async fn chat_anthropic(
@@ -768,5 +982,45 @@ mod tests {
         assert_eq!(tcs[0].id, "toolu_123");
         assert_eq!(tcs[0].function.name, "read_memory");
         assert!(tcs[0].function.arguments.contains("test.md"));
+    }
+
+    #[test]
+    fn classify_status_429_is_retryable() {
+        let err = classify_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "rate limited",
+            &Provider::OpenRouter,
+        );
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn classify_status_500_is_retryable() {
+        let err = classify_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "server error",
+            &Provider::OpenRouter,
+        );
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn classify_status_401_is_fatal() {
+        let err = classify_status(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "bad key",
+            &Provider::OpenRouter,
+        );
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn classify_status_400_is_fatal() {
+        let err = classify_status(
+            reqwest::StatusCode::BAD_REQUEST,
+            "bad request",
+            &Provider::OpenRouter,
+        );
+        assert!(!err.is_retryable());
     }
 }
