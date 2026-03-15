@@ -1,4 +1,5 @@
 mod app;
+mod command_popup;
 mod composer;
 mod history;
 mod layout;
