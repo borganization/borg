@@ -6,11 +6,11 @@ use crate::config::Config;
 use crate::tokenizer::estimate_tokens;
 
 pub fn memory_dir() -> Result<PathBuf> {
-    Ok(Config::data_dir()?.join("memory"))
+    Config::memory_dir()
 }
 
 pub fn memory_index_path() -> Result<PathBuf> {
-    Ok(Config::data_dir()?.join("MEMORY.md"))
+    Config::memory_index_path()
 }
 
 pub fn load_memory_context(max_tokens: usize) -> Result<String> {
@@ -84,18 +84,17 @@ fn validate_memory_filename(filename: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn write_memory(filename: &str, content: &str, append: bool) -> Result<String> {
+fn resolve_memory_path(filename: &str) -> Result<PathBuf> {
     validate_memory_filename(filename)?;
+    match filename {
+        "SOUL.md" => Config::soul_path(),
+        "MEMORY.md" => memory_index_path(),
+        _ => Ok(memory_dir()?.join(filename)),
+    }
+}
 
-    let path = if filename == "SOUL.md" {
-        Config::data_dir()?.join("SOUL.md")
-    } else if filename == "MEMORY.md" {
-        memory_index_path()?
-    } else {
-        let dir = memory_dir()?;
-        std::fs::create_dir_all(&dir)?;
-        dir.join(filename)
-    };
+pub fn write_memory(filename: &str, content: &str, append: bool) -> Result<String> {
+    let path = resolve_memory_path(filename)?;
 
     if append && path.exists() {
         let existing = std::fs::read_to_string(&path)?;
@@ -111,15 +110,7 @@ pub fn write_memory(filename: &str, content: &str, append: bool) -> Result<Strin
 }
 
 pub fn read_memory(filename: &str) -> Result<String> {
-    validate_memory_filename(filename)?;
-
-    let path = if filename == "SOUL.md" {
-        Config::data_dir()?.join("SOUL.md")
-    } else if filename == "MEMORY.md" {
-        memory_index_path()?
-    } else {
-        memory_dir()?.join(filename)
-    };
+    let path = resolve_memory_path(filename)?;
 
     if path.exists() {
         Ok(std::fs::read_to_string(&path)?)
@@ -276,6 +267,36 @@ mod tests {
     fn memory_index_path_check() {
         let path = memory_index_path().unwrap();
         assert!(path.to_string_lossy().contains("MEMORY.md"));
+    }
+
+    #[test]
+    fn resolve_memory_path_soul() {
+        let path = resolve_memory_path("SOUL.md").unwrap();
+        assert!(path.to_string_lossy().contains(".tamagotchi"));
+        assert!(path.to_string_lossy().ends_with("SOUL.md"));
+        // Should NOT be inside memory/ subdirectory
+        assert!(!path.to_string_lossy().contains("memory/SOUL.md"));
+    }
+
+    #[test]
+    fn resolve_memory_path_memory_index() {
+        let path = resolve_memory_path("MEMORY.md").unwrap();
+        assert!(path.to_string_lossy().contains(".tamagotchi"));
+        assert!(path.to_string_lossy().ends_with("MEMORY.md"));
+        assert!(!path.to_string_lossy().contains("memory/MEMORY.md"));
+    }
+
+    #[test]
+    fn resolve_memory_path_topic_file() {
+        let path = resolve_memory_path("notes.md").unwrap();
+        assert!(path.to_string_lossy().contains("memory/notes.md"));
+    }
+
+    #[test]
+    fn resolve_memory_path_rejects_invalid() {
+        assert!(resolve_memory_path("").is_err());
+        assert!(resolve_memory_path("../etc/passwd").is_err());
+        assert!(resolve_memory_path("sub/dir.md").is_err());
     }
 
     #[test]

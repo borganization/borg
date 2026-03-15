@@ -40,74 +40,59 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LlmConfig {
-    #[serde(default)]
     pub provider: Option<String>,
-    #[serde(default = "default_api_key_env")]
     pub api_key_env: String,
-    #[serde(default = "default_model")]
     pub model: String,
-    #[serde(default = "default_temperature")]
     pub temperature: f32,
-    #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
-    #[serde(default = "default_max_retries")]
     pub max_retries: u32,
-    #[serde(default = "default_initial_retry_delay_ms")]
     pub initial_retry_delay_ms: u64,
-    #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HeartbeatConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_interval")]
     pub interval: String,
-    #[serde(default)]
     pub quiet_hours_start: Option<String>,
-    #[serde(default)]
     pub quiet_hours_end: Option<String>,
-    #[serde(default)]
     pub cron: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ToolsConfig {
-    #[serde(default = "default_timeout")]
     pub default_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SandboxConfig {
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_sandbox_mode")]
     pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MemoryConfig {
-    #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SkillsConfig {
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_skills_max_tokens")]
     pub max_context_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ConversationConfig {
-    #[serde(default = "default_max_history_tokens")]
     pub max_history_tokens: usize,
-    #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
-    #[serde(default = "default_true")]
     pub show_thinking: bool,
 }
 
@@ -120,48 +105,18 @@ pub struct UserConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WebConfig {
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_search_provider")]
     pub search_provider: String,
-    #[serde(default)]
     pub search_api_key_env: Option<String>,
 }
 
-impl Default for WebConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_true(),
-            search_provider: default_search_provider(),
-            search_api_key_env: None,
-        }
-    }
-}
-
-fn default_search_provider() -> String {
-    "duckduckgo".to_string()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TasksConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
-}
-
-impl Default for TasksConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            max_concurrent: default_max_concurrent(),
-        }
-    }
-}
-
-fn default_max_concurrent() -> usize {
-    3
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -172,68 +127,22 @@ pub struct DebugConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SecurityConfig {
-    #[serde(default = "default_true")]
     pub secret_detection: bool,
-}
-
-fn default_api_key_env() -> String {
-    "OPENROUTER_API_KEY".to_string()
-}
-fn default_model() -> String {
-    "anthropic/claude-sonnet-4".to_string()
-}
-fn default_temperature() -> f32 {
-    0.7
-}
-fn default_max_tokens() -> u32 {
-    4096
-}
-fn default_max_retries() -> u32 {
-    3
-}
-fn default_initial_retry_delay_ms() -> u64 {
-    200
-}
-fn default_request_timeout_ms() -> u64 {
-    60000
-}
-fn default_interval() -> String {
-    "30m".to_string()
-}
-fn default_timeout() -> u64 {
-    30000
-}
-fn default_true() -> bool {
-    true
-}
-fn default_sandbox_mode() -> String {
-    "strict".to_string()
-}
-fn default_max_context_tokens() -> usize {
-    8000
-}
-fn default_skills_max_tokens() -> usize {
-    4000
-}
-fn default_max_history_tokens() -> usize {
-    32000
-}
-fn default_max_iterations() -> u32 {
-    25
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             provider: None,
-            api_key_env: default_api_key_env(),
-            model: default_model(),
-            temperature: default_temperature(),
-            max_tokens: default_max_tokens(),
-            max_retries: default_max_retries(),
-            initial_retry_delay_ms: default_initial_retry_delay_ms(),
-            request_timeout_ms: default_request_timeout_ms(),
+            api_key_env: "OPENROUTER_API_KEY".into(),
+            model: "anthropic/claude-sonnet-4".into(),
+            temperature: 0.7,
+            max_tokens: 4096,
+            max_retries: 3,
+            initial_retry_delay_ms: 200,
+            request_timeout_ms: 60000,
         }
     }
 }
@@ -242,7 +151,7 @@ impl Default for HeartbeatConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            interval: default_interval(),
+            interval: "30m".into(),
             quiet_hours_start: None,
             quiet_hours_end: None,
             cron: None,
@@ -253,7 +162,7 @@ impl Default for HeartbeatConfig {
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
-            default_timeout_ms: default_timeout(),
+            default_timeout_ms: 30000,
         }
     }
 }
@@ -261,8 +170,8 @@ impl Default for ToolsConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
-            mode: default_sandbox_mode(),
+            enabled: true,
+            mode: "strict".into(),
         }
     }
 }
@@ -270,7 +179,7 @@ impl Default for SandboxConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            max_context_tokens: default_max_context_tokens(),
+            max_context_tokens: 8000,
         }
     }
 }
@@ -278,8 +187,8 @@ impl Default for MemoryConfig {
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
-            max_context_tokens: default_skills_max_tokens(),
+            enabled: true,
+            max_context_tokens: 4000,
         }
     }
 }
@@ -287,9 +196,9 @@ impl Default for SkillsConfig {
 impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
-            max_history_tokens: default_max_history_tokens(),
-            max_iterations: default_max_iterations(),
-            show_thinking: default_true(),
+            max_history_tokens: 32000,
+            max_iterations: 25,
+            show_thinking: true,
         }
     }
 }
@@ -297,7 +206,26 @@ impl Default for ConversationConfig {
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            secret_detection: default_true(),
+            secret_detection: true,
+        }
+    }
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            search_provider: "duckduckgo".into(),
+            search_api_key_env: None,
+        }
+    }
+}
+
+impl Default for TasksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_concurrent: 3,
         }
     }
 }
@@ -307,6 +235,38 @@ impl Config {
         Ok(dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
             .join(".tamagotchi"))
+    }
+
+    pub fn memory_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("memory"))
+    }
+
+    pub fn skills_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("skills"))
+    }
+
+    pub fn tools_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("tools"))
+    }
+
+    pub fn logs_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("logs"))
+    }
+
+    pub fn sessions_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("sessions"))
+    }
+
+    pub fn db_path() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("tamagotchi.db"))
+    }
+
+    pub fn soul_path() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("SOUL.md"))
+    }
+
+    pub fn memory_index_path() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("MEMORY.md"))
     }
 
     pub fn load() -> Result<Self> {
@@ -467,7 +427,7 @@ impl Config {
             return Ok((provider, key));
         }
 
-        if self.llm.api_key_env != default_api_key_env() {
+        if self.llm.api_key_env != LlmConfig::default().api_key_env {
             if let Ok(key) = std::env::var(&self.llm.api_key_env) {
                 if !key.is_empty() {
                     let provider = match self.llm.api_key_env.as_str() {
@@ -686,6 +646,99 @@ agent_name = "Buddy"
         assert!(display.contains("model"));
         assert!(display.contains("max_iterations"));
         assert!(display.contains("secret_detection"));
+    }
+
+    #[test]
+    fn default_web_config_values() {
+        let cfg = WebConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.search_provider, "duckduckgo");
+        assert!(cfg.search_api_key_env.is_none());
+    }
+
+    #[test]
+    fn default_tasks_config_values() {
+        let cfg = TasksConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.max_concurrent, 3);
+    }
+
+    #[test]
+    fn default_llm_config_retry_fields() {
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.max_retries, 3);
+        assert_eq!(cfg.initial_retry_delay_ms, 200);
+        assert_eq!(cfg.request_timeout_ms, 60000);
+    }
+
+    #[test]
+    fn path_helpers() {
+        let data = Config::data_dir().unwrap();
+        assert!(data.to_string_lossy().ends_with(".tamagotchi"));
+
+        let memory = Config::memory_dir().unwrap();
+        assert_eq!(memory, data.join("memory"));
+
+        let skills = Config::skills_dir().unwrap();
+        assert_eq!(skills, data.join("skills"));
+
+        let tools = Config::tools_dir().unwrap();
+        assert_eq!(tools, data.join("tools"));
+
+        let logs = Config::logs_dir().unwrap();
+        assert_eq!(logs, data.join("logs"));
+
+        let sessions = Config::sessions_dir().unwrap();
+        assert_eq!(sessions, data.join("sessions"));
+
+        let db = Config::db_path().unwrap();
+        assert_eq!(db, data.join("tamagotchi.db"));
+
+        let soul = Config::soul_path().unwrap();
+        assert_eq!(soul, data.join("SOUL.md"));
+
+        let mem_index = Config::memory_index_path().unwrap();
+        assert_eq!(mem_index, data.join("MEMORY.md"));
+    }
+
+    #[test]
+    fn partial_section_defaults_remaining_fields() {
+        // Only set model; temperature, max_tokens, etc. should get defaults
+        let toml_str = r#"
+[llm]
+model = "custom-model"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.llm.model, "custom-model");
+        assert!((cfg.llm.temperature - 0.7).abs() < f32::EPSILON);
+        assert_eq!(cfg.llm.max_tokens, 4096);
+        assert_eq!(cfg.llm.max_retries, 3);
+        assert_eq!(cfg.llm.initial_retry_delay_ms, 200);
+        assert_eq!(cfg.llm.request_timeout_ms, 60000);
+        assert_eq!(cfg.llm.api_key_env, "OPENROUTER_API_KEY");
+    }
+
+    #[test]
+    fn partial_web_config_defaults_remaining_fields() {
+        let toml_str = r#"
+[web]
+enabled = false
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(!cfg.web.enabled);
+        assert_eq!(cfg.web.search_provider, "duckduckgo");
+        assert!(cfg.web.search_api_key_env.is_none());
+    }
+
+    #[test]
+    fn partial_tasks_config_defaults_remaining_fields() {
+        let toml_str = r#"
+[tasks]
+enabled = true
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(cfg.tasks.enabled);
+        assert_eq!(cfg.tasks.max_concurrent, 3);
     }
 
     #[test]
