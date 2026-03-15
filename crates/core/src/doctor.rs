@@ -90,7 +90,7 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
     check_tools(&mut checks);
 
     // Skills checks
-    check_skills(&mut checks);
+    check_skills(config, &mut checks);
 
     // Memory checks
     check_memory(&mut checks);
@@ -103,6 +103,11 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
 
     // Budget checks
     check_budget(config, &mut checks);
+
+    // Host security checks
+    if config.security.host_audit {
+        crate::host_audit::run_host_security_checks(&mut checks);
+    }
 
     DiagnosticReport { checks }
 }
@@ -371,8 +376,9 @@ fn check_tools(checks: &mut Vec<DiagnosticCheck>) {
     }
 }
 
-fn check_skills(checks: &mut Vec<DiagnosticCheck>) {
-    match load_all_skills() {
+fn check_skills(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
+    let resolved_creds = config.resolve_credentials();
+    match load_all_skills(&resolved_creds) {
         Ok(skills) => {
             let available = skills.iter().filter(|s| s.available).count();
             let total = skills.len();
