@@ -135,7 +135,10 @@ pub fn parse_skill_md(content: &str) -> Result<(SkillManifest, String)> {
     Ok((manifest, body))
 }
 
-fn check_requirements(requires: &SkillRequires) -> bool {
+fn check_requirements(
+    requires: &SkillRequires,
+    resolved_creds: &std::collections::HashMap<String, String>,
+) -> bool {
     for bin in &requires.bins {
         if which::which(bin).is_err() {
             debug!("Skill requirement missing: binary '{bin}'");
@@ -143,7 +146,7 @@ fn check_requirements(requires: &SkillRequires) -> bool {
         }
     }
     for var in &requires.env {
-        if std::env::var(var).is_err() {
+        if std::env::var(var).is_err() && !resolved_creds.contains_key(var) {
             debug!("Skill requirement missing: env var '{var}'");
             return false;
         }
@@ -151,9 +154,12 @@ fn check_requirements(requires: &SkillRequires) -> bool {
     true
 }
 
-fn load_builtin_skill(content: &str) -> Result<Skill> {
+fn load_builtin_skill(
+    content: &str,
+    resolved_creds: &std::collections::HashMap<String, String>,
+) -> Result<Skill> {
     let (manifest, body) = parse_skill_md(content)?;
-    let available = check_requirements(&manifest.requires);
+    let available = check_requirements(&manifest.requires, resolved_creds);
     Ok(Skill {
         manifest,
         body,
@@ -168,7 +174,9 @@ pub fn skills_dir() -> Result<PathBuf> {
     Config::skills_dir()
 }
 
-pub fn load_all_skills() -> Result<Vec<Skill>> {
+pub fn load_all_skills(
+    resolved_creds: &std::collections::HashMap<String, String>,
+) -> Result<Vec<Skill>> {
     let builtins_raw = [
         BUILTIN_SLACK,
         BUILTIN_DISCORD,
@@ -190,7 +198,7 @@ pub fn load_all_skills() -> Result<Vec<Skill>> {
     let mut builtin_names: Vec<String> = Vec::new();
 
     for raw in builtins_raw {
-        match load_builtin_skill(raw) {
+        match load_builtin_skill(raw, resolved_creds) {
             Ok(skill) => {
                 builtin_names.push(skill.manifest.name.clone());
                 skills.push(skill);
@@ -211,7 +219,8 @@ pub fn load_all_skills() -> Result<Vec<Skill>> {
                     match std::fs::read_to_string(&skill_file) {
                         Ok(content) => match parse_skill_md(&content) {
                             Ok((manifest, body)) => {
-                                let available = check_requirements(&manifest.requires);
+                                let available =
+                                    check_requirements(&manifest.requires, resolved_creds);
                                 let name = manifest.name.clone();
                                 let skill_dir = entry.path();
 
@@ -278,8 +287,11 @@ pub fn load_all_skills() -> Result<Vec<Skill>> {
     Ok(skills)
 }
 
-pub fn load_skills_context(max_tokens: usize) -> Result<String> {
-    let skills = load_all_skills()?;
+pub fn load_skills_context(
+    max_tokens: usize,
+    resolved_creds: &std::collections::HashMap<String, String>,
+) -> Result<String> {
+    let skills = load_all_skills(resolved_creds)?;
 
     if skills.is_empty() {
         return Ok(String::new());
@@ -302,7 +314,6 @@ pub fn load_skills_context(max_tokens: usize) -> Result<String> {
 
     // Phase 2: With remaining budget, upgrade available skills to full body
     let mut full_parts = Vec::new();
-    let mut upgraded: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     for (i, skill) in sorted_skills.iter().enumerate() {
         if !skill.available {
@@ -322,7 +333,6 @@ pub fn load_skills_context(max_tokens: usize) -> Result<String> {
         }
 
         full_parts.push((i, full));
-        upgraded.insert(i);
         estimated_tokens += additional;
         debug!(
             "Included full skill '{}' ({full_tokens} estimated tokens)",
@@ -463,7 +473,7 @@ Short body.
 
     #[test]
     fn load_all_includes_builtins() {
-        let skills = load_all_skills().unwrap();
+        let skills = load_all_skills(&std::collections::HashMap::new()).unwrap();
         let names: Vec<&str> = skills.iter().map(|s| s.manifest.name.as_str()).collect();
         assert!(names.contains(&"slack"));
         assert!(names.contains(&"discord"));
@@ -504,7 +514,7 @@ Short body.
     #[test]
     fn skill_context_respects_token_budget() {
         // With a very small budget, not all skills should fit
-        let context = load_skills_context(100).unwrap();
+        let context = load_skills_context(100, &std::collections::HashMap::new()).unwrap();
         // At least the header should be there if any fit, or empty if none fit
         if !context.is_empty() {
             assert!(context.starts_with("# Skills"));
@@ -514,7 +524,7 @@ Short body.
     #[test]
     fn check_requirements_no_reqs() {
         let reqs = SkillRequires::default();
-        assert!(check_requirements(&reqs));
+        assert!(check_requirements(&reqs, &std::collections::HashMap::new()));
     }
 
     #[test]
@@ -523,7 +533,10 @@ Short body.
             bins: vec!["definitely_not_a_real_binary_xyz123".to_string()],
             env: vec![],
         };
-        assert!(!check_requirements(&reqs));
+        assert!(!check_requirements(
+            &reqs,
+            &std::collections::HashMap::new()
+        ));
     }
 
     #[test]
@@ -532,7 +545,24 @@ Short body.
             bins: vec![],
             env: vec!["DEFINITELY_NOT_A_REAL_ENV_VAR_XYZ123".to_string()],
         };
-        assert!(!check_requirements(&reqs));
+        assert!(!check_requirements(
+            &reqs,
+            &std::collections::HashMap::new()
+        ));
+    }
+
+    #[test]
+    fn check_requirements_env_satisfied_by_credentials() {
+        let reqs = SkillRequires {
+            bins: vec![],
+            env: vec!["CRED_STORE_VAR_XYZ123".to_string()],
+        };
+        let mut creds = std::collections::HashMap::new();
+        creds.insert(
+            "CRED_STORE_VAR_XYZ123".to_string(),
+            "secret-val".to_string(),
+        );
+        assert!(check_requirements(&reqs, &creds));
     }
 
     #[test]
@@ -648,7 +678,7 @@ Short body.
     #[test]
     fn progressive_loading_prioritizes_available() {
         // load_skills_context should include full body for available skills first
-        let context = load_skills_context(2000).unwrap();
+        let context = load_skills_context(2000, &std::collections::HashMap::new()).unwrap();
         // Just verify it doesn't panic and produces output
         if !context.is_empty() {
             assert!(context.starts_with("# Skills"));
