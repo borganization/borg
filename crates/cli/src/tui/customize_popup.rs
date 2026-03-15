@@ -110,7 +110,7 @@ impl CustomizePopup {
                     self.status_message = None;
                     None
                 }
-                KeyCode::Char(' ') => {
+                KeyCode::Char(' ') | KeyCode::Enter => {
                     if let Some(item) = self.items.get_mut(self.cursor) {
                         if !item.def.platform.is_available() {
                             self.status_message = Some((
@@ -128,7 +128,7 @@ impl CustomizePopup {
                     }
                     None
                 }
-                KeyCode::Enter => {
+                KeyCode::Tab => {
                     let actions = self.compute_actions();
                     if actions.is_empty() {
                         self.status_message = Some(("No changes to apply.".to_string(), false));
@@ -170,7 +170,7 @@ impl CustomizePopup {
         let popup_height = (area.height * 80 / 100)
             .max(12)
             .min(area.height.saturating_sub(2));
-        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let x = 1; // left-aligned with a small margin
         let y = (area.height.saturating_sub(popup_height)) / 2;
         let popup_area = Rect::new(x, y, popup_width, popup_height);
 
@@ -228,7 +228,18 @@ impl CustomizePopup {
                 String::new()
             };
 
-            let label = format!("  [{check}] {}{status}{platform_note}", item.def.name,);
+            let python_note = if item.def.required_bins.contains(&"python3")
+                && which::which("python3").is_err()
+            {
+                "  (needs python3)".to_string()
+            } else {
+                String::new()
+            };
+
+            let label = format!(
+                "  [{check}] {}{status}{platform_note}{python_note}",
+                item.def.name,
+            );
 
             let is_selected = i == self.cursor;
             let style = if is_selected {
@@ -273,7 +284,7 @@ impl CustomizePopup {
         }
 
         // Footer hint
-        let hint = " Space: toggle  Enter: apply  Esc: close";
+        let hint = " Enter: toggle  Tab: apply  Esc: close";
         let footer_y = inner.y + inner.height - 1;
         let footer_area = Rect::new(inner.x, footer_y, inner.width, 1);
         frame.render_widget(
@@ -333,10 +344,19 @@ mod tests {
         assert!(!popup.items[0].is_selected);
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // Enter toggles selection
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        popup.handle_key(enter);
+        assert!(popup.items[0].is_selected);
+
+        // Space also toggles selection
         let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
         popup.handle_key(space);
+        assert!(!popup.items[0].is_selected);
 
-        // First item should now be selected
+        // Toggle back on for action check
+        popup.handle_key(enter);
         assert!(popup.items[0].is_selected);
 
         let actions = popup.compute_actions();
