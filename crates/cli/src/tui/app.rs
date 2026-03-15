@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 use ratatui::Frame;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use tamagotchi_core::agent::AgentEvent;
 use tamagotchi_core::config::Config;
@@ -14,6 +15,7 @@ use tamagotchi_heartbeat::scheduler::HeartbeatEvent;
 use super::composer::Composer;
 use super::history::{ApprovalStatus, HistoryCell};
 use super::layout;
+use super::spinner;
 use super::theme;
 
 pub enum AppState {
@@ -33,10 +35,12 @@ pub enum AppAction {
     SendMessage {
         input: String,
         event_tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
     },
     CompactHistory,
     ClearHistory,
     ShowUsage,
+    UndoLastTurn,
     UpdateSetting {
         key: String,
         value: String,
@@ -52,6 +56,7 @@ pub struct App<'a> {
     pub config: Config,
     pub event_rx: Option<mpsc::Receiver<AgentEvent>>,
     pub heartbeat_rx: Option<mpsc::Receiver<HeartbeatEvent>>,
+    pub cancel_token: Option<CancellationToken>,
     auto_scroll: bool,
 }
 
@@ -66,6 +71,7 @@ impl<'a> App<'a> {
             config,
             event_rx: None,
             heartbeat_rx,
+            cancel_token: None,
             auto_scroll: true,
         }
     }
@@ -104,6 +110,10 @@ impl<'a> App<'a> {
                     || (key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
+                    // Cancel the in-flight agent task via token
+                    if let Some(token) = self.cancel_token.take() {
+                        token.cancel();
+                    }
                     self.event_rx = None;
                     for cell in self.cells.iter_mut().rev() {
                         if let HistoryCell::Assistant { streaming, .. } = cell {
@@ -178,6 +188,7 @@ impl<'a> App<'a> {
                      /usage     - Show usage stats\n  \
                      /compact   - Compact conversation history\n  \
                      /clear     - Clear conversation\n  \
+                     /undo      - Undo last agent turn\n  \
                      /tools     - List tools\n  \
                      /memory    - Show memory\n  \
                      /skills    - List skills\n  \
@@ -254,6 +265,9 @@ impl<'a> App<'a> {
             "/usage" => {
                 return Ok(AppAction::ShowUsage);
             }
+            "/undo" => {
+                return Ok(AppAction::UndoLastTurn);
+            }
             _ => {}
         }
 
@@ -299,6 +313,9 @@ impl<'a> App<'a> {
         let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
         self.event_rx = Some(event_rx);
 
+        let cancel = CancellationToken::new();
+        self.cancel_token = Some(cancel.clone());
+
         self.state = AppState::Streaming {
             start: Instant::now(),
         };
@@ -308,6 +325,7 @@ impl<'a> App<'a> {
         Ok(AppAction::SendMessage {
             input: input.to_string(),
             event_tx,
+            cancel,
         })
     }
 
@@ -420,6 +438,11 @@ impl<'a> App<'a> {
         let width = area.width;
         let mut all_lines: Vec<Line<'static>> = Vec::new();
 
+        let stream_elapsed = match &self.state {
+            AppState::Streaming { start, .. } => Some(start.elapsed()),
+            _ => None,
+        };
+
         if self.cells.is_empty() {
             let title = match &self.config.user.agent_name {
                 Some(name) => format!("{name} AI Assistant"),
@@ -435,7 +458,7 @@ impl<'a> App<'a> {
         }
 
         for cell in &self.cells {
-            all_lines.extend(cell.render(width));
+            all_lines.extend(cell.render(width, stream_elapsed));
         }
 
         self.total_lines = all_lines.len();
@@ -468,12 +491,12 @@ impl<'a> App<'a> {
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         let line = match &self.state {
             AppState::Streaming { start, .. } => {
-                let elapsed = start.elapsed().as_secs();
+                let elapsed_dur = start.elapsed();
+                let elapsed_secs = elapsed_dur.as_secs();
                 Line::from(vec![
-                    Span::styled(
-                        format!(" {} Working ({elapsed}s", theme::BULLET),
-                        theme::tool_style(),
-                    ),
+                    Span::raw(" "),
+                    spinner::status_spinner_frame(elapsed_dur),
+                    Span::styled(format!(" Working ({elapsed_secs}s"), theme::tool_style()),
                     Span::styled(" • esc to interrupt)", theme::dim()),
                 ])
             }

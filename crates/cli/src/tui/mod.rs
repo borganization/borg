@@ -3,6 +3,7 @@ mod composer;
 mod history;
 mod layout;
 mod markdown;
+mod spinner;
 mod theme;
 
 use std::io::stdout;
@@ -153,11 +154,18 @@ async fn run_event_loop(
 
         match action {
             AppAction::Quit => return Ok(()),
-            AppAction::SendMessage { input, event_tx } => {
+            AppAction::SendMessage {
+                input,
+                event_tx,
+                cancel,
+            } => {
                 let agent_clone = Arc::clone(agent);
                 tokio::spawn(async move {
                     let mut agent = agent_clone.lock().await;
-                    if let Err(e) = agent.send_message(&input, event_tx.clone()).await {
+                    if let Err(e) = agent
+                        .send_message_with_cancel(&input, event_tx.clone(), cancel)
+                        .await
+                    {
                         let _ = event_tx.send(AgentEvent::Error(e.to_string())).await;
                     }
                 });
@@ -196,6 +204,17 @@ async fn run_event_loop(
                     }
                 }
                 app.push_system_message(text.trim_end().to_string());
+            }
+            AppAction::UndoLastTurn => {
+                let mut agent = agent.lock().await;
+                let removed = agent.undo();
+                if removed > 0 {
+                    app.push_system_message(format!(
+                        "Undid last turn ({removed} messages removed)."
+                    ));
+                } else {
+                    app.push_system_message("Nothing to undo.".to_string());
+                }
             }
             AppAction::UpdateSetting { key, value } => {
                 let mut agent = agent.lock().await;

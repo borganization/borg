@@ -38,6 +38,12 @@ pub struct LlmConfig {
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_initial_retry_delay_ms")]
+    pub initial_retry_delay_ms: u64,
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +114,15 @@ fn default_temperature() -> f32 {
 fn default_max_tokens() -> u32 {
     4096
 }
+fn default_max_retries() -> u32 {
+    3
+}
+fn default_initial_retry_delay_ms() -> u64 {
+    200
+}
+fn default_request_timeout_ms() -> u64 {
+    60000
+}
 fn default_interval() -> String {
     "30m".to_string()
 }
@@ -138,6 +153,9 @@ impl Default for LlmConfig {
             model: default_model(),
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
+            max_retries: default_max_retries(),
+            initial_retry_delay_ms: default_initial_retry_delay_ms(),
+            request_timeout_ms: default_request_timeout_ms(),
         }
     }
 }
@@ -735,7 +753,8 @@ model = "anthropic/claude-sonnet-4"
     #[test]
     fn apply_setting_memory_max_context_tokens() {
         let mut cfg = Config::default();
-        cfg.apply_setting("memory.max_context_tokens", "16000").unwrap();
+        cfg.apply_setting("memory.max_context_tokens", "16000")
+            .unwrap();
         assert_eq!(cfg.memory.max_context_tokens, 16000);
     }
 

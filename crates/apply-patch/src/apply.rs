@@ -314,4 +314,84 @@ mod tests {
             "expected path traversal error"
         );
     }
+
+    /// End-to-end test: parse + apply a patch that creates a file whose content
+    /// contains embedded patch DSL markers (e.g., a README documenting the DSL).
+    /// With '+' prefix encoding, embedded markers are unambiguous.
+    #[test]
+    fn end_to_end_add_file_with_embedded_patch_markers() {
+        let dir = TempDir::new().unwrap();
+        let patch_text = "\
+*** Begin Patch
+*** Add File: README.md
++# My Project
++
++## Patch DSL
++
++Example:
++
++*** Begin Patch
++*** Add File: tool-name/tool.toml
+++content here
++*** End Patch
++
++That's it.
+*** End Patch";
+
+        let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+
+        // Should create exactly one file
+        assert_eq!(affected, vec!["README.md"]);
+        assert!(dir.path().join("README.md").exists());
+
+        // Should NOT create spurious files from embedded patch markers
+        assert!(
+            !dir.path().join("tool-name").exists(),
+            "Should not create tool-name/ directory from embedded patch example"
+        );
+
+        // Content should be complete and include the embedded markers
+        let content = std::fs::read_to_string(dir.path().join("README.md")).unwrap();
+        assert!(content.contains("# My Project"));
+        assert!(content.contains("*** Begin Patch"));
+        assert!(content.contains("*** Add File: tool-name/tool.toml"));
+        assert!(content.contains("That's it."));
+    }
+
+    /// End-to-end: parse + apply a full patch with add, update, and delete.
+    #[test]
+    fn end_to_end_full_patch() {
+        let dir = TempDir::new().unwrap();
+
+        // Pre-create a file to update and one to delete
+        std::fs::write(dir.path().join("update.txt"), "foo\nbar\nbaz\n").unwrap();
+        std::fs::write(dir.path().join("delete.txt"), "gone").unwrap();
+
+        let patch_text = "\
+*** Begin Patch
+*** Add File: new.txt
++hello world
+*** Update File: update.txt
+@@
+ foo
+-bar
++BAR
+*** Delete File: delete.txt
+*** End Patch";
+
+        let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        assert_eq!(affected.len(), 3);
+
+        // New file created
+        let content = std::fs::read_to_string(dir.path().join("new.txt")).unwrap();
+        assert_eq!(content, "hello world");
+
+        // File updated
+        let content = std::fs::read_to_string(dir.path().join("update.txt")).unwrap();
+        assert!(content.contains("BAR"));
+        assert!(!content.contains("\nbar\n"));
+
+        // File deleted
+        assert!(!dir.path().join("delete.txt").exists());
+    }
 }
