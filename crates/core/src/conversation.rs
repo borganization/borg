@@ -98,6 +98,33 @@ pub fn history_tokens(history: &[Message]) -> usize {
     history.iter().map(message_tokens).sum()
 }
 
+/// Undo the last agent turn: remove everything after the last user message.
+/// Returns the number of messages removed, or 0 if there is nothing to undo.
+pub fn undo_last_turn(history: &mut Vec<Message>) -> usize {
+    // Find the index of the last user message
+    let last_user_idx = history
+        .iter()
+        .rposition(|m| m.role == crate::types::Role::User);
+
+    match last_user_idx {
+        Some(idx) => {
+            // If the last message IS the user message, pop it too (undo the user's input)
+            // Otherwise, pop everything after the last user message (undo the assistant turn)
+            let remove_from = if idx == history.len() - 1 {
+                // Last msg is user — remove it and find the *previous* user message
+                // to also remove the prior assistant response
+                idx
+            } else {
+                idx + 1
+            };
+            let removed = history.len() - remove_from;
+            history.truncate(remove_from);
+            removed
+        }
+        None => 0,
+    }
+}
+
 /// Normalize conversation history to prevent API errors.
 ///
 /// Ensures structural invariants inspired by codex-rs:
@@ -429,6 +456,63 @@ mod tests {
     fn normalize_handles_empty_history() {
         let mut history: Vec<Message> = Vec::new();
         normalize_history(&mut history);
+        assert!(history.is_empty());
+    }
+
+    // -- undo_last_turn --
+
+    #[test]
+    fn undo_removes_assistant_response() {
+        let mut history = vec![
+            make_user("hello"),
+            make_assistant("hi there"),
+            make_user("do something"),
+            make_assistant("done"),
+        ];
+        let removed = undo_last_turn(&mut history);
+        assert_eq!(removed, 1);
+        assert_eq!(history.len(), 3);
+        assert_eq!(
+            history.last().unwrap().content.as_deref(),
+            Some("do something")
+        );
+    }
+
+    #[test]
+    fn undo_removes_tool_call_and_results() {
+        let mut history = vec![
+            make_user("test"),
+            make_tool_call_msg("", "c1", "run_shell"),
+            make_tool_result("c1", "output"),
+            make_assistant("done"),
+        ];
+        let removed = undo_last_turn(&mut history);
+        // Should remove everything after the user message
+        assert_eq!(removed, 3);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn undo_removes_trailing_user_message() {
+        let mut history = vec![make_user("hello"), make_assistant("hi"), make_user("bye")];
+        let removed = undo_last_turn(&mut history);
+        assert_eq!(removed, 1);
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn undo_empty_history() {
+        let mut history: Vec<Message> = Vec::new();
+        let removed = undo_last_turn(&mut history);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn undo_single_user_message() {
+        let mut history = vec![make_user("hello")];
+        let removed = undo_last_turn(&mut history);
+        assert_eq!(removed, 1);
         assert!(history.is_empty());
     }
 }

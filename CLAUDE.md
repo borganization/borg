@@ -83,16 +83,18 @@ Tool receives JSON args on stdin, returns result on stdout.
 
 ## Patch DSL
 
-Used by `apply_patch` to create/modify/delete files:
+Used by `apply_patch` to create/modify/delete files. Follows the codex apply-patch format where **every content line must have a prefix** (`+` for added content, ` ` for context, `-` for removed lines). This prevents ambiguity when file content contains `***` markers.
 
 ```
 *** Begin Patch
 *** Add File: tool-name/tool.toml
-<content>
++name = "example"
++description = "What it does"
 *** Add File: tool-name/main.py
-<content>
++import sys
++print("hello")
 *** Update File: tool-name/main.py
-@@ -1,3 +1,3 @@
+@@
  context
 -old line
 +new line

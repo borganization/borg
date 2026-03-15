@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use ratatui::text::{Line, Span};
 
 use super::markdown;
+use super::spinner;
 use super::theme;
 
 #[derive(Clone)]
@@ -54,7 +57,7 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 }
 
 impl HistoryCell {
-    pub fn render(&self, width: u16) -> Vec<Line<'static>> {
+    pub fn render(&self, width: u16, stream_elapsed: Option<Duration>) -> Vec<Line<'static>> {
         match self {
             HistoryCell::User { text } => {
                 let mut lines = vec![Line::from(vec![
@@ -66,10 +69,14 @@ impl HistoryCell {
             }
             HistoryCell::Assistant { text, streaming } => {
                 let mut lines = if text.is_empty() && *streaming {
-                    vec![Line::from(Span::styled(
-                        format!("{} ...", theme::BULLET),
-                        theme::dim(),
-                    ))]
+                    if let Some(elapsed) = stream_elapsed {
+                        spinner::transcript_spinner_lines(elapsed)
+                    } else {
+                        vec![Line::from(Span::styled(
+                            format!("{} ...", theme::BULLET),
+                            theme::dim(),
+                        ))]
+                    }
                 } else {
                     let prefix_span = Span::styled(format!("{} ", theme::BULLET), theme::dim());
                     let md_lines = markdown::render_markdown(text, width.saturating_sub(2));

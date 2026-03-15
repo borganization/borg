@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::config::Config;
-use crate::conversation::{compact_history, history_tokens, normalize_history};
+use crate::conversation::{compact_history, history_tokens, normalize_history, undo_last_turn};
 use crate::llm::{LlmClient, StreamEvent};
 use crate::logging::log_message;
 use crate::memory::{load_memory_context, read_memory, write_memory};
@@ -85,6 +86,12 @@ impl Agent {
         self.history.clear();
     }
 
+    /// Undo the last agent turn: remove everything back to the last user message.
+    /// Returns the number of messages removed, or 0 if nothing to undo.
+    pub fn undo(&mut self) -> usize {
+        undo_last_turn(&mut self.history)
+    }
+
     /// Returns (message_count, estimated_token_count) for the current session.
     pub fn conversation_stats(&self) -> (usize, usize) {
         (self.history.len(), history_tokens(&self.history))
@@ -128,14 +135,33 @@ impl Agent {
         user_input: &str,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<()> {
+        self.send_message_with_cancel(user_input, event_tx, CancellationToken::new())
+            .await
+    }
+
+    pub async fn send_message_with_cancel(
+        &mut self,
+        user_input: &str,
+        event_tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
         let msg = Message::user(user_input);
         log_message(&msg);
         self.history.push(msg);
-        self.run_agent_loop(event_tx).await
+        self.run_agent_loop(event_tx, cancel).await
     }
 
-    pub async fn run_agent_loop(&mut self, event_tx: mpsc::Sender<AgentEvent>) -> Result<()> {
+    pub async fn run_agent_loop(
+        &mut self,
+        event_tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
         loop {
+            if cancel.is_cancelled() {
+                let _ = event_tx.send(AgentEvent::TurnComplete).await;
+                return Ok(());
+            }
+
             // Normalize history to fix structural invariants (missing/orphaned tool results)
             normalize_history(&mut self.history);
 
@@ -160,11 +186,17 @@ impl Agent {
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
             let messages_clone = messages.clone();
             let tools_clone = tools.map(<[ToolDefinition]>::to_vec);
+            let cancel_clone = cancel.clone();
             let stream_handle = {
                 let llm_client = LlmClient::new(self.config.clone())?;
                 tokio::spawn(async move {
                     if let Err(e) = llm_client
-                        .stream_chat(&messages_clone, tools_clone.as_deref(), stream_tx)
+                        .stream_chat_with_cancel(
+                            &messages_clone,
+                            tools_clone.as_deref(),
+                            stream_tx,
+                            cancel_clone,
+                        )
                         .await
                     {
                         warn!("LLM stream error: {e}");
@@ -175,33 +207,51 @@ impl Agent {
             let mut text_content = String::new();
             let mut tool_calls: Vec<PartialToolCall> = Vec::new();
 
-            while let Some(event) = stream_rx.recv().await {
-                match event {
-                    StreamEvent::TextDelta(delta) => {
-                        text_content.push_str(&delta);
-                        let _ = event_tx.send(AgentEvent::TextDelta(delta)).await;
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        // Append whatever we have as an interrupted message
+                        if !text_content.is_empty() {
+                            let mut content = text_content.clone();
+                            content.push_str("\n\n[response interrupted]");
+                            let msg = Message::assistant(&content);
+                            log_message(&msg);
+                            self.history.push(msg);
+                        }
+                        let _ = event_tx.send(AgentEvent::TurnComplete).await;
+                        let _ = stream_handle.await;
+                        return Ok(());
                     }
-                    StreamEvent::ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments_delta,
-                    } => {
-                        while tool_calls.len() <= index {
-                            tool_calls.push(PartialToolCall::default());
+                    event = stream_rx.recv() => {
+                        match event {
+                            Some(StreamEvent::TextDelta(delta)) => {
+                                text_content.push_str(&delta);
+                                let _ = event_tx.send(AgentEvent::TextDelta(delta)).await;
+                            }
+                            Some(StreamEvent::ToolCallDelta {
+                                index,
+                                id,
+                                name,
+                                arguments_delta,
+                            }) => {
+                                while tool_calls.len() <= index {
+                                    tool_calls.push(PartialToolCall::default());
+                                }
+                                if let Some(id) = id {
+                                    tool_calls[index].id = id;
+                                }
+                                if let Some(name) = name {
+                                    tool_calls[index].name = name;
+                                }
+                                tool_calls[index].arguments.push_str(&arguments_delta);
+                            }
+                            Some(StreamEvent::Done) => break,
+                            Some(StreamEvent::Error(e)) => {
+                                let _ = event_tx.send(AgentEvent::Error(e)).await;
+                                break;
+                            }
+                            None => break,
                         }
-                        if let Some(id) = id {
-                            tool_calls[index].id = id;
-                        }
-                        if let Some(name) = name {
-                            tool_calls[index].name = name;
-                        }
-                        tool_calls[index].arguments.push_str(&arguments_delta);
-                    }
-                    StreamEvent::Done => break,
-                    StreamEvent::Error(e) => {
-                        let _ = event_tx.send(AgentEvent::Error(e)).await;
-                        break;
                     }
                 }
             }
@@ -216,8 +266,23 @@ impl Agent {
                 return Ok(());
             }
 
+            // Validate tool call JSON; drop incomplete ones with a warning
             let tc: Vec<ToolCall> = tool_calls
                 .iter()
+                .filter(|ptc| {
+                    if ptc.name.is_empty() || ptc.id.is_empty() {
+                        warn!("Dropping incomplete tool call (missing name or id)");
+                        return false;
+                    }
+                    if serde_json::from_str::<serde_json::Value>(&ptc.arguments).is_err() {
+                        warn!(
+                            "Dropping tool call '{}' with incomplete JSON arguments",
+                            ptc.name
+                        );
+                        return false;
+                    }
+                    true
+                })
                 .map(|ptc| ToolCall {
                     id: ptc.id.clone(),
                     call_type: "function".to_string(),
@@ -227,6 +292,20 @@ impl Agent {
                     },
                 })
                 .collect();
+
+            if tc.is_empty() {
+                // All tool calls were incomplete — treat as text-only response
+                let content = if text_content.is_empty() {
+                    "[response interrupted — incomplete tool calls discarded]".to_string()
+                } else {
+                    format!("{text_content}\n\n[incomplete tool calls discarded]")
+                };
+                let msg = Message::assistant(&content);
+                log_message(&msg);
+                self.history.push(msg);
+                let _ = event_tx.send(AgentEvent::TurnComplete).await;
+                return Ok(());
+            }
 
             let assistant_msg = if text_content.is_empty() {
                 Message {
@@ -247,6 +326,15 @@ impl Agent {
             self.history.push(assistant_msg);
 
             for tool_call in &tc {
+                if cancel.is_cancelled() {
+                    // Synthesize results for remaining tool calls
+                    let remaining_msg =
+                        Message::tool_result(&tool_call.id, "[tool call cancelled by user]");
+                    log_message(&remaining_msg);
+                    self.history.push(remaining_msg);
+                    continue;
+                }
+
                 let name = &tool_call.function.name;
                 let args = &tool_call.function.arguments;
 
@@ -465,7 +553,7 @@ fn core_tool_definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "apply_patch",
-            "Create or modify files in the tools directory using a patch DSL. Use this to create new tools.\n\nPatch format:\n*** Begin Patch\n*** Add File: <tool-name>/tool.toml\n<content>\n*** Add File: <tool-name>/main.py\n<content>\n*** End Patch",
+            "Create or modify files in the tools directory using a patch DSL. Use this to create new tools.\n\nPatch format:\n*** Begin Patch\n*** Add File: <tool-name>/tool.toml\n+<line1>\n+<line2>\n*** Add File: <tool-name>/main.py\n+<line1>\n+<line2>\n*** Update File: <tool-name>/main.py\n@@\n context\n-old line\n+new line\n*** Delete File: <tool-name>/old.py\n*** End Patch\n\nIMPORTANT: Every content line in Add File MUST start with '+'. Update File lines must start with ' ' (context), '-' (remove), or '+' (add).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -501,7 +589,7 @@ fn core_tool_definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "apply_skill_patch",
-            "Create or modify skill files in the skills directory using the patch DSL. Use this to create new skills.\n\nPatch format:\n*** Begin Patch\n*** Add File: <skill-name>/SKILL.md\n<content>\n*** End Patch",
+            "Create or modify skill files in the skills directory using the patch DSL. Use this to create new skills.\n\nPatch format:\n*** Begin Patch\n*** Add File: <skill-name>/SKILL.md\n+<line1>\n+<line2>\n*** End Patch\n\nIMPORTANT: Every content line in Add File MUST start with '+'.",
             serde_json::json!({
                 "type": "object",
                 "properties": {

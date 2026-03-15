@@ -26,6 +26,8 @@ uuid = { workspace = true }
 serde_yaml = { workspace = true }
 which = { workspace = true }
 tiktoken-rs = { workspace = true }
+tokio-util = "0.7"
+rand = "0.9"
 
 [lints]
 workspace = true

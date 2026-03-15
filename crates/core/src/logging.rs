@@ -168,7 +168,11 @@ mod tests {
         writeln!(f, r#"{{"type":"user_message","content":"hello"}}"#).unwrap();
         writeln!(f, r#"{{"type":"assistant_message","content":"hi"}}"#).unwrap();
         writeln!(f, r#"{{"type":"user_message","content":"do stuff"}}"#).unwrap();
-        writeln!(f, r#"{{"type":"tool_result","tool_call_id":"c1","content":"ok"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"tool_result","tool_call_id":"c1","content":"ok"}}"#
+        )
+        .unwrap();
 
         let stats = count_messages_in_dir(dir.path(), today, 1).unwrap();
         assert_eq!(stats.user_messages, 2);
@@ -182,13 +186,17 @@ mod tests {
         let today = Local::now().date_naive();
 
         // Today
-        let path = dir.path().join(format!("{}.jsonl", today.format("%Y-%m-%d")));
+        let path = dir
+            .path()
+            .join(format!("{}.jsonl", today.format("%Y-%m-%d")));
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, r#"{{"type":"user_message","content":"today"}}"#).unwrap();
 
         // Yesterday
         let yesterday = today - chrono::Duration::days(1);
-        let path = dir.path().join(format!("{}.jsonl", yesterday.format("%Y-%m-%d")));
+        let path = dir
+            .path()
+            .join(format!("{}.jsonl", yesterday.format("%Y-%m-%d")));
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, r#"{{"type":"user_message","content":"yesterday"}}"#).unwrap();
         writeln!(f, r#"{{"type":"assistant_message","content":"resp"}}"#).unwrap();
