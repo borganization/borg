@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod installer;
+pub mod keychain;
 pub mod verifier;
 
 use serde::{Deserialize, Serialize};

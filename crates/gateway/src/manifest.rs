@@ -53,15 +53,7 @@ impl Default for ScriptsSection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SandboxSection {
-    #[serde(default)]
-    pub network: bool,
-    #[serde(default)]
-    pub fs_read: Vec<String>,
-    #[serde(default)]
-    pub fs_write: Vec<String>,
-}
+pub use tamagotchi_tools::manifest::SandboxSection;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AuthSection {

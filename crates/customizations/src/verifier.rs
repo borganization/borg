@@ -78,27 +78,7 @@ pub fn verify_all(installed_ids: &[String], data_dir: &std::path::Path) -> Vec<V
 fn check_keychain_credential(def: &CustomizationDef, key: &str) -> bool {
     let service = format!("tamagotchi-{}", def.id.replace('/', "-"));
     let account = format!("tamagotchi-{key}");
-
-    if cfg!(target_os = "macos") {
-        std::process::Command::new("security")
-            .args([
-                "find-generic-password",
-                "-s",
-                &service,
-                "-a",
-                &account,
-                "-w",
-            ])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    } else if cfg!(target_os = "linux") {
-        std::process::Command::new("secret-tool")
-            .args(["lookup", "service", &service, "key", key])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    } else {
-        false
-    }
+    crate::keychain::check(&service, &account)
 }
 
 #[cfg(test)]

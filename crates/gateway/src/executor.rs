@@ -1,9 +1,8 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::path::Path;
-use tokio::process::Command;
-use tracing::debug;
 
 use crate::manifest::ChannelManifest;
+use tamagotchi_tools::runner::ScriptRunner;
 
 pub struct ChannelExecutor<'a> {
     manifest: &'a ChannelManifest,
@@ -82,116 +81,54 @@ impl<'a> ChannelExecutor<'a> {
         input_json: &str,
         blocked_paths: &[String],
     ) -> Result<String> {
-        let (program, base_args) = self.resolve_runtime()?;
         let script_path = self.channel_dir.join(script_name);
-
-        if !script_path.exists() {
-            bail!("Channel script not found: {}", script_path.display());
-        }
-
-        let mut cmd_args = base_args;
-        cmd_args.push(script_path.to_string_lossy().to_string());
-
         let sandbox_policy = self
             .manifest
             .sandbox_policy()
             .with_tildes_expanded()
             .with_blocked_paths_filtered(blocked_paths);
-        let sandboxed = sandbox_policy.wrap_command(&program, &cmd_args, self.channel_dir);
 
-        debug!(
-            "Executing channel script '{}' for '{}': {} {:?}",
-            script_name, self.manifest.name, sandboxed.program, sandboxed.args
-        );
-
-        let timeout = std::time::Duration::from_millis(self.manifest.settings.timeout_ms);
-
-        let mut cmd = Command::new(&sandboxed.program);
-        cmd.args(&sandboxed.args)
-            .current_dir(self.channel_dir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        // Pass auth env vars if configured
+        // Collect auth env vars
+        let mut extra_env = Vec::new();
         if let Some(ref secret_env) = self.manifest.auth.secret_env {
             if let Ok(val) = std::env::var(secret_env) {
-                cmd.env(secret_env, val);
+                extra_env.push((secret_env.clone(), val));
             }
         }
         if let Some(ref token_env) = self.manifest.auth.token_env {
             if let Ok(val) = std::env::var(token_env) {
-                cmd.env(token_env, val);
+                extra_env.push((token_env.clone(), val));
             }
         }
 
-        let mut child = cmd.kill_on_drop(true).spawn().with_context(|| {
-            format!(
-                "Failed to spawn channel script '{}' for '{}'",
-                script_name, self.manifest.name
-            )
-        })?;
+        let name = format!("channel:{}/{script_name}", self.manifest.name);
+        let runner = ScriptRunner {
+            runtime: &self.manifest.runtime,
+            script_path: &script_path,
+            work_dir: self.channel_dir,
+            sandbox_policy,
+            timeout_ms: self.manifest.settings.timeout_ms,
+            extra_env: &extra_env,
+            name: &name,
+        };
 
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            stdin
-                .write_all(input_json.as_bytes())
-                .await
-                .with_context(|| {
-                    format!("Failed to write stdin to channel script '{script_name}'")
-                })?;
-            drop(stdin);
+        let output = runner.run(input_json).await?;
+
+        if !output.success() {
+            let code = output.exit_code.unwrap_or(-1);
+            if !output.stderr.is_empty() {
+                bail!(
+                    "Channel script '{script_name}' exited {code}: {}",
+                    output.stderr
+                );
+            }
+            bail!(
+                "Channel script '{script_name}' exited {code}: {}",
+                output.stdout
+            );
         }
 
-        let output = tokio::time::timeout(timeout, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                // child is killed on drop via kill_on_drop(true)
-                anyhow::anyhow!(
-                    "Channel script '{script_name}' for '{}' timed out after {}ms",
-                    self.manifest.name,
-                    self.manifest.settings.timeout_ms
-                )
-            })?
-            .context("Failed to wait for channel script")?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
-            if !stderr.is_empty() {
-                bail!("Channel script '{script_name}' exited {code}: {stderr}");
-            }
-            bail!("Channel script '{script_name}' exited {code}: {stdout}");
-        }
-
-        Ok(stdout)
-    }
-
-    fn resolve_runtime(&self) -> Result<(String, Vec<String>)> {
-        match self.manifest.runtime.as_str() {
-            "python" => {
-                let python = which::which("python3")
-                    .or_else(|_| which::which("python"))
-                    .context("Python not found")?;
-                Ok((python.to_string_lossy().to_string(), vec![]))
-            }
-            "node" => {
-                let node = which::which("node").context("Node.js not found")?;
-                Ok((node.to_string_lossy().to_string(), vec![]))
-            }
-            "deno" => {
-                let deno = which::which("deno").context("Deno not found")?;
-                let allow_read = format!("--allow-read={}", self.channel_dir.display());
-                Ok((
-                    deno.to_string_lossy().to_string(),
-                    vec!["run".to_string(), allow_read],
-                ))
-            }
-            "bash" => Ok(("bash".to_string(), vec![])),
-            other => bail!("Unsupported runtime: {other}"),
-        }
+        Ok(output.stdout)
     }
 }
 
