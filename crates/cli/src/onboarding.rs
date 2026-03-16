@@ -302,21 +302,7 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
             (None, KeyStorage::EnvFile)
         } else {
             let storage = if keychain_available() {
-                let storage_options = vec![
-                    "OS Keychain (recommended — encrypted, no plaintext on disk)".to_string(),
-                    ".env file (plaintext in ~/.tamagotchi/.env)".to_string(),
-                ];
-                let chosen = prompt_or_cancel!(Select::new(
-                    "Where should the API key be stored?",
-                    storage_options
-                )
-                .with_help_message("Keychain uses macOS Keychain or Linux secret-tool")
-                .prompt());
-                if chosen.starts_with("OS Keychain") {
-                    KeyStorage::Keychain
-                } else {
-                    KeyStorage::EnvFile
-                }
+                KeyStorage::Keychain
             } else {
                 KeyStorage::EnvFile
             };
