@@ -415,9 +415,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let data_dir = tmp.path();
 
-        // Use the first catalog entry (Telegram)
+        // Use the first catalog entry (WhatsApp)
         let def = &CATALOG[0];
-        assert_eq!(def.id, "messaging/telegram");
+        assert_eq!(def.id, "messaging/whatsapp");
 
         // Write templates
         write_templates(def, data_dir).expect("write");

@@ -198,6 +198,8 @@ pub struct GatewayConfig {
     pub request_timeout_ms: u64,
     #[serde(default = "default_rate_limit")]
     pub rate_limit_per_minute: u32,
+    #[serde(default)]
+    pub public_url: Option<String>,
 }
 
 fn default_rate_limit() -> u32 {
@@ -213,6 +215,7 @@ impl Default for GatewayConfig {
             max_concurrent: 10,
             request_timeout_ms: 120_000,
             rate_limit_per_minute: default_rate_limit(),
+            public_url: None,
         }
     }
 }
