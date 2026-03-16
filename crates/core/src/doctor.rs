@@ -16,7 +16,32 @@ pub struct DiagnosticCheck {
     pub status: CheckStatus,
 }
 
-#[derive(Debug, Clone)]
+impl DiagnosticCheck {
+    pub fn pass(category: &'static str, name: impl Into<String>) -> Self {
+        Self {
+            category,
+            name: name.into(),
+            status: CheckStatus::Pass,
+        }
+    }
+
+    pub fn warn(category: &'static str, name: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self {
+            category,
+            name: name.into(),
+            status: CheckStatus::Warn(msg.into()),
+        }
+    }
+
+    pub fn fail(category: &'static str, name: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self {
+            category,
+            name: name.into(),
+            status: CheckStatus::Fail(msg.into()),
+        }
+    }
+}
+
 pub struct DiagnosticReport {
     pub checks: Vec<DiagnosticCheck>,
 }
@@ -120,41 +145,33 @@ fn check_config(checks: &mut Vec<DiagnosticCheck>) {
         Ok(data_dir) => {
             let config_path = data_dir.join("config.toml");
             if config_path.exists() {
-                checks.push(DiagnosticCheck {
-                    category: "Config",
-                    name: "config.toml exists".to_string(),
-                    status: CheckStatus::Pass,
-                });
+                checks.push(DiagnosticCheck::pass("Config", "config.toml exists"));
                 match Config::load() {
                     Ok(_) => {
-                        checks.push(DiagnosticCheck {
-                            category: "Config",
-                            name: "config.toml valid".to_string(),
-                            status: CheckStatus::Pass,
-                        });
+                        checks.push(DiagnosticCheck::pass("Config", "config.toml valid"));
                     }
                     Err(e) => {
-                        checks.push(DiagnosticCheck {
-                            category: "Config",
-                            name: "config.toml valid".to_string(),
-                            status: CheckStatus::Fail(format!("{e}")),
-                        });
+                        checks.push(DiagnosticCheck::fail(
+                            "Config",
+                            "config.toml valid",
+                            format!("{e}"),
+                        ));
                     }
                 }
             } else {
-                checks.push(DiagnosticCheck {
-                    category: "Config",
-                    name: "config.toml exists".to_string(),
-                    status: CheckStatus::Warn("not found, using defaults".to_string()),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    "Config",
+                    "config.toml exists",
+                    "not found, using defaults",
+                ));
             }
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Config",
-                name: "data directory".to_string(),
-                status: CheckStatus::Fail(format!("{e}")),
-            });
+            checks.push(DiagnosticCheck::fail(
+                "Config",
+                "data directory",
+                format!("{e}"),
+            ));
         }
     }
 }
@@ -162,44 +179,33 @@ fn check_config(checks: &mut Vec<DiagnosticCheck>) {
 fn check_provider(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
     match config.resolve_provider() {
         Ok((provider, _key)) => {
-            checks.push(DiagnosticCheck {
-                category: "Provider",
-                name: "API key set".to_string(),
-                status: CheckStatus::Pass,
-            });
-            checks.push(DiagnosticCheck {
-                category: "Provider",
-                name: format!("Provider: {provider}"),
-                status: CheckStatus::Pass,
-            });
+            checks.push(DiagnosticCheck::pass("Provider", "API key set"));
+            checks.push(DiagnosticCheck::pass(
+                "Provider",
+                format!("Provider: {provider}"),
+            ));
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Provider",
-                name: "API key set".to_string(),
-                status: CheckStatus::Fail(format!("{e}")),
-            });
+            checks.push(DiagnosticCheck::fail(
+                "Provider",
+                "API key set",
+                format!("{e}"),
+            ));
         }
     }
 
-    checks.push(DiagnosticCheck {
-        category: "Provider",
-        name: "API connectivity".to_string(),
-        status: CheckStatus::Warn("skipped (use --online for live check)".to_string()),
-    });
+    checks.push(DiagnosticCheck::warn(
+        "Provider",
+        "API connectivity",
+        "skipped (use --online for live check)",
+    ));
 }
 
 fn check_secrets(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
-    // Check if api_key SecretRef is configured (more secure than plaintext .env)
     if config.llm.api_key.is_some() {
-        checks.push(DiagnosticCheck {
-            category: "Secrets",
-            name: "API key via SecretRef".to_string(),
-            status: CheckStatus::Pass,
-        });
+        checks.push(DiagnosticCheck::pass("Secrets", "API key via SecretRef"));
     }
 
-    // Check for plaintext API keys in .env file
     if let Ok(data_dir) = Config::data_dir() {
         let env_path = data_dir.join(".env");
         if env_path.exists() {
@@ -219,55 +225,46 @@ fn check_secrets(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
                         } else {
                             "plaintext API keys in .env — consider using SecretRef in config.toml (e.g., api_key = { source = \"exec\", command = \"security\", args = [\"find-generic-password\", \"-s\", \"tamagotchi\", \"-w\"] })"
                         };
-                        checks.push(DiagnosticCheck {
-                            category: "Secrets",
-                            name: "plaintext keys in .env".to_string(),
-                            status: CheckStatus::Warn(hint.to_string()),
-                        });
+                        checks.push(DiagnosticCheck::warn(
+                            "Secrets",
+                            "plaintext keys in .env",
+                            hint,
+                        ));
                     } else {
-                        checks.push(DiagnosticCheck {
-                            category: "Secrets",
-                            name: "no plaintext API keys in .env".to_string(),
-                            status: CheckStatus::Pass,
-                        });
+                        checks.push(DiagnosticCheck::pass(
+                            "Secrets",
+                            "no plaintext API keys in .env",
+                        ));
                     }
                 }
                 Err(_) => {
-                    checks.push(DiagnosticCheck {
-                        category: "Secrets",
-                        name: ".env readable".to_string(),
-                        status: CheckStatus::Warn("could not read .env file".to_string()),
-                    });
+                    checks.push(DiagnosticCheck::warn(
+                        "Secrets",
+                        ".env readable",
+                        "could not read .env file",
+                    ));
                 }
             }
 
-            // Check file permissions on Unix
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
                 if let Ok(meta) = std::fs::metadata(&env_path) {
                     let mode = meta.mode() & 0o777;
                     if mode & 0o077 != 0 {
-                        checks.push(DiagnosticCheck {
-                            category: "Secrets",
-                            name: ".env file permissions".to_string(),
-                            status: CheckStatus::Warn(format!(
-                                "permissions are {mode:04o} — should be 0600 or stricter"
-                            )),
-                        });
+                        checks.push(DiagnosticCheck::warn(
+                            "Secrets",
+                            ".env file permissions",
+                            format!("permissions are {mode:04o} — should be 0600 or stricter"),
+                        ));
                     } else {
-                        checks.push(DiagnosticCheck {
-                            category: "Secrets",
-                            name: ".env file permissions".to_string(),
-                            status: CheckStatus::Pass,
-                        });
+                        checks.push(DiagnosticCheck::pass("Secrets", ".env file permissions"));
                     }
                 }
             }
         }
     }
 
-    // Check for multi-key fallback
     if !config.llm.api_keys.is_empty() {
         let resolved_count = config
             .llm
@@ -275,62 +272,49 @@ fn check_secrets(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
             .iter()
             .filter(|sr| sr.resolve().is_ok())
             .count();
-        checks.push(DiagnosticCheck {
-            category: "Secrets",
-            name: format!(
-                "multi-key fallback: {resolved_count}/{} keys resolvable",
-                config.llm.api_keys.len()
-            ),
-            status: if resolved_count > 0 {
-                CheckStatus::Pass
-            } else {
-                CheckStatus::Warn("no fallback keys could be resolved".to_string())
-            },
-        });
+        let name = format!(
+            "multi-key fallback: {resolved_count}/{} keys resolvable",
+            config.llm.api_keys.len()
+        );
+        if resolved_count > 0 {
+            checks.push(DiagnosticCheck::pass("Secrets", name));
+        } else {
+            checks.push(DiagnosticCheck::warn(
+                "Secrets",
+                name,
+                "no fallback keys could be resolved",
+            ));
+        }
     }
 }
 
 fn check_sandbox(checks: &mut Vec<DiagnosticCheck>) {
     if cfg!(target_os = "macos") {
-        match which::which("sandbox-exec") {
-            Ok(_) => {
-                checks.push(DiagnosticCheck {
-                    category: "Sandbox",
-                    name: "sandbox-exec available".to_string(),
-                    status: CheckStatus::Pass,
-                });
-            }
-            Err(_) => {
-                checks.push(DiagnosticCheck {
-                    category: "Sandbox",
-                    name: "sandbox-exec available".to_string(),
-                    status: CheckStatus::Warn("not found".to_string()),
-                });
-            }
+        if which::which("sandbox-exec").is_ok() {
+            checks.push(DiagnosticCheck::pass("Sandbox", "sandbox-exec available"));
+        } else {
+            checks.push(DiagnosticCheck::warn(
+                "Sandbox",
+                "sandbox-exec available",
+                "not found",
+            ));
         }
     } else if cfg!(target_os = "linux") {
-        match which::which("bwrap") {
-            Ok(_) => {
-                checks.push(DiagnosticCheck {
-                    category: "Sandbox",
-                    name: "bwrap available".to_string(),
-                    status: CheckStatus::Pass,
-                });
-            }
-            Err(_) => {
-                checks.push(DiagnosticCheck {
-                    category: "Sandbox",
-                    name: "bwrap available".to_string(),
-                    status: CheckStatus::Warn("not found — sandboxing disabled".to_string()),
-                });
-            }
+        if which::which("bwrap").is_ok() {
+            checks.push(DiagnosticCheck::pass("Sandbox", "bwrap available"));
+        } else {
+            checks.push(DiagnosticCheck::warn(
+                "Sandbox",
+                "bwrap available",
+                "not found — sandboxing disabled",
+            ));
         }
     } else {
-        checks.push(DiagnosticCheck {
-            category: "Sandbox",
-            name: "sandbox support".to_string(),
-            status: CheckStatus::Warn("not available on this platform".to_string()),
-        });
+        checks.push(DiagnosticCheck::warn(
+            "Sandbox",
+            "sandbox support",
+            "not available on this platform",
+        ));
     }
 }
 
@@ -338,43 +322,38 @@ fn check_tools(checks: &mut Vec<DiagnosticCheck>) {
     match Config::tools_dir() {
         Ok(tools_dir) => {
             if tools_dir.exists() {
-                checks.push(DiagnosticCheck {
-                    category: "Tools",
-                    name: "tools directory exists".to_string(),
-                    status: CheckStatus::Pass,
-                });
+                checks.push(DiagnosticCheck::pass("Tools", "tools directory exists"));
             } else {
-                checks.push(DiagnosticCheck {
-                    category: "Tools",
-                    name: "tools directory exists".to_string(),
-                    status: CheckStatus::Warn("not found".to_string()),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    "Tools",
+                    "tools directory exists",
+                    "not found",
+                ));
             }
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Tools",
-                name: "tools directory".to_string(),
-                status: CheckStatus::Fail(format!("{e}")),
-            });
+            checks.push(DiagnosticCheck::fail(
+                "Tools",
+                "tools directory",
+                format!("{e}"),
+            ));
         }
     }
 
     match tamagotchi_tools::registry::ToolRegistry::new() {
         Ok(registry) => {
             let tools = registry.list_tools();
-            checks.push(DiagnosticCheck {
-                category: "Tools",
-                name: format!("tool manifests valid ({} tools)", tools.len()),
-                status: CheckStatus::Pass,
-            });
+            checks.push(DiagnosticCheck::pass(
+                "Tools",
+                format!("tool manifests valid ({} tools)", tools.len()),
+            ));
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Tools",
-                name: "tool manifests valid".to_string(),
-                status: CheckStatus::Fail(format!("{e}")),
-            });
+            checks.push(DiagnosticCheck::fail(
+                "Tools",
+                "tool manifests valid",
+                format!("{e}"),
+            ));
         }
     }
 }
@@ -385,11 +364,10 @@ fn check_skills(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
         Ok(skills) => {
             let available = skills.iter().filter(|s| s.available).count();
             let total = skills.len();
-            checks.push(DiagnosticCheck {
-                category: "Skills",
-                name: format!("{available}/{total} skills available"),
-                status: CheckStatus::Pass,
-            });
+            checks.push(DiagnosticCheck::pass(
+                "Skills",
+                format!("{available}/{total} skills available"),
+            ));
 
             let missing: Vec<String> = skills
                 .iter()
@@ -397,19 +375,19 @@ fn check_skills(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
                 .map(|s| s.manifest.name.clone())
                 .collect();
             if !missing.is_empty() {
-                checks.push(DiagnosticCheck {
-                    category: "Skills",
-                    name: format!("missing requirements: {}", missing.join(", ")),
-                    status: CheckStatus::Warn("some skills unavailable".to_string()),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    "Skills",
+                    format!("missing requirements: {}", missing.join(", ")),
+                    "some skills unavailable",
+                ));
             }
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Skills",
-                name: "skills loading".to_string(),
-                status: CheckStatus::Fail(format!("{e}")),
-            });
+            checks.push(DiagnosticCheck::fail(
+                "Skills",
+                "skills loading",
+                format!("{e}"),
+            ));
         }
     }
 }
@@ -418,50 +396,34 @@ fn check_memory(checks: &mut Vec<DiagnosticCheck>) {
     match Config::memory_index_path() {
         Ok(path) => {
             if path.exists() {
-                checks.push(DiagnosticCheck {
-                    category: "Memory",
-                    name: "MEMORY.md exists".to_string(),
-                    status: CheckStatus::Pass,
-                });
+                checks.push(DiagnosticCheck::pass("Memory", "MEMORY.md exists"));
             } else {
-                checks.push(DiagnosticCheck {
-                    category: "Memory",
-                    name: "MEMORY.md exists".to_string(),
-                    status: CheckStatus::Warn("not found".to_string()),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    "Memory",
+                    "MEMORY.md exists",
+                    "not found",
+                ));
             }
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Memory",
-                name: "MEMORY.md".to_string(),
-                status: CheckStatus::Fail(format!("{e}")),
-            });
+            checks.push(DiagnosticCheck::fail("Memory", "MEMORY.md", format!("{e}")));
         }
     }
 
     match Config::soul_path() {
         Ok(path) => {
             if path.exists() {
-                checks.push(DiagnosticCheck {
-                    category: "Memory",
-                    name: "SOUL.md exists".to_string(),
-                    status: CheckStatus::Pass,
-                });
+                checks.push(DiagnosticCheck::pass("Memory", "SOUL.md exists"));
             } else {
-                checks.push(DiagnosticCheck {
-                    category: "Memory",
-                    name: "SOUL.md exists".to_string(),
-                    status: CheckStatus::Warn("not found".to_string()),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    "Memory",
+                    "SOUL.md exists",
+                    "not found",
+                ));
             }
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Memory",
-                name: "SOUL.md".to_string(),
-                status: CheckStatus::Fail(format!("{e}")),
-            });
+            checks.push(DiagnosticCheck::fail("Memory", "SOUL.md", format!("{e}")));
         }
     }
 }
@@ -470,80 +432,66 @@ fn check_data_dir(checks: &mut Vec<DiagnosticCheck>) {
     match Config::data_dir() {
         Ok(data_dir) => {
             if data_dir.exists() {
-                // Test writability
                 let test_file = data_dir.join(".doctor_write_test");
                 match std::fs::write(&test_file, "test") {
                     Ok(()) => {
                         let _ = std::fs::remove_file(&test_file);
-                        checks.push(DiagnosticCheck {
-                            category: "Data",
-                            name: "data directory writable".to_string(),
-                            status: CheckStatus::Pass,
-                        });
+                        checks.push(DiagnosticCheck::pass("Data", "data directory writable"));
                     }
                     Err(e) => {
-                        checks.push(DiagnosticCheck {
-                            category: "Data",
-                            name: "data directory writable".to_string(),
-                            status: CheckStatus::Fail(format!("{e}")),
-                        });
+                        checks.push(DiagnosticCheck::fail(
+                            "Data",
+                            "data directory writable",
+                            format!("{e}"),
+                        ));
                     }
                 }
             } else {
-                checks.push(DiagnosticCheck {
-                    category: "Data",
-                    name: "data directory exists".to_string(),
-                    status: CheckStatus::Warn(
-                        "~/.tamagotchi not found — run `tamagotchi init`".to_string(),
-                    ),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    "Data",
+                    "data directory exists",
+                    "~/.tamagotchi not found — run `tamagotchi init`",
+                ));
             }
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Data",
-                name: "data directory".to_string(),
-                status: CheckStatus::Fail(format!("{e}")),
-            });
+            checks.push(DiagnosticCheck::fail(
+                "Data",
+                "data directory",
+                format!("{e}"),
+            ));
         }
     }
 
     match Database::open() {
-        Ok(_) => {
-            checks.push(DiagnosticCheck {
-                category: "Data",
-                name: "database accessible".to_string(),
-                status: CheckStatus::Pass,
-            });
-        }
+        Ok(_) => checks.push(DiagnosticCheck::pass("Data", "database accessible")),
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Data",
-                name: "database accessible".to_string(),
-                status: CheckStatus::Fail(format!("{e}")),
-            });
+            checks.push(DiagnosticCheck::fail(
+                "Data",
+                "database accessible",
+                format!("{e}"),
+            ));
         }
     }
 }
 
 fn check_gateway(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
     if !config.gateway.enabled {
-        checks.push(DiagnosticCheck {
-            category: "Gateway",
-            name: "gateway enabled".to_string(),
-            status: CheckStatus::Warn("disabled".to_string()),
-        });
+        checks.push(DiagnosticCheck::warn(
+            "Gateway",
+            "gateway enabled",
+            "disabled",
+        ));
         return;
     }
 
-    checks.push(DiagnosticCheck {
-        category: "Gateway",
-        name: format!(
+    checks.push(DiagnosticCheck::pass(
+        "Gateway",
+        format!(
             "gateway config: {}:{}",
             config.gateway.host, config.gateway.port
         ),
-        status: CheckStatus::Pass,
-    });
+    ));
 
     match Config::channels_dir() {
         Ok(channels_dir) => {
@@ -572,33 +520,28 @@ fn check_gateway(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
                     }
                 }
 
-                checks.push(DiagnosticCheck {
-                    category: "Gateway",
-                    name: format!("{count} channel(s) found"),
-                    status: CheckStatus::Pass,
-                });
+                checks.push(DiagnosticCheck::pass(
+                    "Gateway",
+                    format!("{count} channel(s) found"),
+                ));
 
                 for error in errors {
-                    checks.push(DiagnosticCheck {
-                        category: "Gateway",
-                        name: "channel manifest".to_string(),
-                        status: CheckStatus::Fail(error),
-                    });
+                    checks.push(DiagnosticCheck::fail("Gateway", "channel manifest", error));
                 }
             } else {
-                checks.push(DiagnosticCheck {
-                    category: "Gateway",
-                    name: "channels directory".to_string(),
-                    status: CheckStatus::Warn("not found".to_string()),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    "Gateway",
+                    "channels directory",
+                    "not found",
+                ));
             }
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Gateway",
-                name: "channels directory".to_string(),
-                status: CheckStatus::Fail(format!("{e}")),
-            });
+            checks.push(DiagnosticCheck::fail(
+                "Gateway",
+                "channels directory",
+                format!("{e}"),
+            ));
         }
     }
 }
@@ -606,11 +549,11 @@ fn check_gateway(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
 fn check_budget(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
     let limit = config.budget.monthly_token_limit;
     if limit == 0 {
-        checks.push(DiagnosticCheck {
-            category: "Budget",
-            name: "monthly limit".to_string(),
-            status: CheckStatus::Warn("unlimited (no budget set)".to_string()),
-        });
+        checks.push(DiagnosticCheck::warn(
+            "Budget",
+            "monthly limit",
+            "unlimited (no budget set)",
+        ));
         return;
     }
 
@@ -620,39 +563,27 @@ fn check_budget(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
                 let pct = (used as f64 / limit as f64 * 100.0) as u64;
                 let name = format!("monthly usage: {used}/{limit} ({pct}%)");
                 if used >= limit {
-                    checks.push(DiagnosticCheck {
-                        category: "Budget",
-                        name,
-                        status: CheckStatus::Fail("budget exceeded".to_string()),
-                    });
+                    checks.push(DiagnosticCheck::fail("Budget", name, "budget exceeded"));
                 } else if (used as f64 / limit as f64) >= config.budget.warning_threshold {
-                    checks.push(DiagnosticCheck {
-                        category: "Budget",
-                        name,
-                        status: CheckStatus::Warn("approaching limit".to_string()),
-                    });
+                    checks.push(DiagnosticCheck::warn("Budget", name, "approaching limit"));
                 } else {
-                    checks.push(DiagnosticCheck {
-                        category: "Budget",
-                        name,
-                        status: CheckStatus::Pass,
-                    });
+                    checks.push(DiagnosticCheck::pass("Budget", name));
                 }
             }
             Err(e) => {
-                checks.push(DiagnosticCheck {
-                    category: "Budget",
-                    name: "monthly usage".to_string(),
-                    status: CheckStatus::Warn(format!("could not read: {e}")),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    "Budget",
+                    "monthly usage",
+                    format!("could not read: {e}"),
+                ));
             }
         },
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Budget",
-                name: "monthly usage".to_string(),
-                status: CheckStatus::Warn(format!("database unavailable: {e}")),
-            });
+            checks.push(DiagnosticCheck::warn(
+                "Budget",
+                "monthly usage",
+                format!("database unavailable: {e}"),
+            ));
         }
     }
 }
@@ -662,44 +593,46 @@ fn check_customizations(checks: &mut Vec<DiagnosticCheck>) {
         Ok(db) => match db.list_customizations() {
             Ok(customizations) => {
                 if customizations.is_empty() {
-                    checks.push(DiagnosticCheck {
-                        category: "Customizations",
-                        name: "installed integrations".to_string(),
-                        status: CheckStatus::Warn("none installed (use /customize)".to_string()),
-                    });
+                    checks.push(DiagnosticCheck::warn(
+                        "Customizations",
+                        "installed integrations",
+                        "none installed (use /customize)",
+                    ));
                 } else {
                     let verified = customizations
                         .iter()
                         .filter(|c| c.verified_at.is_some())
                         .count();
-                    checks.push(DiagnosticCheck {
-                        category: "Customizations",
-                        name: format!(
+                    checks.push(DiagnosticCheck::pass(
+                        "Customizations",
+                        format!(
                             "{} integration(s) installed, {verified} verified",
                             customizations.len()
                         ),
-                        status: CheckStatus::Pass,
-                    });
+                    ));
 
                     for c in &customizations {
-                        let status = if c.verified_at.is_some() {
-                            CheckStatus::Pass
+                        let name = format!("{} ({})", c.name, c.kind);
+                        if c.verified_at.is_some() {
+                            checks.push(DiagnosticCheck::pass("Customizations", name));
                         } else {
-                            CheckStatus::Warn("not verified".to_string())
-                        };
-                        checks.push(DiagnosticCheck {
-                            category: "Customizations",
-                            name: format!("{} ({})", c.name, c.kind),
-                            status,
-                        });
+                            checks.push(DiagnosticCheck::warn(
+                                "Customizations",
+                                name,
+                                "not verified",
+                            ));
+                        }
 
-                        // Integrity check
                         if let Ok(data_dir) = Config::data_dir() {
                             if let Ok(result) =
                                 crate::integrity::verify_integrity(&db, &c.id, &data_dir)
                             {
-                                let integrity_status = if result.ok {
-                                    CheckStatus::Pass
+                                let integrity_name = format!("{} file integrity", c.name);
+                                if result.ok {
+                                    checks.push(DiagnosticCheck::pass(
+                                        "Customizations",
+                                        integrity_name,
+                                    ));
                                 } else {
                                     let mut issues = Vec::new();
                                     if !result.tampered.is_empty() {
@@ -714,32 +647,31 @@ fn check_customizations(checks: &mut Vec<DiagnosticCheck>) {
                                             result.missing.join(", ")
                                         ));
                                     }
-                                    CheckStatus::Fail(issues.join("; "))
-                                };
-                                checks.push(DiagnosticCheck {
-                                    category: "Customizations",
-                                    name: format!("{} file integrity", c.name),
-                                    status: integrity_status,
-                                });
+                                    checks.push(DiagnosticCheck::fail(
+                                        "Customizations",
+                                        integrity_name,
+                                        issues.join("; "),
+                                    ));
+                                }
                             }
                         }
                     }
                 }
             }
             Err(e) => {
-                checks.push(DiagnosticCheck {
-                    category: "Customizations",
-                    name: "customizations table".to_string(),
-                    status: CheckStatus::Warn(format!("could not query: {e}")),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    "Customizations",
+                    "customizations table",
+                    format!("could not query: {e}"),
+                ));
             }
         },
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: "Customizations",
-                name: "database".to_string(),
-                status: CheckStatus::Warn(format!("unavailable: {e}")),
-            });
+            checks.push(DiagnosticCheck::warn(
+                "Customizations",
+                "database",
+                format!("unavailable: {e}"),
+            ));
         }
     }
 }
@@ -752,26 +684,10 @@ mod tests {
     fn report_format_output() {
         let report = DiagnosticReport {
             checks: vec![
-                DiagnosticCheck {
-                    category: "Config",
-                    name: "config.toml exists".to_string(),
-                    status: CheckStatus::Pass,
-                },
-                DiagnosticCheck {
-                    category: "Config",
-                    name: "config.toml valid".to_string(),
-                    status: CheckStatus::Pass,
-                },
-                DiagnosticCheck {
-                    category: "Provider",
-                    name: "API key set".to_string(),
-                    status: CheckStatus::Fail("not found".to_string()),
-                },
-                DiagnosticCheck {
-                    category: "Sandbox",
-                    name: "sandbox-exec".to_string(),
-                    status: CheckStatus::Warn("not available".to_string()),
-                },
+                DiagnosticCheck::pass("Config", "config.toml exists"),
+                DiagnosticCheck::pass("Config", "config.toml valid"),
+                DiagnosticCheck::fail("Provider", "API key set", "not found"),
+                DiagnosticCheck::warn("Sandbox", "sandbox-exec", "not available"),
             ],
         };
         let output = report.format();
@@ -786,21 +702,9 @@ mod tests {
     fn report_counts() {
         let report = DiagnosticReport {
             checks: vec![
-                DiagnosticCheck {
-                    category: "Test",
-                    name: "pass".to_string(),
-                    status: CheckStatus::Pass,
-                },
-                DiagnosticCheck {
-                    category: "Test",
-                    name: "warn".to_string(),
-                    status: CheckStatus::Warn("w".to_string()),
-                },
-                DiagnosticCheck {
-                    category: "Test",
-                    name: "fail".to_string(),
-                    status: CheckStatus::Fail("f".to_string()),
-                },
+                DiagnosticCheck::pass("Test", "pass"),
+                DiagnosticCheck::warn("Test", "warn", "w"),
+                DiagnosticCheck::fail("Test", "fail", "f"),
             ],
         };
         assert_eq!(report.counts(), (1, 1, 1));

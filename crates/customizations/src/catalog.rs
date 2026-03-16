@@ -16,14 +16,6 @@ pub struct CustomizationDef {
 
 // ── Embedded templates via include_str! ──
 
-// Telegram
-const TELEGRAM_CHANNEL_TOML: &str = include_str!("../templates/messaging/telegram/channel.toml");
-const TELEGRAM_PARSE_INBOUND: &str =
-    include_str!("../templates/messaging/telegram/parse_inbound.py");
-const TELEGRAM_SEND_OUTBOUND: &str =
-    include_str!("../templates/messaging/telegram/send_outbound.py");
-const TELEGRAM_VERIFY: &str = include_str!("../templates/messaging/telegram/verify.py");
-
 // WhatsApp
 const WHATSAPP_CHANNEL_TOML: &str = include_str!("../templates/messaging/whatsapp/channel.toml");
 const WHATSAPP_PARSE_INBOUND: &str =
@@ -69,43 +61,7 @@ const LINEAR_MAIN: &str = include_str!("../templates/productivity/linear/main.py
 
 pub static CATALOG: &[CustomizationDef] = &[
     // ── Messaging ──
-    CustomizationDef {
-        id: "messaging/telegram",
-        name: "Telegram",
-        category: Category::Messaging,
-        kind: CustomizationKind::Channel,
-        description: "Telegram bot integration for bidirectional messaging",
-        required_credentials: &[CredentialSpec {
-            key: "TELEGRAM_BOT_TOKEN",
-            label: "Telegram Bot Token",
-            help_url: "https://core.telegram.org/bots#botfather",
-            is_optional: false,
-        }],
-        required_bins: &["python3"],
-        templates: &[
-            TemplateFile {
-                relative_path: "telegram/channel.toml",
-                content: TELEGRAM_CHANNEL_TOML,
-                target: TemplateTarget::Channels,
-            },
-            TemplateFile {
-                relative_path: "telegram/parse_inbound.py",
-                content: TELEGRAM_PARSE_INBOUND,
-                target: TemplateTarget::Channels,
-            },
-            TemplateFile {
-                relative_path: "telegram/send_outbound.py",
-                content: TELEGRAM_SEND_OUTBOUND,
-                target: TemplateTarget::Channels,
-            },
-            TemplateFile {
-                relative_path: "telegram/verify.py",
-                content: TELEGRAM_VERIFY,
-                target: TemplateTarget::Channels,
-            },
-        ],
-        platform: Platform::All,
-    },
+    // Note: Telegram is now a native integration in the gateway crate (no template needed).
     CustomizationDef {
         id: "messaging/whatsapp",
         name: "WhatsApp",
@@ -406,7 +362,7 @@ mod tests {
 
     #[test]
     fn find_by_id_works() {
-        assert!(find_by_id("messaging/telegram").is_some());
+        assert!(find_by_id("messaging/whatsapp").is_some());
         assert!(find_by_id("nonexistent").is_none());
     }
 
