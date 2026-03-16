@@ -10,7 +10,7 @@ mod plan_overlay;
 mod schedule_popup;
 mod settings_popup;
 mod spinner;
-mod theme;
+pub(crate) mod theme;
 
 use std::io::stdout;
 use std::panic;
@@ -36,14 +36,17 @@ use tamagotchi_heartbeat::scheduler::{HeartbeatEvent, HeartbeatScheduler};
 use app::{App, AppAction};
 use history::HistoryCell;
 
-/// Spawn the gateway server if there are installed channels.
-/// Returns `true` if a gateway was actually spawned.
+/// Spawn the gateway server and/or iMessage monitor if channels are installed.
+/// Returns `true` if anything was actually spawned.
 fn spawn_gateway(config: &Config, shutdown: CancellationToken) -> bool {
+    let mut spawned = false;
+
     if let Ok(registry) = tamagotchi_gateway::ChannelRegistry::new() {
         if !registry.list_channels().is_empty() {
             let gw_config = config.clone();
+            let gw_shutdown = shutdown.clone();
             tokio::spawn(async move {
-                match tamagotchi_gateway::GatewayServer::new(gw_config, shutdown) {
+                match tamagotchi_gateway::GatewayServer::new(gw_config, gw_shutdown) {
                     Ok(server) => {
                         if let Err(e) = server.run().await {
                             tracing::error!("Gateway exited with error: {e}");
@@ -52,10 +55,32 @@ fn spawn_gateway(config: &Config, shutdown: CancellationToken) -> bool {
                     Err(e) => tracing::error!("Failed to initialize gateway: {e}"),
                 }
             });
-            return true;
+            spawned = true;
         }
     }
-    false
+
+    // Start native iMessage monitor if channel is installed (mirrors service.rs)
+    if let Ok(data_dir) = Config::data_dir() {
+        let imessage_dir = data_dir.join("channels/imessage");
+        if imessage_dir.join("channel.toml").exists() {
+            let im_config = config.clone();
+            let im_shutdown = shutdown;
+            tokio::spawn(async move {
+                match tamagotchi_gateway::imessage::start_imessage_monitor(
+                    im_config,
+                    im_shutdown,
+                )
+                .await
+                {
+                    Ok(_handle) => tracing::info!("iMessage monitor started"),
+                    Err(e) => tracing::error!("iMessage monitor failed: {e}"),
+                }
+            });
+            spawned = true;
+        }
+    }
+
+    spawned
 }
 
 /// Restart the gateway: cancel old token, reload config, spawn fresh server.
