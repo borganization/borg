@@ -44,9 +44,10 @@ pub fn store(service: &str, account: &str, value: &str) -> Result<()> {
             ])
             .stdin(std::process::Stdio::piped())
             .spawn()?;
-        if let Some(ref mut stdin) = child.stdin {
+        if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
             stdin.write_all(value.as_bytes())?;
+            drop(stdin); // close stdin so secret-tool sees EOF
         }
         let status = child.wait()?;
         if !status.success() {

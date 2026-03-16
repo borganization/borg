@@ -64,7 +64,9 @@ impl<'a> ScriptRunner<'a> {
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            let _ = stdin.write_all(input_json.as_bytes()).await;
+            if let Err(e) = stdin.write_all(input_json.as_bytes()).await {
+                tracing::warn!("Failed to write input to '{}': {e}", self.name);
+            }
             drop(stdin);
         }
 
