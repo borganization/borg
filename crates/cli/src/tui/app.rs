@@ -60,6 +60,7 @@ pub enum AppAction {
         id: String,
     },
     ListSessions,
+    RestartGateway,
     RunCustomize {
         actions: Vec<CustomizeAction>,
     },
@@ -460,6 +461,7 @@ impl<'a> App<'a> {
                      /new       - Start new session\n  \
                      /customize - Integration marketplace\n  \
                      /schedule-tasks - Manage scheduled tasks\n  \
+                     /restart   - Restart gateway and services\n  \
                      /logs      - Show recent logs\n  \
                      /plan      - Send message in plan mode\n  \
                      quit/exit  - Exit"
@@ -477,7 +479,10 @@ impl<'a> App<'a> {
                     ("create_tool", "Create/modify user tools via patch DSL"),
                     ("run_shell", "Execute a shell command"),
                     ("list_skills", "List skills with status"),
-                    ("apply_skill_patch", "Create/modify skill files via patch DSL"),
+                    (
+                        "apply_skill_patch",
+                        "Create/modify skill files via patch DSL",
+                    ),
                     ("read_pdf", "Extract text from a PDF file"),
                     ("create_channel", "Create/modify channel integrations"),
                     ("list_channels", "List messaging channels"),
@@ -622,6 +627,9 @@ impl<'a> App<'a> {
             "/schedule-tasks" => {
                 self.schedule_popup.show();
                 return Ok(AppAction::Continue);
+            }
+            "/restart" => {
+                return Ok(AppAction::RestartGateway);
             }
             "/compact" => {
                 return Ok(AppAction::CompactHistory);

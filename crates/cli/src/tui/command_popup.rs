@@ -81,6 +81,10 @@ const COMMANDS: &[SlashCommandDef] = &[
         description: "Manage scheduled tasks",
     },
     SlashCommandDef {
+        name: "/restart",
+        description: "Restart gateway and services",
+    },
+    SlashCommandDef {
         name: "/logs",
         description: "Show recent logs",
     },
