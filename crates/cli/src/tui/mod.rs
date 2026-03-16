@@ -66,11 +66,8 @@ fn spawn_gateway(config: &Config, shutdown: CancellationToken) -> bool {
             let im_config = config.clone();
             let im_shutdown = shutdown;
             tokio::spawn(async move {
-                match tamagotchi_gateway::imessage::start_imessage_monitor(
-                    im_config,
-                    im_shutdown,
-                )
-                .await
+                match tamagotchi_gateway::imessage::start_imessage_monitor(im_config, im_shutdown)
+                    .await
                 {
                     Ok(_handle) => tracing::info!("iMessage monitor started"),
                     Err(e) => tracing::error!("iMessage monitor failed: {e}"),
