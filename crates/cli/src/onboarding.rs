@@ -213,65 +213,13 @@ pub(crate) fn format_number(n: u64) -> String {
 
 /// Check if a system keychain is available for secret storage.
 pub(crate) fn keychain_available() -> bool {
-    if cfg!(target_os = "macos") {
-        which::which("security").is_ok()
-    } else if cfg!(target_os = "linux") {
-        which::which("secret-tool").is_ok()
-    } else {
-        false
-    }
+    tamagotchi_customizations::keychain::available()
 }
 
 /// Store an API key in the OS keychain.
 fn store_in_keychain(provider_id: &str, api_key: &str) -> Result<()> {
     let service_name = format!("tamagotchi-{provider_id}");
-    if cfg!(target_os = "macos") {
-        let status = std::process::Command::new("security")
-            .args([
-                "add-generic-password",
-                "-s",
-                &service_name,
-                "-a",
-                "tamagotchi",
-                "-w",
-                api_key,
-                "-U", // update if exists
-            ])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!(
-                "Failed to store key in macOS Keychain (exit {})",
-                status.code().unwrap_or(-1)
-            );
-        }
-    } else if cfg!(target_os = "linux") {
-        let mut child = std::process::Command::new("secret-tool")
-            .args([
-                "store",
-                "--label",
-                &format!("Tamagotchi {provider_id} API key"),
-                "service",
-                "tamagotchi",
-                "provider",
-                provider_id,
-            ])
-            .stdin(std::process::Stdio::piped())
-            .spawn()?;
-        if let Some(ref mut stdin) = child.stdin {
-            use std::io::Write;
-            stdin.write_all(api_key.as_bytes())?;
-        }
-        let status = child.wait()?;
-        if !status.success() {
-            anyhow::bail!(
-                "Failed to store key via secret-tool (exit {})",
-                status.code().unwrap_or(-1)
-            );
-        }
-    } else {
-        anyhow::bail!("Keychain storage not supported on this platform");
-    }
-    Ok(())
+    tamagotchi_customizations::keychain::store(&service_name, "tamagotchi", api_key)
 }
 
 /// Validate that a model ID is safe for TOML interpolation (alphanumeric, slashes, hyphens, dots).

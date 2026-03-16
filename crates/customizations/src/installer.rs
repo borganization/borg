@@ -116,7 +116,7 @@ pub fn uninstall(def: &CustomizationDef, data_dir: &std::path::Path) -> Result<(
     // Remove keychain entries
     let service = format!("tamagotchi-{}", def.id.replace('/', "-"));
     for cred in def.required_credentials {
-        let _ = remove_credential(&service, cred.key);
+        remove_credential(&service, cred.key);
     }
 
     Ok(())
@@ -239,67 +239,14 @@ fn make_scripts_executable(def: &CustomizationDef, data_dir: &std::path::Path) -
     Ok(())
 }
 
-/// Store a credential in the OS keychain.
 fn store_credential(service: &str, key: &str, value: &str) -> Result<()> {
     let account = format!("tamagotchi-{key}");
-    if cfg!(target_os = "macos") {
-        let status = std::process::Command::new("security")
-            .args([
-                "add-generic-password",
-                "-s",
-                service,
-                "-a",
-                &account,
-                "-w",
-                value,
-                "-U",
-            ])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("Failed to store {key} in macOS Keychain");
-        }
-    } else if cfg!(target_os = "linux") {
-        let mut child = std::process::Command::new("secret-tool")
-            .args([
-                "store",
-                "--label",
-                &format!("Tamagotchi {key}"),
-                "service",
-                service,
-                "key",
-                key,
-            ])
-            .stdin(std::process::Stdio::piped())
-            .spawn()?;
-        if let Some(ref mut stdin) = child.stdin {
-            use std::io::Write;
-            stdin.write_all(value.as_bytes())?;
-        }
-        let status = child.wait()?;
-        if !status.success() {
-            anyhow::bail!("Failed to store {key} via secret-tool");
-        }
-    } else {
-        anyhow::bail!(
-            "No keychain available on this platform — cannot store credential {key} securely"
-        );
-    }
-    Ok(())
+    crate::keychain::store(service, &account, value)
 }
 
-/// Remove a credential from the OS keychain.
-fn remove_credential(service: &str, key: &str) -> Result<()> {
+fn remove_credential(service: &str, key: &str) {
     let account = format!("tamagotchi-{key}");
-    if cfg!(target_os = "macos") {
-        let _ = std::process::Command::new("security")
-            .args(["delete-generic-password", "-s", service, "-a", &account])
-            .status();
-    } else if cfg!(target_os = "linux") {
-        let _ = std::process::Command::new("secret-tool")
-            .args(["clear", "service", service, "key", key])
-            .status();
-    }
-    Ok(())
+    crate::keychain::remove(service, &account);
 }
 
 /// Post-install hook for iMessage: initialize state.json with current max ROWID
@@ -379,13 +326,7 @@ async fn send_event(tx: Option<&mpsc::Sender<InstallEvent>>, event: InstallEvent
 
 /// Check if the OS keychain is available.
 pub fn keychain_available() -> bool {
-    if cfg!(target_os = "macos") {
-        which::which("security").is_ok()
-    } else if cfg!(target_os = "linux") {
-        which::which("secret-tool").is_ok()
-    } else {
-        false
-    }
+    crate::keychain::available()
 }
 
 #[cfg(test)]
