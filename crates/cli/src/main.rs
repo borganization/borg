@@ -50,6 +50,8 @@ enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Permanently delete all Tamagotchi data and uninstall the service
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -164,6 +166,7 @@ async fn main() -> Result<()> {
             ServiceAction::Uninstall => service::uninstall_service()?,
             ServiceAction::Status => service::service_status()?,
         },
+        Some(Commands::Uninstall) => run_uninstall()?,
     }
 
     Ok(())
@@ -254,6 +257,45 @@ fn harden_data_dir(_data_dir: &std::path::Path) {
     // No-op on non-Unix platforms
 }
 
+fn run_uninstall() -> Result<()> {
+    let data_dir = tamagotchi_core::config::Config::data_dir()?;
+
+    eprintln!(
+        "WARNING: This will permanently delete all Tamagotchi data at {}\n\
+         including config, memory, tools, skills, channels, and database.\n",
+        data_dir.display()
+    );
+    eprint!("Continue? [y/N] ");
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+
+    if confirm_uninstall(input.trim()) {
+        if let Err(e) = service::uninstall_service() {
+            tracing::debug!("Service uninstall skipped: {e}");
+        }
+
+        delete_data_dir(&data_dir)?;
+
+        println!("Tamagotchi data deleted. Goodbye!");
+    } else {
+        println!("Aborted.");
+    }
+
+    Ok(())
+}
+
+fn confirm_uninstall(input: &str) -> bool {
+    input.eq_ignore_ascii_case("y")
+}
+
+fn delete_data_dir(data_dir: &std::path::Path) -> Result<()> {
+    if data_dir.exists() {
+        std::fs::remove_dir_all(data_dir)?;
+    }
+    Ok(())
+}
+
 /// Non-interactive fallback: write default config files without the wizard.
 fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
     for sub in &["memory", "tools", "skills", "logs", "cache"] {
@@ -288,4 +330,63 @@ fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn confirm_uninstall_accepts_y() {
+        assert!(confirm_uninstall("y"));
+    }
+
+    #[test]
+    fn confirm_uninstall_accepts_uppercase_y() {
+        assert!(confirm_uninstall("Y"));
+    }
+
+    #[test]
+    fn confirm_uninstall_rejects_empty() {
+        assert!(!confirm_uninstall(""));
+    }
+
+    #[test]
+    fn confirm_uninstall_rejects_no() {
+        assert!(!confirm_uninstall("n"));
+        assert!(!confirm_uninstall("N"));
+    }
+
+    #[test]
+    fn confirm_uninstall_rejects_yes_spelled_out() {
+        assert!(!confirm_uninstall("yes"));
+    }
+
+    #[test]
+    fn confirm_uninstall_rejects_arbitrary_input() {
+        assert!(!confirm_uninstall("maybe"));
+        assert!(!confirm_uninstall("yy"));
+    }
+
+    #[test]
+    fn delete_data_dir_removes_directory() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("tamagotchi_test");
+        fs::create_dir_all(dir.join("memory")).unwrap();
+        fs::write(dir.join("config.toml"), "test").unwrap();
+
+        assert!(dir.exists());
+        delete_data_dir(&dir).unwrap();
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn delete_data_dir_noop_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("nonexistent");
+        assert!(!dir.exists());
+        delete_data_dir(&dir).unwrap();
+    }
 }
