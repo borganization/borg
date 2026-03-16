@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 mod logo;
 mod onboarding;
@@ -50,8 +51,75 @@ enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// List built-in and user-created tools
+    Tools,
+    /// List skills with availability status
+    Skills,
+    /// Show or update configuration settings
+    Settings {
+        #[command(subcommand)]
+        action: Option<SettingsAction>,
+    },
+    /// Show recent conversation history
+    Logs {
+        /// Number of log entries to show
+        #[arg(long, short, default_value_t = 50)]
+        count: usize,
+    },
+    /// Manage scheduled tasks
+    Tasks {
+        #[command(subcommand)]
+        action: Option<TasksAction>,
+    },
     /// Permanently delete all Tamagotchi data and uninstall the service
     Uninstall,
+}
+
+#[derive(Subcommand)]
+enum SettingsAction {
+    /// Update a configuration setting
+    Set {
+        /// Setting key (e.g. temperature, model, sandbox.enabled)
+        key: String,
+        /// New value
+        value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TasksAction {
+    /// List all scheduled tasks
+    List,
+    /// Create a new scheduled task
+    Create {
+        /// Task name
+        #[arg(long)]
+        name: String,
+        /// Prompt to send to the agent
+        #[arg(long)]
+        prompt: String,
+        /// Schedule expression (cron or interval)
+        #[arg(long)]
+        schedule: String,
+        /// Schedule type: cron, interval, or once
+        #[arg(long, default_value = "cron")]
+        r#type: String,
+    },
+    /// Delete a scheduled task
+    Delete {
+        /// Task ID (or prefix)
+        id: String,
+    },
+    /// Pause a scheduled task
+    Pause {
+        /// Task ID (or prefix)
+        id: String,
+    },
+    /// Resume a paused task
+    Resume {
+        /// Task ID (or prefix)
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -166,6 +234,25 @@ async fn main() -> Result<()> {
             ServiceAction::Uninstall => service::uninstall_service()?,
             ServiceAction::Status => service::service_status()?,
         },
+        Some(Commands::Tools) => run_tools()?,
+        Some(Commands::Skills) => run_skills()?,
+        Some(Commands::Settings { action }) => match action {
+            Some(SettingsAction::Set { key, value }) => run_settings_set(&key, &value)?,
+            None => run_settings_show()?,
+        },
+        Some(Commands::Logs { count }) => run_logs(count)?,
+        Some(Commands::Tasks { action }) => match action {
+            Some(TasksAction::List) | None => run_tasks_list()?,
+            Some(TasksAction::Create {
+                name,
+                prompt,
+                schedule,
+                r#type,
+            }) => run_tasks_create(&name, &prompt, &schedule, &r#type)?,
+            Some(TasksAction::Delete { id }) => run_tasks_delete(&id)?,
+            Some(TasksAction::Pause { id }) => run_tasks_update_status(&id, "paused")?,
+            Some(TasksAction::Resume { id }) => run_tasks_update_status(&id, "active")?,
+        },
         Some(Commands::Uninstall) => run_uninstall()?,
     }
 
@@ -255,6 +342,173 @@ fn harden_data_dir(data_dir: &std::path::Path) {
 #[cfg(not(unix))]
 fn harden_data_dir(_data_dir: &std::path::Path) {
     // No-op on non-Unix platforms
+}
+
+fn run_tools() -> Result<()> {
+    let config = tamagotchi_core::config::Config::load().unwrap_or_default();
+
+    println!("Built-in tools:");
+    let builtins = [
+        ("write_memory", "Write/append to memory files"),
+        ("read_memory", "Read a memory file"),
+        ("list_tools", "List user-created tools"),
+        ("apply_patch", "Create/update/delete files via patch DSL"),
+        ("create_tool", "Create/modify user tools via patch DSL"),
+        ("run_shell", "Execute a shell command"),
+        ("list_skills", "List skills with status"),
+        ("apply_skill_patch", "Create/modify skill files via patch DSL"),
+        ("read_pdf", "Extract text from a PDF file"),
+        ("create_channel", "Create/modify channel integrations"),
+        ("list_channels", "List messaging channels"),
+        ("manage_tasks", "Manage scheduled tasks"),
+    ];
+    for (name, desc) in &builtins {
+        println!("  {name:20} {desc}");
+    }
+    if config.web.enabled {
+        println!("  {:20} Fetch a URL", "web_fetch");
+        println!("  {:20} Search the web", "web_search");
+    }
+    if config.security.host_audit {
+        println!("  {:20} Run host security audit", "security_audit");
+    }
+
+    if let Ok(registry) = tamagotchi_tools::registry::ToolRegistry::new() {
+        let user_tools = registry.list_tools();
+        if !user_tools.is_empty() {
+            println!();
+            println!("User tools:");
+            for tool in &user_tools {
+                println!("  {tool}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_skills() -> Result<()> {
+    let config = tamagotchi_core::config::Config::load().unwrap_or_default();
+    let creds = config.resolve_credentials();
+    let skills = tamagotchi_core::skills::load_all_skills(&creds)?;
+
+    if skills.is_empty() {
+        println!("No skills found.");
+    } else {
+        println!("Skills:");
+        for skill in &skills {
+            println!("  {}", skill.summary_line());
+        }
+    }
+    Ok(())
+}
+
+fn run_settings_show() -> Result<()> {
+    let config = tamagotchi_core::config::Config::load()?;
+    println!("{}", config.display_settings());
+    Ok(())
+}
+
+fn run_settings_set(key: &str, value: &str) -> Result<()> {
+    let mut config = tamagotchi_core::config::Config::load()?;
+    let confirmation = config.apply_setting(key, value)?;
+    config.save()?;
+    println!("Updated: {confirmation}");
+    Ok(())
+}
+
+fn run_logs(count: usize) -> Result<()> {
+    let lines = tamagotchi_core::logging::read_history_formatted(count)?;
+    if lines.is_empty() {
+        println!("No conversation history.");
+    } else {
+        for line in &lines {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+fn run_tasks_list() -> Result<()> {
+    let db = tamagotchi_core::db::Database::open()?;
+    let tasks = db.list_tasks()?;
+
+    if tasks.is_empty() {
+        println!("No scheduled tasks.");
+    } else {
+        println!(
+            "{:8}  {:20}  {:8}  {:8}  {:20}  NEXT RUN",
+            "ID", "NAME", "TYPE", "STATUS", "SCHEDULE"
+        );
+        for task in &tasks {
+            let next_run = task
+                .next_run
+                .map(|ts| {
+                    chrono::DateTime::from_timestamp(ts, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                })
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "{:8}  {:20}  {:8}  {:8}  {:20}  {}",
+                &task.id[..8.min(task.id.len())],
+                truncate_str(&task.name, 20),
+                task.schedule_type,
+                task.status,
+                truncate_str(&task.schedule_expr, 20),
+                next_run,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_tasks_create(name: &str, prompt: &str, schedule: &str, schedule_type: &str) -> Result<()> {
+    tamagotchi_core::tasks::validate_schedule(schedule_type, schedule)?;
+    let next_run = tamagotchi_core::tasks::calculate_next_run(schedule_type, schedule)?;
+    let id = Uuid::new_v4().to_string();
+    let tz = chrono::Local::now().offset().to_string();
+
+    let db = tamagotchi_core::db::Database::open()?;
+    db.create_task(&tamagotchi_core::db::NewTask {
+        id: &id,
+        name,
+        prompt,
+        schedule_type,
+        schedule_expr: schedule,
+        timezone: &tz,
+        next_run,
+    })?;
+
+    println!("Created task {} ({})", &id[..8], name);
+    Ok(())
+}
+
+fn run_tasks_delete(id: &str) -> Result<()> {
+    let db = tamagotchi_core::db::Database::open()?;
+    if db.delete_task(id)? {
+        println!("Deleted task {}", &id[..8.min(id.len())]);
+    } else {
+        println!("Task not found: {id}");
+    }
+    Ok(())
+}
+
+fn run_tasks_update_status(id: &str, status: &str) -> Result<()> {
+    let db = tamagotchi_core::db::Database::open()?;
+    if db.update_task_status(id, status)? {
+        println!("Task {} status: {status}", &id[..8.min(id.len())]);
+    } else {
+        println!("Task not found: {id}");
+    }
+    Ok(())
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max - 1])
+    }
 }
 
 fn run_uninstall() -> Result<()> {
@@ -388,5 +642,208 @@ mod tests {
         let dir = tmp.path().join("nonexistent");
         assert!(!dir.exists());
         delete_data_dir(&dir).unwrap();
+    }
+
+    // -- Clap parsing tests --
+
+    #[test]
+    fn test_parse_tools_command() {
+        let cli = Cli::try_parse_from(["tamagotchi", "tools"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Tools)));
+    }
+
+    #[test]
+    fn test_parse_skills_command() {
+        let cli = Cli::try_parse_from(["tamagotchi", "skills"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Skills)));
+    }
+
+    #[test]
+    fn test_parse_settings_show() {
+        let cli = Cli::try_parse_from(["tamagotchi", "settings"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Settings { action: None })
+        ));
+    }
+
+    #[test]
+    fn test_parse_settings_set() {
+        let cli =
+            Cli::try_parse_from(["tamagotchi", "settings", "set", "temperature", "0.5"]).unwrap();
+        match cli.command {
+            Some(Commands::Settings {
+                action: Some(SettingsAction::Set { key, value }),
+            }) => {
+                assert_eq!(key, "temperature");
+                assert_eq!(value, "0.5");
+            }
+            _ => panic!("Expected Settings Set"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logs_default() {
+        let cli = Cli::try_parse_from(["tamagotchi", "logs"]).unwrap();
+        match cli.command {
+            Some(Commands::Logs { count }) => assert_eq!(count, 50),
+            _ => panic!("Expected Logs"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logs_custom_count() {
+        let cli = Cli::try_parse_from(["tamagotchi", "logs", "--count", "10"]).unwrap();
+        match cli.command {
+            Some(Commands::Logs { count }) => assert_eq!(count, 10),
+            _ => panic!("Expected Logs"),
+        }
+    }
+
+    #[test]
+    fn test_parse_tasks_list() {
+        let cli = Cli::try_parse_from(["tamagotchi", "tasks"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tasks { action: None })
+        ));
+
+        let cli = Cli::try_parse_from(["tamagotchi", "tasks", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tasks {
+                action: Some(TasksAction::List)
+            })
+        ));
+    }
+
+    #[test]
+    fn test_parse_tasks_create() {
+        let cli = Cli::try_parse_from([
+            "tamagotchi",
+            "tasks",
+            "create",
+            "--name",
+            "test",
+            "--prompt",
+            "hello",
+            "--schedule",
+            "*/5 * * * *",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Tasks {
+                action:
+                    Some(TasksAction::Create {
+                        name,
+                        prompt,
+                        schedule,
+                        r#type,
+                    }),
+            }) => {
+                assert_eq!(name, "test");
+                assert_eq!(prompt, "hello");
+                assert_eq!(schedule, "*/5 * * * *");
+                assert_eq!(r#type, "cron");
+            }
+            _ => panic!("Expected Tasks Create"),
+        }
+    }
+
+    #[test]
+    fn test_parse_tasks_delete() {
+        let cli = Cli::try_parse_from(["tamagotchi", "tasks", "delete", "abc123"]).unwrap();
+        match cli.command {
+            Some(Commands::Tasks {
+                action: Some(TasksAction::Delete { id }),
+            }) => assert_eq!(id, "abc123"),
+            _ => panic!("Expected Tasks Delete"),
+        }
+    }
+
+    #[test]
+    fn test_parse_tasks_pause_resume() {
+        let cli = Cli::try_parse_from(["tamagotchi", "tasks", "pause", "abc123"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tasks {
+                action: Some(TasksAction::Pause { .. })
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["tamagotchi", "tasks", "resume", "abc123"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tasks {
+                action: Some(TasksAction::Resume { .. })
+            })
+        ));
+    }
+
+    // -- Settings tests --
+
+    #[test]
+    fn test_settings_show_with_default_config() {
+        let config = tamagotchi_core::config::Config::default();
+        let output = config.display_settings();
+        assert!(!output.is_empty());
+        assert!(output.contains("temperature"));
+    }
+
+    #[test]
+    fn test_settings_apply_valid_key() {
+        let mut config = tamagotchi_core::config::Config::default();
+        let result = config.apply_setting("temperature", "0.5");
+        assert!(result.is_ok());
+        assert!((config.llm.temperature - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_settings_apply_invalid_key() {
+        let mut config = tamagotchi_core::config::Config::default();
+        let result = config.apply_setting("nonexistent", "x");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_settings_apply_invalid_value() {
+        let mut config = tamagotchi_core::config::Config::default();
+        let result = config.apply_setting("temperature", "not_a_number");
+        assert!(result.is_err());
+    }
+
+    // -- Tasks tests (using temp DB) --
+
+    #[test]
+    fn test_tasks_validate_schedule_cron() {
+        assert!(tamagotchi_core::tasks::validate_schedule("cron", "0 */5 * * * *").is_ok());
+    }
+
+    #[test]
+    fn test_tasks_validate_schedule_interval() {
+        assert!(tamagotchi_core::tasks::validate_schedule("interval", "30m").is_ok());
+    }
+
+    #[test]
+    fn test_tasks_validate_schedule_invalid() {
+        assert!(tamagotchi_core::tasks::validate_schedule("cron", "not valid").is_err());
+    }
+
+    // -- Helper tests --
+
+    #[test]
+    fn test_truncate_str_short() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_exact() {
+        assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_str_long() {
+        let result = truncate_str("hello world", 5);
+        assert_eq!(result, "hell…");
     }
 }
