@@ -18,10 +18,15 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
 which = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+regex = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tokio-util = "0.7"
 uuid = { workspace = true }
+rand = "0.8"
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

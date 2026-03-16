@@ -196,6 +196,12 @@ pub struct GatewayConfig {
     pub port: u16,
     pub max_concurrent: usize,
     pub request_timeout_ms: u64,
+    #[serde(default = "default_rate_limit")]
+    pub rate_limit_per_minute: u32,
+}
+
+fn default_rate_limit() -> u32 {
+    60
 }
 
 impl Default for GatewayConfig {
@@ -206,6 +212,7 @@ impl Default for GatewayConfig {
             port: 7842,
             max_concurrent: 10,
             request_timeout_ms: 120_000,
+            rate_limit_per_minute: default_rate_limit(),
         }
     }
 }
@@ -1402,12 +1409,16 @@ GH_TOKEN = { source = "file", path = "/tmp/token" }
         );
         let serialized = toml::to_string_pretty(&cfg).expect("serialize");
         // Must be valid TOML on re-parse
-        let reparsed: Config = toml::from_str(&serialized)
-            .unwrap_or_else(|e| panic!("serialized config is invalid TOML: {e}\n---\n{serialized}"));
+        let reparsed: Config = toml::from_str(&serialized).unwrap_or_else(|e| {
+            panic!("serialized config is invalid TOML: {e}\n---\n{serialized}")
+        });
         assert!(reparsed.credentials.contains_key("TELEGRAM_BOT_TOKEN"));
 
         // No duplicate [credentials] header
-        let count = serialized.lines().filter(|l| l.trim() == "[credentials]").count();
+        let count = serialized
+            .lines()
+            .filter(|l| l.trim() == "[credentials]")
+            .count();
         assert!(
             count <= 1,
             "expected at most 1 [credentials] section, got {count}\n---\n{serialized}"
@@ -1434,8 +1445,9 @@ model = "test"
         );
         let serialized = toml::to_string_pretty(&cfg).expect("serialize");
         // Must still be valid TOML
-        let _reparsed: Config = toml::from_str(&serialized)
-            .unwrap_or_else(|e| panic!("re-serialized config is invalid TOML: {e}\n---\n{serialized}"));
+        let _reparsed: Config = toml::from_str(&serialized).unwrap_or_else(|e| {
+            panic!("re-serialized config is invalid TOML: {e}\n---\n{serialized}")
+        });
 
         let count = serialized
             .lines()
@@ -1457,8 +1469,14 @@ model = "test"
 [credentials]
 "#;
         let output = Config::dedup_toml_tables(input);
-        let count = output.lines().filter(|l| l.trim() == "[credentials]").count();
-        assert_eq!(count, 1, "should have exactly 1 [credentials]\n---\n{output}");
+        let count = output
+            .lines()
+            .filter(|l| l.trim() == "[credentials]")
+            .count();
+        assert_eq!(
+            count, 1,
+            "should have exactly 1 [credentials]\n---\n{output}"
+        );
         // Must parse successfully
         let _cfg: Config = toml::from_str(&output).expect("deduped config should parse");
     }

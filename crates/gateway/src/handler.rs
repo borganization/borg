@@ -1,13 +1,18 @@
+use std::sync::Arc;
+
 use anyhow::{bail, Context, Result};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
 use tamagotchi_core::agent::{Agent, AgentEvent};
 use tamagotchi_core::config::Config;
-use tamagotchi_core::db::Database;
+use tamagotchi_core::db::{Database, NewDelivery};
 
+use crate::chunker;
 use crate::executor::ChannelExecutor;
+use crate::health::ChannelHealthRegistry;
 use crate::registry::RegisteredChannel;
+use crate::retry::{self, RetryOutcome, RetryPolicy};
 
 /// Normalized inbound message parsed from the channel's inbound script.
 #[derive(Debug, serde::Deserialize)]
@@ -24,6 +29,7 @@ pub async fn handle_webhook(
     headers_json: serde_json::Value,
     body: String,
     config: &Config,
+    health: Option<&Arc<RwLock<ChannelHealthRegistry>>>,
 ) -> Result<String> {
     let executor = ChannelExecutor::new(&channel.manifest, &channel.dir);
     let blocked_paths = &config.security.blocked_paths;
@@ -84,7 +90,7 @@ pub async fn handle_webhook(
         serde_json::from_value(parsed).context("Invalid inbound message structure")?;
 
     // Steps 3-5: shared processing
-    process_message(channel, inbound, config).await
+    process_message(channel, inbound, config, health).await
 }
 
 /// Process a polled message that is already normalized (no verify/parse needed).
@@ -92,39 +98,60 @@ pub async fn handle_polled_message(
     channel: &RegisteredChannel,
     message: InboundMessage,
     config: &Config,
+    health: Option<&Arc<RwLock<ChannelHealthRegistry>>>,
 ) -> Result<String> {
-    process_message(channel, message, config).await
+    process_message(channel, message, config, health).await
 }
 
-/// Shared message processing: session resolution, agent invocation, outbound.
+/// Build a RetryPolicy from channel settings, falling back to defaults.
+fn build_retry_policy(channel: &RegisteredChannel) -> RetryPolicy {
+    let mut policy = RetryPolicy::default();
+    if let Some(max) = channel.manifest.settings.retry_max_attempts {
+        policy.max_retries = max;
+    }
+    if let Some(delay) = channel.manifest.settings.retry_initial_delay_ms {
+        policy.initial_delay_ms = delay;
+    }
+    policy
+}
+
+/// Shared message processing: session resolution, agent invocation, outbound with retry + chunking.
 async fn process_message(
     channel: &RegisteredChannel,
     inbound: InboundMessage,
     config: &Config,
+    health: Option<&Arc<RwLock<ChannelHealthRegistry>>>,
 ) -> Result<String> {
     let executor = ChannelExecutor::new(&channel.manifest, &channel.dir);
     let blocked_paths = &config.security.blocked_paths;
+    let channel_name = &channel.manifest.name;
 
     info!(
         "Channel '{}' received message from '{}'",
-        channel.manifest.name, inbound.sender_id
+        channel_name, inbound.sender_id
     );
+
+    if let Some(h) = health {
+        h.write().await.record_inbound(channel_name);
+    }
 
     // Resolve session
     let db = Database::open().context("Failed to open database")?;
     let session_id = db
-        .resolve_channel_session(&channel.manifest.name, &inbound.sender_id)
+        .resolve_channel_session(channel_name, &inbound.sender_id)
         .context("Failed to resolve channel session")?;
 
     // Log inbound message
-    let _ = db.log_channel_message(
-        &channel.manifest.name,
+    if let Err(e) = db.log_channel_message(
+        channel_name,
         &inbound.sender_id,
         "inbound",
         Some(&inbound.text),
         None,
         Some(&session_id),
-    );
+    ) {
+        warn!("Failed to log inbound message for channel '{channel_name}': {e}");
+    }
 
     // Create Agent, load session, send message
     let mut agent = Agent::new(config.clone()).context("Failed to create agent")?;
@@ -132,7 +159,7 @@ async fn process_message(
     if let Err(e) = agent.load_session(&session_id) {
         warn!(
             "Could not load session '{session_id}' for channel '{}': {e}",
-            channel.manifest.name
+            channel_name
         );
     }
 
@@ -155,7 +182,7 @@ async fn process_message(
         match event {
             AgentEvent::TextDelta(delta) => response_text.push_str(&delta),
             AgentEvent::Error(e) => {
-                warn!("Agent error on channel '{}': {e}", channel.manifest.name)
+                warn!("Agent error on channel '{}': {e}", channel_name)
             }
             _ => {}
         }
@@ -173,16 +200,18 @@ async fn process_message(
     }
 
     // Log outbound message
-    let _ = db.log_channel_message(
-        &channel.manifest.name,
+    if let Err(e) = db.log_channel_message(
+        channel_name,
         &inbound.sender_id,
         "outbound",
         Some(&response_text),
         None,
         Some(&session_id),
-    );
+    ) {
+        warn!("Failed to log outbound message for channel '{channel_name}': {e}");
+    }
 
-    // Send outbound response via channel script
+    // Prepare auth tokens
     let token = channel
         .manifest
         .auth
@@ -199,23 +228,90 @@ async fn process_message(
         .and_then(|env| std::env::var(env).ok())
         .unwrap_or_default();
 
-    let outbound_input = serde_json::json!({
-        "text": response_text,
-        "sender_id": inbound.sender_id,
-        "channel_id": inbound.channel_id,
-        "token": token,
-        "secret": secret,
-    });
+    let retry_policy = build_retry_policy(channel);
 
-    match executor
-        .send_outbound(&outbound_input.to_string(), blocked_paths)
-        .await
-    {
-        Ok(_) => info!("Outbound sent for channel '{}'", channel.manifest.name),
-        Err(e) => warn!(
-            "Failed to send outbound for channel '{}': {e}",
-            channel.manifest.name
-        ),
+    // Chunk text if max_message_chars is configured
+    let chunks = match channel.manifest.settings.max_message_chars {
+        Some(max) if max > 0 => chunker::chunk_text(&response_text, max),
+        _ => vec![response_text.clone()],
+    };
+    let total_chunks = chunks.len();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        // Build payload without secrets for persistence
+        let mut outbound = serde_json::json!({
+            "text": chunk,
+            "sender_id": inbound.sender_id,
+            "channel_id": inbound.channel_id,
+        });
+
+        if total_chunks > 1 {
+            outbound["chunk_index"] = serde_json::json!(i);
+            outbound["total_chunks"] = serde_json::json!(total_chunks);
+        }
+
+        let persist_str = outbound.to_string();
+
+        // Add secrets for runtime sending only
+        outbound["token"] = serde_json::json!(token);
+        outbound["secret"] = serde_json::json!(secret);
+        let outbound_str = outbound.to_string();
+
+        // Enqueue to delivery queue for persistence (without secrets)
+        let delivery_id = uuid::Uuid::new_v4().to_string();
+        if let Err(e) = db.enqueue_delivery(&NewDelivery {
+            id: &delivery_id,
+            channel_name,
+            sender_id: &inbound.sender_id,
+            channel_id: inbound.channel_id.as_deref(),
+            session_id: Some(&session_id),
+            payload_json: &persist_str,
+            max_retries: retry_policy.max_retries as i32,
+        }) {
+            warn!("Failed to enqueue delivery for channel '{channel_name}': {e}");
+        }
+
+        // Send with retry
+        match retry::send_with_retry(&executor, &outbound_str, blocked_paths, &retry_policy).await {
+            RetryOutcome::Success(_) => {
+                info!(
+                    "Outbound sent for channel '{}' (chunk {}/{})",
+                    channel_name,
+                    i + 1,
+                    total_chunks
+                );
+                if let Err(e) = db.mark_delivered(&delivery_id) {
+                    warn!("Failed to mark delivery '{delivery_id}' as delivered: {e}");
+                }
+                if let Some(h) = health {
+                    h.write().await.record_outbound(channel_name);
+                }
+            }
+            RetryOutcome::PermanentFailure(e) => {
+                warn!(
+                    "Permanent outbound failure for channel '{}': {e}",
+                    channel_name
+                );
+                if let Err(db_err) = db.mark_failed(&delivery_id, &e, None) {
+                    warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
+                }
+                if let Some(h) = health {
+                    h.write().await.record_error(channel_name, &e);
+                }
+            }
+            RetryOutcome::Exhausted(e) => {
+                warn!(
+                    "Outbound delivery exhausted for channel '{}': {e}",
+                    channel_name
+                );
+                if let Err(db_err) = db.mark_failed(&delivery_id, &e, None) {
+                    warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
+                }
+                if let Some(h) = health {
+                    h.write().await.record_error(channel_name, &e);
+                }
+            }
+        }
     }
 
     Ok(response_text)

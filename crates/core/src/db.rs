@@ -59,6 +59,24 @@ pub struct MessageRow {
     pub created_at: i64,
 }
 
+/// Delivery queue row from SQLite.
+#[derive(Debug, Clone)]
+pub struct DeliveryRow {
+    pub id: String,
+    pub channel_name: String,
+    pub sender_id: String,
+    pub channel_id: Option<String>,
+    pub session_id: Option<String>,
+    pub payload_json: String,
+    pub status: String,
+    pub retry_count: i32,
+    pub max_retries: i32,
+    pub next_retry_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub error: Option<String>,
+}
+
 /// Customization row from SQLite.
 #[derive(Debug, Clone)]
 pub struct CustomizationRow {
@@ -81,6 +99,17 @@ pub struct NewTask<'a> {
     pub schedule_expr: &'a str,
     pub timezone: &'a str,
     pub next_run: Option<i64>,
+}
+
+/// Parameters for enqueuing a delivery.
+pub struct NewDelivery<'a> {
+    pub id: &'a str,
+    pub channel_name: &'a str,
+    pub sender_id: &'a str,
+    pub channel_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub payload_json: &'a str,
+    pub max_retries: i32,
 }
 
 /// Parameters for updating an existing scheduled task. `None` fields are left unchanged.
@@ -121,7 +150,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 5;
+    const CURRENT_VERSION: u32 = 6;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -148,6 +177,9 @@ impl Database {
         }
         if current < 5 {
             self.migrate_v5()?;
+        }
+        if current < 6 {
+            self.migrate_v6()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -350,6 +382,115 @@ impl Database {
             ",
         )?;
         Ok(())
+    }
+
+    /// V6: Add delivery_queue table for persistent outbound delivery
+    fn migrate_v6(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS delivery_queue (
+                id TEXT PRIMARY KEY,
+                channel_name TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                channel_id TEXT,
+                session_id TEXT,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                max_retries INTEGER NOT NULL DEFAULT 5,
+                next_retry_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_delivery_queue_status
+                ON delivery_queue(status, next_retry_at);
+            ",
+        )?;
+        Ok(())
+    }
+
+    // ── Delivery Queue ──
+
+    pub fn enqueue_delivery(&self, d: &NewDelivery<'_>) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO delivery_queue (id, channel_name, sender_id, channel_id, session_id, payload_json, status, retry_count, max_retries, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', 0, ?7, ?8, ?8)",
+            params![d.id, d.channel_name, d.sender_id, d.channel_id, d.session_id, d.payload_json, d.max_retries, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn claim_pending_deliveries(&self, limit: u32) -> Result<Vec<DeliveryRow>> {
+        let now = chrono::Utc::now().timestamp();
+        let tx = self.conn.unchecked_transaction()?;
+
+        let mut stmt = tx.prepare(
+            "SELECT id, channel_name, sender_id, channel_id, session_id, payload_json, status, retry_count, max_retries, next_retry_at, created_at, updated_at, error
+             FROM delivery_queue
+             WHERE status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= ?1)
+             ORDER BY created_at ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![now, limit], |row| {
+                Ok(DeliveryRow {
+                    id: row.get(0)?,
+                    channel_name: row.get(1)?,
+                    sender_id: row.get(2)?,
+                    channel_id: row.get(3)?,
+                    session_id: row.get(4)?,
+                    payload_json: row.get(5)?,
+                    status: row.get(6)?,
+                    retry_count: row.get(7)?,
+                    max_retries: row.get(8)?,
+                    next_retry_at: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
+                    error: row.get(12)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        // Mark claimed rows as in_progress
+        for row in &rows {
+            tx.execute(
+                "UPDATE delivery_queue SET status = 'in_progress', updated_at = ?1 WHERE id = ?2",
+                params![now, row.id],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(rows)
+    }
+
+    pub fn mark_delivered(&self, id: &str) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "UPDATE delivery_queue SET status = 'delivered', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_failed(&self, id: &str, error: &str, next_retry_at: Option<i64>) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "UPDATE delivery_queue SET status = CASE WHEN retry_count + 1 >= max_retries THEN 'exhausted' ELSE 'pending' END, retry_count = retry_count + 1, error = ?1, next_retry_at = ?2, updated_at = ?3 WHERE id = ?4",
+            params![error, next_retry_at, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn replay_unfinished(&self) -> Result<u32> {
+        let now = chrono::Utc::now().timestamp();
+        let count = self.conn.execute(
+            "UPDATE delivery_queue SET status = 'pending', updated_at = ?1 WHERE status = 'in_progress'",
+            params![now],
+        )?;
+        Ok(count as u32)
     }
 
     // ── Customizations ──
@@ -1552,5 +1693,116 @@ mod tests {
         let hashes = db.get_file_hashes("messaging/telegram").expect("get");
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0].1, "new_hash");
+    }
+
+    #[test]
+    fn migrate_v6_creates_delivery_queue() {
+        let db = test_db();
+        let version: String = db.get_meta("schema_version").unwrap().unwrap_or_default();
+        assert_eq!(version, Database::CURRENT_VERSION.to_string());
+
+        // Table should exist
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='delivery_queue'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    fn new_delivery<'a>(
+        id: &'a str,
+        channel_name: &'a str,
+        sender_id: &'a str,
+        channel_id: Option<&'a str>,
+        payload: &'a str,
+        max_retries: i32,
+    ) -> NewDelivery<'a> {
+        NewDelivery {
+            id,
+            channel_name,
+            sender_id,
+            channel_id,
+            session_id: None,
+            payload_json: payload,
+            max_retries,
+        }
+    }
+
+    #[test]
+    fn delivery_queue_enqueue_and_claim() {
+        let db = test_db();
+        db.enqueue_delivery(&new_delivery(
+            "d1",
+            "slack",
+            "user1",
+            Some("C123"),
+            r#"{"text":"hi"}"#,
+            3,
+        ))
+        .unwrap();
+        db.enqueue_delivery(&new_delivery(
+            "d2",
+            "slack",
+            "user2",
+            None,
+            r#"{"text":"bye"}"#,
+            3,
+        ))
+        .unwrap();
+
+        let claimed = db.claim_pending_deliveries(10).unwrap();
+        assert_eq!(claimed.len(), 2);
+        assert_eq!(claimed[0].id, "d1");
+        assert_eq!(claimed[0].channel_name, "slack");
+    }
+
+    #[test]
+    fn delivery_queue_mark_delivered() {
+        let db = test_db();
+        db.enqueue_delivery(&new_delivery("d1", "slack", "user1", None, "{}", 3))
+            .unwrap();
+        let claimed = db.claim_pending_deliveries(10).unwrap();
+        assert_eq!(claimed.len(), 1);
+
+        db.mark_delivered("d1").unwrap();
+
+        // Should not be claimable again
+        let claimed2 = db.claim_pending_deliveries(10).unwrap();
+        assert!(claimed2.is_empty());
+    }
+
+    #[test]
+    fn delivery_queue_mark_failed_with_retry() {
+        let db = test_db();
+        db.enqueue_delivery(&new_delivery("d1", "slack", "user1", None, "{}", 3))
+            .unwrap();
+        let _ = db.claim_pending_deliveries(10).unwrap();
+
+        let future = chrono::Utc::now().timestamp() + 60;
+        db.mark_failed("d1", "timeout", Some(future)).unwrap();
+
+        // Should not be claimable yet (next_retry_at is in the future)
+        let claimed = db.claim_pending_deliveries(10).unwrap();
+        assert!(claimed.is_empty());
+    }
+
+    #[test]
+    fn delivery_queue_replay_unfinished() {
+        let db = test_db();
+        db.enqueue_delivery(&new_delivery("d1", "slack", "user1", None, "{}", 3))
+            .unwrap();
+        let _ = db.claim_pending_deliveries(10).unwrap();
+
+        // d1 is now in_progress
+        let reset = db.replay_unfinished().unwrap();
+        assert_eq!(reset, 1);
+
+        // Should be claimable again
+        let claimed = db.claim_pending_deliveries(10).unwrap();
+        assert_eq!(claimed.len(), 1);
     }
 }
