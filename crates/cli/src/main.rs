@@ -54,8 +54,6 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ServiceAction {
-    /// Install the daemon as a system service (launchd on macOS, systemd on Linux)
-    Install,
     /// Uninstall the daemon service
     Uninstall,
     /// Show the daemon service status
@@ -163,7 +161,6 @@ async fn main() -> Result<()> {
         Some(Commands::Gateway) => run_gateway(shutdown).await?,
         Some(Commands::Daemon) => service::run_daemon(shutdown).await?,
         Some(Commands::Service { action }) => match action {
-            ServiceAction::Install => service::install_service()?,
             ServiceAction::Uninstall => service::uninstall_service()?,
             ServiceAction::Status => service::service_status()?,
         },
@@ -177,6 +174,10 @@ fn ensure_onboarded() -> Result<()> {
     let config_path = data_dir.join("config.toml");
     if !config_path.exists() {
         init_data_dir()?;
+    }
+    // Auto-install service if not already present (non-fatal)
+    if let Err(e) = service::ensure_service_installed() {
+        tracing::warn!("Auto-install service: {e}");
     }
     Ok(())
 }
@@ -209,6 +210,12 @@ fn init_data_dir() -> Result<()> {
             let provider: tamagotchi_core::provider::Provider = result.provider.parse()?;
             let env_var = provider.default_env_var();
             onboarding::apply_onboarding(&result)?;
+
+            // Auto-install service after successful onboarding (non-fatal)
+            if let Err(e) = service::ensure_service_installed() {
+                tracing::warn!("Auto-install service during onboarding: {e}");
+            }
+
             println!();
             println!("Initialized {}", data_dir.display());
             println!();

@@ -71,13 +71,27 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
             match tamagotchi_gateway::GatewayServer::new(gw_config, gw_shutdown) {
                 Ok(gateway) => {
                     if let Err(e) = gateway.run().await {
-                        tracing::warn!("Gateway server error: {e}");
+                        tracing::error!("Gateway server error: {e}");
                     }
                 }
-                Err(e) => tracing::warn!("Failed to create gateway server: {e}"),
+                Err(e) => tracing::error!("Failed to create gateway server: {e}"),
             }
         });
         println!("Gateway server started.");
+    }
+
+    // Start native iMessage monitor if channel is installed
+    let imessage_dir = Config::data_dir()?.join("channels/imessage");
+    if imessage_dir.join("channel.toml").exists() {
+        let im_config = config.clone();
+        let im_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            match tamagotchi_gateway::imessage::start_imessage_monitor(im_config, im_shutdown).await
+            {
+                Ok(_handle) => tracing::info!("iMessage monitor started"),
+                Err(e) => tracing::error!("iMessage monitor failed: {e}"),
+            }
+        });
     }
 
     println!("Daemon running. Press Ctrl+C to stop.");
@@ -206,8 +220,23 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
     }
 }
 
-/// Install the daemon as a system service.
-pub fn install_service() -> Result<()> {
+/// Ensure the daemon service is installed, installing silently if needed.
+pub fn ensure_service_installed() -> Result<()> {
+    let already_installed = if cfg!(target_os = "macos") {
+        launchd_plist_path().map(|p| p.exists()).unwrap_or(false)
+    } else if cfg!(target_os = "linux") {
+        systemd_unit_path().map(|p| p.exists()).unwrap_or(false)
+    } else {
+        return Ok(());
+    };
+
+    if !already_installed {
+        install_service_inner()?;
+    }
+    Ok(())
+}
+
+fn install_service_inner() -> Result<()> {
     let binary_path = find_binary_path()?;
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
@@ -296,22 +325,10 @@ fn install_launchd(
     std::fs::write(&plist_path, &content)
         .with_context(|| format!("Failed to write plist to {}", plist_path.display()))?;
 
-    // Load the service
-    let status = std::process::Command::new("launchctl")
+    let _ = std::process::Command::new("launchctl")
         .args(["load", &plist_path.to_string_lossy()])
         .status()
         .context("Failed to run launchctl load")?;
-
-    if status.success() {
-        println!("Service installed and loaded: {}", plist_path.display());
-        println!("The daemon will start automatically on login.");
-    } else {
-        println!(
-            "Plist written to {} but launchctl load failed.",
-            plist_path.display()
-        );
-        println!("Try: launchctl load {}", plist_path.display());
-    }
 
     Ok(())
 }
@@ -348,11 +365,8 @@ fn status_launchd() -> Result<()> {
 }
 
 fn stop_launchd() -> Result<()> {
+    ensure_service_installed()?;
     let plist_path = launchd_plist_path()?;
-    if !plist_path.exists() {
-        println!("Service not installed. Run `tamagotchi service install` first.");
-        return Ok(());
-    }
     let status = std::process::Command::new("launchctl")
         .args(["unload", &plist_path.to_string_lossy()])
         .status()
@@ -366,11 +380,8 @@ fn stop_launchd() -> Result<()> {
 }
 
 fn restart_launchd() -> Result<()> {
+    ensure_service_installed()?;
     let plist_path = launchd_plist_path()?;
-    if !plist_path.exists() {
-        println!("Service not installed. Run `tamagotchi service install` first.");
-        return Ok(());
-    }
     let _ = std::process::Command::new("launchctl")
         .args(["unload", &plist_path.to_string_lossy()])
         .status();
@@ -415,19 +426,10 @@ fn install_systemd(binary_path: &str, home: &std::path::Path) -> Result<()> {
         .args(["--user", "daemon-reload"])
         .status();
 
-    let status = std::process::Command::new("systemctl")
+    let _ = std::process::Command::new("systemctl")
         .args(["--user", "enable", "--now", "tamagotchi.service"])
         .status()
         .context("Failed to enable service")?;
-
-    if status.success() {
-        println!("Service installed and started: {}", unit_path.display());
-    } else {
-        println!(
-            "Unit written to {} but systemctl enable failed.",
-            unit_path.display()
-        );
-    }
 
     Ok(())
 }
@@ -463,11 +465,7 @@ fn status_systemd() -> Result<()> {
 }
 
 fn stop_systemd() -> Result<()> {
-    let unit_path = systemd_unit_path()?;
-    if !unit_path.exists() {
-        println!("Service not installed. Run `tamagotchi service install` first.");
-        return Ok(());
-    }
+    ensure_service_installed()?;
     let status = std::process::Command::new("systemctl")
         .args(["--user", "stop", "tamagotchi.service"])
         .status()
@@ -481,11 +479,7 @@ fn stop_systemd() -> Result<()> {
 }
 
 fn restart_systemd() -> Result<()> {
-    let unit_path = systemd_unit_path()?;
-    if !unit_path.exists() {
-        println!("Service not installed. Run `tamagotchi service install` first.");
-        return Ok(());
-    }
+    ensure_service_installed()?;
     let status = std::process::Command::new("systemctl")
         .args(["--user", "restart", "tamagotchi.service"])
         .status()
