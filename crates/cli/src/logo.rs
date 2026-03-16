@@ -4,6 +4,7 @@ use crossterm::{
 };
 use std::io::{self, Write};
 
+#[allow(dead_code)]
 const LOGO: &str = r#"
        ╭━━━━━━━╮
       ╱ ●    ● ╲
@@ -14,6 +15,7 @@ const LOGO: &str = r#"
     ╰━━━━━━━━━━━╯
 "#;
 
+#[allow(dead_code)]
 pub fn print_logo() -> anyhow::Result<()> {
     let mut stdout = io::stdout();
     stdout.execute(SetForegroundColor(Color::Magenta))?;

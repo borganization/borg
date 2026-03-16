@@ -39,7 +39,6 @@ dirs = "6"
 serde_yaml = "0.9"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
-inquire = "0.7"
 tiktoken-rs = "0.9"
 dotenvy = "0.15"
 ratatui = "0.29"
@@ -56,6 +55,7 @@ sha2 = "0.10"
 axum = "0.8"
 tower = { version = "0.5", features = ["limit"] }
 tracing-appender = "0.2"
+throbber-widgets-tui = "0.9"
 
 [workspace.lints.clippy]
 identity_op = "deny"
