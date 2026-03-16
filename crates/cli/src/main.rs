@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 mod logo;
 mod onboarding;
+mod onboarding_tui;
 mod repl;
 mod service;
 mod tui;
@@ -356,7 +357,10 @@ fn run_tools() -> Result<()> {
         ("create_tool", "Create/modify user tools via patch DSL"),
         ("run_shell", "Execute a shell command"),
         ("list_skills", "List skills with status"),
-        ("apply_skill_patch", "Create/modify skill files via patch DSL"),
+        (
+            "apply_skill_patch",
+            "Create/modify skill files via patch DSL",
+        ),
         ("read_pdf", "Extract text from a PDF file"),
         ("create_channel", "Create/modify channel integrations"),
         ("list_channels", "List messaging channels"),

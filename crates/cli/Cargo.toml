@@ -23,7 +23,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 futures-util = { workspace = true }
-inquire = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }
 chrono = { workspace = true }
@@ -41,6 +40,7 @@ uuid = { workspace = true }
 tokio-util = "0.7"
 tracing-appender = { workspace = true }
 tempfile = { workspace = true }
+throbber-widgets-tui = { workspace = true }
 
 [lints]
 workspace = true
