@@ -299,11 +299,11 @@ impl OnboardingState {
         // Route based on tab and input mode
         match self.tab {
             Tab::Welcome => self.handle_welcome_key(key),
-            Tab::Style => self.handle_list_key(key, STYLES.len(), &mut self.style_cursor.clone()),
+            Tab::Style => self.handle_list_key(key, STYLES.len()),
             Tab::Provider => self.handle_provider_key(key),
             Tab::Model => {
                 let len = self.current_models().len();
-                self.handle_list_key(key, len, &mut self.model_cursor.clone());
+                self.handle_list_key(key, len);
             }
             Tab::ApiKey => self.handle_api_key_key(key),
             Tab::Budget => self.handle_budget_key(key),
@@ -363,8 +363,7 @@ impl OnboardingState {
         }
     }
 
-    fn handle_list_key(&mut self, key: KeyEvent, len: usize, _cursor: &mut usize) {
-        // For list tabs, we need to route to the right cursor based on tab
+    fn handle_list_key(&mut self, key: KeyEvent, len: usize) {
         match key.code {
             KeyCode::Up => {
                 let cursor = self.active_list_cursor_mut();
@@ -389,11 +388,7 @@ impl OnboardingState {
                 }
             }
             KeyCode::Left => {
-                if key.code == KeyCode::Tab {
-                    // handled above
-                } else {
-                    self.prev_tab();
-                }
+                self.prev_tab();
             }
             KeyCode::Char(c @ '1'..='7') => {
                 let idx = (c as usize) - ('1' as usize);
@@ -1124,7 +1119,7 @@ fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState
         _ => " Tab/→: next  Shift+Tab/←: back  ↑↓: navigate  Enter: select  Esc: cancel",
     };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(hint.to_string(), theme::dim()))),
+        Paragraph::new(Line::from(Span::styled(hint, theme::dim()))),
         area,
     );
 }
