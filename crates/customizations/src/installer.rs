@@ -355,7 +355,10 @@ fn imessage_post_install(data_dir: &std::path::Path) -> Vec<String> {
             }
 
             notes.push(
-                "Messages will be polled automatically when Tamagotchi is running".to_string(),
+                "Messages will be processed automatically when Tamagotchi is running".to_string(),
+            );
+            notes.push(
+                "Note: Messages you send to yourself are ignored (prevents loops). Test by texting from another device.".to_string(),
             );
         }
         Err(_) => {
