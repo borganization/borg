@@ -24,39 +24,29 @@ pub fn check_firewall(checks: &mut Vec<DiagnosticCheck>) {
     #[cfg(target_os = "macos")]
     {
         match run_cmd("socketfilterfw", &["--getglobalstate"]) {
-            Ok(output) => {
-                let status = parse_macos_firewall(&output);
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "Application Firewall".to_string(),
-                    status,
-                });
-            }
-            Err(e) => {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "Application Firewall".to_string(),
-                    status: CheckStatus::Warn(format!("could not check: {e}")),
-                });
-            }
+            Ok(output) => checks.push(DiagnosticCheck {
+                category: CATEGORY,
+                name: "Application Firewall".to_string(),
+                status: parse_macos_firewall(&output),
+            }),
+            Err(e) => checks.push(DiagnosticCheck::warn(
+                CATEGORY,
+                "Application Firewall",
+                format!("could not check: {e}"),
+            )),
         }
 
         match run_cmd("pfctl", &["-s", "info"]) {
-            Ok(output) => {
-                let status = parse_pf_status(&output);
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "PF packet filter".to_string(),
-                    status,
-                });
-            }
-            Err(_) => {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "PF packet filter".to_string(),
-                    status: CheckStatus::Warn("could not query pfctl (needs root)".to_string()),
-                });
-            }
+            Ok(output) => checks.push(DiagnosticCheck {
+                category: CATEGORY,
+                name: "PF packet filter".to_string(),
+                status: parse_pf_status(&output),
+            }),
+            Err(_) => checks.push(DiagnosticCheck::warn(
+                CATEGORY,
+                "PF packet filter",
+                "could not query pfctl (needs root)",
+            )),
         }
     }
 
@@ -64,60 +54,56 @@ pub fn check_firewall(checks: &mut Vec<DiagnosticCheck>) {
     {
         let mut found = false;
         if let Ok(output) = run_cmd("ufw", &["status"]) {
-            let status = parse_ufw_status(&output);
             checks.push(DiagnosticCheck {
                 category: CATEGORY,
                 name: "UFW firewall".to_string(),
-                status,
+                status: parse_ufw_status(&output),
             });
             found = true;
         }
         if !found {
             if let Ok(output) = run_cmd("systemctl", &["is-active", "firewalld"]) {
                 let active = output.trim() == "active";
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "firewalld".to_string(),
-                    status: if active {
-                        CheckStatus::Pass
-                    } else {
-                        CheckStatus::Warn("firewalld is not active".to_string())
-                    },
-                });
+                if active {
+                    checks.push(DiagnosticCheck::pass(CATEGORY, "firewalld"));
+                } else {
+                    checks.push(DiagnosticCheck::warn(
+                        CATEGORY,
+                        "firewalld",
+                        "firewalld is not active",
+                    ));
+                }
                 found = true;
             }
         }
         if !found {
             if let Ok(output) = run_cmd("iptables", &["-L", "-n"]) {
-                let has_rules = parse_iptables_output(&output);
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "iptables rules".to_string(),
-                    status: if has_rules {
-                        CheckStatus::Pass
-                    } else {
-                        CheckStatus::Warn("no iptables rules found".to_string())
-                    },
-                });
+                if parse_iptables_output(&output) {
+                    checks.push(DiagnosticCheck::pass(CATEGORY, "iptables rules"));
+                } else {
+                    checks.push(DiagnosticCheck::warn(
+                        CATEGORY,
+                        "iptables rules",
+                        "no iptables rules found",
+                    ));
+                }
             } else {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "firewall".to_string(),
-                    status: CheckStatus::Warn(
-                        "no firewall detected (ufw, firewalld, iptables)".to_string(),
-                    ),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    CATEGORY,
+                    "firewall",
+                    "no firewall detected (ufw, firewalld, iptables)",
+                ));
             }
         }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        checks.push(DiagnosticCheck {
-            category: CATEGORY,
-            name: "firewall".to_string(),
-            status: CheckStatus::Warn("not supported on this platform".to_string()),
-        });
+        checks.push(DiagnosticCheck::warn(
+            CATEGORY,
+            "firewall",
+            "not supported on this platform",
+        ));
     }
 }
 
@@ -142,27 +128,23 @@ pub fn check_listening_ports(checks: &mut Vec<DiagnosticCheck>) {
         Ok(output) => {
             let findings = parse_listening_ports(&output);
             if findings.is_empty() {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "risky listening ports".to_string(),
-                    status: CheckStatus::Pass,
-                });
+                checks.push(DiagnosticCheck::pass(CATEGORY, "risky listening ports"));
             } else {
                 for finding in findings {
-                    checks.push(DiagnosticCheck {
-                        category: CATEGORY,
-                        name: finding,
-                        status: CheckStatus::Warn("risky port open on all interfaces".to_string()),
-                    });
+                    checks.push(DiagnosticCheck::warn(
+                        CATEGORY,
+                        finding,
+                        "risky port open on all interfaces",
+                    ));
                 }
             }
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: CATEGORY,
-                name: "listening ports".to_string(),
-                status: CheckStatus::Warn(format!("could not check: {e}")),
-            });
+            checks.push(DiagnosticCheck::warn(
+                CATEGORY,
+                "listening ports",
+                format!("could not check: {e}"),
+            ));
         }
     }
 }
@@ -174,13 +156,11 @@ pub fn check_listening_ports(checks: &mut Vec<DiagnosticCheck>) {
 pub fn check_ssh_config(checks: &mut Vec<DiagnosticCheck>) {
     let sshd_config = std::path::Path::new("/etc/ssh/sshd_config");
     if !sshd_config.exists() {
-        checks.push(DiagnosticCheck {
-            category: CATEGORY,
-            name: "SSH daemon config".to_string(),
-            status: CheckStatus::Warn(
-                "sshd_config not found (SSH may not be installed)".to_string(),
-            ),
-        });
+        checks.push(DiagnosticCheck::warn(
+            CATEGORY,
+            "SSH daemon config",
+            "sshd_config not found (SSH may not be installed)",
+        ));
         return;
     }
 
@@ -188,27 +168,23 @@ pub fn check_ssh_config(checks: &mut Vec<DiagnosticCheck>) {
         Ok(content) => {
             let issues = parse_ssh_config(&content);
             if issues.is_empty() {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "SSH daemon config".to_string(),
-                    status: CheckStatus::Pass,
-                });
+                checks.push(DiagnosticCheck::pass(CATEGORY, "SSH daemon config"));
             } else {
                 for issue in issues {
-                    checks.push(DiagnosticCheck {
-                        category: CATEGORY,
-                        name: format!("SSH: {issue}"),
-                        status: CheckStatus::Warn("weak SSH configuration".to_string()),
-                    });
+                    checks.push(DiagnosticCheck::warn(
+                        CATEGORY,
+                        format!("SSH: {issue}"),
+                        "weak SSH configuration",
+                    ));
                 }
             }
         }
         Err(e) => {
-            checks.push(DiagnosticCheck {
-                category: CATEGORY,
-                name: "SSH daemon config".to_string(),
-                status: CheckStatus::Warn(format!("could not read: {e}")),
-            });
+            checks.push(DiagnosticCheck::warn(
+                CATEGORY,
+                "SSH daemon config",
+                format!("could not read: {e}"),
+            ));
         }
     }
 }
@@ -225,11 +201,11 @@ pub fn check_sensitive_permissions(checks: &mut Vec<DiagnosticCheck>) {
         let home = match dirs::home_dir() {
             Some(h) => h,
             None => {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "sensitive dir permissions".to_string(),
-                    status: CheckStatus::Warn("could not determine home directory".to_string()),
-                });
+                checks.push(DiagnosticCheck::warn(
+                    CATEGORY,
+                    "sensitive dir permissions",
+                    "could not determine home directory",
+                ));
                 return;
             }
         };
@@ -240,31 +216,28 @@ pub fn check_sensitive_permissions(checks: &mut Vec<DiagnosticCheck>) {
             if !path.exists() {
                 continue;
             }
+            let name = format!("~/{dir_name} permissions");
             match std::fs::metadata(&path) {
                 Ok(meta) => {
                     let mode = meta.mode() & 0o777;
                     if mode & 0o077 != 0 {
-                        checks.push(DiagnosticCheck {
-                            category: CATEGORY,
-                            name: format!("~/{dir_name} permissions"),
-                            status: CheckStatus::Warn(format!(
+                        checks.push(DiagnosticCheck::warn(
+                            CATEGORY,
+                            name,
+                            format!(
                                 "permissions are {mode:04o} — should not have group/other access"
-                            )),
-                        });
+                            ),
+                        ));
                     } else {
-                        checks.push(DiagnosticCheck {
-                            category: CATEGORY,
-                            name: format!("~/{dir_name} permissions"),
-                            status: CheckStatus::Pass,
-                        });
+                        checks.push(DiagnosticCheck::pass(CATEGORY, name));
                     }
                 }
                 Err(e) => {
-                    checks.push(DiagnosticCheck {
-                        category: CATEGORY,
-                        name: format!("~/{dir_name} permissions"),
-                        status: CheckStatus::Warn(format!("could not stat: {e}")),
-                    });
+                    checks.push(DiagnosticCheck::warn(
+                        CATEGORY,
+                        name,
+                        format!("could not stat: {e}"),
+                    ));
                 }
             }
         }
@@ -272,11 +245,11 @@ pub fn check_sensitive_permissions(checks: &mut Vec<DiagnosticCheck>) {
 
     #[cfg(not(unix))]
     {
-        checks.push(DiagnosticCheck {
-            category: CATEGORY,
-            name: "sensitive dir permissions".to_string(),
-            status: CheckStatus::Warn("not supported on this platform".to_string()),
-        });
+        checks.push(DiagnosticCheck::warn(
+            CATEGORY,
+            "sensitive dir permissions",
+            "not supported on this platform",
+        ));
     }
 }
 
@@ -288,21 +261,16 @@ pub fn check_disk_encryption(checks: &mut Vec<DiagnosticCheck>) {
     #[cfg(target_os = "macos")]
     {
         match run_cmd("fdesetup", &["status"]) {
-            Ok(output) => {
-                let status = parse_fde_status(&output);
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "FileVault disk encryption".to_string(),
-                    status,
-                });
-            }
-            Err(e) => {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "FileVault disk encryption".to_string(),
-                    status: CheckStatus::Warn(format!("could not check: {e}")),
-                });
-            }
+            Ok(output) => checks.push(DiagnosticCheck {
+                category: CATEGORY,
+                name: "FileVault disk encryption".to_string(),
+                status: parse_fde_status(&output),
+            }),
+            Err(e) => checks.push(DiagnosticCheck::warn(
+                CATEGORY,
+                "FileVault disk encryption",
+                format!("could not check: {e}"),
+            )),
         }
     }
 
@@ -310,34 +278,31 @@ pub fn check_disk_encryption(checks: &mut Vec<DiagnosticCheck>) {
     {
         match run_cmd("lsblk", &["-o", "NAME,FSTYPE"]) {
             Ok(output) => {
-                let encrypted = output.contains("crypto_LUKS");
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "LUKS disk encryption".to_string(),
-                    status: if encrypted {
-                        CheckStatus::Pass
-                    } else {
-                        CheckStatus::Warn("no LUKS-encrypted volumes detected".to_string())
-                    },
-                });
+                if output.contains("crypto_LUKS") {
+                    checks.push(DiagnosticCheck::pass(CATEGORY, "LUKS disk encryption"));
+                } else {
+                    checks.push(DiagnosticCheck::warn(
+                        CATEGORY,
+                        "LUKS disk encryption",
+                        "no LUKS-encrypted volumes detected",
+                    ));
+                }
             }
-            Err(e) => {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "disk encryption".to_string(),
-                    status: CheckStatus::Warn(format!("could not check: {e}")),
-                });
-            }
+            Err(e) => checks.push(DiagnosticCheck::warn(
+                CATEGORY,
+                "disk encryption",
+                format!("could not check: {e}"),
+            )),
         }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        checks.push(DiagnosticCheck {
-            category: CATEGORY,
-            name: "disk encryption".to_string(),
-            status: CheckStatus::Warn("not supported on this platform".to_string()),
-        });
+        checks.push(DiagnosticCheck::warn(
+            CATEGORY,
+            "disk encryption",
+            "not supported on this platform",
+        ));
     }
 }
 
@@ -349,21 +314,16 @@ pub fn check_os_updates(checks: &mut Vec<DiagnosticCheck>) {
     #[cfg(target_os = "macos")]
     {
         match run_cmd_timeout("softwareupdate", &["-l"], Duration::from_secs(10)) {
-            Ok(output) => {
-                let status = parse_softwareupdate(&output);
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "macOS software updates".to_string(),
-                    status,
-                });
-            }
-            Err(e) => {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "macOS software updates".to_string(),
-                    status: CheckStatus::Warn(format!("could not check: {e}")),
-                });
-            }
+            Ok(output) => checks.push(DiagnosticCheck {
+                category: CATEGORY,
+                name: "macOS software updates".to_string(),
+                status: parse_softwareupdate(&output),
+            }),
+            Err(e) => checks.push(DiagnosticCheck::warn(
+                CATEGORY,
+                "macOS software updates",
+                format!("could not check: {e}"),
+            )),
         }
     }
 
@@ -373,11 +333,10 @@ pub fn check_os_updates(checks: &mut Vec<DiagnosticCheck>) {
         if let Ok(output) =
             run_cmd_timeout("apt", &["list", "--upgradable"], Duration::from_secs(10))
         {
-            let status = parse_apt_upgradable(&output);
             checks.push(DiagnosticCheck {
                 category: CATEGORY,
                 name: "OS package updates".to_string(),
-                status,
+                status: parse_apt_upgradable(&output),
             });
             checked = true;
         }
@@ -385,35 +344,34 @@ pub fn check_os_updates(checks: &mut Vec<DiagnosticCheck>) {
             if let Ok(output) =
                 run_cmd_timeout("dnf", &["check-update", "-q"], Duration::from_secs(10))
             {
-                let has_updates = !output.trim().is_empty();
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "OS package updates".to_string(),
-                    status: if has_updates {
-                        CheckStatus::Warn("updates available".to_string())
-                    } else {
-                        CheckStatus::Pass
-                    },
-                });
+                if output.trim().is_empty() {
+                    checks.push(DiagnosticCheck::pass(CATEGORY, "OS package updates"));
+                } else {
+                    checks.push(DiagnosticCheck::warn(
+                        CATEGORY,
+                        "OS package updates",
+                        "updates available",
+                    ));
+                }
                 checked = true;
             }
         }
         if !checked {
-            checks.push(DiagnosticCheck {
-                category: CATEGORY,
-                name: "OS package updates".to_string(),
-                status: CheckStatus::Warn("could not check (no apt or dnf)".to_string()),
-            });
+            checks.push(DiagnosticCheck::warn(
+                CATEGORY,
+                "OS package updates",
+                "could not check (no apt or dnf)",
+            ));
         }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        checks.push(DiagnosticCheck {
-            category: CATEGORY,
-            name: "OS updates".to_string(),
-            status: CheckStatus::Warn("not supported on this platform".to_string()),
-        });
+        checks.push(DiagnosticCheck::warn(
+            CATEGORY,
+            "OS updates",
+            "not supported on this platform",
+        ));
     }
 }
 
@@ -427,19 +385,16 @@ pub fn check_running_services(checks: &mut Vec<DiagnosticCheck>) {
         match run_cmd("launchctl", &["list"]) {
             Ok(output) => {
                 let count = output.lines().count().saturating_sub(1); // header line
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: format!("running daemons ({count} launchctl jobs)"),
-                    status: CheckStatus::Pass,
-                });
+                checks.push(DiagnosticCheck::pass(
+                    CATEGORY,
+                    format!("running daemons ({count} launchctl jobs)"),
+                ));
             }
-            Err(e) => {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "running daemons".to_string(),
-                    status: CheckStatus::Warn(format!("could not list: {e}")),
-                });
-            }
+            Err(e) => checks.push(DiagnosticCheck::warn(
+                CATEGORY,
+                "running daemons",
+                format!("could not list: {e}"),
+            )),
         }
     }
 
@@ -457,29 +412,26 @@ pub fn check_running_services(checks: &mut Vec<DiagnosticCheck>) {
         ) {
             Ok(output) => {
                 let count = output.lines().filter(|l| l.contains(".service")).count();
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: format!("running services ({count} systemd units)"),
-                    status: CheckStatus::Pass,
-                });
+                checks.push(DiagnosticCheck::pass(
+                    CATEGORY,
+                    format!("running services ({count} systemd units)"),
+                ));
             }
-            Err(e) => {
-                checks.push(DiagnosticCheck {
-                    category: CATEGORY,
-                    name: "running services".to_string(),
-                    status: CheckStatus::Warn(format!("could not list: {e}")),
-                });
-            }
+            Err(e) => checks.push(DiagnosticCheck::warn(
+                CATEGORY,
+                "running services",
+                format!("could not list: {e}"),
+            )),
         }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        checks.push(DiagnosticCheck {
-            category: CATEGORY,
-            name: "running services".to_string(),
-            status: CheckStatus::Warn("not supported on this platform".to_string()),
-        });
+        checks.push(DiagnosticCheck::warn(
+            CATEGORY,
+            "running services",
+            "not supported on this platform",
+        ));
     }
 }
 
