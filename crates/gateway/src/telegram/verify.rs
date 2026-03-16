@@ -17,15 +17,10 @@ pub fn verify_secret_token(headers: &HeaderMap, secret: &str) -> bool {
 }
 
 /// Constant-time byte comparison to prevent timing attacks.
+/// Uses the `subtle` crate which handles differing lengths safely.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 /// Parse and validate a Telegram update from the request body.
