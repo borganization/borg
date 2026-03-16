@@ -80,6 +80,12 @@ pub struct SettingsSection {
     pub mode: ChannelMode,
     #[serde(default)]
     pub poll_interval_ms: Option<u64>,
+    #[serde(default)]
+    pub max_message_chars: Option<usize>,
+    #[serde(default)]
+    pub retry_max_attempts: Option<u32>,
+    #[serde(default)]
+    pub retry_initial_delay_ms: Option<u64>,
 }
 
 impl Default for SettingsSection {
@@ -90,6 +96,9 @@ impl Default for SettingsSection {
             max_concurrent: default_max_concurrent(),
             mode: ChannelMode::default(),
             poll_interval_ms: None,
+            max_message_chars: None,
+            retry_max_attempts: None,
+            retry_initial_delay_ms: None,
         }
     }
 }
