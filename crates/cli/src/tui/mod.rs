@@ -27,6 +27,7 @@ use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 use tamagotchi_core::agent::{Agent, AgentEvent};
 use tamagotchi_core::config::Config;
@@ -34,6 +35,56 @@ use tamagotchi_heartbeat::scheduler::{HeartbeatEvent, HeartbeatScheduler};
 
 use app::{App, AppAction};
 use history::HistoryCell;
+
+/// Spawn the gateway server if there are installed channels.
+/// Returns `true` if a gateway was actually spawned.
+fn spawn_gateway(config: &Config, shutdown: CancellationToken) -> bool {
+    if let Ok(registry) = tamagotchi_gateway::ChannelRegistry::new() {
+        if !registry.list_channels().is_empty() {
+            let gw_config = config.clone();
+            tokio::spawn(async move {
+                match tamagotchi_gateway::GatewayServer::new(gw_config, shutdown) {
+                    Ok(server) => {
+                        if let Err(e) = server.run().await {
+                            tracing::error!("Gateway exited with error: {e}");
+                        }
+                    }
+                    Err(e) => tracing::error!("Failed to initialize gateway: {e}"),
+                }
+            });
+            return true;
+        }
+    }
+    false
+}
+
+/// Restart the gateway: cancel old token, reload config, spawn fresh server.
+/// Returns the new shutdown token.
+fn restart_gateway(gateway_shutdown: &Arc<Mutex<CancellationToken>>) -> String {
+    let shutdown = gateway_shutdown.try_lock();
+    let Ok(mut shutdown) = shutdown else {
+        return "Gateway restart failed: could not acquire lock".to_string();
+    };
+
+    // Cancel existing gateway
+    shutdown.cancel();
+
+    // Create new token
+    let new_token = CancellationToken::new();
+    *shutdown = new_token.clone();
+
+    // Reload config and spawn
+    match Config::load() {
+        Ok(config) => {
+            if spawn_gateway(&config, new_token) {
+                "Gateway restarted.".to_string()
+            } else {
+                "No channels installed — gateway not started.".to_string()
+            }
+        }
+        Err(e) => format!("Gateway restart failed: could not reload config: {e}"),
+    }
+}
 
 /// Guard that restores terminal state on drop (both normal exit and early error return).
 struct TerminalGuard;
@@ -77,26 +128,12 @@ pub async fn run() -> Result<()> {
     };
 
     // Auto-start gateway if enabled and any channels are installed
-    let gateway_shutdown = tokio_util::sync::CancellationToken::new();
-    let _gateway_guard = gateway_shutdown.clone().drop_guard();
+    let gateway_shutdown_token = CancellationToken::new();
+    let _gateway_guard = gateway_shutdown_token.clone().drop_guard();
     if config.gateway.enabled {
-        if let Ok(registry) = tamagotchi_gateway::ChannelRegistry::new() {
-            if !registry.list_channels().is_empty() {
-                let gw_config = config.clone();
-                let gw_shutdown = gateway_shutdown.clone();
-                tokio::spawn(async move {
-                    match tamagotchi_gateway::GatewayServer::new(gw_config, gw_shutdown) {
-                        Ok(server) => {
-                            if let Err(e) = server.run().await {
-                                tracing::error!("Gateway exited with error: {e}");
-                            }
-                        }
-                        Err(e) => tracing::error!("Failed to initialize gateway: {e}"),
-                    }
-                });
-            }
-        }
+        spawn_gateway(&config, gateway_shutdown_token.clone());
     }
+    let gateway_shutdown = Arc::new(Mutex::new(gateway_shutdown_token));
 
     // Setup terminal
     enable_raw_mode()?;
@@ -129,6 +166,7 @@ pub async fn run() -> Result<()> {
         &agent,
         &mut event_stream,
         tick_rate,
+        &gateway_shutdown,
     )
     .await
 }
@@ -160,6 +198,7 @@ async fn run_event_loop(
     agent: &Arc<Mutex<Agent>>,
     event_stream: &mut EventStream,
     tick_rate: Duration,
+    gateway_shutdown: &Arc<Mutex<CancellationToken>>,
 ) -> Result<()> {
     let mut tick_interval = tokio::time::interval(tick_rate);
 
@@ -498,9 +537,8 @@ async fn run_event_loop(
                                         if def.kind
                                             == tamagotchi_customizations::CustomizationKind::Channel
                                         {
-                                            msg.push_str(
-                                                "\n  Restart Tamagotchi to activate the gateway",
-                                            );
+                                            let gw_msg = restart_gateway(gateway_shutdown);
+                                            msg.push_str(&format!("\n  {gw_msg}"));
                                         }
                                         results.push(msg);
                                     }
@@ -678,6 +716,10 @@ async fn run_event_loop(
                 if !results.is_empty() {
                     app.push_system_message(results.join("\n"));
                 }
+            }
+            AppAction::RestartGateway => {
+                let msg = restart_gateway(gateway_shutdown);
+                app.push_system_message(msg);
             }
             AppAction::Continue => {}
         }
