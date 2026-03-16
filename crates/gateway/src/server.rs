@@ -23,6 +23,7 @@ use crate::manifest::ChannelMode;
 use crate::rate_limit::SlidingWindowLimiter;
 use crate::registry::ChannelRegistry;
 use crate::retry::RetryPolicy;
+use crate::slack::api::SlackClient;
 use crate::telegram::api::TelegramClient;
 use crate::telegram::dedup::UpdateDeduplicator;
 
@@ -36,6 +37,8 @@ struct AppState {
     telegram_client: Option<Arc<TelegramClient>>,
     telegram_dedup: Arc<Mutex<UpdateDeduplicator>>,
     telegram_secret: Option<String>,
+    slack_client: Option<Arc<SlackClient>>,
+    slack_signing_secret: Option<String>,
 }
 
 pub struct GatewayServer {
@@ -72,9 +75,26 @@ impl GatewayServer {
             None
         };
 
+        // Resolve Telegram bot token via credential store, falling back to env var
+        let telegram_token = self
+            .config
+            .credentials
+            .get("TELEGRAM_BOT_TOKEN")
+            .and_then(|cv| cv.resolve().ok())
+            .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok())
+            .filter(|t| !t.is_empty());
+
+        // Resolve webhook secret via credential store, falling back to env var
+        let telegram_secret = self
+            .config
+            .credentials
+            .get("TELEGRAM_WEBHOOK_SECRET")
+            .and_then(|cv| cv.resolve().ok())
+            .or_else(|| std::env::var("TELEGRAM_WEBHOOK_SECRET").ok());
+
         // Initialize native Telegram client if token is available
-        let telegram_client = match std::env::var("TELEGRAM_BOT_TOKEN") {
-            Ok(token) if !token.is_empty() => {
+        let telegram_client = match telegram_token {
+            Some(token) => {
                 let client = TelegramClient::new(&token);
                 match client.get_me().await {
                     Ok(me) => {
@@ -86,9 +106,9 @@ impl GatewayServer {
                         // Set webhook if public_url is configured
                         if let Some(ref url) = self.config.gateway.public_url {
                             let webhook_url = format!("{url}/webhook/telegram");
-                            let secret = std::env::var("TELEGRAM_WEBHOOK_SECRET").ok();
-                            if let Err(e) =
-                                client.set_webhook(&webhook_url, secret.as_deref()).await
+                            if let Err(e) = client
+                                .set_webhook(&webhook_url, telegram_secret.as_deref())
+                                .await
                             {
                                 warn!("Failed to set Telegram webhook: {e}");
                             } else {
@@ -104,10 +124,48 @@ impl GatewayServer {
                     }
                 }
             }
-            _ => None,
+            None => None,
         };
 
-        let telegram_secret = std::env::var("TELEGRAM_WEBHOOK_SECRET").ok();
+        let telegram_dedup = Arc::new(Mutex::new(UpdateDeduplicator::new()));
+
+        // Resolve Slack credentials via credential store, falling back to env vars
+        let slack_token = self
+            .config
+            .credentials
+            .get("SLACK_BOT_TOKEN")
+            .and_then(|cv| cv.resolve().ok())
+            .or_else(|| std::env::var("SLACK_BOT_TOKEN").ok())
+            .filter(|t| !t.is_empty());
+
+        let slack_signing_secret = self
+            .config
+            .credentials
+            .get("SLACK_SIGNING_SECRET")
+            .and_then(|cv| cv.resolve().ok())
+            .or_else(|| std::env::var("SLACK_SIGNING_SECRET").ok());
+
+        // Initialize native Slack client if token is available
+        let slack_client = match slack_token {
+            Some(token) => {
+                let client = SlackClient::new(&token);
+                match client.auth_test().await {
+                    Ok(resp) => {
+                        info!(
+                            "Slack native integration active (bot: {}, team: {})",
+                            resp.user.as_deref().unwrap_or("unknown"),
+                            resp.team.as_deref().unwrap_or("unknown"),
+                        );
+                        Some(Arc::new(client))
+                    }
+                    Err(e) => {
+                        warn!("SLACK_BOT_TOKEN set but auth.test failed: {e}");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
 
         let state = Arc::new(AppState {
             config: self.config.clone(),
@@ -117,8 +175,10 @@ impl GatewayServer {
             health: health.clone(),
             rate_limiter,
             telegram_client: telegram_client.clone(),
-            telegram_dedup: Arc::new(Mutex::new(UpdateDeduplicator::new())),
+            telegram_dedup: telegram_dedup.clone(),
             telegram_secret,
+            slack_client,
+            slack_signing_secret,
         });
 
         let app = Router::new()
@@ -156,6 +216,69 @@ impl GatewayServer {
                 }
             }
         });
+
+        // Spawn Telegram polling if no public_url (polling mode)
+        if self.config.gateway.public_url.is_none() {
+            if let Some(ref tg_client) = telegram_client {
+                info!("No public_url configured — starting Telegram long-polling mode");
+                let poll_client = tg_client.clone();
+                let poll_dedup = telegram_dedup.clone();
+                let poll_shutdown = self.shutdown.clone();
+                let poll_config = self.config.clone();
+                let poll_health = health.clone();
+
+                let callback: crate::telegram::polling::PollCallback =
+                    Arc::new(move |inbound, chat_id| {
+                        let config = poll_config.clone();
+                        let health = poll_health.clone();
+                        let tg = poll_client.clone();
+                        Box::pin(async move {
+                            let _ = tg.send_typing(chat_id).await;
+
+                            // Extract thread/reply IDs before passing inbound to invoke_agent
+                            let thread_id: Option<i64> =
+                                inbound.thread_id.as_deref().and_then(|id| id.parse().ok());
+                            let reply_to: Option<i64> =
+                                inbound.message_id.as_deref().and_then(|id| id.parse().ok());
+
+                            match handler::invoke_agent(
+                                "telegram",
+                                &inbound,
+                                &config,
+                                Some(&health),
+                            )
+                            .await
+                            {
+                                Ok((response_text, _)) => {
+                                    send_telegram_response(
+                                        &tg,
+                                        chat_id,
+                                        &response_text,
+                                        thread_id,
+                                        reply_to,
+                                        &health,
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    warn!("Agent error in Telegram poll mode: {e}");
+                                }
+                            }
+                        })
+                    });
+
+                let polling_client = tg_client.clone();
+                tokio::spawn(async move {
+                    crate::telegram::polling::run_polling(
+                        polling_client,
+                        poll_dedup,
+                        callback,
+                        poll_shutdown,
+                    )
+                    .await;
+                });
+            }
+        }
 
         // Spawn poll loops for poll-mode channels
         let mut poll_handles = Vec::new();
@@ -473,6 +596,12 @@ async fn webhook_handler(
                         anyhow::anyhow!("Missing or invalid chat_id in Telegram update")
                     })?;
 
+                let thread_id: Option<i64> =
+                    inbound.thread_id.as_deref().and_then(|id| id.parse().ok());
+
+                let reply_to: Option<i64> =
+                    inbound.message_id.as_deref().and_then(|id| id.parse().ok());
+
                 // Send typing indicator
                 let _ = tg_client.send_typing(chat_id).await;
 
@@ -481,17 +610,16 @@ async fn webhook_handler(
                     handler::invoke_agent("telegram", &inbound, &state.config, Some(&state.health))
                         .await?;
 
-                // Send response via Telegram API
-                if let Err(e) = tg_client.send_message(chat_id, &response_text, None).await {
-                    warn!("Failed to send Telegram response: {e}");
-                    state
-                        .health
-                        .write()
-                        .await
-                        .record_error("telegram", &e.to_string());
-                } else {
-                    state.health.write().await.record_outbound("telegram");
-                }
+                // Send response with HTML formatting and plain-text fallback
+                send_telegram_response(
+                    tg_client,
+                    chat_id,
+                    &response_text,
+                    thread_id,
+                    reply_to,
+                    &state.health,
+                )
+                .await;
 
                 Ok(response_text)
             })
@@ -507,6 +635,92 @@ async fn webhook_handler(
                     (
                         StatusCode::OK,
                         axum::Json(serde_json::json!({ "ok": true })),
+                    )
+                }
+                Err(_) => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    axum::Json(serde_json::json!({ "error": "Request timed out" })),
+                ),
+            };
+        }
+    }
+
+    // Native Slack handling
+    if name == "slack" {
+        if let Some(ref slack_client) = state.slack_client {
+            // Signature verification + envelope parsing (sync, no timeout needed)
+            let webhook_result = match crate::slack::handle_slack_webhook(
+                &headers,
+                &body,
+                state.slack_signing_secret.as_deref(),
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("Slack webhook verification/parse error: {e:#}");
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        axum::Json(serde_json::json!({ "error": "Unauthorized" })),
+                    );
+                }
+            };
+
+            // Handle challenge immediately (no agent invocation needed)
+            if let crate::slack::SlackWebhookResult::Challenge(challenge) = webhook_result {
+                return (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({ "challenge": challenge })),
+                );
+            }
+
+            // Handle skip
+            if matches!(webhook_result, crate::slack::SlackWebhookResult::Skip) {
+                return (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({ "ok": true })),
+                );
+            }
+
+            // Must be Message — invoke agent with timeout
+            let crate::slack::SlackWebhookResult::Message(inbound) = webhook_result else {
+                unreachable!()
+            };
+
+            let result = tokio::time::timeout(state.request_timeout, async {
+                let channel_id = inbound.channel_id.clone().unwrap_or_default();
+                let thread_ts = inbound.thread_ts.clone();
+
+                let (response_text, _session_id) =
+                    handler::invoke_agent("slack", &inbound, &state.config, Some(&state.health))
+                        .await?;
+
+                if let Err(e) = slack_client
+                    .post_message(&channel_id, &response_text, thread_ts.as_deref())
+                    .await
+                {
+                    warn!("Failed to send Slack response: {e}");
+                    state
+                        .health
+                        .write()
+                        .await
+                        .record_error("slack", &e.to_string());
+                } else {
+                    state.health.write().await.record_outbound("slack");
+                }
+
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+
+            return match result {
+                Ok(Ok(())) => (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({ "ok": true })),
+                ),
+                Ok(Err(e)) => {
+                    warn!("Slack agent/send error: {e:#}");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(serde_json::json!({ "error": "Internal server error" })),
                     )
                 }
                 Err(_) => (
@@ -558,6 +772,39 @@ async fn webhook_handler(
             StatusCode::GATEWAY_TIMEOUT,
             axum::Json(serde_json::json!({ "error": "Request timed out" })),
         ),
+    }
+}
+
+/// Send a Telegram response with HTML formatting and plain-text fallback.
+async fn send_telegram_response(
+    client: &TelegramClient,
+    chat_id: i64,
+    response_text: &str,
+    thread_id: Option<i64>,
+    reply_to: Option<i64>,
+    health: &Arc<RwLock<ChannelHealthRegistry>>,
+) {
+    let html = crate::telegram::format::markdown_to_telegram_html(response_text);
+
+    if let Err(e) = client
+        .send_message(chat_id, &html, Some("HTML"), thread_id, reply_to)
+        .await
+    {
+        warn!("HTML send failed, retrying as plain text: {e}");
+        if let Err(e2) = client
+            .send_message(chat_id, response_text, None, thread_id, reply_to)
+            .await
+        {
+            warn!("Failed to send Telegram response: {e2}");
+            health
+                .write()
+                .await
+                .record_error("telegram", &e2.to_string());
+        } else {
+            health.write().await.record_outbound("telegram");
+        }
+    } else {
+        health.write().await.record_outbound("telegram");
     }
 }
 

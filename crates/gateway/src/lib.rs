@@ -8,6 +8,7 @@ pub mod rate_limit;
 pub mod registry;
 pub mod retry;
 pub mod server;
+pub mod slack;
 pub mod telegram;
 
 pub use registry::ChannelRegistry;

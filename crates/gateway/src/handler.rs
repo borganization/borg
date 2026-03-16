@@ -21,6 +21,12 @@ pub struct InboundMessage {
     pub text: String,
     #[serde(default)]
     pub channel_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub thread_ts: Option<String>,
 }
 
 /// Process a webhook request for a channel end-to-end.
@@ -134,10 +140,14 @@ pub async fn invoke_agent(
         h.write().await.record_inbound(channel_name);
     }
 
-    // Resolve session
+    // Resolve session — include thread_id in the key for forum topic isolation
     let db = Database::open().context("Failed to open database")?;
+    let session_key = match &inbound.thread_id {
+        Some(tid) => format!("{}:{}", inbound.sender_id, tid),
+        None => inbound.sender_id.clone(),
+    };
     let session_id = db
-        .resolve_channel_session(channel_name, &inbound.sender_id)
+        .resolve_channel_session(channel_name, &session_key)
         .context("Failed to resolve channel session")?;
 
     // Log inbound message
