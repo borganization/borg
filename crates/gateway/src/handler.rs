@@ -115,17 +115,16 @@ fn build_retry_policy(channel: &RegisteredChannel) -> RetryPolicy {
     policy
 }
 
-/// Shared message processing: session resolution, agent invocation, outbound with retry + chunking.
-async fn process_message(
-    channel: &RegisteredChannel,
-    inbound: InboundMessage,
+/// Invoke the agent with an inbound message and return the response text and session ID.
+///
+/// This is the shared core: session resolution, agent creation, message dispatch, response collection.
+/// Used by both script-based channels and native integrations (e.g. Telegram).
+pub async fn invoke_agent(
+    channel_name: &str,
+    inbound: &InboundMessage,
     config: &Config,
     health: Option<&Arc<RwLock<ChannelHealthRegistry>>>,
-) -> Result<String> {
-    let executor = ChannelExecutor::new(&channel.manifest, &channel.dir);
-    let blocked_paths = &config.security.blocked_paths;
-    let channel_name = &channel.manifest.name;
-
+) -> Result<(String, String)> {
     info!(
         "Channel '{}' received message from '{}'",
         channel_name, inbound.sender_id
@@ -211,6 +210,20 @@ async fn process_message(
         warn!("Failed to log outbound message for channel '{channel_name}': {e}");
     }
 
+    Ok((response_text, session_id))
+}
+
+/// Shared message processing: session resolution, agent invocation, outbound with retry + chunking.
+async fn process_message(
+    channel: &RegisteredChannel,
+    inbound: InboundMessage,
+    config: &Config,
+    health: Option<&Arc<RwLock<ChannelHealthRegistry>>>,
+) -> Result<String> {
+    let channel_name = &channel.manifest.name;
+
+    let (response_text, _session_id) = invoke_agent(channel_name, &inbound, config, health).await?;
+
     // Prepare auth tokens
     let token = channel
         .manifest
@@ -228,6 +241,8 @@ async fn process_message(
         .and_then(|env| std::env::var(env).ok())
         .unwrap_or_default();
 
+    let executor = ChannelExecutor::new(&channel.manifest, &channel.dir);
+    let blocked_paths = &config.security.blocked_paths;
     let retry_policy = build_retry_policy(channel);
 
     // Chunk text if max_message_chars is configured
@@ -236,6 +251,8 @@ async fn process_message(
         _ => vec![response_text.clone()],
     };
     let total_chunks = chunks.len();
+
+    let db = Database::open().context("Failed to open database")?;
 
     for (i, chunk) in chunks.iter().enumerate() {
         // Build payload without secrets for persistence
@@ -264,7 +281,7 @@ async fn process_message(
             channel_name,
             sender_id: &inbound.sender_id,
             channel_id: inbound.channel_id.as_deref(),
-            session_id: Some(&session_id),
+            session_id: Some(&_session_id),
             payload_json: &persist_str,
             max_retries: retry_policy.max_retries as i32,
         }) {

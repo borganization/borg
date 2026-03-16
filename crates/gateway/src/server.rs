@@ -23,6 +23,8 @@ use crate::manifest::ChannelMode;
 use crate::rate_limit::SlidingWindowLimiter;
 use crate::registry::ChannelRegistry;
 use crate::retry::RetryPolicy;
+use crate::telegram::api::TelegramClient;
+use crate::telegram::dedup::UpdateDeduplicator;
 
 struct AppState {
     config: Config,
@@ -31,6 +33,9 @@ struct AppState {
     request_timeout: Duration,
     health: Arc<RwLock<ChannelHealthRegistry>>,
     rate_limiter: Option<Arc<Mutex<SlidingWindowLimiter>>>,
+    telegram_client: Option<Arc<TelegramClient>>,
+    telegram_dedup: Arc<Mutex<UpdateDeduplicator>>,
+    telegram_secret: Option<String>,
 }
 
 pub struct GatewayServer {
@@ -67,6 +72,43 @@ impl GatewayServer {
             None
         };
 
+        // Initialize native Telegram client if token is available
+        let telegram_client = match std::env::var("TELEGRAM_BOT_TOKEN") {
+            Ok(token) if !token.is_empty() => {
+                let client = TelegramClient::new(&token);
+                match client.get_me().await {
+                    Ok(me) => {
+                        info!(
+                            "Telegram native integration active (bot: @{})",
+                            me.username.as_deref().unwrap_or(&me.first_name)
+                        );
+
+                        // Set webhook if public_url is configured
+                        if let Some(ref url) = self.config.gateway.public_url {
+                            let webhook_url = format!("{url}/webhook/telegram");
+                            let secret = std::env::var("TELEGRAM_WEBHOOK_SECRET").ok();
+                            if let Err(e) =
+                                client.set_webhook(&webhook_url, secret.as_deref()).await
+                            {
+                                warn!("Failed to set Telegram webhook: {e}");
+                            } else {
+                                info!("Telegram webhook set to {webhook_url}");
+                            }
+                        }
+
+                        Some(Arc::new(client))
+                    }
+                    Err(e) => {
+                        warn!("TELEGRAM_BOT_TOKEN set but getMe failed: {e}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
+        let telegram_secret = std::env::var("TELEGRAM_WEBHOOK_SECRET").ok();
+
         let state = Arc::new(AppState {
             config: self.config.clone(),
             registry,
@@ -74,6 +116,9 @@ impl GatewayServer {
             request_timeout: Duration::from_millis(gateway_config.request_timeout_ms),
             health: health.clone(),
             rate_limiter,
+            telegram_client: telegram_client.clone(),
+            telegram_dedup: Arc::new(Mutex::new(UpdateDeduplicator::new())),
+            telegram_secret,
         });
 
         let app = Router::new()
@@ -283,6 +328,7 @@ impl GatewayServer {
         }
 
         let shutdown = self.shutdown.clone();
+        let shutdown_tg_client = telegram_client.clone();
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -290,6 +336,15 @@ impl GatewayServer {
         .with_graceful_shutdown(async move {
             shutdown.cancelled().await;
             info!("Gateway shutting down");
+
+            // Clean up Telegram webhook on shutdown
+            if let Some(client) = shutdown_tg_client {
+                if let Err(e) = client.delete_webhook().await {
+                    warn!("Failed to delete Telegram webhook on shutdown: {e}");
+                } else {
+                    info!("Telegram webhook removed");
+                }
+            }
         })
         .await?;
 
@@ -392,6 +447,75 @@ async fn webhook_handler(
             );
         }
     };
+
+    // Native Telegram handling
+    if name == "telegram" {
+        if let Some(ref tg_client) = state.telegram_client {
+            let result = tokio::time::timeout(state.request_timeout, async {
+                let inbound = crate::telegram::handle_telegram_webhook(
+                    &headers,
+                    &body,
+                    state.telegram_secret.as_deref(),
+                    &state.telegram_dedup,
+                )
+                .await?;
+
+                let inbound = match inbound {
+                    Some(msg) => msg,
+                    None => return Ok::<_, anyhow::Error>("(skipped)".to_string()),
+                };
+
+                let chat_id: i64 = inbound
+                    .channel_id
+                    .as_deref()
+                    .and_then(|id| id.parse().ok())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Missing or invalid chat_id in Telegram update")
+                    })?;
+
+                // Send typing indicator
+                let _ = tg_client.send_typing(chat_id).await;
+
+                // Invoke agent
+                let (response_text, _session_id) =
+                    handler::invoke_agent("telegram", &inbound, &state.config, Some(&state.health))
+                        .await?;
+
+                // Send response via Telegram API
+                if let Err(e) = tg_client.send_message(chat_id, &response_text, None).await {
+                    warn!("Failed to send Telegram response: {e}");
+                    state
+                        .health
+                        .write()
+                        .await
+                        .record_error("telegram", &e.to_string());
+                } else {
+                    state.health.write().await.record_outbound("telegram");
+                }
+
+                Ok(response_text)
+            })
+            .await;
+
+            return match result {
+                Ok(Ok(_)) => (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({ "ok": true })),
+                ),
+                Ok(Err(e)) => {
+                    warn!("Telegram webhook error: {e:#}");
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({ "ok": true })),
+                    )
+                }
+                Err(_) => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    axum::Json(serde_json::json!({ "error": "Request timed out" })),
+                ),
+            };
+        }
+    }
 
     // Convert headers to JSON
     let mut headers_map = serde_json::Map::new();
