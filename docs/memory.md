@@ -1,10 +1,10 @@
 # Memory
 
-Tamagotchi has a persistent memory system that carries context across sessions. The agent can read and write memory files, and relevant memories are automatically loaded into the system prompt each turn.
+Borg has a persistent memory system that carries context across sessions. The agent can read and write memory files, and relevant memories are automatically loaded into the system prompt each turn.
 
 ## Memory files
 
-All memory lives in `~/.tamagotchi/`:
+All memory lives in `~/.borg/`:
 
 | File | Purpose | Loaded |
 |------|---------|--------|
@@ -47,9 +47,9 @@ The agent uses the `write_memory` tool:
 - `append`: if `true`, appends to existing content instead of overwriting
 
 Special filenames:
-- `SOUL.md` — writes to `~/.tamagotchi/SOUL.md` (personality)
-- `MEMORY.md` — writes to `~/.tamagotchi/MEMORY.md` (index)
-- Anything else — writes to `~/.tamagotchi/memory/<filename>`
+- `SOUL.md` — writes to `~/.borg/SOUL.md` (personality)
+- `MEMORY.md` — writes to `~/.borg/MEMORY.md` (index)
+- Anything else — writes to `~/.borg/memory/<filename>`
 
 ## Reading memory
 
@@ -76,18 +76,18 @@ Secrets in tool output are automatically redacted when `security.secret_detectio
 
 The personality file is special — it's loaded as the first part of the system prompt (before memory context). The agent can modify its own personality by writing to `SOUL.md`. Changes persist across sessions.
 
-The default `SOUL.md` is created by `tamagotchi init`.
+The default `SOUL.md` is created by `borg init`.
 
 ## Session persistence
 
-Conversations are automatically saved as session files in `~/.tamagotchi/sessions/`. Sessions track:
+Conversations are automatically saved as session files in `~/.borg/sessions/`. Sessions track:
 
 - Full message history
 - Token usage
 - Model used
 - Auto-generated title
 
-Sessions are stored in the SQLite database (`tamagotchi.db`) with metadata for listing and retrieval. The most recent session can be automatically loaded on startup.
+Sessions are stored in the SQLite database (`borg.db`) with metadata for listing and retrieval. The most recent session can be automatically loaded on startup.
 
 ## Conversation compaction
 

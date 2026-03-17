@@ -261,8 +261,8 @@ mod tests {
             format!("{home_str}/Library/Messages")
         );
         assert_eq!(
-            expand_tilde("~/.tamagotchi/channels"),
-            format!("{home_str}/.tamagotchi/channels")
+            expand_tilde("~/.borg/channels"),
+            format!("{home_str}/.borg/channels")
         );
     }
 
@@ -292,7 +292,7 @@ mod tests {
         let policy = SandboxPolicy {
             network: false,
             fs_read: vec!["~/Library/Messages".into(), "/etc/ssl".into()],
-            fs_write: vec!["~/.tamagotchi/channels/imessage".into()],
+            fs_write: vec!["~/.borg/channels/imessage".into()],
         };
         let expanded = policy.with_tildes_expanded();
 
@@ -305,7 +305,7 @@ mod tests {
         );
         assert_eq!(
             expanded.fs_write,
-            vec![format!("{home_str}/.tamagotchi/channels/imessage"),]
+            vec![format!("{home_str}/.borg/channels/imessage"),]
         );
         assert!(!expanded.network);
     }

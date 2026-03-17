@@ -1,6 +1,6 @@
 [package]
-name = "tamagotchi-sandbox"
-description = "macOS Seatbelt and Linux Bubblewrap sandboxing for Tamagotchi"
+name = "borg-sandbox"
+description = "macOS Seatbelt and Linux Bubblewrap sandboxing for Borg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

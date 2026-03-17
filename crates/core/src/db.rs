@@ -122,7 +122,7 @@ pub struct UpdateTask<'a> {
 }
 
 impl Database {
-    /// Open (or create) the database at `~/.tamagotchi/tamagotchi.db`.
+    /// Open (or create) the database at `~/.borg/borg.db`.
     pub fn open() -> Result<Self> {
         let path = Self::db_path()?;
         if let Some(parent) = path.parent() {
@@ -1537,7 +1537,7 @@ mod tests {
             "messaging/telegram",
             "TELEGRAM_BOT_TOKEN",
             "keychain",
-            Some("tamagotchi-telegram"),
+            Some("borg-telegram"),
             None,
         )
         .expect("insert cred");
@@ -1556,7 +1556,7 @@ mod tests {
             "messaging/telegram",
             "TELEGRAM_BOT_TOKEN",
             "keychain",
-            Some("tamagotchi-telegram"),
+            Some("borg-telegram"),
             None,
         )
         .expect("insert cred");

@@ -3,8 +3,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use tamagotchi_customizations::catalog::{CustomizationDef, CATALOG};
-use tamagotchi_customizations::Category;
+use borg_customizations::catalog::{CustomizationDef, CATALOG};
+use borg_customizations::Category;
 
 use super::theme;
 
@@ -20,7 +20,7 @@ struct CustomizeItem {
 enum CustomizePhase {
     Browsing,
     CredentialInput {
-        action_queue: Vec<(String, &'static [tamagotchi_customizations::CredentialSpec])>,
+        action_queue: Vec<(String, &'static [borg_customizations::CredentialSpec])>,
         current_def_idx: usize,
         current_cred_idx: usize,
         buffer: String,
@@ -73,7 +73,7 @@ impl CustomizePopup {
         self.items = CATALOG
             .iter()
             .map(|def| {
-                let installed = tamagotchi_customizations::installer::is_installed(def, data_dir);
+                let installed = borg_customizations::installer::is_installed(def, data_dir);
                 CustomizeItem {
                     def,
                     is_installed: installed,
@@ -151,13 +151,13 @@ impl CustomizePopup {
                     // Check if any install actions need credentials
                     let mut needs_creds: Vec<(
                         String,
-                        &'static [tamagotchi_customizations::CredentialSpec],
+                        &'static [borg_customizations::CredentialSpec],
                     )> = Vec::new();
                     let mut immediate_actions: Vec<CustomizeAction> = Vec::new();
 
                     for (id, is_install) in &actions {
                         if *is_install {
-                            if let Some(def) = tamagotchi_customizations::catalog::find_by_id(id) {
+                            if let Some(def) = borg_customizations::catalog::find_by_id(id) {
                                 let has_required =
                                     def.required_credentials.iter().any(|c| !c.is_optional);
                                 if !has_required {
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn show_and_dismiss() {
         let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("tamagotchi-customize-test");
+        let tmp = std::env::temp_dir().join("borg-customize-test");
         popup.show(&tmp);
         assert!(popup.is_visible());
         assert!(!popup.items.is_empty());
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn navigation_wraps() {
         let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-nav");
+        let tmp = std::env::temp_dir().join("borg-customize-test-nav");
         popup.show(&tmp);
 
         let count = popup.items.len();
@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn toggle_and_compute_actions() {
         let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-toggle");
+        let tmp = std::env::temp_dir().join("borg-customize-test-toggle");
         popup.show(&tmp);
 
         // All items start unselected (since nothing is installed in temp dir)
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn no_credential_input_for_zero_cred_defs() {
         let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-nocred");
+        let tmp = std::env::temp_dir().join("borg-customize-test-nocred");
         popup.show(&tmp);
 
         // Find iMessage (no required credentials) and select it
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn credential_input_phase_transitions() {
         let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-cred-phase");
+        let tmp = std::env::temp_dir().join("borg-customize-test-cred-phase");
         popup.show(&tmp);
 
         // Telegram requires credentials — select it
@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn credential_input_esc_cancels() {
         let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-cred-esc");
+        let tmp = std::env::temp_dir().join("borg-customize-test-cred-esc");
         popup.show(&tmp);
 
         let telegram_idx = popup
@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn credential_input_backspace() {
         let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-cred-bs");
+        let tmp = std::env::temp_dir().join("borg-customize-test-cred-bs");
         popup.show(&tmp);
 
         let telegram_idx = popup
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn credential_input_enter_produces_install_action() {
         let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("tamagotchi-customize-test-cred-enter");
+        let tmp = std::env::temp_dir().join("borg-customize-test-cred-enter");
         popup.show(&tmp);
 
         // Telegram has 1 required credential

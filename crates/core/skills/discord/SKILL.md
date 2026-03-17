@@ -22,7 +22,7 @@ Set `DISCORD_BOT_TOKEN` in your environment. The bot needs appropriate permissio
 curl -s -X POST "https://discord.com/api/v10/channels/CHANNEL_ID/messages" \
   -H "Authorization: Bot $DISCORD_BOT_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"content":"Hello from Tamagotchi"}'
+  -d '{"content":"Hello from Borg"}'
 ```
 
 ### React to a message

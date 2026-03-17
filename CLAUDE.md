@@ -1,4 +1,4 @@
-# Tamagotchi
+# Borg
 
 AI personal assistant agent built in Rust. The agent itself is the plugin system — it writes its own tools at runtime rather than relying on a static extension framework.
 
@@ -18,7 +18,7 @@ crates/
   customizations/   Library: marketplace catalog, template installer, TUI integration
 ```
 
-**Data directory:** `~/.tamagotchi/` — config, personality, memory, user-created tools, logs.
+**Data directory:** `~/.borg/` — config, personality, memory, user-created tools, logs.
 
 ## Build & Test
 
@@ -29,20 +29,20 @@ cargo fmt --check
 cargo clippy -- -D warnings
 ```
 
-Binary name is `tamagotchi`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` at runtime (see `.env.example`).
+Binary name is `borg`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` at runtime (see `.env.example`).
 
 ## CLI Commands
 
-- `tamagotchi` or `tamagotchi chat` — interactive REPL
-- `tamagotchi ask "message"` — one-shot query
-- `tamagotchi init` — interactive onboarding wizard (name, personality, provider, model selection)
-- `tamagotchi gateway` — start webhook gateway server for messaging channels
-- `tamagotchi doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
+- `borg` or `borg chat` — interactive REPL
+- `borg ask "message"` — one-shot query
+- `borg init` — interactive onboarding wizard (name, personality, provider, model selection)
+- `borg gateway` — start webhook gateway server for messaging channels
+- `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
 - `/customize` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
 
 ## Customizations
 
-Template marketplace for one-click installation of channel and tool integrations. Templates are embedded in the binary via `include_str!` and installed to `~/.tamagotchi/channels/` or `~/.tamagotchi/tools/`. Categories: Messaging (WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). **Note:** Telegram and Slack are native Rust integrations in the gateway crate (not templates).
+Template marketplace for one-click installation of channel and tool integrations. Templates are embedded in the binary via `include_str!` and installed to `~/.borg/channels/` or `~/.borg/tools/`. Categories: Messaging (WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). **Note:** Telegram and Slack are native Rust integrations in the gateway crate (not templates).
 
 ## Agent Loop
 
@@ -62,18 +62,18 @@ System prompt assembled each turn: `SOUL.md` + current time + memory context + s
 | `read_memory` | Read a memory file |
 | `list_tools` | List user-created tools |
 | `apply_patch` | Create/update/delete files in the current working directory via patch DSL |
-| `create_tool` | Create/modify files in `~/.tamagotchi/tools/` via patch DSL |
+| `create_tool` | Create/modify files in `~/.borg/tools/` via patch DSL |
 | `run_shell` | Execute a shell command |
 | `list_skills` | List all skills with status and source |
-| `apply_skill_patch` | Create/modify files in `~/.tamagotchi/skills/` via patch DSL |
+| `apply_skill_patch` | Create/modify files in `~/.borg/skills/` via patch DSL |
 | `read_pdf` | Extract text from a PDF file with token-aware truncation |
-| `create_channel` | Create/modify channel integrations in `~/.tamagotchi/channels/` via patch DSL |
+| `create_channel` | Create/modify channel integrations in `~/.borg/channels/` via patch DSL |
 | `list_channels` | List all messaging channels with status and webhook paths |
 | `security_audit` | Run host security audit (firewall, ports, SSH, permissions, encryption, updates, services). Requires `security.host_audit = true` |
 
 ## User Tools
 
-Located at `~/.tamagotchi/tools/<name>/tool.toml` + entrypoint script. The agent creates these via `apply_patch`. Registry auto-reloads after patching.
+Located at `~/.borg/tools/<name>/tool.toml` + entrypoint script. The agent creates these via `apply_patch`. Registry auto-reloads after patching.
 
 **tool.toml format:**
 ```toml
@@ -122,7 +122,7 @@ Used by `apply_patch` to create/modify/delete files. Follows the codex apply-pat
 
 ## Config
 
-`~/.tamagotchi/config.toml`:
+`~/.borg/config.toml`:
 
 ```toml
 [llm]
@@ -182,24 +182,24 @@ MY_SECRET = { source = "env", var = "MY_SECRET" }    # explicit env SecretRef
 
 ## Memory System
 
-- `~/.tamagotchi/MEMORY.md` — loaded every turn
-- `~/.tamagotchi/memory/*.md` — loaded by recency until token budget exhausted
-- **Per-project local memory**: `$CWD/.tamagotchi/memory/*.md` — loaded in addition to global memory when present
+- `~/.borg/MEMORY.md` — loaded every turn
+- `~/.borg/memory/*.md` — loaded by recency until token budget exhausted
+- **Per-project local memory**: `$CWD/.borg/memory/*.md` — loaded in addition to global memory when present
 - `write_memory` tool accepts `scope: "local"` to write to project-local memory
 - Token estimation via `tiktoken-rs` (cl100k_base BPE tokenizer)
 
 ## Personality (SOUL.md)
 
-`~/.tamagotchi/SOUL.md` is injected into the system prompt. The agent can update it via `write_memory` targeting `SOUL.md`. Changes persist across sessions.
+`~/.borg/SOUL.md` is injected into the system prompt. The agent can update it via `write_memory` targeting `SOUL.md`. Changes persist across sessions.
 
-During `tamagotchi init`, the onboarding wizard generates a personalized SOUL.md based on the user's chosen agent name and personality style (Professional, Casual, Snarky, Nurturing, or Minimal).
+During `borg init`, the onboarding wizard generates a personalized SOUL.md based on the user's chosen agent name and personality style (Professional, Casual, Snarky, Nurturing, or Minimal).
 
 ## Skills
 
 Skills are instruction bundles (SKILL.md files with YAML frontmatter) that teach the agent how to use external CLI tools via `run_shell`. Distinct from "tools" which are sandboxed executable scripts.
 
 - **Built-in skills**: Embedded via `include_str!` in `crates/core/skills/*/SKILL.md` (slack, discord, github, weather, skill-creator, git, http, search, docker, database, notes, calendar, 1password, browser)
-- **User skills**: `~/.tamagotchi/skills/<name>/SKILL.md` — created via `apply_skill_patch`
+- **User skills**: `~/.borg/skills/<name>/SKILL.md` — created via `apply_skill_patch`
 - User skills with the same name override built-in skills
 - Requirements (bins/env vars) are checked at load time against both process env and `[credentials]` store; unavailable skills are still listed but flagged
 - **Credential injection**: Resolved credentials from `[credentials]` are injected as env vars into `run_shell` commands, so skills can reference them without the user exporting them in the shell
@@ -228,7 +228,7 @@ Channels are user-created integrations that receive webhooks from external servi
 
 **Native integrations:** Telegram and Slack are handled natively in Rust (`crates/gateway/src/telegram/`, `crates/gateway/src/slack/`) using `reqwest` — no Python scripts needed. Set `TELEGRAM_BOT_TOKEN` or `SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET` env vars (or configure via `[credentials]` store). Telegram optionally uses `gateway.public_url` for automatic webhook registration.
 
-**Location:** `~/.tamagotchi/channels/<name>/`
+**Location:** `~/.borg/channels/<name>/`
 
 **channel.toml format:**
 ```toml
@@ -268,9 +268,9 @@ max_concurrent = 10
 request_timeout_ms = 120000
 ```
 
-**CLI:** `tamagotchi gateway` starts the gateway server standalone. Also spawns in the daemon when `gateway.enabled = true`.
+**CLI:** `borg gateway` starts the gateway server standalone. Also spawns in the daemon when `gateway.enabled = true`.
 
-**Built-in tools:** `create_channel` (patch DSL to `~/.tamagotchi/channels/`), `list_channels`
+**Built-in tools:** `create_channel` (patch DSL to `~/.borg/channels/`), `list_channels`
 
 **Database:** V3 migration adds `channel_sessions` and `channel_messages` tables.
 
@@ -288,11 +288,11 @@ Hooks implement the `Hook` trait and are registered on the agent via `agent.hook
 
 `crates/core/src/doctor.rs` — diagnostic checks for config, provider, sandbox, tools, skills, memory, data directory, budget, and host security.
 
-Available via `tamagotchi doctor` CLI subcommand or `/doctor` TUI command.
+Available via `borg doctor` CLI subcommand or `/doctor` TUI command.
 
 ## Database
 
-SQLite at `~/.tamagotchi/tamagotchi.db` with versioned migrations:
+SQLite at `~/.borg/borg.db` with versioned migrations:
 - **V1**: sessions, scheduled_tasks, task_runs, meta, token_usage tables
 - **V2**: messages table (crash recovery), retry_count on scheduled_tasks
 - **V3**: channel_sessions + channel_messages tables (gateway)
@@ -381,8 +381,8 @@ Six-layer defense against prompt injection attacks:
 
 ```sh
 cargo test                              # all tests
-cargo test -p tamagotchi-apply-patch    # 13 patch tests
-cargo test -p tamagotchi-core           # config + skills tests
-cargo test -p tamagotchi-gateway        # channel manifest + registry tests
-cargo test -p tamagotchi-customizations # catalog + installer tests
+cargo test -p borg-apply-patch    # 13 patch tests
+cargo test -p borg-core           # config + skills tests
+cargo test -p borg-gateway        # channel manifest + registry tests
+cargo test -p borg-customizations # catalog + installer tests
 ```

@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions to Tamagotchi are welcome. This document covers the guidelines for contributing to the project.
+Contributions to Borg are welcome. This document covers the guidelines for contributing to the project.
 
 ## Getting started
 

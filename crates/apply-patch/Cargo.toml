@@ -1,6 +1,6 @@
 [package]
-name = "tamagotchi-apply-patch"
-description = "Patch DSL parser and filesystem applicator for Tamagotchi"
+name = "borg-apply-patch"
+description = "Patch DSL parser and filesystem applicator for Borg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

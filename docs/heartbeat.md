@@ -45,10 +45,10 @@ If the LLM responds with the exact same message as the previous heartbeat, it's 
 For running heartbeat check-ins and scheduled tasks without the interactive TUI, use daemon mode:
 
 ```sh
-tamagotchi daemon
+borg daemon
 ```
 
-The daemon runs in the foreground as a background-friendly process. It executes heartbeat check-ins and any scheduled tasks on their configured intervals. Combine with `tamagotchi service install` to run it as a system service (launchd on macOS, systemd on Linux).
+The daemon runs in the foreground as a background-friendly process. It executes heartbeat check-ins and any scheduled tasks on their configured intervals. Combine with `borg service install` to run it as a system service (launchd on macOS, systemd on Linux).
 
 ## Heartbeat prompt
 

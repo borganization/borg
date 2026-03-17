@@ -3,7 +3,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use tamagotchi_core::config::Config;
+use borg_core::config::Config;
 
 use super::app::AppAction;
 use super::theme;

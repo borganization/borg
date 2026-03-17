@@ -1,21 +1,21 @@
 [package]
-name = "tamagotchi-cli"
-description = "CLI for the Tamagotchi AI personal assistant"
+name = "borg-cli"
+description = "CLI for the Borg AI personal assistant"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "tamagotchi"
+name = "borg"
 path = "src/main.rs"
 
 [dependencies]
-tamagotchi-core = { path = "../core" }
-tamagotchi-heartbeat = { path = "../heartbeat" }
-tamagotchi-tools = { path = "../tools" }
-tamagotchi-gateway = { path = "../gateway" }
-tamagotchi-customizations = { path = "../customizations" }
+borg-core = { path = "../core" }
+borg-heartbeat = { path = "../heartbeat" }
+borg-tools = { path = "../tools" }
+borg-gateway = { path = "../gateway" }
+borg-customizations = { path = "../customizations" }
 tokio = { workspace = true }
 clap = { workspace = true }
 crossterm = { workspace = true }

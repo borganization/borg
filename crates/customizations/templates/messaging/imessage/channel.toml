@@ -9,7 +9,7 @@ outbound = "send_outbound.sh"
 [sandbox]
 network = false
 fs_read = ["~/Library/Messages"]
-fs_write = ["~/.tamagotchi/channels/imessage"]
+fs_write = ["~/.borg/channels/imessage"]
 
 [settings]
 mode = "poll"

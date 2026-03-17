@@ -22,8 +22,8 @@ use crate::tasks;
 use crate::truncate::truncate_output;
 use crate::types::{FunctionCall, Message, ToolCall, ToolDefinition};
 use crate::web;
-use tamagotchi_apply_patch::apply_patch_to_dir;
-use tamagotchi_tools::registry::ToolRegistry;
+use borg_apply_patch::apply_patch_to_dir;
+use borg_tools::registry::ToolRegistry;
 
 /// Max tokens for tool output before truncation (head + tail preserved).
 const TOOL_OUTPUT_MAX_TOKENS: usize = 4000;
@@ -1440,16 +1440,16 @@ fn classify_action(tool_name: &str) -> ActionType {
 
 fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     let mut defs = vec![
-        ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'SOUL.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories. Use scope='local' to write to project-local memory (.tamagotchi/ in CWD).", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false},"scope":{"type":"string","enum":["global","local"],"description":"Memory scope: 'global' (default, ~/.tamagotchi/) or 'local' (CWD/.tamagotchi/)","default":"global"}},"required":["filename","content"]})),
+        ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'SOUL.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories. Use scope='local' to write to project-local memory (.borg/ in CWD).", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false},"scope":{"type":"string","enum":["global","local"],"description":"Memory scope: 'global' (default, ~/.borg/) or 'local' (CWD/.borg/)","default":"global"}},"required":["filename","content"]})),
         ToolDefinition::new("read_memory", "Read a memory file.", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file to read"}},"required":["filename"]})),
         ToolDefinition::new("list_tools", "List all available user-created tools.", serde_json::json!({"type":"object","properties":{}})),
         ToolDefinition::new("apply_patch", "Create, update, or delete files in the current working directory using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
-        ToolDefinition::new("create_tool", "Create or modify user tools in ~/.tamagotchi/tools/ using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
+        ToolDefinition::new("create_tool", "Create or modify user tools in ~/.borg/tools/ using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
         ToolDefinition::new("run_shell", "Execute a shell command. Requires user confirmation before execution.", serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]})),
         ToolDefinition::new("list_skills", "List all available skills with their status and source.", serde_json::json!({"type":"object","properties":{}})),
         ToolDefinition::new("apply_skill_patch", "Create or modify skill files in the skills directory using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
         ToolDefinition::new("read_pdf", "Read and extract text from a PDF file.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the PDF file"},"max_chars":{"type":"integer","description":"Maximum characters to return (default: 50000)","default":50000}},"required":["file_path"]})),
-        ToolDefinition::new("create_channel", "Create or modify messaging channel integrations in ~/.tamagotchi/channels/ using the patch DSL. Channels receive webhooks and route messages to the agent.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
+        ToolDefinition::new("create_channel", "Create or modify messaging channel integrations in ~/.borg/channels/ using the patch DSL. Channels receive webhooks and route messages to the agent.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
         ToolDefinition::new("list_channels", "List all messaging channel integrations with their status and webhook paths.", serde_json::json!({"type":"object","properties":{}})),
     ];
 

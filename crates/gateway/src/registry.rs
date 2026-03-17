@@ -19,7 +19,7 @@ impl ChannelRegistry {
     pub fn new() -> Result<Self> {
         let channels_dir = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-            .join(".tamagotchi")
+            .join(".borg")
             .join("channels");
 
         let mut registry = Self {

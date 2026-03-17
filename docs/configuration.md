@@ -1,8 +1,8 @@
 # Configuration
 
-Configuration lives at `~/.tamagotchi/config.toml`. All fields have defaults — the file can be empty or omitted entirely.
+Configuration lives at `~/.borg/config.toml`. All fields have defaults — the file can be empty or omitted entirely.
 
-Run `tamagotchi init` to generate a config with default values.
+Run `borg init` to generate a config with default values.
 
 ## Full reference
 
@@ -147,7 +147,7 @@ See [Skills](skills.md) for the skills system.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `name` | `""` | Your name (included in the system prompt for personalization) |
-| `agent_name` | `""` | The agent's name (set during `tamagotchi init`) |
+| `agent_name` | `""` | The agent's name (set during `borg init`) |
 
 ### `[policy]`
 
@@ -162,7 +162,7 @@ Commands matching `deny` are rejected. Commands matching `auto_approve` run with
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `llm_logging` | `false` | Log all LLM requests and responses to daily JSONL files in `~/.tamagotchi/logs/` |
+| `llm_logging` | `false` | Log all LLM requests and responses to daily JSONL files in `~/.borg/logs/` |
 
 ### `[security]`
 
@@ -185,7 +185,7 @@ Commands matching `deny` are rejected. Commands matching `auto_approve` run with
 | `enabled` | `false` | Whether scheduled task tools are available |
 | `max_concurrent` | `3` | Maximum number of tasks that can run concurrently |
 
-Scheduled tasks require the daemon to be running (`tamagotchi daemon`). See [Heartbeat](heartbeat.md) for daemon mode details.
+Scheduled tasks require the daemon to be running (`borg daemon`). See [Heartbeat](heartbeat.md) for daemon mode details.
 
 ### `[credentials]`
 
@@ -199,7 +199,7 @@ slack_token = "SLACK_BOT_TOKEN"
 
 ## Defaults
 
-If `~/.tamagotchi/config.toml` does not exist, all defaults apply. You can also specify partial configs — any omitted field falls back to its default.
+If `~/.borg/config.toml` does not exist, all defaults apply. You can also specify partial configs — any omitted field falls back to its default.
 
 ```toml
 # This is a valid config — only overrides the model

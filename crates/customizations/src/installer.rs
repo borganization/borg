@@ -36,7 +36,7 @@ pub async fn install(
     write_templates(def, data_dir)?;
 
     // 3. Store credentials in keychain
-    let service = format!("tamagotchi-{}", def.id.replace('/', "-"));
+    let service = format!("borg-{}", def.id.replace('/', "-"));
     for (key, value) in credentials {
         send_event(
             progress_tx,
@@ -69,7 +69,7 @@ pub async fn install(
     let credential_entries = credentials
         .iter()
         .map(|(key, _)| {
-            let account = format!("tamagotchi-{key}");
+            let account = format!("borg-{key}");
             crate::CredentialEntry {
                 key: key.clone(),
                 service: service.clone(),
@@ -114,7 +114,7 @@ pub fn uninstall(def: &CustomizationDef, data_dir: &std::path::Path) -> Result<(
     }
 
     // Remove keychain entries
-    let service = format!("tamagotchi-{}", def.id.replace('/', "-"));
+    let service = format!("borg-{}", def.id.replace('/', "-"));
     for cred in def.required_credentials {
         remove_credential(&service, cred.key);
     }
@@ -240,12 +240,12 @@ fn make_scripts_executable(def: &CustomizationDef, data_dir: &std::path::Path) -
 }
 
 fn store_credential(service: &str, key: &str, value: &str) -> Result<()> {
-    let account = format!("tamagotchi-{key}");
+    let account = format!("borg-{key}");
     crate::keychain::store(service, &account, value)
 }
 
 fn remove_credential(service: &str, key: &str) {
-    let account = format!("tamagotchi-{key}");
+    let account = format!("borg-{key}");
     crate::keychain::remove(service, &account);
 }
 
@@ -264,7 +264,7 @@ fn imessage_post_install(data_dir: &std::path::Path) -> Vec<String> {
     if !db_path.exists() {
         notes.push("Full Disk Access required:".to_string());
         notes.push("  System Settings > Privacy & Security > Full Disk Access".to_string());
-        notes.push("  Add your terminal app, then restart Tamagotchi".to_string());
+        notes.push("  Add your terminal app, then restart Borg".to_string());
         return notes;
     }
 
@@ -301,9 +301,7 @@ fn imessage_post_install(data_dir: &std::path::Path) -> Vec<String> {
                 notes.push(format!("Your iMessage address: {address}"));
             }
 
-            notes.push(
-                "Messages will be processed automatically when Tamagotchi is running".to_string(),
-            );
+            notes.push("Messages will be processed automatically when Borg is running".to_string());
             notes.push(
                 "Note: Messages you send to yourself are ignored (prevents loops). Test by texting from another device.".to_string(),
             );
@@ -311,7 +309,7 @@ fn imessage_post_install(data_dir: &std::path::Path) -> Vec<String> {
         Err(_) => {
             notes.push("Full Disk Access required:".to_string());
             notes.push("  System Settings > Privacy & Security > Full Disk Access".to_string());
-            notes.push("  Add your terminal app, then restart Tamagotchi".to_string());
+            notes.push("  Add your terminal app, then restart Borg".to_string());
         }
     }
 
@@ -347,7 +345,7 @@ mod tests {
     #[test]
     fn is_installed_returns_false_for_missing() {
         let def = &CATALOG[0];
-        let tmp = std::env::temp_dir().join("tamagotchi-test-nonexistent");
+        let tmp = std::env::temp_dir().join("borg-test-nonexistent");
         assert!(!is_installed(def, &tmp));
     }
 
