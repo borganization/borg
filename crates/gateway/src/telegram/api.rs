@@ -1,8 +1,12 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use tracing::warn;
 
-use super::types::{ApiResponse, SendMessageRequest, User};
+use super::circuit_breaker::CircuitBreaker;
+use super::types::{ApiResponse, FileInfo, SendMessageRequest, Update, User};
 use crate::chunker;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
@@ -12,6 +16,7 @@ const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 pub struct TelegramClient {
     client: Client,
     token: String,
+    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl TelegramClient {
@@ -19,11 +24,16 @@ impl TelegramClient {
         Self {
             client: Client::new(),
             token: token.to_string(),
+            circuit_breaker: Arc::new(CircuitBreaker::new()),
         }
     }
 
     fn api_url(&self, method: &str) -> String {
         format!("{TELEGRAM_API_BASE}/bot{}/{method}", self.token)
+    }
+
+    fn file_url(&self, file_path: &str) -> String {
+        format!("{TELEGRAM_API_BASE}/file/bot{}/{file_path}", self.token)
     }
 
     /// Validate the bot token by calling getMe.
@@ -53,6 +63,8 @@ impl TelegramClient {
         chat_id: i64,
         text: &str,
         parse_mode: Option<&str>,
+        message_thread_id: Option<i64>,
+        reply_to_message_id: Option<i64>,
     ) -> Result<()> {
         let chunks = chunker::chunk_text(text, 4000);
         let chunks = if chunks.is_empty() {
@@ -61,8 +73,11 @@ impl TelegramClient {
             chunks
         };
 
-        for chunk in &chunks {
-            self.send_single_message(chat_id, chunk, parse_mode).await?;
+        for (i, chunk) in chunks.iter().enumerate() {
+            // Only reply to the original message on the first chunk
+            let reply_id = if i == 0 { reply_to_message_id } else { None };
+            self.send_single_message(chat_id, chunk, parse_mode, message_thread_id, reply_id)
+                .await?;
         }
         Ok(())
     }
@@ -72,11 +87,15 @@ impl TelegramClient {
         chat_id: i64,
         text: &str,
         parse_mode: Option<&str>,
+        message_thread_id: Option<i64>,
+        reply_to_message_id: Option<i64>,
     ) -> Result<()> {
         let body = SendMessageRequest {
             chat_id,
             text: text.to_string(),
             parse_mode: parse_mode.map(String::from),
+            reply_to_message_id,
+            message_thread_id,
         };
 
         const MAX_RETRIES: u32 = 5;
@@ -84,13 +103,29 @@ impl TelegramClient {
         let mut attempts = 0u32;
 
         loop {
-            let resp = self
+            let send_result = self
                 .client
                 .post(self.api_url("sendMessage"))
                 .json(&body)
                 .send()
-                .await
-                .context("Failed to send message")?;
+                .await;
+
+            let resp = match send_result {
+                Ok(r) => r,
+                Err(e) => {
+                    if is_safe_to_retry(&e) {
+                        attempts += 1;
+                        if attempts > MAX_RETRIES {
+                            bail!("sendMessage failed after {MAX_RETRIES} retries: {e}");
+                        }
+                        let backoff = Duration::from_millis(500 * 2u64.pow(attempts - 1));
+                        warn!("sendMessage connection error, retrying in {backoff:?} (attempt {attempts}/{MAX_RETRIES}): {e}");
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(e).context("Failed to send message");
+                }
+            };
 
             let status = resp.status();
             let resp_body: ApiResponse<serde_json::Value> = resp
@@ -102,7 +137,7 @@ impl TelegramClient {
                 return Ok(());
             }
 
-            // Handle 429 rate limiting — wait and retry (bounded)
+            // Handle 429 rate limiting
             if status.as_u16() == 429 {
                 attempts += 1;
                 if attempts > MAX_RETRIES {
@@ -111,7 +146,7 @@ impl TelegramClient {
                 if let Some(retry_after) = resp_body.retry_after {
                     let capped = retry_after.min(MAX_RETRY_AFTER_SECS);
                     warn!("Telegram rate limited, retry after {capped}s (attempt {attempts}/{MAX_RETRIES})");
-                    tokio::time::sleep(std::time::Duration::from_secs(capped)).await;
+                    tokio::time::sleep(Duration::from_secs(capped)).await;
                     continue;
                 }
             }
@@ -127,18 +162,37 @@ impl TelegramClient {
     }
 
     /// Send a "typing" chat action.
+    /// Uses circuit breaker to prevent infinite 401 loops.
     pub async fn send_typing(&self, chat_id: i64) -> Result<()> {
+        if self.circuit_breaker.is_open() {
+            return Ok(());
+        }
+
         let body = serde_json::json!({
             "chat_id": chat_id,
             "action": "typing",
         });
 
-        let _ = self
+        let result = self
             .client
             .post(self.api_url("sendChatAction"))
             .json(&body)
             .send()
             .await;
+
+        match result {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                if status == 401 {
+                    self.circuit_breaker.record_failure(401);
+                } else {
+                    self.circuit_breaker.record_success();
+                }
+            }
+            Err(_) => {
+                // Network errors don't contribute to circuit breaker
+            }
+        }
 
         Ok(())
     }
@@ -190,6 +244,80 @@ impl TelegramClient {
         }
         Ok(())
     }
+
+    /// Get file info by file_id (for future media download support).
+    pub async fn get_file(&self, file_id: &str) -> Result<FileInfo> {
+        let body = serde_json::json!({ "file_id": file_id });
+        let resp: ApiResponse<FileInfo> = self
+            .client
+            .post(self.api_url("getFile"))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to call getFile")?
+            .json()
+            .await
+            .context("Failed to parse getFile response")?;
+
+        match resp.result {
+            Some(info) if resp.ok => Ok(info),
+            _ => bail!(
+                "getFile failed: {}",
+                resp.description.unwrap_or_else(|| "unknown error".into())
+            ),
+        }
+    }
+
+    /// Download a file by its file_path (obtained from get_file).
+    pub async fn download_file(&self, file_path: &str) -> Result<Vec<u8>> {
+        let bytes = self
+            .client
+            .get(self.file_url(file_path))
+            .send()
+            .await
+            .context("Failed to download file")?
+            .bytes()
+            .await
+            .context("Failed to read file bytes")?;
+
+        Ok(bytes.to_vec())
+    }
+
+    /// Long-poll for updates (used when webhook is not configured).
+    pub async fn get_updates(&self, offset: Option<i64>, timeout: u64) -> Result<Vec<Update>> {
+        let mut body = serde_json::json!({
+            "timeout": timeout,
+            "allowed_updates": ["message", "edited_message", "callback_query"],
+        });
+        if let Some(off) = offset {
+            body["offset"] = serde_json::json!(off);
+        }
+
+        let resp: ApiResponse<Vec<Update>> = self
+            .client
+            .post(self.api_url("getUpdates"))
+            .json(&body)
+            .timeout(Duration::from_secs(timeout + 10))
+            .send()
+            .await
+            .context("Failed to call getUpdates")?
+            .json()
+            .await
+            .context("Failed to parse getUpdates response")?;
+
+        match resp.result {
+            Some(updates) if resp.ok => Ok(updates),
+            _ => bail!(
+                "getUpdates failed: {}",
+                resp.description.unwrap_or_else(|| "unknown error".into())
+            ),
+        }
+    }
+}
+
+/// Determine if a network error is safe to retry (no data was sent/received).
+fn is_safe_to_retry(err: &reqwest::Error) -> bool {
+    err.is_connect() || (err.is_timeout() && err.status().is_none())
 }
 
 #[cfg(test)]
@@ -210,16 +338,43 @@ mod tests {
     }
 
     #[test]
+    fn file_url_construction() {
+        let client = TelegramClient::new("123:ABC");
+        assert_eq!(
+            client.file_url("photos/file_1.jpg"),
+            "https://api.telegram.org/file/bot123:ABC/photos/file_1.jpg"
+        );
+    }
+
+    #[test]
     fn send_message_request_serialization() {
         let req = SendMessageRequest {
             chat_id: 42,
             text: "hello".into(),
             parse_mode: Some("Markdown".into()),
+            reply_to_message_id: None,
+            message_thread_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["chat_id"], 42);
         assert_eq!(json["text"], "hello");
         assert_eq!(json["parse_mode"], "Markdown");
+        assert!(json.get("reply_to_message_id").is_none());
+        assert!(json.get("message_thread_id").is_none());
+    }
+
+    #[test]
+    fn send_message_request_with_thread_and_reply() {
+        let req = SendMessageRequest {
+            chat_id: 42,
+            text: "hello".into(),
+            parse_mode: None,
+            reply_to_message_id: Some(10),
+            message_thread_id: Some(99),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["reply_to_message_id"], 10);
+        assert_eq!(json["message_thread_id"], 99);
     }
 
     #[test]
@@ -228,6 +383,8 @@ mod tests {
             chat_id: 42,
             text: "hello".into(),
             parse_mode: None,
+            reply_to_message_id: None,
+            message_thread_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("parse_mode").is_none());
@@ -235,7 +392,6 @@ mod tests {
 
     #[test]
     fn chunking_integration() {
-        // Verify that a long message would be chunked at 4000 chars
         let long_text: String = "a".repeat(8500);
         let chunks = chunker::chunk_text(&long_text, 4000);
         assert_eq!(chunks.len(), 3);
