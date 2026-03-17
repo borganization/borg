@@ -7,6 +7,9 @@ use tracing::{info, warn};
 use tamagotchi_core::agent::{Agent, AgentEvent};
 use tamagotchi_core::config::Config;
 use tamagotchi_core::db::{Database, NewDelivery};
+use tamagotchi_core::sanitize::{
+    scan_for_injection, wrap_untrusted, wrap_with_injection_warning, ThreatLevel,
+};
 
 use crate::chunker;
 use crate::executor::ChannelExecutor;
@@ -173,7 +176,19 @@ pub async fn invoke_agent(
     }
 
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
-    let message_text = inbound.text.clone();
+
+    // Apply injection scanning and source attribution
+    let message_text = {
+        let base = format!(
+            "[Channel: {}, Sender: {}]\n{}",
+            channel_name, inbound.sender_id, inbound.text
+        );
+        match scan_for_injection(&inbound.text) {
+            ThreatLevel::HighRisk { .. } => wrap_with_injection_warning(channel_name, &base),
+            ThreatLevel::Flagged { .. } => wrap_untrusted(channel_name, &base),
+            ThreatLevel::Clean => base,
+        }
+    };
 
     let agent_handle = tokio::spawn(async move {
         agent
@@ -192,6 +207,18 @@ pub async fn invoke_agent(
             AgentEvent::TextDelta(delta) => response_text.push_str(&delta),
             AgentEvent::Error(e) => {
                 warn!("Agent error on channel '{}': {e}", channel_name)
+            }
+            AgentEvent::ToolConfirmation {
+                respond,
+                tool_name,
+                reason,
+            } => {
+                warn!("Auto-denying tool confirmation in gateway mode: {tool_name} ({reason})");
+                let _ = respond.send(false);
+            }
+            AgentEvent::ShellConfirmation { respond, command } => {
+                warn!("Auto-denying shell confirmation in gateway mode: {command}");
+                let _ = respond.send(false);
             }
             _ => {}
         }

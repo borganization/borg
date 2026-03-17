@@ -136,7 +136,11 @@ impl<'a> App<'a> {
                     if let Some(tx) = respond.take() {
                         let _ = tx.send(true);
                     }
-                    if let Some(HistoryCell::ShellApproval { status, .. }) = self.cells.last_mut() {
+                    if let Some(
+                        HistoryCell::ShellApproval { status, .. }
+                        | HistoryCell::ToolApproval { status, .. },
+                    ) = self.cells.last_mut()
+                    {
                         *status = ApprovalStatus::Approved;
                     }
                     self.state = AppState::Streaming {
@@ -147,7 +151,11 @@ impl<'a> App<'a> {
                     if let Some(tx) = respond.take() {
                         let _ = tx.send(false);
                     }
-                    if let Some(HistoryCell::ShellApproval { status, .. }) = self.cells.last_mut() {
+                    if let Some(
+                        HistoryCell::ShellApproval { status, .. }
+                        | HistoryCell::ToolApproval { status, .. },
+                    ) = self.cells.last_mut()
+                    {
                         *status = ApprovalStatus::Denied;
                     }
                     self.state = AppState::Streaming {
@@ -856,6 +864,23 @@ impl<'a> App<'a> {
             AgentEvent::ShellConfirmation { command, respond } => {
                 self.cells.push(HistoryCell::ShellApproval {
                     command,
+                    status: ApprovalStatus::Pending,
+                });
+                self.state = AppState::AwaitingApproval {
+                    respond: Some(respond),
+                };
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
+            AgentEvent::ToolConfirmation {
+                tool_name,
+                reason,
+                respond,
+            } => {
+                self.cells.push(HistoryCell::ToolApproval {
+                    tool_name,
+                    reason,
                     status: ApprovalStatus::Pending,
                 });
                 self.state = AppState::AwaitingApproval {

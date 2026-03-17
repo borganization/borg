@@ -233,6 +233,14 @@ pub struct SecurityConfig {
     pub secret_detection: bool,
     pub blocked_paths: Vec<String>,
     pub host_audit: bool,
+    #[serde(default = "default_hitl_dangerous_ops")]
+    pub hitl_dangerous_ops: bool,
+    #[serde(default)]
+    pub action_limits: crate::rate_guard::ActionLimits,
+}
+
+fn default_hitl_dangerous_ops() -> bool {
+    true
 }
 
 impl Default for LlmConfig {
@@ -322,6 +330,8 @@ impl Default for SecurityConfig {
                 "private_key".into(),
             ],
             host_audit: true,
+            hitl_dangerous_ops: true,
+            action_limits: crate::rate_guard::ActionLimits::default(),
         }
     }
 }

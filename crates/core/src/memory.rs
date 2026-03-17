@@ -23,7 +23,9 @@ pub fn load_memory_context(max_tokens: usize) -> Result<String> {
         let content = std::fs::read_to_string(&index_path)?;
         let tokens = estimate_tokens(&content);
         if tokens < max_tokens {
-            parts.push(format!("## MEMORY.md\n\n{content}"));
+            parts.push(format!(
+                "<memory_file name=\"MEMORY.md\">\n{content}\n</memory_file>"
+            ));
             estimated_tokens += tokens;
             debug!("Loaded MEMORY.md ({tokens} estimated tokens)");
         }
@@ -49,7 +51,9 @@ pub fn load_memory_context(max_tokens: usize) -> Result<String> {
                 let content = std::fs::read_to_string(&local_index)?;
                 let tokens = estimate_tokens(&content);
                 if estimated_tokens + tokens <= max_tokens {
-                    parts.push(format!("## Local MEMORY.md\n\n{content}"));
+                    parts.push(format!(
+                        "<memory_file name=\"Local MEMORY.md\">\n{content}\n</memory_file>"
+                    ));
                     estimated_tokens += tokens;
                     debug!("Loaded local MEMORY.md ({tokens} estimated tokens)");
                 }
@@ -67,7 +71,7 @@ pub fn load_memory_context(max_tokens: usize) -> Result<String> {
     if parts.is_empty() {
         Ok(String::new())
     } else {
-        Ok(format!("# Your Memory\n\n{}\n", parts.join("\n\n---\n\n")))
+        Ok(parts.join("\n\n"))
     }
 }
 
@@ -111,7 +115,9 @@ fn load_memory_files_from_dir(
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        parts.push(format!("## {label}: {filename}\n\n{content}"));
+        parts.push(format!(
+            "<memory_file name=\"{label}: {filename}\">\n{content}\n</memory_file>"
+        ));
         *estimated_tokens += tokens;
         debug!(
             "Loaded {}/{}.md ({tokens} estimated tokens)",
@@ -383,6 +389,31 @@ mod tests {
     #[test]
     fn validate_rejects_empty() {
         assert!(validate_memory_filename("").is_err());
+    }
+
+    #[test]
+    fn test_memory_wraps_in_xml_tags() {
+        // Verify the memory format uses XML tags
+        let filename = "_test_xml_wrap_12345.md";
+        write_memory(filename, "test xml content", false).unwrap();
+
+        let result = load_memory_context(100_000);
+        if let Ok(ctx) = result {
+            if ctx.contains("test xml content") {
+                assert!(
+                    ctx.contains("<memory_file name="),
+                    "Memory context should use XML tags"
+                );
+                assert!(
+                    ctx.contains("</memory_file>"),
+                    "Memory context should close XML tags"
+                );
+            }
+        }
+
+        // Cleanup
+        let path = memory_dir().unwrap().join(filename);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
