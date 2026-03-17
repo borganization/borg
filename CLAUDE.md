@@ -42,7 +42,7 @@ Binary name is `tamagotchi`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_K
 
 ## Customizations
 
-Template marketplace for one-click installation of channel and tool integrations. Templates are embedded in the binary via `include_str!` and installed to `~/.tamagotchi/channels/` or `~/.tamagotchi/tools/`. Categories: Messaging (WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). **Note:** Telegram is a native Rust integration in the gateway crate (not a template).
+Template marketplace for one-click installation of channel and tool integrations. Templates are embedded in the binary via `include_str!` and installed to `~/.tamagotchi/channels/` or `~/.tamagotchi/tools/`. Categories: Messaging (WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). **Note:** Telegram and Slack are native Rust integrations in the gateway crate (not templates).
 
 ## Agent Loop
 
@@ -215,7 +215,7 @@ Instructions and command examples here.
 
 Channels are user-created integrations that receive webhooks from external services, route messages to the agent, and send responses back. They follow the same pattern as tools.
 
-**Native integrations:** Telegram is handled natively in Rust (`crates/gateway/src/telegram/`) using `reqwest` — no Python scripts needed. Set `TELEGRAM_BOT_TOKEN` env var and optionally `gateway.public_url` in config for automatic webhook registration.
+**Native integrations:** Telegram and Slack are handled natively in Rust (`crates/gateway/src/telegram/`, `crates/gateway/src/slack/`) using `reqwest` — no Python scripts needed. Set `TELEGRAM_BOT_TOKEN` or `SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET` env vars (or configure via `[credentials]` store). Telegram optionally uses `gateway.public_url` for automatic webhook registration.
 
 **Location:** `~/.tamagotchi/channels/<name>/`
 
@@ -343,7 +343,8 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 | `crates/gateway/src/manifest.rs` | channel.toml parsing |
 | `crates/gateway/src/registry.rs` | Scan + register user channels |
 | `crates/gateway/src/executor.rs` | Channel script subprocess execution |
-| `crates/gateway/src/server.rs` | Axum HTTP server (webhook routes, native Telegram) |
+| `crates/gateway/src/server.rs` | Axum HTTP server (webhook routes, native Telegram + Slack) |
+| `crates/gateway/src/slack/` | Native Slack Bot API integration (types, verify, parse, api) |
 | `crates/gateway/src/telegram/` | Native Telegram Bot API integration (types, verify, parse, api, dedup) |
 | `crates/gateway/src/handler.rs` | Webhook handler: verify -> parse -> agent -> respond |
 
