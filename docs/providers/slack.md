@@ -17,7 +17,7 @@ Install the app to your workspace and copy the **Bot User OAuth Token** (`xoxb-.
 
 ## 3. Store Credentials
 
-Add the bot token and signing secret to `~/.tamagotchi/config.toml`:
+Add the bot token and signing secret to `~/.borg/config.toml`:
 
 ```toml
 [credentials]
@@ -67,7 +67,7 @@ In your Slack app settings, go to **Event Subscriptions**:
 ## 6. Start the Gateway
 
 ```sh
-tamagotchi gateway
+borg gateway
 ```
 
 Or enable it as part of the daemon by setting `gateway.enabled = true`.

@@ -4,10 +4,10 @@ use anyhow::{bail, Context, Result};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
-use tamagotchi_core::agent::{Agent, AgentEvent};
-use tamagotchi_core::config::Config;
-use tamagotchi_core::db::{Database, NewDelivery};
-use tamagotchi_core::sanitize::{
+use borg_core::agent::{Agent, AgentEvent};
+use borg_core::config::Config;
+use borg_core::db::{Database, NewDelivery};
+use borg_core::sanitize::{
     scan_for_injection, wrap_untrusted, wrap_with_injection_warning, ThreatLevel,
 };
 

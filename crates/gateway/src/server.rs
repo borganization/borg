@@ -13,8 +13,8 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use tamagotchi_core::config::Config;
-use tamagotchi_core::db::Database;
+use borg_core::config::Config;
+use borg_core::db::Database;
 
 use crate::handler;
 use crate::handler::InboundMessage;

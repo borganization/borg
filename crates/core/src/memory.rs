@@ -41,12 +41,12 @@ pub fn load_memory_context(max_tokens: usize) -> Result<String> {
         &mut parts,
     )?;
 
-    // Load local project memory from CWD/.tamagotchi/memory/ if it exists
+    // Load local project memory from CWD/.borg/memory/ if it exists
     if let Ok(cwd) = std::env::current_dir() {
-        let local_mem_dir = cwd.join(".tamagotchi").join("memory");
+        let local_mem_dir = cwd.join(".borg").join("memory");
         if local_mem_dir.exists() {
             // Also load local MEMORY.md if present
-            let local_index = cwd.join(".tamagotchi").join("MEMORY.md");
+            let local_index = cwd.join(".borg").join("MEMORY.md");
             if local_index.exists() {
                 let content = std::fs::read_to_string(&local_index)?;
                 let tokens = estimate_tokens(&content);
@@ -160,7 +160,7 @@ pub fn write_memory_scoped(
 ) -> Result<String> {
     let path = if scope == "local" {
         let cwd = std::env::current_dir()?;
-        let local_dir = cwd.join(".tamagotchi");
+        let local_dir = cwd.join(".borg");
         validate_memory_filename(filename)?;
         match filename {
             "MEMORY.md" => local_dir.join("MEMORY.md"),
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn memory_dir_path() {
         let dir = memory_dir().unwrap();
-        assert!(dir.to_string_lossy().contains(".tamagotchi"));
+        assert!(dir.to_string_lossy().contains(".borg"));
         assert!(dir.to_string_lossy().ends_with("memory"));
     }
 
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn resolve_memory_path_soul() {
         let path = resolve_memory_path("SOUL.md").unwrap();
-        assert!(path.to_string_lossy().contains(".tamagotchi"));
+        assert!(path.to_string_lossy().contains(".borg"));
         assert!(path.to_string_lossy().ends_with("SOUL.md"));
         // Should NOT be inside memory/ subdirectory
         assert!(!path.to_string_lossy().contains("memory/SOUL.md"));
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn resolve_memory_path_memory_index() {
         let path = resolve_memory_path("MEMORY.md").unwrap();
-        assert!(path.to_string_lossy().contains(".tamagotchi"));
+        assert!(path.to_string_lossy().contains(".borg"));
         assert!(path.to_string_lossy().ends_with("MEMORY.md"));
         assert!(!path.to_string_lossy().contains("memory/MEMORY.md"));
     }

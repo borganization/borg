@@ -76,8 +76,8 @@ pub fn verify_all(installed_ids: &[String], data_dir: &std::path::Path) -> Vec<V
 }
 
 fn check_keychain_credential(def: &CustomizationDef, key: &str) -> bool {
-    let service = format!("tamagotchi-{}", def.id.replace('/', "-"));
-    let account = format!("tamagotchi-{key}");
+    let service = format!("borg-{}", def.id.replace('/', "-"));
+    let account = format!("borg-{key}");
     crate::keychain::check(&service, &account)
 }
 
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn verify_uninstalled_fails() {
         let def = &CATALOG[0];
-        let tmp = std::env::temp_dir().join("tamagotchi-verify-test");
+        let tmp = std::env::temp_dir().join("borg-verify-test");
         let result = verify(def, &tmp);
         assert!(!result.ok);
     }

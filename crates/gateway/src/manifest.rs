@@ -53,7 +53,7 @@ impl Default for ScriptsSection {
     }
 }
 
-pub use tamagotchi_tools::manifest::SandboxSection;
+pub use borg_tools::manifest::SandboxSection;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AuthSection {
@@ -129,8 +129,8 @@ impl ChannelManifest {
             .unwrap_or_else(|| format!("/webhook/{}", self.name))
     }
 
-    pub fn sandbox_policy(&self) -> tamagotchi_sandbox::policy::SandboxPolicy {
-        tamagotchi_sandbox::policy::SandboxPolicy {
+    pub fn sandbox_policy(&self) -> borg_sandbox::policy::SandboxPolicy {
+        borg_sandbox::policy::SandboxPolicy {
             network: self.sandbox.network,
             fs_read: self.sandbox.fs_read.clone(),
             fs_write: self.sandbox.fs_write.clone(),
@@ -257,7 +257,7 @@ outbound = "send_outbound.sh"
 [sandbox]
 network = false
 fs_read = ["~/Library/Messages"]
-fs_write = ["~/.tamagotchi/channels/imessage"]
+fs_write = ["~/.borg/channels/imessage"]
 
 [settings]
 mode = "poll"

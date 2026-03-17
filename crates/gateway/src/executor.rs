@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::path::Path;
 
 use crate::manifest::ChannelManifest;
-use tamagotchi_tools::runner::ScriptRunner;
+use borg_tools::runner::ScriptRunner;
 
 pub struct ChannelExecutor<'a> {
     manifest: &'a ChannelManifest,

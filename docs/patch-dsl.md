@@ -1,6 +1,6 @@
 # Patch DSL
 
-Tamagotchi uses a custom patch DSL for creating, modifying, and deleting files. The agent uses this via the `apply_patch` and `apply_skill_patch` built-in tools.
+Borg uses a custom patch DSL for creating, modifying, and deleting files. The agent uses this via the `apply_patch` and `apply_skill_patch` built-in tools.
 
 ## Format
 
@@ -90,8 +90,8 @@ description = "A new tool"
 
 ## Base directories
 
-- `apply_patch` operates on `~/.tamagotchi/tools/` — file paths are relative to this directory
-- `apply_skill_patch` operates on `~/.tamagotchi/skills/` — file paths are relative to this directory
+- `apply_patch` operates on `~/.borg/tools/` — file paths are relative to this directory
+- `apply_skill_patch` operates on `~/.borg/skills/` — file paths are relative to this directory
 
 ## Error handling
 

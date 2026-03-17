@@ -961,7 +961,7 @@ mod tests {
     /// Helper to create an LlmClient with Anthropic provider for testing.
     /// Uses a unique env var to avoid races with parallel tests.
     fn make_test_anthropic_client() -> LlmClient {
-        let env_var = "TAMAGOTCHI_TEST_ANTHROPIC_LLM";
+        let env_var = "BORG_TEST_ANTHROPIC_LLM";
         std::env::set_var(env_var, "sk-test");
         let mut config = Config::default();
         config.llm.provider = Some("anthropic".to_string());

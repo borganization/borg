@@ -7,11 +7,11 @@ use std::str::FromStr;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use tamagotchi_core::config::HeartbeatConfig;
-use tamagotchi_core::llm::LlmClient;
-use tamagotchi_core::memory::load_memory_context;
-use tamagotchi_core::soul::load_soul;
-use tamagotchi_core::types::Message;
+use borg_core::config::HeartbeatConfig;
+use borg_core::llm::LlmClient;
+use borg_core::memory::load_memory_context;
+use borg_core::soul::load_soul;
+use borg_core::types::Message;
 
 #[derive(Debug, Clone)]
 pub enum HeartbeatEvent {
@@ -274,7 +274,7 @@ mod tests {
     }
 
     fn make_test_llm() -> LlmClient {
-        use tamagotchi_core::config::Config;
+        use borg_core::config::Config;
         // Set the env var so LlmClient::new doesn't fail
         std::env::set_var("OPENROUTER_API_KEY", "test-key");
         let config = Config::default();

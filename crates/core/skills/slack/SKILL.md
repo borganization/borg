@@ -22,7 +22,7 @@ Set `SLACK_BOT_TOKEN` in your environment. The bot needs appropriate OAuth scope
 curl -s -X POST https://slack.com/api/chat.postMessage \
   -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"channel":"C123","text":"Hello from Tamagotchi"}'
+  -d '{"channel":"C123","text":"Hello from Borg"}'
 ```
 
 ### React to a message

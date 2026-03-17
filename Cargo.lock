@@ -210,6 +210,176 @@ dependencies = [
 ]
 
 [[package]]
+name = "borg-apply-patch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "borg-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borg-core",
+ "borg-customizations",
+ "borg-gateway",
+ "borg-heartbeat",
+ "borg-tools",
+ "chrono",
+ "clap",
+ "crossterm",
+ "dirs",
+ "dotenvy",
+ "futures",
+ "futures-util",
+ "pulldown-cmark",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "textwrap",
+ "throbber-widgets-tui",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "tui-textarea",
+ "unicode-width 0.2.0",
+ "uuid",
+ "which",
+]
+
+[[package]]
+name = "borg-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borg-apply-patch",
+ "borg-tools",
+ "chrono",
+ "cron",
+ "dirs",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "pdf-extract",
+ "rand 0.9.2",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "scraper",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "shellexpand",
+ "tempfile",
+ "thiserror",
+ "tiktoken-rs",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+ "which",
+]
+
+[[package]]
+name = "borg-customizations"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "which",
+]
+
+[[package]]
+name = "borg-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "borg-core",
+ "borg-sandbox",
+ "borg-tools",
+ "chrono",
+ "dirs",
+ "futures",
+ "hex",
+ "hmac",
+ "rand 0.9.2",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower",
+ "tracing",
+ "uuid",
+ "which",
+]
+
+[[package]]
+name = "borg-heartbeat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borg-core",
+ "chrono",
+ "cron",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "borg-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "borg-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borg-sandbox",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "which",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2532,176 +2702,6 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
-]
-
-[[package]]
-name = "tamagotchi-apply-patch"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "tamagotchi-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "crossterm",
- "dirs",
- "dotenvy",
- "futures",
- "futures-util",
- "pulldown-cmark",
- "ratatui",
- "serde",
- "serde_json",
- "tamagotchi-core",
- "tamagotchi-customizations",
- "tamagotchi-gateway",
- "tamagotchi-heartbeat",
- "tamagotchi-tools",
- "tempfile",
- "textwrap",
- "throbber-widgets-tui",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "tui-textarea",
- "unicode-width 0.2.0",
- "uuid",
- "which",
-]
-
-[[package]]
-name = "tamagotchi-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "cron",
- "dirs",
- "eventsource-stream",
- "futures",
- "futures-util",
- "pdf-extract",
- "rand 0.9.2",
- "regex",
- "reqwest",
- "rusqlite",
- "scraper",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "shellexpand",
- "tamagotchi-apply-patch",
- "tamagotchi-tools",
- "tempfile",
- "thiserror",
- "tiktoken-rs",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "uuid",
- "which",
-]
-
-[[package]]
-name = "tamagotchi-customizations"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tracing",
- "which",
-]
-
-[[package]]
-name = "tamagotchi-gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "dirs",
- "futures",
- "hex",
- "hmac",
- "rand 0.9.2",
- "regex",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "subtle",
- "tamagotchi-core",
- "tamagotchi-sandbox",
- "tamagotchi-tools",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml",
- "tower",
- "tracing",
- "uuid",
- "which",
-]
-
-[[package]]
-name = "tamagotchi-heartbeat"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "cron",
- "tamagotchi-core",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tamagotchi-sandbox"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "serde",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tamagotchi-tools"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "serde",
- "serde_json",
- "tamagotchi-sandbox",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "which",
 ]
 
 [[package]]

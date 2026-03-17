@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn resolve_env_var() {
-        let var_name = "TAMAGOTCHI_TEST_SECRET_REF_ENV";
+        let var_name = "BORG_TEST_SECRET_REF_ENV";
         std::env::set_var(var_name, "test-secret-value");
         let sr = SecretRef::Env {
             var: var_name.to_string(),
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn resolve_env_var_missing() {
         let sr = SecretRef::Env {
-            var: "TAMAGOTCHI_TEST_SECRET_REF_MISSING".to_string(),
+            var: "BORG_TEST_SECRET_REF_MISSING".to_string(),
         };
         assert!(sr.resolve().is_err());
     }
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn resolve_file_missing() {
         let sr = SecretRef::File {
-            path: "/tmp/tamagotchi_test_nonexistent_secret_file.txt".to_string(),
+            path: "/tmp/borg_test_nonexistent_secret_file.txt".to_string(),
             key: None,
         };
         assert!(sr.resolve().is_err());
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn resolve_exec_nonexistent_command() {
         let sr = SecretRef::Exec {
-            command: "tamagotchi_nonexistent_command_12345".to_string(),
+            command: "borg_nonexistent_command_12345".to_string(),
             args: vec![],
         };
         assert!(sr.resolve().is_err());
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn resolve_first_picks_first_success() {
-        let var_name = "TAMAGOTCHI_TEST_RESOLVE_FIRST";
+        let var_name = "BORG_TEST_RESOLVE_FIRST";
         std::env::set_var(var_name, "first-key");
         let refs = vec![
             SecretRef::Env {
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn deserialize_inline_table_exec() {
-        let toml_str = r#"secret = { source = "exec", command = "security", args = ["find-generic-password", "-s", "tamagotchi", "-w"] }"#;
+        let toml_str = r#"secret = { source = "exec", command = "security", args = ["find-generic-password", "-s", "borg", "-w"] }"#;
         #[derive(Deserialize)]
         struct Wrapper {
             secret: SecretRef,
@@ -342,14 +342,14 @@ mod tests {
     #[test]
     fn serde_roundtrip_keychain() {
         let sr = SecretRef::Keychain {
-            service: "tamagotchi-messaging-telegram".to_string(),
-            account: "tamagotchi-TELEGRAM_BOT_TOKEN".to_string(),
+            service: "borg-messaging-telegram".to_string(),
+            account: "borg-TELEGRAM_BOT_TOKEN".to_string(),
         };
         let toml_str = toml::to_string(&sr).expect("serialize");
         let parsed: SecretRef = toml::from_str(&toml_str).expect("deserialize");
         if let SecretRef::Keychain { service, account } = parsed {
-            assert_eq!(service, "tamagotchi-messaging-telegram");
-            assert_eq!(account, "tamagotchi-TELEGRAM_BOT_TOKEN");
+            assert_eq!(service, "borg-messaging-telegram");
+            assert_eq!(account, "borg-TELEGRAM_BOT_TOKEN");
         } else {
             panic!("expected Keychain variant");
         }
@@ -357,15 +357,16 @@ mod tests {
 
     #[test]
     fn deserialize_inline_table_keychain() {
-        let toml_str = r#"secret = { source = "keychain", service = "tamagotchi-svc", account = "tamagotchi-acct" }"#;
+        let toml_str =
+            r#"secret = { source = "keychain", service = "borg-svc", account = "borg-acct" }"#;
         #[derive(Deserialize)]
         struct Wrapper {
             secret: SecretRef,
         }
         let w: Wrapper = toml::from_str(toml_str).expect("parse");
         if let SecretRef::Keychain { service, account } = w.secret {
-            assert_eq!(service, "tamagotchi-svc");
-            assert_eq!(account, "tamagotchi-acct");
+            assert_eq!(service, "borg-svc");
+            assert_eq!(account, "borg-acct");
         } else {
             panic!("expected Keychain variant");
         }
@@ -374,8 +375,8 @@ mod tests {
     #[test]
     fn resolve_keychain_missing_entry() {
         let sr = SecretRef::Keychain {
-            service: "tamagotchi-nonexistent-test-service-12345".to_string(),
-            account: "tamagotchi-nonexistent-test-account-12345".to_string(),
+            service: "borg-nonexistent-test-service-12345".to_string(),
+            account: "borg-nonexistent-test-account-12345".to_string(),
         };
         assert!(sr.resolve().is_err());
     }

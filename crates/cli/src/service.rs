@@ -2,16 +2,16 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
-use tamagotchi_core::config::Config;
+use borg_core::config::Config;
 
-const LAUNCHD_LABEL: &str = "com.tamagotchi.daemon";
+const LAUNCHD_LABEL: &str = "com.borg.daemon";
 
 const LAUNCHD_PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.tamagotchi.daemon</string>
+    <string>com.borg.daemon</string>
     <key>ProgramArguments</key>
     <array>
         <string>{{BINARY_PATH}}</string>
@@ -34,7 +34,7 @@ const LAUNCHD_PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </plist>"#;
 
 const SYSTEMD_UNIT_TEMPLATE: &str = r#"[Unit]
-Description=Tamagotchi AI Assistant Daemon
+Description=Borg AI Assistant Daemon
 After=network.target
 
 [Service]
@@ -52,13 +52,13 @@ WantedBy=default.target
 pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
     let config = Config::load()?;
 
-    println!("Tamagotchi daemon starting...");
+    println!("Borg daemon starting...");
 
     // Open database for task scheduling
-    let db = tamagotchi_core::db::Database::open()?;
+    let db = borg_core::db::Database::open()?;
 
     // Validate that LLM client can be constructed
-    let _ = tamagotchi_core::llm::LlmClient::new(config.clone())?;
+    let _ = borg_core::llm::LlmClient::new(config.clone())?;
 
     let max_concurrent = config.tasks.max_concurrent;
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
@@ -68,7 +68,7 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
         let gw_config = config.clone();
         let gw_shutdown = shutdown.clone();
         tokio::spawn(async move {
-            match tamagotchi_gateway::GatewayServer::new(gw_config, gw_shutdown) {
+            match borg_gateway::GatewayServer::new(gw_config, gw_shutdown) {
                 Ok(gateway) => {
                     if let Err(e) = gateway.run().await {
                         tracing::error!("Gateway server error: {e}");
@@ -86,8 +86,7 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
         let im_config = config.clone();
         let im_shutdown = shutdown.clone();
         tokio::spawn(async move {
-            match tamagotchi_gateway::imessage::start_imessage_monitor(im_config, im_shutdown).await
-            {
+            match borg_gateway::imessage::start_imessage_monitor(im_config, im_shutdown).await {
                 Ok(_handle) => tracing::info!("iMessage monitor started"),
                 Err(e) => tracing::error!("iMessage monitor failed: {e}"),
             }
@@ -121,7 +120,7 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
             Ok(tasks) => {
                 for task in tasks {
                     // Advance next_run immediately to prevent re-execution
-                    if let Err(e) = tamagotchi_core::tasks::advance_next_run(&task, &db) {
+                    if let Err(e) = borg_core::tasks::advance_next_run(&task, &db) {
                         tracing::warn!("Failed to advance task next_run: {e}");
                     }
 
@@ -137,9 +136,9 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                         tracing::info!("Executing scheduled task: {task_name} ({task_id})");
                         let started_at = chrono::Utc::now().timestamp();
 
-                        let soul = tamagotchi_core::soul::load_soul().unwrap_or_default();
+                        let soul = borg_core::soul::load_soul().unwrap_or_default();
                         let memory =
-                            tamagotchi_core::memory::load_memory_context(4000).unwrap_or_default();
+                            borg_core::memory::load_memory_context(4000).unwrap_or_default();
                         let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
 
                         let system = format!(
@@ -149,11 +148,11 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                         );
 
                         let messages = vec![
-                            tamagotchi_core::types::Message::system(system),
-                            tamagotchi_core::types::Message::user(&task_prompt),
+                            borg_core::types::Message::system(system),
+                            borg_core::types::Message::user(&task_prompt),
                         ];
 
-                        let llm = match tamagotchi_core::llm::LlmClient::new(task_config) {
+                        let llm = match borg_core::llm::LlmClient::new(task_config) {
                             Ok(l) => l,
                             Err(e) => {
                                 tracing::warn!(
@@ -165,7 +164,7 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                         let result =
                             tokio::time::timeout(task_timeout, llm.chat(&messages, None)).await;
 
-                        if let Ok(db) = tamagotchi_core::db::Database::open() {
+                        if let Ok(db) = borg_core::db::Database::open() {
                             match result {
                                 Ok(Ok(response)) => {
                                     let duration_ms =
@@ -406,7 +405,7 @@ fn systemd_unit_path() -> Result<PathBuf> {
         .join(".config")
         .join("systemd")
         .join("user")
-        .join("tamagotchi.service"))
+        .join("borg.service"))
 }
 
 fn install_systemd(binary_path: &str, home: &std::path::Path) -> Result<()> {
@@ -427,7 +426,7 @@ fn install_systemd(binary_path: &str, home: &std::path::Path) -> Result<()> {
         .status();
 
     let _ = std::process::Command::new("systemctl")
-        .args(["--user", "enable", "--now", "tamagotchi.service"])
+        .args(["--user", "enable", "--now", "borg.service"])
         .status()
         .context("Failed to enable service")?;
 
@@ -438,7 +437,7 @@ fn uninstall_systemd() -> Result<()> {
     let unit_path = systemd_unit_path()?;
 
     let _ = std::process::Command::new("systemctl")
-        .args(["--user", "disable", "--now", "tamagotchi.service"])
+        .args(["--user", "disable", "--now", "borg.service"])
         .status();
 
     if unit_path.exists() {
@@ -455,7 +454,7 @@ fn uninstall_systemd() -> Result<()> {
 
 fn status_systemd() -> Result<()> {
     let output = std::process::Command::new("systemctl")
-        .args(["--user", "status", "tamagotchi.service"])
+        .args(["--user", "status", "borg.service"])
         .output()
         .context("Failed to run systemctl status")?;
 
@@ -467,7 +466,7 @@ fn status_systemd() -> Result<()> {
 fn stop_systemd() -> Result<()> {
     ensure_service_installed()?;
     let status = std::process::Command::new("systemctl")
-        .args(["--user", "stop", "tamagotchi.service"])
+        .args(["--user", "stop", "borg.service"])
         .status()
         .context("Failed to run systemctl stop")?;
     if status.success() {
@@ -481,7 +480,7 @@ fn stop_systemd() -> Result<()> {
 fn restart_systemd() -> Result<()> {
     ensure_service_installed()?;
     let status = std::process::Command::new("systemctl")
-        .args(["--user", "restart", "tamagotchi.service"])
+        .args(["--user", "restart", "borg.service"])
         .status()
         .context("Failed to run systemctl restart")?;
     if status.success() {
@@ -493,8 +492,8 @@ fn restart_systemd() -> Result<()> {
 }
 
 fn find_binary_path() -> Result<String> {
-    // Try to find the tamagotchi binary
-    if let Ok(path) = which::which("tamagotchi") {
+    // Try to find the borg binary
+    if let Ok(path) = which::which("borg") {
         return Ok(path.to_string_lossy().to_string());
     }
 

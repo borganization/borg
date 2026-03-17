@@ -63,12 +63,9 @@ impl Provider {
                 headers.insert("Authorization", val);
                 headers.insert(
                     "HTTP-Referer",
-                    HeaderValue::from_static("https://github.com/tamagotchi-ai"),
+                    HeaderValue::from_static("https://github.com/borg-ai"),
                 );
-                headers.insert(
-                    "X-Title",
-                    HeaderValue::from_static("Tamagotchi AI Assistant"),
-                );
+                headers.insert("X-Title", HeaderValue::from_static("Borg AI Assistant"));
             }
             Provider::Anthropic => {
                 let val = HeaderValue::from_str(api_key)

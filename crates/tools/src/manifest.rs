@@ -103,8 +103,8 @@ impl ToolManifest {
         })
     }
 
-    pub fn sandbox_policy(&self) -> tamagotchi_sandbox::policy::SandboxPolicy {
-        tamagotchi_sandbox::policy::SandboxPolicy {
+    pub fn sandbox_policy(&self) -> borg_sandbox::policy::SandboxPolicy {
+        borg_sandbox::policy::SandboxPolicy {
             network: self.sandbox.network,
             fs_read: self.sandbox.fs_read.clone(),
             fs_write: self.sandbox.fs_write.clone(),

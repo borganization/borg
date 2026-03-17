@@ -222,7 +222,7 @@ impl Default for GatewayConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DebugConfig {
-    /// When true, log full LLM request/response to ~/.tamagotchi/logs/debug/
+    /// When true, log full LLM request/response to ~/.borg/logs/debug/
     #[serde(default)]
     pub llm_logging: bool,
 }
@@ -359,7 +359,7 @@ impl Config {
     pub fn data_dir() -> Result<PathBuf> {
         Ok(dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-            .join(".tamagotchi"))
+            .join(".borg"))
     }
 
     pub fn memory_dir() -> Result<PathBuf> {
@@ -387,7 +387,7 @@ impl Config {
     }
 
     pub fn db_path() -> Result<PathBuf> {
-        Ok(Self::data_dir()?.join("tamagotchi.db"))
+        Ok(Self::data_dir()?.join("borg.db"))
     }
 
     pub fn soul_path() -> Result<PathBuf> {
@@ -823,7 +823,7 @@ model = "meta/llama-3"
 
     #[test]
     fn load_from_nonexistent_path_returns_defaults() {
-        let path = Path::new("/tmp/tamagotchi_test_nonexistent_config.toml");
+        let path = Path::new("/tmp/borg_test_nonexistent_config.toml");
         let cfg = Config::load_from(path).expect("should return default for missing file");
         let defaults = Config::default();
         assert_eq!(cfg.llm.model, defaults.llm.model);
@@ -848,7 +848,7 @@ model = "meta/llama-3"
 
     #[test]
     fn api_key_resolved_from_env() {
-        let env_name = "TAMAGOTCHI_TEST_API_KEY_RESOLVE";
+        let env_name = "BORG_TEST_API_KEY_RESOLVE";
         let mut cfg = Config::default();
         cfg.llm.api_key_env = env_name.to_string();
         std::env::remove_var(env_name);
@@ -958,7 +958,7 @@ agent_name = "Buddy"
     #[test]
     fn path_helpers() {
         let data = Config::data_dir().unwrap();
-        assert!(data.to_string_lossy().ends_with(".tamagotchi"));
+        assert!(data.to_string_lossy().ends_with(".borg"));
 
         let memory = Config::memory_dir().unwrap();
         assert_eq!(memory, data.join("memory"));
@@ -976,7 +976,7 @@ agent_name = "Buddy"
         assert_eq!(sessions, data.join("sessions"));
 
         let db = Config::db_path().unwrap();
-        assert_eq!(db, data.join("tamagotchi.db"));
+        assert_eq!(db, data.join("borg.db"));
 
         let soul = Config::soul_path().unwrap();
         assert_eq!(soul, data.join("SOUL.md"));
@@ -1122,7 +1122,7 @@ model = "anthropic/claude-sonnet-4"
         let toml_str = r#"
 [llm]
 provider = "openrouter"
-api_key = { source = "exec", command = "security", args = ["find-generic-password", "-s", "tamagotchi", "-w"] }
+api_key = { source = "exec", command = "security", args = ["find-generic-password", "-s", "borg", "-w"] }
 model = "anthropic/claude-sonnet-4"
 "#;
         let cfg: Config = toml::from_str(toml_str).expect("should parse");
@@ -1169,7 +1169,7 @@ model = "test-model"
 
     #[test]
     fn resolve_provider_prefers_secret_ref() {
-        let env_name = "TAMAGOTCHI_TEST_SECRET_REF_RESOLVE";
+        let env_name = "BORG_TEST_SECRET_REF_RESOLVE";
         std::env::set_var(env_name, "secret-ref-key");
         let mut cfg = Config::default();
         cfg.llm.provider = Some("openrouter".to_string());
@@ -1184,8 +1184,8 @@ model = "test-model"
 
     #[test]
     fn resolve_api_keys_multi() {
-        let env1 = "TAMAGOTCHI_TEST_MULTI_KEY_1";
-        let env2 = "TAMAGOTCHI_TEST_MULTI_KEY_2";
+        let env1 = "BORG_TEST_MULTI_KEY_1";
+        let env2 = "BORG_TEST_MULTI_KEY_2";
         std::env::set_var(env1, "key-one");
         std::env::set_var(env2, "key-two");
         let mut cfg = Config::default();
@@ -1416,8 +1416,8 @@ GH_TOKEN = { source = "file", path = "/tmp/token" }
         cfg.credentials.insert(
             "TELEGRAM_BOT_TOKEN".to_string(),
             CredentialValue::Ref(SecretRef::Keychain {
-                service: "tamagotchi-messaging-telegram".to_string(),
-                account: "tamagotchi-TELEGRAM_BOT_TOKEN".to_string(),
+                service: "borg-messaging-telegram".to_string(),
+                account: "borg-TELEGRAM_BOT_TOKEN".to_string(),
             }),
         );
         let serialized = toml::to_string_pretty(&cfg).expect("serialize");

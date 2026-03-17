@@ -12,7 +12,7 @@ mod service;
 mod tui;
 
 #[derive(Parser)]
-#[command(name = "tamagotchi", about = "AI Personal Assistant Agent")]
+#[command(name = "borg", about = "AI Personal Assistant Agent")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -20,7 +20,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start Tamagotchi — interactive TUI with auto-gateway (default)
+    /// Start Borg — interactive TUI with auto-gateway (default)
     Start,
     /// Start interactive chat (alias for start)
     Chat,
@@ -28,7 +28,7 @@ enum Commands {
     Stop,
     /// Restart the background daemon service
     Restart,
-    /// Run interactive setup wizard for ~/.tamagotchi
+    /// Run interactive setup wizard for ~/.borg
     Init,
     /// Send a single message and exit
     Ask {
@@ -72,7 +72,7 @@ enum Commands {
         #[command(subcommand)]
         action: Option<TasksAction>,
     },
-    /// Permanently delete all Tamagotchi data and uninstall the service
+    /// Permanently delete all Borg data and uninstall the service
     Uninstall,
 }
 
@@ -134,8 +134,8 @@ enum ServiceAction {
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
-    // Also load .env from the data directory (~/.tamagotchi/.env)
-    if let Ok(data_dir) = tamagotchi_core::config::Config::data_dir() {
+    // Also load .env from the data directory (~/.borg/.env)
+    if let Ok(data_dir) = borg_core::config::Config::data_dir() {
         let _ = dotenvy::from_path(data_dir.join(".env"));
         // Harden data directory permissions (owner-only access)
         harden_data_dir(&data_dir);
@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     let _guard;
 
     if tui_mode {
-        let (non_blocking, guard) = match tamagotchi_core::config::Config::logs_dir() {
+        let (non_blocking, guard) = match borg_core::config::Config::logs_dir() {
             Ok(log_dir) => {
                 let _ = std::fs::create_dir_all(&log_dir);
                 let mut opts = std::fs::OpenOptions::new();
@@ -261,7 +261,7 @@ async fn main() -> Result<()> {
 }
 
 fn ensure_onboarded() -> Result<()> {
-    let data_dir = tamagotchi_core::config::Config::data_dir()?;
+    let data_dir = borg_core::config::Config::data_dir()?;
     let config_path = data_dir.join("config.toml");
     if !config_path.exists() {
         init_data_dir()?;
@@ -274,14 +274,14 @@ fn ensure_onboarded() -> Result<()> {
 }
 
 async fn run_gateway(shutdown: CancellationToken) -> Result<()> {
-    let config = tamagotchi_core::config::Config::load()?;
-    let gateway = tamagotchi_gateway::GatewayServer::new(config, shutdown)?;
+    let config = borg_core::config::Config::load()?;
+    let gateway = borg_gateway::GatewayServer::new(config, shutdown)?;
     gateway.run().await
 }
 
 fn run_doctor() -> Result<()> {
-    let config = tamagotchi_core::config::Config::load().unwrap_or_default();
-    let report = tamagotchi_core::doctor::run_diagnostics(&config);
+    let config = borg_core::config::Config::load().unwrap_or_default();
+    let report = borg_core::doctor::run_diagnostics(&config);
     println!("{}", report.format());
     let (_pass, _warn, fail) = report.counts();
     if fail > 0 {
@@ -291,14 +291,14 @@ fn run_doctor() -> Result<()> {
 }
 
 fn init_data_dir() -> Result<()> {
-    let data_dir = tamagotchi_core::config::Config::data_dir()?;
+    let data_dir = borg_core::config::Config::data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
 
     // Run interactive onboarding wizard
     match onboarding::run_onboarding()? {
         Some(result) => {
             let has_api_key = result.api_key.is_some();
-            let provider: tamagotchi_core::provider::Provider = result.provider.parse()?;
+            let provider: borg_core::provider::Provider = result.provider.parse()?;
             let env_var = provider.default_env_var();
             onboarding::apply_onboarding(&result)?;
 
@@ -311,9 +311,9 @@ fn init_data_dir() -> Result<()> {
             println!("Initialized {}", data_dir.display());
             println!();
             if has_api_key {
-                println!("You're all set! Run `tamagotchi` to start chatting.");
+                println!("You're all set! Run `borg` to start chatting.");
             } else {
-                println!("You're all set! Run `tamagotchi` to start chatting.");
+                println!("You're all set! Run `borg` to start chatting.");
                 println!();
                 println!("Note: You'll need to set {env_var} before chatting.");
                 println!("  Add it to {}", data_dir.join(".env").display());
@@ -329,7 +329,7 @@ fn init_data_dir() -> Result<()> {
     Ok(())
 }
 
-/// Set `~/.tamagotchi/` to mode 0700 so only the owner can access it.
+/// Set `~/.borg/` to mode 0700 so only the owner can access it.
 /// This protects SOUL.md, memory, config, conversation logs, and API key env files.
 #[cfg(unix)]
 fn harden_data_dir(data_dir: &std::path::Path) {
@@ -346,7 +346,7 @@ fn harden_data_dir(_data_dir: &std::path::Path) {
 }
 
 fn run_tools() -> Result<()> {
-    let config = tamagotchi_core::config::Config::load().unwrap_or_default();
+    let config = borg_core::config::Config::load().unwrap_or_default();
 
     println!("Built-in tools:");
     let builtins = [
@@ -377,7 +377,7 @@ fn run_tools() -> Result<()> {
         println!("  {:20} Run host security audit", "security_audit");
     }
 
-    if let Ok(registry) = tamagotchi_tools::registry::ToolRegistry::new() {
+    if let Ok(registry) = borg_tools::registry::ToolRegistry::new() {
         let user_tools = registry.list_tools();
         if !user_tools.is_empty() {
             println!();
@@ -391,9 +391,9 @@ fn run_tools() -> Result<()> {
 }
 
 fn run_skills() -> Result<()> {
-    let config = tamagotchi_core::config::Config::load().unwrap_or_default();
+    let config = borg_core::config::Config::load().unwrap_or_default();
     let creds = config.resolve_credentials();
-    let skills = tamagotchi_core::skills::load_all_skills(&creds)?;
+    let skills = borg_core::skills::load_all_skills(&creds)?;
 
     if skills.is_empty() {
         println!("No skills found.");
@@ -407,13 +407,13 @@ fn run_skills() -> Result<()> {
 }
 
 fn run_settings_show() -> Result<()> {
-    let config = tamagotchi_core::config::Config::load()?;
+    let config = borg_core::config::Config::load()?;
     println!("{}", config.display_settings());
     Ok(())
 }
 
 fn run_settings_set(key: &str, value: &str) -> Result<()> {
-    let mut config = tamagotchi_core::config::Config::load()?;
+    let mut config = borg_core::config::Config::load()?;
     let confirmation = config.apply_setting(key, value)?;
     config.save()?;
     println!("Updated: {confirmation}");
@@ -421,7 +421,7 @@ fn run_settings_set(key: &str, value: &str) -> Result<()> {
 }
 
 fn run_logs(count: usize) -> Result<()> {
-    let lines = tamagotchi_core::logging::read_history_formatted(count)?;
+    let lines = borg_core::logging::read_history_formatted(count)?;
     if lines.is_empty() {
         println!("No conversation history.");
     } else {
@@ -433,7 +433,7 @@ fn run_logs(count: usize) -> Result<()> {
 }
 
 fn run_tasks_list() -> Result<()> {
-    let db = tamagotchi_core::db::Database::open()?;
+    let db = borg_core::db::Database::open()?;
     let tasks = db.list_tasks()?;
 
     if tasks.is_empty() {
@@ -467,13 +467,13 @@ fn run_tasks_list() -> Result<()> {
 }
 
 fn run_tasks_create(name: &str, prompt: &str, schedule: &str, schedule_type: &str) -> Result<()> {
-    tamagotchi_core::tasks::validate_schedule(schedule_type, schedule)?;
-    let next_run = tamagotchi_core::tasks::calculate_next_run(schedule_type, schedule)?;
+    borg_core::tasks::validate_schedule(schedule_type, schedule)?;
+    let next_run = borg_core::tasks::calculate_next_run(schedule_type, schedule)?;
     let id = Uuid::new_v4().to_string();
     let tz = chrono::Local::now().offset().to_string();
 
-    let db = tamagotchi_core::db::Database::open()?;
-    db.create_task(&tamagotchi_core::db::NewTask {
+    let db = borg_core::db::Database::open()?;
+    db.create_task(&borg_core::db::NewTask {
         id: &id,
         name,
         prompt,
@@ -488,7 +488,7 @@ fn run_tasks_create(name: &str, prompt: &str, schedule: &str, schedule_type: &st
 }
 
 fn run_tasks_delete(id: &str) -> Result<()> {
-    let db = tamagotchi_core::db::Database::open()?;
+    let db = borg_core::db::Database::open()?;
     if db.delete_task(id)? {
         println!("Deleted task {}", &id[..8.min(id.len())]);
     } else {
@@ -498,7 +498,7 @@ fn run_tasks_delete(id: &str) -> Result<()> {
 }
 
 fn run_tasks_update_status(id: &str, status: &str) -> Result<()> {
-    let db = tamagotchi_core::db::Database::open()?;
+    let db = borg_core::db::Database::open()?;
     if db.update_task_status(id, status)? {
         println!("Task {} status: {status}", &id[..8.min(id.len())]);
     } else {
@@ -516,10 +516,10 @@ fn truncate_str(s: &str, max: usize) -> String {
 }
 
 fn run_uninstall() -> Result<()> {
-    let data_dir = tamagotchi_core::config::Config::data_dir()?;
+    let data_dir = borg_core::config::Config::data_dir()?;
 
     eprintln!(
-        "WARNING: This will permanently delete all Tamagotchi data at {}\n\
+        "WARNING: This will permanently delete all Borg data at {}\n\
          including config, memory, tools, skills, channels, and database.\n",
         data_dir.display()
     );
@@ -535,7 +535,7 @@ fn run_uninstall() -> Result<()> {
 
         delete_data_dir(&data_dir)?;
 
-        println!("Tamagotchi data deleted. Goodbye!");
+        println!("Borg data deleted. Goodbye!");
     } else {
         println!("Aborted.");
     }
@@ -576,8 +576,8 @@ fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
 
     let soul_path = data_dir.join("SOUL.md");
     if !soul_path.exists() {
-        let soul = tamagotchi_core::soul::load_soul()?;
-        tamagotchi_core::soul::save_soul(&soul)?;
+        let soul = borg_core::soul::load_soul()?;
+        borg_core::soul::save_soul(&soul)?;
         println!("  Created {}", soul_path.display());
     }
 
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn delete_data_dir_removes_directory() {
         let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("tamagotchi_test");
+        let dir = tmp.path().join("borg_test");
         fs::create_dir_all(dir.join("memory")).unwrap();
         fs::write(dir.join("config.toml"), "test").unwrap();
 
@@ -652,19 +652,19 @@ mod tests {
 
     #[test]
     fn test_parse_tools_command() {
-        let cli = Cli::try_parse_from(["tamagotchi", "tools"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "tools"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Tools)));
     }
 
     #[test]
     fn test_parse_skills_command() {
-        let cli = Cli::try_parse_from(["tamagotchi", "skills"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "skills"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Skills)));
     }
 
     #[test]
     fn test_parse_settings_show() {
-        let cli = Cli::try_parse_from(["tamagotchi", "settings"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "settings"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Commands::Settings { action: None })
@@ -673,8 +673,7 @@ mod tests {
 
     #[test]
     fn test_parse_settings_set() {
-        let cli =
-            Cli::try_parse_from(["tamagotchi", "settings", "set", "temperature", "0.5"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "settings", "set", "temperature", "0.5"]).unwrap();
         match cli.command {
             Some(Commands::Settings {
                 action: Some(SettingsAction::Set { key, value }),
@@ -688,7 +687,7 @@ mod tests {
 
     #[test]
     fn test_parse_logs_default() {
-        let cli = Cli::try_parse_from(["tamagotchi", "logs"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "logs"]).unwrap();
         match cli.command {
             Some(Commands::Logs { count }) => assert_eq!(count, 50),
             _ => panic!("Expected Logs"),
@@ -697,7 +696,7 @@ mod tests {
 
     #[test]
     fn test_parse_logs_custom_count() {
-        let cli = Cli::try_parse_from(["tamagotchi", "logs", "--count", "10"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "logs", "--count", "10"]).unwrap();
         match cli.command {
             Some(Commands::Logs { count }) => assert_eq!(count, 10),
             _ => panic!("Expected Logs"),
@@ -706,13 +705,13 @@ mod tests {
 
     #[test]
     fn test_parse_tasks_list() {
-        let cli = Cli::try_parse_from(["tamagotchi", "tasks"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "tasks"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Commands::Tasks { action: None })
         ));
 
-        let cli = Cli::try_parse_from(["tamagotchi", "tasks", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "tasks", "list"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Commands::Tasks {
@@ -724,7 +723,7 @@ mod tests {
     #[test]
     fn test_parse_tasks_create() {
         let cli = Cli::try_parse_from([
-            "tamagotchi",
+            "borg",
             "tasks",
             "create",
             "--name",
@@ -756,7 +755,7 @@ mod tests {
 
     #[test]
     fn test_parse_tasks_delete() {
-        let cli = Cli::try_parse_from(["tamagotchi", "tasks", "delete", "abc123"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "tasks", "delete", "abc123"]).unwrap();
         match cli.command {
             Some(Commands::Tasks {
                 action: Some(TasksAction::Delete { id }),
@@ -767,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_parse_tasks_pause_resume() {
-        let cli = Cli::try_parse_from(["tamagotchi", "tasks", "pause", "abc123"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "tasks", "pause", "abc123"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Commands::Tasks {
@@ -775,7 +774,7 @@ mod tests {
             })
         ));
 
-        let cli = Cli::try_parse_from(["tamagotchi", "tasks", "resume", "abc123"]).unwrap();
+        let cli = Cli::try_parse_from(["borg", "tasks", "resume", "abc123"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Commands::Tasks {
@@ -788,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_settings_show_with_default_config() {
-        let config = tamagotchi_core::config::Config::default();
+        let config = borg_core::config::Config::default();
         let output = config.display_settings();
         assert!(!output.is_empty());
         assert!(output.contains("temperature"));
@@ -796,7 +795,7 @@ mod tests {
 
     #[test]
     fn test_settings_apply_valid_key() {
-        let mut config = tamagotchi_core::config::Config::default();
+        let mut config = borg_core::config::Config::default();
         let result = config.apply_setting("temperature", "0.5");
         assert!(result.is_ok());
         assert!((config.llm.temperature - 0.5).abs() < f32::EPSILON);
@@ -804,14 +803,14 @@ mod tests {
 
     #[test]
     fn test_settings_apply_invalid_key() {
-        let mut config = tamagotchi_core::config::Config::default();
+        let mut config = borg_core::config::Config::default();
         let result = config.apply_setting("nonexistent", "x");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_settings_apply_invalid_value() {
-        let mut config = tamagotchi_core::config::Config::default();
+        let mut config = borg_core::config::Config::default();
         let result = config.apply_setting("temperature", "not_a_number");
         assert!(result.is_err());
     }
@@ -820,17 +819,17 @@ mod tests {
 
     #[test]
     fn test_tasks_validate_schedule_cron() {
-        assert!(tamagotchi_core::tasks::validate_schedule("cron", "0 */5 * * * *").is_ok());
+        assert!(borg_core::tasks::validate_schedule("cron", "0 */5 * * * *").is_ok());
     }
 
     #[test]
     fn test_tasks_validate_schedule_interval() {
-        assert!(tamagotchi_core::tasks::validate_schedule("interval", "30m").is_ok());
+        assert!(borg_core::tasks::validate_schedule("interval", "30m").is_ok());
     }
 
     #[test]
     fn test_tasks_validate_schedule_invalid() {
-        assert!(tamagotchi_core::tasks::validate_schedule("cron", "not valid").is_err());
+        assert!(borg_core::tasks::validate_schedule("cron", "not valid").is_err());
     }
 
     // -- Helper tests --

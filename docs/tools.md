@@ -5,16 +5,16 @@ The agent can create its own tools at runtime. These are sandboxed scripts that 
 ## How it works
 
 1. During a conversation, the agent decides it needs a new capability
-2. It uses `create_tool` to create a `tool.toml` manifest and entrypoint script in `~/.tamagotchi/tools/<name>/`
+2. It uses `create_tool` to create a `tool.toml` manifest and entrypoint script in `~/.borg/tools/<name>/`
 3. The tool registry reloads automatically
 4. The tool is now available as a callable function in all future turns
 
 ## Tool structure
 
-Each tool lives in its own directory under `~/.tamagotchi/tools/`:
+Each tool lives in its own directory under `~/.borg/tools/`:
 
 ```
-~/.tamagotchi/tools/
+~/.borg/tools/
 └── weather/
     ├── tool.toml      # Manifest: name, description, runtime, sandbox policy, parameters
     └── main.py        # Entrypoint script
@@ -111,10 +111,10 @@ These are always available and don't require tool.toml manifests:
 | `read_memory` | Read a memory file |
 | `list_tools` | List all user-created tools |
 | `apply_patch` | Create/update/delete files in the current working directory via [Patch DSL](patch-dsl.md) |
-| `create_tool` | Create/modify files in `~/.tamagotchi/tools/` via [Patch DSL](patch-dsl.md) |
+| `create_tool` | Create/modify files in `~/.borg/tools/` via [Patch DSL](patch-dsl.md) |
 | `run_shell` | Execute a shell command (subject to [execution policy](configuration.md#policy)) |
 | `list_skills` | List all skills with status and source |
-| `apply_skill_patch` | Create/modify files in `~/.tamagotchi/skills/` via [Patch DSL](patch-dsl.md) |
+| `apply_skill_patch` | Create/modify files in `~/.borg/skills/` via [Patch DSL](patch-dsl.md) |
 
 ### Conditional tools
 

@@ -60,7 +60,7 @@ pub struct DiagnosticReport {
 
 impl DiagnosticReport {
     pub fn format(&self) -> String {
-        let mut output = String::from("Tamagotchi Doctor\n─────────────────\n");
+        let mut output = String::from("Borg Doctor\n───────────\n");
         let mut current_category = "";
         let mut pass_count = 0;
         let mut warn_count = 0;
@@ -235,7 +235,7 @@ fn check_secrets(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
                         let hint = if config.llm.api_key.is_some() {
                             "plaintext .env still present — consider removing it"
                         } else {
-                            "plaintext API keys in .env — consider using SecretRef in config.toml (e.g., api_key = { source = \"exec\", command = \"security\", args = [\"find-generic-password\", \"-s\", \"tamagotchi\", \"-w\"] })"
+                            "plaintext API keys in .env — consider using SecretRef in config.toml (e.g., api_key = { source = \"exec\", command = \"security\", args = [\"find-generic-password\", \"-s\", \"borg\", \"-w\"] })"
                         };
                         checks.push(DiagnosticCheck::warn(
                             "Secrets",
@@ -352,7 +352,7 @@ fn check_tools(checks: &mut Vec<DiagnosticCheck>) {
         }
     }
 
-    match tamagotchi_tools::registry::ToolRegistry::new() {
+    match borg_tools::registry::ToolRegistry::new() {
         Ok(registry) => {
             let tools = registry.list_tools();
             checks.push(DiagnosticCheck::pass(
@@ -462,7 +462,7 @@ fn check_data_dir(checks: &mut Vec<DiagnosticCheck>) {
                 checks.push(DiagnosticCheck::warn(
                     "Data",
                     "data directory exists",
-                    "~/.tamagotchi not found — run `tamagotchi init`",
+                    "~/.borg not found — run `borg init`",
                 ));
             }
         }
@@ -703,7 +703,7 @@ mod tests {
             ],
         };
         let output = report.format();
-        assert!(output.contains("Tamagotchi Doctor"));
+        assert!(output.contains("Borg Doctor"));
         assert!(output.contains("✓ config.toml exists"));
         assert!(output.contains("✗ API key set"));
         assert!(output.contains("⚠ sandbox-exec"));

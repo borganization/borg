@@ -2,8 +2,8 @@ use anyhow::{bail, Result};
 
 use std::str::FromStr;
 
-use tamagotchi_core::config::Config;
-use tamagotchi_core::provider::Provider;
+use borg_core::config::Config;
+use borg_core::provider::Provider;
 
 /// Provider choices with display labels.
 pub(crate) const PROVIDERS: &[(&str, &str, &str)] = &[
@@ -113,7 +113,7 @@ pub(crate) const STYLES: &[PersonalityStyle] = &[
 /// How the API key should be stored.
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeyStorage {
-    /// Store in ~/.tamagotchi/.env (legacy plaintext)
+    /// Store in ~/.borg/.env (legacy plaintext)
     EnvFile,
     /// Store in OS keychain (macOS Keychain / Linux secret-tool)
     Keychain,
@@ -213,13 +213,13 @@ pub(crate) fn format_number(n: u64) -> String {
 
 /// Check if a system keychain is available for secret storage.
 pub(crate) fn keychain_available() -> bool {
-    tamagotchi_customizations::keychain::available()
+    borg_customizations::keychain::available()
 }
 
 /// Store an API key in the OS keychain.
 fn store_in_keychain(provider_id: &str, api_key: &str) -> Result<()> {
-    let service_name = format!("tamagotchi-{provider_id}");
-    tamagotchi_customizations::keychain::store(&service_name, "tamagotchi", api_key)
+    let service_name = format!("borg-{provider_id}");
+    borg_customizations::keychain::store(&service_name, "borg", api_key)
 }
 
 /// Validate that a model ID is safe for TOML interpolation (alphanumeric, slashes, hyphens, dots).
@@ -253,14 +253,14 @@ pub fn generate_config(
 
     let api_key_line = match key_storage {
         KeyStorage::Keychain => {
-            let service_name = format!("tamagotchi-{provider_id}");
+            let service_name = format!("borg-{provider_id}");
             if cfg!(target_os = "macos") {
                 format!(
-                    r#"api_key = {{ source = "exec", command = "security", args = ["find-generic-password", "-s", "{service_name}", "-a", "tamagotchi", "-w"] }}"#,
+                    r#"api_key = {{ source = "exec", command = "security", args = ["find-generic-password", "-s", "{service_name}", "-a", "borg", "-w"] }}"#,
                 )
             } else {
                 format!(
-                    r#"api_key = {{ source = "exec", command = "secret-tool", args = ["lookup", "service", "tamagotchi", "provider", "{provider_id}"] }}"#,
+                    r#"api_key = {{ source = "exec", command = "secret-tool", args = ["lookup", "service", "borg", "provider", "{provider_id}"] }}"#,
                 )
             }
         }
@@ -360,7 +360,7 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
             KeyStorage::Keychain => match store_in_keychain(&result.provider, api_key) {
                 Ok(()) => {
                     println!(
-                        "  Stored API key in OS keychain (service: tamagotchi-{})",
+                        "  Stored API key in OS keychain (service: borg-{})",
                         result.provider
                     );
                 }

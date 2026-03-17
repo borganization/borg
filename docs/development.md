@@ -1,6 +1,6 @@
 # Development
 
-Guide for building, testing, and working on the Tamagotchi codebase.
+Guide for building, testing, and working on the Borg codebase.
 
 ## Prerequisites
 
@@ -15,16 +15,16 @@ cargo build            # debug build
 cargo build --release  # optimized build
 ```
 
-The binary is `target/release/tamagotchi` (or `target/debug/tamagotchi`).
+The binary is `target/release/borg` (or `target/debug/borg`).
 
 ## Testing
 
 ```sh
 cargo test                            # all tests
-cargo test -p tamagotchi-apply-patch  # patch parser + applicator (13 tests)
-cargo test -p tamagotchi-core         # config + skills + memory tests
-cargo test -p tamagotchi-heartbeat    # heartbeat scheduler tests
-cargo test -p tamagotchi-tools        # tool manifest tests
+cargo test -p borg-apply-patch  # patch parser + applicator (13 tests)
+cargo test -p borg-core         # config + skills + memory tests
+cargo test -p borg-heartbeat    # heartbeat scheduler tests
+cargo test -p borg-tools        # tool manifest tests
 ```
 
 ## Linting
@@ -37,7 +37,7 @@ cargo clippy -- -D warnings  # lint check (warnings are errors)
 ## Project structure
 
 ```
-tamagotchi/
+borg/
 ├── Cargo.toml              # workspace root
 ├── CLAUDE.md               # project instructions
 ├── docs/                   # documentation (you are here)

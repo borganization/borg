@@ -36,7 +36,7 @@ pub fn store(service: &str, account: &str, value: &str) -> Result<()> {
             .args([
                 "store",
                 "--label",
-                &format!("Tamagotchi {account}"),
+                &format!("Borg {account}"),
                 "service",
                 service,
                 "account",

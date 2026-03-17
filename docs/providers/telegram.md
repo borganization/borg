@@ -6,7 +6,7 @@ Open Telegram, message [@BotFather](https://t.me/BotFather), and run `/newbot`. 
 
 ## 2. Store the Token
 
-Add the token to `~/.tamagotchi/config.toml` under `[credentials]`:
+Add the token to `~/.borg/config.toml` under `[credentials]`:
 
 ```toml
 # Option A: environment variable
@@ -68,7 +68,7 @@ The secret is passed to Telegram during webhook registration and verified on eac
 ## 6. Start the Gateway
 
 ```sh
-tamagotchi gateway
+borg gateway
 ```
 
 Or enable it as part of the daemon by setting `gateway.enabled = true`.
