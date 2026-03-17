@@ -444,9 +444,15 @@ fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
         .args(args)
         .output()
         .map_err(|e| format!("{program}: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    Ok(format!("{stdout}{stderr}"))
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "{program}: exited with status {} — {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn run_cmd_timeout(program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {

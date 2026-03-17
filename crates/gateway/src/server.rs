@@ -498,11 +498,28 @@ fn extract_client_ip(
     headers: &HeaderMap,
     connect_info: &ConnectInfo<std::net::SocketAddr>,
 ) -> String {
-    // Check X-Forwarded-For first
-    if let Some(xff) = headers.get("x-forwarded-for") {
-        if let Ok(val) = xff.to_str() {
-            if let Some(first) = val.split(',').next() {
-                let trimmed = first.trim();
+    let peer_ip = connect_info.0.ip();
+
+    // Only trust proxy headers when the peer is a loopback address (i.e. behind a
+    // local reverse proxy). This prevents arbitrary clients from spoofing their IP
+    // via X-Forwarded-For to bypass rate limiting.
+    if peer_ip.is_loopback() {
+        // Check X-Forwarded-For first
+        if let Some(xff) = headers.get("x-forwarded-for") {
+            if let Ok(val) = xff.to_str() {
+                if let Some(first) = val.split(',').next() {
+                    let trimmed = first.trim();
+                    if !trimmed.is_empty() {
+                        return trimmed.to_string();
+                    }
+                }
+            }
+        }
+
+        // Check X-Real-IP
+        if let Some(xri) = headers.get("x-real-ip") {
+            if let Ok(val) = xri.to_str() {
+                let trimmed = val.trim();
                 if !trimmed.is_empty() {
                     return trimmed.to_string();
                 }
@@ -510,18 +527,8 @@ fn extract_client_ip(
         }
     }
 
-    // Check X-Real-IP
-    if let Some(xri) = headers.get("x-real-ip") {
-        if let Ok(val) = xri.to_str() {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-    }
-
     // Fall back to peer address
-    connect_info.0.ip().to_string()
+    peer_ip.to_string()
 }
 
 async fn webhook_handler(

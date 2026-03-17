@@ -22,7 +22,11 @@ pub struct TelegramClient {
 impl TelegramClient {
     pub fn new(token: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
             token: token.to_string(),
             circuit_breaker: Arc::new(CircuitBreaker::new()),
         }
@@ -143,12 +147,10 @@ impl TelegramClient {
                 if attempts > MAX_RETRIES {
                     bail!("sendMessage rate limited after {MAX_RETRIES} retries");
                 }
-                if let Some(retry_after) = resp_body.retry_after {
-                    let capped = retry_after.min(MAX_RETRY_AFTER_SECS);
-                    warn!("Telegram rate limited, retry after {capped}s (attempt {attempts}/{MAX_RETRIES})");
-                    tokio::time::sleep(Duration::from_secs(capped)).await;
-                    continue;
-                }
+                let retry_secs = resp_body.retry_after.unwrap_or(5).min(MAX_RETRY_AFTER_SECS);
+                warn!("Telegram rate limited, retry after {retry_secs}s (attempt {attempts}/{MAX_RETRIES})");
+                tokio::time::sleep(Duration::from_secs(retry_secs)).await;
+                continue;
             }
 
             bail!(
@@ -269,16 +271,31 @@ impl TelegramClient {
     }
 
     /// Download a file by its file_path (obtained from get_file).
+    /// Limits download size to 25 MB to prevent memory exhaustion.
     pub async fn download_file(&self, file_path: &str) -> Result<Vec<u8>> {
-        let bytes = self
+        const MAX_FILE_SIZE: u64 = 25 * 1024 * 1024; // 25 MB
+
+        let resp = self
             .client
             .get(self.file_url(file_path))
             .send()
             .await
-            .context("Failed to download file")?
-            .bytes()
-            .await
-            .context("Failed to read file bytes")?;
+            .context("Failed to download file")?;
+
+        if let Some(len) = resp.content_length() {
+            if len > MAX_FILE_SIZE {
+                bail!("File too large: {len} bytes (max {MAX_FILE_SIZE})");
+            }
+        }
+
+        let bytes = resp.bytes().await.context("Failed to read file bytes")?;
+
+        if bytes.len() as u64 > MAX_FILE_SIZE {
+            bail!(
+                "Downloaded file too large: {} bytes (max {MAX_FILE_SIZE})",
+                bytes.len()
+            );
+        }
 
         Ok(bytes.to_vec())
     }

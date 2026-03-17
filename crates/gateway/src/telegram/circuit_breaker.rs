@@ -25,16 +25,16 @@ impl CircuitBreaker {
 
     /// Returns `true` if the circuit is open (calls should be skipped).
     pub fn is_open(&self) -> bool {
-        if !self.open.load(Ordering::Relaxed) {
+        if !self.open.load(Ordering::Acquire) {
             return false;
         }
 
         let now = now_secs();
-        let suspended_until = self.suspended_until.load(Ordering::Relaxed);
+        let suspended_until = self.suspended_until.load(Ordering::Acquire);
         if now >= suspended_until {
             // Suspension period elapsed — half-open: allow a probe
-            self.open.store(false, Ordering::Relaxed);
-            self.consecutive_failures.store(0, Ordering::Relaxed);
+            self.consecutive_failures.store(0, Ordering::Release);
+            self.open.store(false, Ordering::Release);
             false
         } else {
             true
@@ -43,8 +43,8 @@ impl CircuitBreaker {
 
     /// Record a successful call — resets the failure counter.
     pub fn record_success(&self) {
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-        self.open.store(false, Ordering::Relaxed);
+        self.consecutive_failures.store(0, Ordering::Release);
+        self.open.store(false, Ordering::Release);
     }
 
     /// Record a failure with the given HTTP status code.
@@ -54,11 +54,11 @@ impl CircuitBreaker {
             return;
         }
 
-        let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        let count = self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
         if count >= FAILURE_THRESHOLD {
-            self.open.store(true, Ordering::Relaxed);
             self.suspended_until
-                .store(now_secs() + SUSPENSION_SECS, Ordering::Relaxed);
+                .store(now_secs() + SUSPENSION_SECS, Ordering::Release);
+            self.open.store(true, Ordering::Release);
         }
     }
 }
