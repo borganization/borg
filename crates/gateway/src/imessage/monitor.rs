@@ -109,6 +109,9 @@ async fn monitor_loop(
                                         sender_id: sender_id.clone(),
                                         text,
                                         channel_id: Some(channel_id),
+                                        thread_id: None,
+                                        message_id: None,
+                                        thread_ts: None,
                                     };
 
                                     match handler::handle_polled_message(
