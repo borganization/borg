@@ -40,6 +40,18 @@ impl DiagnosticCheck {
             status: CheckStatus::Fail(msg.into()),
         }
     }
+
+    pub fn with_status(
+        category: &'static str,
+        name: impl Into<String>,
+        status: CheckStatus,
+    ) -> Self {
+        Self {
+            category,
+            name: name.into(),
+            status,
+        }
+    }
 }
 
 pub struct DiagnosticReport {
