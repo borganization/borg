@@ -157,6 +157,17 @@ max_context_tokens = 4000
 secret_detection = true
 blocked_paths = [".ssh", ".aws", ".gnupg", ".config/gh", ".env", "credentials", "private_key"]
 host_audit = true                # enable host security checks in doctor + security_audit tool
+hitl_dangerous_ops = true          # confirm before file deletion, SOUL.md changes
+action_limits.tool_calls_warn = 50
+action_limits.tool_calls_block = 100
+action_limits.shell_commands_warn = 20
+action_limits.shell_commands_block = 50
+action_limits.file_writes_warn = 15
+action_limits.file_writes_block = 30
+action_limits.memory_writes_warn = 10
+action_limits.memory_writes_block = 20
+action_limits.web_requests_warn = 20
+action_limits.web_requests_block = 50
 
 [budget]
 monthly_token_limit = 1000000    # 0 = unlimited
@@ -312,6 +323,22 @@ User tools run sandboxed:
 
 Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 
+## Prompt Injection Defense
+
+Six-layer defense against prompt injection attacks:
+
+1. **Input Sanitization** (`crates/core/src/sanitize.rs`): Scoring-based injection detection with regex patterns. Flags suspicious content with explicit untrusted markers instead of stripping (preserves legitimate messages). Applied at gateway inbound and tool results.
+
+2. **Context Segregation**: System prompt uses XML structural boundaries (`<system_instructions>`, `<user_memory>`, `<tool_output>`) with trust labels to prevent instruction boundary confusion.
+
+3. **Prompt Hardening**: Security policy injected into system prompt instructing the model to treat external data as data, not instructions. Role boundary enforcement.
+
+4. **HITL for Dangerous Ops**: `ToolConfirmation` event for file deletion (apply_patch) and personality modification (SOUL.md). Auto-denied in gateway mode. Configurable via `security.hitl_dangerous_ops`.
+
+5. **Rate Limiting** (`crates/core/src/rate_guard.rs`): Per-session action caps (tool calls, shell commands, file/memory writes, web requests) with warn and block thresholds. Configurable via `[security]` config.
+
+6. **Secret Redaction** (existing): Regex-based redaction of API keys, tokens, and credentials in tool outputs.
+
 ## Key Source Files
 
 | File | What |
@@ -329,6 +356,8 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 | `crates/core/src/hooks.rs` | Lifecycle hook system (trait, registry, dispatch) |
 | `crates/core/src/doctor.rs` | Diagnostic checks and report formatting |
 | `crates/core/src/host_audit.rs` | Host security audit checks (firewall, ports, SSH, permissions, encryption, updates, services) |
+| `crates/core/src/sanitize.rs` | Prompt injection detection (scoring-based, regex patterns, untrusted content wrapping) |
+| `crates/core/src/rate_guard.rs` | Per-session rate limiting for tool calls, shell commands, file/memory writes, web requests |
 | `crates/core/src/db.rs` | SQLite database with versioned migrations |
 | `crates/core/src/types.rs` | Message (with timestamps), ToolCall, ToolDefinition |
 | `crates/heartbeat/src/scheduler.rs` | Interval + quiet hours + dedup |
