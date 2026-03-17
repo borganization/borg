@@ -24,11 +24,11 @@ pub fn check_firewall(checks: &mut Vec<DiagnosticCheck>) {
     #[cfg(target_os = "macos")]
     {
         match run_cmd("socketfilterfw", &["--getglobalstate"]) {
-            Ok(output) => checks.push(DiagnosticCheck {
-                category: CATEGORY,
-                name: "Application Firewall".to_string(),
-                status: parse_macos_firewall(&output),
-            }),
+            Ok(output) => checks.push(DiagnosticCheck::with_status(
+                CATEGORY,
+                "Application Firewall",
+                parse_macos_firewall(&output),
+            )),
             Err(e) => checks.push(DiagnosticCheck::warn(
                 CATEGORY,
                 "Application Firewall",
@@ -37,11 +37,11 @@ pub fn check_firewall(checks: &mut Vec<DiagnosticCheck>) {
         }
 
         match run_cmd("pfctl", &["-s", "info"]) {
-            Ok(output) => checks.push(DiagnosticCheck {
-                category: CATEGORY,
-                name: "PF packet filter".to_string(),
-                status: parse_pf_status(&output),
-            }),
+            Ok(output) => checks.push(DiagnosticCheck::with_status(
+                CATEGORY,
+                "PF packet filter",
+                parse_pf_status(&output),
+            )),
             Err(_) => checks.push(DiagnosticCheck::warn(
                 CATEGORY,
                 "PF packet filter",
@@ -54,11 +54,11 @@ pub fn check_firewall(checks: &mut Vec<DiagnosticCheck>) {
     {
         let mut found = false;
         if let Ok(output) = run_cmd("ufw", &["status"]) {
-            checks.push(DiagnosticCheck {
-                category: CATEGORY,
-                name: "UFW firewall".to_string(),
-                status: parse_ufw_status(&output),
-            });
+            checks.push(DiagnosticCheck::with_status(
+                CATEGORY,
+                "UFW firewall",
+                parse_ufw_status(&output),
+            ));
             found = true;
         }
         if !found {
@@ -261,11 +261,11 @@ pub fn check_disk_encryption(checks: &mut Vec<DiagnosticCheck>) {
     #[cfg(target_os = "macos")]
     {
         match run_cmd("fdesetup", &["status"]) {
-            Ok(output) => checks.push(DiagnosticCheck {
-                category: CATEGORY,
-                name: "FileVault disk encryption".to_string(),
-                status: parse_fde_status(&output),
-            }),
+            Ok(output) => checks.push(DiagnosticCheck::with_status(
+                CATEGORY,
+                "FileVault disk encryption",
+                parse_fde_status(&output),
+            )),
             Err(e) => checks.push(DiagnosticCheck::warn(
                 CATEGORY,
                 "FileVault disk encryption",
@@ -314,11 +314,11 @@ pub fn check_os_updates(checks: &mut Vec<DiagnosticCheck>) {
     #[cfg(target_os = "macos")]
     {
         match run_cmd_timeout("softwareupdate", &["-l"], Duration::from_secs(10)) {
-            Ok(output) => checks.push(DiagnosticCheck {
-                category: CATEGORY,
-                name: "macOS software updates".to_string(),
-                status: parse_softwareupdate(&output),
-            }),
+            Ok(output) => checks.push(DiagnosticCheck::with_status(
+                CATEGORY,
+                "macOS software updates",
+                parse_softwareupdate(&output),
+            )),
             Err(e) => checks.push(DiagnosticCheck::warn(
                 CATEGORY,
                 "macOS software updates",
@@ -333,11 +333,11 @@ pub fn check_os_updates(checks: &mut Vec<DiagnosticCheck>) {
         if let Ok(output) =
             run_cmd_timeout("apt", &["list", "--upgradable"], Duration::from_secs(10))
         {
-            checks.push(DiagnosticCheck {
-                category: CATEGORY,
-                name: "OS package updates".to_string(),
-                status: parse_apt_upgradable(&output),
-            });
+            checks.push(DiagnosticCheck::with_status(
+                CATEGORY,
+                "OS package updates",
+                parse_apt_upgradable(&output),
+            ));
             checked = true;
         }
         if !checked {
@@ -474,8 +474,7 @@ fn run_cmd_timeout(program: &str, args: &[&str], timeout: Duration) -> Result<St
                     let _ = child.wait(); // reap zombie
                     return Err(format!("{program}: timed out after {}s", timeout.as_secs()));
                 }
-                // Yield briefly to avoid busy-spinning
-                std::thread::yield_now();
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(e) => return Err(format!("{program}: {e}")),
         }
