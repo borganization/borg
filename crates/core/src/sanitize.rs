@@ -1,6 +1,13 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
+const HIGH_RISK_THRESHOLD: u8 = 50;
+const FLAGGED_THRESHOLD: u8 = 20;
+
+fn compile_regex(pattern: &str) -> Regex {
+    Regex::new(pattern).unwrap_or_else(|e| panic!("bad regex: {e}"))
+}
+
 struct InjectionPattern {
     regex: Regex,
     label: &'static str,
@@ -10,44 +17,45 @@ struct InjectionPattern {
 static INJECTION_PATTERNS: LazyLock<Vec<InjectionPattern>> = LazyLock::new(|| {
     vec![
         InjectionPattern {
-            regex: Regex::new(r"(?i)ignore\s+(all|previous|prior|above)\s+(instructions|prompts|rules)")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(
+                r"(?i)ignore\s+(all|previous|prior|above)\s+(instructions|prompts|rules)",
+            ),
             label: "direct_override",
             score: 30,
         },
         InjectionPattern {
-            regex: Regex::new(r"(?i)disregard\s+(above|previous|prior|all)")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"(?i)disregard\s+(above|previous|prior|all)"),
             label: "direct_override",
             score: 30,
         },
         InjectionPattern {
-            regex: Regex::new(r"(?i)(you are now|your new role|act as|pretend you are|from now on you)")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(
+                r"(?i)(you are now|your new role|act as|pretend you are|from now on you)",
+            ),
             label: "role_hijack",
             score: 20,
         },
         InjectionPattern {
-            regex: Regex::new(r"(?im)^(system:|\[SYSTEM\]|<<SYS>>|<\|system\|>)")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"(?im)^(system:|\[SYSTEM\]|<<SYS>>|<\|system\|>)"),
             label: "fake_system",
             score: 25,
         },
         InjectionPattern {
-            regex: Regex::new(r"(?i)</(tool_result|function|tool_call|system)>")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"(?i)</(tool_result|function|tool_call|system)>"),
             label: "xml_escape",
             score: 25,
         },
         InjectionPattern {
-            regex: Regex::new(r"(?i)(IMPORTANT:|CRITICAL:|OVERRIDE:|URGENT:).{0,20}(must|always|never|immediately)")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(
+                r"(?i)(IMPORTANT:|CRITICAL:|OVERRIDE:|URGENT:).{0,20}(must|always|never|immediately)",
+            ),
             label: "authority_escalation",
             score: 15,
         },
         InjectionPattern {
-            regex: Regex::new(r"(?i)(do not reveal|don't tell|hide this from).{0,30}(user|human|operator)")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(
+                r"(?i)(do not reveal|don't tell|hide this from).{0,30}(user|human|operator)",
+            ),
             label: "concealment",
             score: 20,
         },
@@ -106,7 +114,7 @@ pub fn scan_for_injection(text: &str) -> ThreatLevel {
 
     let score = total_score.min(255) as u8;
 
-    if score >= 50 {
+    if score >= HIGH_RISK_THRESHOLD {
         tracing::warn!(
             score,
             patterns = ?matched_labels,
@@ -116,7 +124,7 @@ pub fn scan_for_injection(text: &str) -> ThreatLevel {
             score,
             patterns: matched_labels,
         }
-    } else if score >= 20 {
+    } else if score >= FLAGGED_THRESHOLD {
         tracing::warn!(
             score,
             patterns = ?matched_labels,

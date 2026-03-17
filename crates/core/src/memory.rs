@@ -5,6 +5,12 @@ use tracing::debug;
 use crate::config::Config;
 use crate::tokenizer::estimate_tokens;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteMode {
+    Overwrite,
+    Append,
+}
+
 pub fn memory_dir() -> Result<PathBuf> {
     Config::memory_dir()
 }
@@ -148,14 +154,14 @@ fn resolve_memory_path(filename: &str) -> Result<PathBuf> {
     }
 }
 
-pub fn write_memory(filename: &str, content: &str, append: bool) -> Result<String> {
-    write_memory_scoped(filename, content, append, "global")
+pub fn write_memory(filename: &str, content: &str, mode: WriteMode) -> Result<String> {
+    write_memory_scoped(filename, content, mode, "global")
 }
 
 pub fn write_memory_scoped(
     filename: &str,
     content: &str,
-    append: bool,
+    mode: WriteMode,
     scope: &str,
 ) -> Result<String> {
     let path = if scope == "local" {
@@ -170,7 +176,7 @@ pub fn write_memory_scoped(
         resolve_memory_path(filename)?
     };
 
-    if append && path.exists() {
+    if mode == WriteMode::Append && path.exists() {
         let existing = std::fs::read_to_string(&path)?;
         std::fs::write(&path, format!("{existing}\n{content}"))?;
     } else {
@@ -263,7 +269,7 @@ mod tests {
     #[test]
     fn write_and_read_memory_file() {
         // Write to a topic file
-        let result = write_memory("_test_topic_12345.md", "test content", false);
+        let result = write_memory("_test_topic_12345.md", "test content", WriteMode::Overwrite);
         assert!(result.is_ok());
         let msg = result.unwrap();
         assert!(msg.contains("Written to"));
@@ -282,10 +288,10 @@ mod tests {
         let filename = "_test_append_12345.md";
 
         // Write initial content
-        write_memory(filename, "line1", false).unwrap();
+        write_memory(filename, "line1", WriteMode::Overwrite).unwrap();
 
         // Append
-        write_memory(filename, "line2", true).unwrap();
+        write_memory(filename, "line2", WriteMode::Append).unwrap();
 
         let content = read_memory(filename).unwrap();
         assert!(content.contains("line1"));
@@ -300,8 +306,8 @@ mod tests {
     fn write_memory_overwrite_mode() {
         let filename = "_test_overwrite_12345.md";
 
-        write_memory(filename, "original", false).unwrap();
-        write_memory(filename, "replaced", false).unwrap();
+        write_memory(filename, "original", WriteMode::Overwrite).unwrap();
+        write_memory(filename, "replaced", WriteMode::Overwrite).unwrap();
 
         let content = read_memory(filename).unwrap();
         assert_eq!(content, "replaced");
@@ -395,7 +401,7 @@ mod tests {
     fn test_memory_wraps_in_xml_tags() {
         // Verify the memory format uses XML tags
         let filename = "_test_xml_wrap_12345.md";
-        write_memory(filename, "test xml content", false).unwrap();
+        write_memory(filename, "test xml content", WriteMode::Overwrite).unwrap();
 
         let result = load_memory_context(100_000);
         if let Ok(ctx) = result {

@@ -341,26 +341,9 @@ async fn process_message(
                     h.write().await.record_outbound(channel_name);
                 }
             }
-            RetryOutcome::PermanentFailure(e) => {
-                warn!(
-                    "Permanent outbound failure for channel '{}': {e}",
-                    channel_name
-                );
-                if let Err(db_err) = db.mark_failed(&delivery_id, &e, None) {
-                    warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
-                }
-                if let Some(h) = health {
-                    h.write().await.record_error(channel_name, &e);
-                }
-            }
-            RetryOutcome::Exhausted(e) => {
-                warn!(
-                    "Outbound delivery exhausted for channel '{}': {e}",
-                    channel_name
-                );
-                if let Err(db_err) = db.mark_failed(&delivery_id, &e, None) {
-                    warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
-                }
+            RetryOutcome::PermanentFailure(e) | RetryOutcome::Exhausted(e) => {
+                warn!("Outbound failure for channel '{}': {e}", channel_name);
+                record_delivery_failure_sync(&db, &delivery_id, &e);
                 if let Some(h) = health {
                     h.write().await.record_error(channel_name, &e);
                 }
@@ -369,4 +352,10 @@ async fn process_message(
     }
 
     Ok(response_text)
+}
+
+fn record_delivery_failure_sync(db: &Database, delivery_id: &str, error: &str) {
+    if let Err(db_err) = db.mark_failed(delivery_id, error, None) {
+        warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
+    }
 }

@@ -1,6 +1,10 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
+fn compile_regex(pattern: &str) -> Regex {
+    Regex::new(pattern).unwrap_or_else(|e| panic!("bad regex: {e}"))
+}
+
 struct SecretPattern {
     regex: Regex,
     label: &'static str,
@@ -9,51 +13,45 @@ struct SecretPattern {
 static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
     vec![
         SecretPattern {
-            regex: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"AKIA[0-9A-Z]{16}"),
             label: "AWS Access Key",
         },
         SecretPattern {
-            regex: Regex::new(r"(?:ghp|ghs|gho|ghu|ghm)_[A-Za-z0-9_]{36,}")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"(?:ghp|ghs|gho|ghu|ghm)_[A-Za-z0-9_]{36,}"),
             label: "GitHub Token",
         },
         SecretPattern {
-            regex: Regex::new(r"sk-ant-[A-Za-z0-9_-]{32,}")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"sk-ant-[A-Za-z0-9_-]{32,}"),
             label: "Anthropic API Key",
         },
         SecretPattern {
-            regex: Regex::new(r"sk-proj-[A-Za-z0-9_-]{32,}")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"sk-proj-[A-Za-z0-9_-]{32,}"),
             label: "OpenAI Project Key",
         },
         SecretPattern {
-            regex: Regex::new(r"sk-[A-Za-z0-9]{48,}").unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"sk-[A-Za-z0-9]{48,}"),
             label: "API Key",
         },
         SecretPattern {
-            regex: Regex::new(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(
+                r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+            ),
             label: "JWT",
         },
         SecretPattern {
-            regex: Regex::new(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"),
             label: "Private Key",
         },
         SecretPattern {
-            regex: Regex::new(r"xox[bpsar]-[A-Za-z0-9-]{24,}")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"xox[bpsar]-[A-Za-z0-9-]{24,}"),
             label: "Slack Token",
         },
         SecretPattern {
-            regex: Regex::new(r#"(?:password|passwd|pwd)\s*[=:]\s*"[^"]{8,}""#)
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r#"(?:password|passwd|pwd)\s*[=:]\s*"[^"]{8,}""#),
             label: "Quoted Password",
         },
         SecretPattern {
-            regex: Regex::new(r"(?:password|passwd|pwd)\s*[=:]\s*(\S{8,64})")
-                .unwrap_or_else(|e| panic!("bad regex: {e}")),
+            regex: compile_regex(r"(?:password|passwd|pwd)\s*[=:]\s*(\S{8,64})"),
             label: "Password Assignment",
         },
     ]
