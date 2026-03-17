@@ -29,9 +29,9 @@ use ratatui::Terminal;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use tamagotchi_core::agent::{Agent, AgentEvent};
-use tamagotchi_core::config::Config;
-use tamagotchi_heartbeat::scheduler::{HeartbeatEvent, HeartbeatScheduler};
+use borg_core::agent::{Agent, AgentEvent};
+use borg_core::config::Config;
+use borg_heartbeat::scheduler::{HeartbeatEvent, HeartbeatScheduler};
 
 use app::{App, AppAction};
 use history::HistoryCell;
@@ -41,12 +41,12 @@ use history::HistoryCell;
 fn spawn_gateway(config: &Config, shutdown: CancellationToken) -> bool {
     let mut spawned = false;
 
-    if let Ok(registry) = tamagotchi_gateway::ChannelRegistry::new() {
+    if let Ok(registry) = borg_gateway::ChannelRegistry::new() {
         if !registry.list_channels().is_empty() {
             let gw_config = config.clone();
             let gw_shutdown = shutdown.clone();
             tokio::spawn(async move {
-                match tamagotchi_gateway::GatewayServer::new(gw_config, gw_shutdown) {
+                match borg_gateway::GatewayServer::new(gw_config, gw_shutdown) {
                     Ok(server) => {
                         if let Err(e) = server.run().await {
                             tracing::error!("Gateway exited with error: {e}");
@@ -66,9 +66,7 @@ fn spawn_gateway(config: &Config, shutdown: CancellationToken) -> bool {
             let im_config = config.clone();
             let im_shutdown = shutdown;
             tokio::spawn(async move {
-                match tamagotchi_gateway::imessage::start_imessage_monitor(im_config, im_shutdown)
-                    .await
-                {
+                match borg_gateway::imessage::start_imessage_monitor(im_config, im_shutdown).await {
                     Ok(_handle) => tracing::info!("iMessage monitor started"),
                     Err(e) => tracing::error!("iMessage monitor failed: {e}"),
                 }
@@ -124,7 +122,7 @@ pub async fn run() -> Result<()> {
 
     // Try to resume the last session
     let mut resumed_info: Option<(String, usize)> = None;
-    if let Ok(Some(session)) = tamagotchi_core::session::load_last_session() {
+    if let Ok(Some(session)) = borg_core::session::load_last_session() {
         if !session.messages.is_empty() {
             let title = session.meta.title.clone();
             let count = session.meta.message_count;
@@ -139,7 +137,7 @@ pub async fn run() -> Result<()> {
     // Start heartbeat if enabled
     let heartbeat_rx = if config.heartbeat.enabled {
         let (hb_tx, hb_rx) = mpsc::channel::<HeartbeatEvent>(32);
-        let llm = tamagotchi_core::llm::LlmClient::new(config.clone())?;
+        let llm = borg_core::llm::LlmClient::new(config.clone())?;
         let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), llm);
         tokio::spawn(async move {
             scheduler.run(hb_tx).await;
@@ -325,7 +323,7 @@ async fn run_event_loop(
                 );
 
                 for (label, days) in [("24h", 1), ("7d", 7), ("30d", 30)] {
-                    match tamagotchi_core::logging::count_messages_for_period(days) {
+                    match borg_core::logging::count_messages_for_period(days) {
                         Ok(stats) => {
                             text.push_str(&format!(
                                 "{label}: {} user, {} assistant, {} tool calls\n",
@@ -341,7 +339,7 @@ async fn run_event_loop(
                 // Show monthly budget info
                 let budget_limit = app.config.budget.monthly_token_limit;
                 if budget_limit > 0 {
-                    if let Ok(db) = tamagotchi_core::db::Database::open() {
+                    if let Ok(db) = borg_core::db::Database::open() {
                         if let Ok(used) = db.monthly_token_total() {
                             let pct = if budget_limit > 0 {
                                 (used as f64 / budget_limit as f64 * 100.0) as u64
@@ -390,7 +388,7 @@ async fn run_event_loop(
             }
             AppAction::LoadSession { id } => {
                 // Support partial ID matching (prefix)
-                let full_id = match tamagotchi_core::session::list_sessions() {
+                let full_id = match borg_core::session::list_sessions() {
                     Ok(sessions) => {
                         let matches: Vec<_> =
                             sessions.iter().filter(|s| s.id.starts_with(&id)).collect();
@@ -449,7 +447,7 @@ async fn run_event_loop(
                 }
             }
             AppAction::RunCustomize { actions } => {
-                let data_dir = match tamagotchi_core::config::Config::data_dir() {
+                let data_dir = match borg_core::config::Config::data_dir() {
                     Ok(dir) => dir,
                     Err(e) => {
                         app.push_system_message(format!("Failed to resolve data directory: {e}"));
@@ -461,8 +459,8 @@ async fn run_event_loop(
                 for action in actions {
                     match action {
                         customize_popup::CustomizeAction::Install { id, credentials } => {
-                            if let Some(def) = tamagotchi_customizations::catalog::find_by_id(&id) {
-                                match tamagotchi_customizations::installer::install(
+                            if let Some(def) = borg_customizations::catalog::find_by_id(&id) {
+                                match borg_customizations::installer::install(
                                     def,
                                     &data_dir,
                                     &credentials,
@@ -472,7 +470,7 @@ async fn run_event_loop(
                                 {
                                     Ok(install_result) => {
                                         // Record in DB + store file hashes
-                                        if let Ok(db) = tamagotchi_core::db::Database::open() {
+                                        if let Ok(db) = borg_core::db::Database::open() {
                                             if let Err(e) = db.insert_customization(
                                                 def.id,
                                                 def.name,
@@ -501,7 +499,7 @@ async fn run_event_loop(
                                                     first_tmpl.relative_path.split('/').next()
                                                 {
                                                     match def.kind {
-                                                        tamagotchi_customizations::CustomizationKind::Tool => {
+                                                        borg_customizations::CustomizationKind::Tool => {
                                                             if let Err(e) = db.insert_installed_tool(
                                                                 item_name,
                                                                 def.description,
@@ -511,7 +509,7 @@ async fn run_event_loop(
                                                                 tracing::warn!("Failed to register tool: {e}");
                                                             }
                                                         }
-                                                        tamagotchi_customizations::CustomizationKind::Channel => {
+                                                        borg_customizations::CustomizationKind::Channel => {
                                                             let webhook = format!("/webhook/{item_name}");
                                                             if let Err(e) = db.insert_installed_channel(
                                                                 item_name,
@@ -530,21 +528,22 @@ async fn run_event_loop(
 
                                         // Wire credential entries + gateway config in one load/save
                                         if !install_result.credential_entries.is_empty()
-                                            || def.kind == tamagotchi_customizations::CustomizationKind::Channel
+                                            || def.kind
+                                                == borg_customizations::CustomizationKind::Channel
                                         {
                                             if let Ok(mut cfg) = Config::load() {
                                                 for entry in &install_result.credential_entries {
                                                     cfg.credentials.insert(
                                                         entry.key.clone(),
-                                                        tamagotchi_core::config::CredentialValue::Ref(
-                                                            tamagotchi_core::secrets_resolve::SecretRef::Keychain {
+                                                        borg_core::config::CredentialValue::Ref(
+                                                            borg_core::secrets_resolve::SecretRef::Keychain {
                                                                 service: entry.service.clone(),
                                                                 account: entry.account.clone(),
                                                             },
                                                         ),
                                                     );
                                                 }
-                                                if def.kind == tamagotchi_customizations::CustomizationKind::Channel
+                                                if def.kind == borg_customizations::CustomizationKind::Channel
                                                     && !cfg.gateway.enabled
                                                 {
                                                     cfg.gateway.enabled = true;
@@ -557,7 +556,7 @@ async fn run_event_loop(
                                             msg.push_str(&format!("\n  {note}"));
                                         }
                                         if def.kind
-                                            == tamagotchi_customizations::CustomizationKind::Channel
+                                            == borg_customizations::CustomizationKind::Channel
                                         {
                                             let gw_msg = restart_gateway(gateway_shutdown);
                                             msg.push_str(&format!("\n  {gw_msg}"));
@@ -572,12 +571,10 @@ async fn run_event_loop(
                             }
                         }
                         customize_popup::CustomizeAction::Uninstall { id } => {
-                            if let Some(def) = tamagotchi_customizations::catalog::find_by_id(&id) {
-                                match tamagotchi_customizations::installer::uninstall(
-                                    def, &data_dir,
-                                ) {
+                            if let Some(def) = borg_customizations::catalog::find_by_id(&id) {
+                                match borg_customizations::installer::uninstall(def, &data_dir) {
                                     Ok(()) => {
-                                        if let Ok(db) = tamagotchi_core::db::Database::open() {
+                                        if let Ok(db) = borg_core::db::Database::open() {
                                             let _ = db.delete_customization(def.id);
                                         }
                                         // Remove credential entries from config
@@ -604,7 +601,7 @@ async fn run_event_loop(
                     app.push_system_message(results.join("\n"));
                 }
             }
-            AppAction::ListSessions => match tamagotchi_core::session::list_sessions() {
+            AppAction::ListSessions => match borg_core::session::list_sessions() {
                 Ok(sessions) => {
                     if sessions.is_empty() {
                         app.push_system_message("No saved sessions.".to_string());
@@ -664,7 +661,7 @@ async fn run_event_loop(
             }
             AppAction::RunScheduleActions { actions } => {
                 let mut results: Vec<String> = Vec::new();
-                if let Ok(db) = tamagotchi_core::db::Database::open() {
+                if let Ok(db) = borg_core::db::Database::open() {
                     for action in actions {
                         match action {
                             schedule_popup::ScheduleAction::ToggleStatus {
@@ -690,7 +687,7 @@ async fn run_event_loop(
                                 schedule_type,
                                 new_expr,
                             } => {
-                                let update = tamagotchi_core::db::UpdateTask {
+                                let update = borg_core::db::UpdateTask {
                                     name: None,
                                     prompt: None,
                                     schedule_type: Some(&schedule_type),

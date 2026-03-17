@@ -3,7 +3,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use tamagotchi_core::db::ScheduledTaskRow;
+use borg_core::db::ScheduledTaskRow;
 
 use super::theme;
 
@@ -64,7 +64,7 @@ impl SchedulePopup {
         self.phase = SchedulePhase::Browsing;
         self.status_message = None;
 
-        self.tasks = match tamagotchi_core::db::Database::open() {
+        self.tasks = match borg_core::db::Database::open() {
             Ok(db) => match db.list_tasks() {
                 Ok(rows) => rows
                     .into_iter()
@@ -195,7 +195,7 @@ impl SchedulePopup {
                     }
                     if let Some(item) = self.tasks.get(self.cursor) {
                         let stype = &item.task.schedule_type;
-                        if let Err(e) = tamagotchi_core::tasks::validate_schedule(stype, buffer) {
+                        if let Err(e) = borg_core::tasks::validate_schedule(stype, buffer) {
                             self.status_message = Some((format!("Invalid: {e}"), false));
                             return None;
                         }

@@ -2,8 +2,8 @@ use anyhow::Result;
 use std::io::{self, Write};
 use tokio::sync::mpsc;
 
-use tamagotchi_core::agent::{Agent, AgentEvent};
-use tamagotchi_core::config::Config;
+use borg_core::agent::{Agent, AgentEvent};
+use borg_core::config::Config;
 
 pub async fn run() -> Result<()> {
     crate::tui::run().await

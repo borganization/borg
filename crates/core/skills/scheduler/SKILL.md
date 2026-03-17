@@ -8,7 +8,7 @@ requires:
 
 # Task Scheduler
 
-Use the `manage_tasks` tool to create and manage scheduled tasks. Tasks run automatically via the daemon (`tamagotchi daemon` or `tamagotchi service install`).
+Use the `manage_tasks` tool to create and manage scheduled tasks. Tasks run automatically via the daemon (`borg daemon` or `borg service install`).
 
 ## Prerequisites
 

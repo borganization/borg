@@ -1,6 +1,6 @@
 # Architecture
 
-Tamagotchi is a Cargo workspace with six crates. Each crate has a focused responsibility.
+Borg is a Cargo workspace with six crates. Each crate has a focused responsibility.
 
 ## Crate overview
 
@@ -55,7 +55,7 @@ Key file: `scheduler.rs`
 Manages user-created tools:
 
 - **Manifest** (`manifest.rs`) — parses `tool.toml` files and converts parameter definitions to JSON Schema.
-- **Registry** (`registry.rs`) — scans `~/.tamagotchi/tools/`, loads manifests, and provides tool definitions to the agent.
+- **Registry** (`registry.rs`) — scans `~/.borg/tools/`, loads manifests, and provides tool definitions to the agent.
 - **Executor** (`executor.rs`) — resolves the runtime binary (python3, node, deno, bash), wraps the command with sandbox policy, and runs the subprocess with JSON args on stdin.
 
 ### `sandbox`

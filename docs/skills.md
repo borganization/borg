@@ -31,7 +31,7 @@ Thirteen skills are embedded in the binary:
 
 ## User skills
 
-User-created skills live at `~/.tamagotchi/skills/<name>/SKILL.md`. The agent creates these via the `apply_skill_patch` tool.
+User-created skills live at `~/.borg/skills/<name>/SKILL.md`. The agent creates these via the `apply_skill_patch` tool.
 
 User skills with the same name as a built-in skill **override** the built-in version.
 
@@ -83,7 +83,7 @@ If any requirement is missing, the skill is marked as unavailable. It still appe
 
 Skills are injected into the system prompt with a configurable token budget (`skills.max_context_tokens`, default 4000). Available skills are included first, then unavailable ones, until the budget is exhausted.
 
-Configure the budget in `~/.tamagotchi/config.toml`:
+Configure the budget in `~/.borg/config.toml`:
 
 ```toml
 [skills]
@@ -116,4 +116,4 @@ curl -H "Authorization: Bearer $MY_API_KEY" https://api.example.com/v1/query?q=S
 *** End Patch
 ```
 
-You can also create skill files manually in `~/.tamagotchi/skills/<name>/SKILL.md`.
+You can also create skill files manually in `~/.borg/skills/<name>/SKILL.md`.

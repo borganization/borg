@@ -1,12 +1,12 @@
-# Tamagotchi
+# Borg
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **A personal AI assistant that lives on your computer.**
 
-## What is Tamagotchi?
+## What is Borg?
 
-Tamagotchi is an AI assistant that runs locally on your machine, remembers you across conversations, and gets better over time. Unlike cloud-only chatbots, it develops its own personality, learns your preferences, and even builds its own tools when it needs new capabilities — no plugins or app store required.
+Borg is an AI assistant that runs locally on your machine, remembers you across conversations, and gets better over time. Unlike cloud-only chatbots, it develops its own personality, learns your preferences, and even builds its own tools when it needs new capabilities — no plugins or app store required.
 
 ## Features
 
@@ -23,8 +23,8 @@ Tamagotchi is an AI assistant that runs locally on your machine, remembers you a
 
 1. **Clone and build:**
    ```sh
-   git clone https://github.com/theognis1002/tamagotchi.git
-   cd tamagotchi
+   git clone https://github.com/borganization/borg.git
+   cd borg
    cargo build --release
    ```
 
@@ -36,23 +36,23 @@ Tamagotchi is an AI assistant that runs locally on your machine, remembers you a
 
 3. **Run the setup wizard:**
    ```sh
-   ./target/release/tamagotchi init
+   ./target/release/borg init
    ```
 
 4. **Start chatting:**
    ```sh
-   ./target/release/tamagotchi
+   ./target/release/borg
    ```
 
 ## Commands
 
 | Command | What it does |
 |---------|-------------|
-| `tamagotchi` | Start an interactive conversation |
-| `tamagotchi ask "..."` | Ask a quick question and get a one-shot answer |
-| `tamagotchi init` | Run the setup wizard (name, personality, provider) |
-| `tamagotchi gateway` | Start the webhook server for messaging integrations |
-| `tamagotchi doctor` | Check that everything is configured correctly |
+| `borg` | Start an interactive conversation |
+| `borg ask "..."` | Ask a quick question and get a one-shot answer |
+| `borg init` | Run the setup wizard (name, personality, provider) |
+| `borg gateway` | Start the webhook server for messaging integrations |
+| `borg doctor` | Check that everything is configured correctly |
 
 ## Contributing
 

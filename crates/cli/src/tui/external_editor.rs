@@ -17,7 +17,7 @@ pub fn open_external_editor(initial_text: &str) -> Result<String> {
 
     // Create a temp file with initial content
     let mut tmpfile = tempfile::Builder::new()
-        .prefix("tamagotchi-")
+        .prefix("borg-")
         .suffix(".md")
         .tempfile()?;
     tmpfile.write_all(initial_text.as_bytes())?;

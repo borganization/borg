@@ -1,12 +1,12 @@
 ---
 name: skill-creator
-description: "Create, edit, or improve Tamagotchi skills. Use when: creating a new skill from scratch, improving an existing skill, or reviewing/auditing a SKILL.md file. Triggers on phrases like 'create a skill', 'make a skill', 'new skill'."
+description: "Create, edit, or improve Borg skills. Use when: creating a new skill from scratch, improving an existing skill, or reviewing/auditing a SKILL.md file. Triggers on phrases like 'create a skill', 'make a skill', 'new skill'."
 requires: {}
 ---
 
 # Skill Creator
 
-Guide for creating Tamagotchi skills. Skills are instruction bundles (SKILL.md files) that teach the agent how to use external CLI tools via `run_shell`.
+Guide for creating Borg skills. Skills are instruction bundles (SKILL.md files) that teach the agent how to use external CLI tools via `run_shell`.
 
 ## Skill Structure
 
@@ -15,7 +15,7 @@ skill-name/
 └── SKILL.md    # YAML frontmatter + markdown instructions
 ```
 
-Skills live at `~/.tamagotchi/skills/<skill-name>/SKILL.md`.
+Skills live at `~/.borg/skills/<skill-name>/SKILL.md`.
 
 ## SKILL.md Format
 

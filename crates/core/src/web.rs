@@ -6,7 +6,7 @@ use crate::config::WebConfig;
 
 const MAX_FETCH_CHARS: usize = 50000;
 const MAX_SEARCH_RESULTS: usize = 8;
-const USER_AGENT: &str = "Mozilla/5.0 (compatible; Tamagotchi/0.1)";
+const USER_AGENT: &str = "Mozilla/5.0 (compatible; Borg/0.1)";
 
 /// Fetch a URL and return its text content. HTML is stripped to plain text.
 pub async fn web_fetch(url: &str, max_chars: Option<usize>) -> Result<String> {

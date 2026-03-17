@@ -19,9 +19,9 @@ use crate::onboarding::{
     provider_key_url, KeyStorage, OnboardingResult, PROVIDERS, STYLES,
 };
 use crate::tui::theme;
+use borg_core::config::Config;
+use borg_core::provider::Provider;
 use std::str::FromStr;
-use tamagotchi_core::config::Config;
-use tamagotchi_core::provider::Provider;
 
 const LOGO: &str = r#"
   ████████╗ █████╗ ███╗   ███╗ █████╗  ██████╗  ██████╗ ████████╗ ██████╗██╗  ██╗██╗
@@ -144,7 +144,7 @@ impl OnboardingState {
             tab: Tab::Welcome,
             input_mode: InputMode::TextInput,
             user_name: String::new(),
-            agent_name: "Tamagotchi".to_string(),
+            agent_name: "Borg".to_string(),
             welcome_focus: WelcomeFocus::UserName,
             style_cursor: 0,
             provider_cursor: 0,
@@ -245,7 +245,7 @@ impl OnboardingState {
         OnboardingResult {
             user_name: self.user_name.clone(),
             agent_name: if self.agent_name.is_empty() {
-                "Tamagotchi".to_string()
+                "Borg".to_string()
             } else {
                 self.agent_name.clone()
             },
@@ -1018,7 +1018,7 @@ fn render_review(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState
         check.clone(),
         Span::styled("Agent name: ", theme::dim()),
         Span::raw(if state.agent_name.is_empty() {
-            "Tamagotchi"
+            "Borg"
         } else {
             &state.agent_name
         }),
@@ -1257,12 +1257,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_agent_name_defaults_to_tamagotchi() {
+    fn empty_agent_name_defaults_to_borg() {
         let mut state = OnboardingState::new();
         state.user_name = "Test".to_string();
         state.agent_name.clear();
         let result = state.build_result();
-        assert_eq!(result.agent_name, "Tamagotchi");
+        assert_eq!(result.agent_name, "Borg");
     }
 
     #[test]

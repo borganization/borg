@@ -1,13 +1,13 @@
 [package]
-name = "tamagotchi-tools"
-description = "Tool manifest parsing, registry, and subprocess execution for Tamagotchi"
+name = "borg-tools"
+description = "Tool manifest parsing, registry, and subprocess execution for Borg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-tamagotchi-sandbox = { path = "../sandbox" }
+borg-sandbox = { path = "../sandbox" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

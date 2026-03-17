@@ -64,11 +64,11 @@ mod tests {
     fn includes_tool_dir_ro_bind() {
         let args = build_bwrap_args(
             &default_policy(),
-            Path::new("/home/user/.tamagotchi/tools/my-tool"),
+            Path::new("/home/user/.borg/tools/my-tool"),
         );
         assert!(args.windows(3).any(|w| w[0] == "--ro-bind"
-            && w[1] == "/home/user/.tamagotchi/tools/my-tool"
-            && w[2] == "/home/user/.tamagotchi/tools/my-tool"));
+            && w[1] == "/home/user/.borg/tools/my-tool"
+            && w[2] == "/home/user/.borg/tools/my-tool"));
     }
 
     #[test]

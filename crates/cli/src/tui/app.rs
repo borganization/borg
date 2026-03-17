@@ -10,9 +10,9 @@ use ratatui::Frame;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use tamagotchi_core::agent::AgentEvent;
-use tamagotchi_core::config::Config;
-use tamagotchi_heartbeat::scheduler::HeartbeatEvent;
+use borg_core::agent::AgentEvent;
+use borg_core::config::Config;
+use borg_heartbeat::scheduler::HeartbeatEvent;
 
 use super::command_popup::CommandPopup;
 use super::composer::Composer;
@@ -511,7 +511,7 @@ impl<'a> App<'a> {
                 }
 
                 text.push_str("\nUser tools:\n");
-                match tamagotchi_tools::registry::ToolRegistry::new() {
+                match borg_tools::registry::ToolRegistry::new() {
                     Ok(registry) => {
                         let tools = registry.list_tools();
                         if tools.is_empty() {
@@ -530,9 +530,8 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/memory" => {
-                let memory = tamagotchi_core::memory::load_memory_context(
-                    self.config.memory.max_context_tokens,
-                )?;
+                let memory =
+                    borg_core::memory::load_memory_context(self.config.memory.max_context_tokens)?;
                 let text = if memory.is_empty() {
                     "No memories loaded.".to_string()
                 } else {
@@ -543,7 +542,7 @@ impl<'a> App<'a> {
             }
             "/skills" => {
                 let resolved_creds = self.config.resolve_credentials();
-                let skills = tamagotchi_core::skills::load_all_skills(&resolved_creds)?;
+                let skills = borg_core::skills::load_all_skills(&resolved_creds)?;
                 let text = if skills.is_empty() {
                     "No skills installed.".to_string()
                 } else {
@@ -557,7 +556,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/history" => {
-                match tamagotchi_core::logging::read_history_formatted(50) {
+                match borg_core::logging::read_history_formatted(50) {
                     Ok(lines) => {
                         let text = if lines.is_empty() {
                             "No conversation history for today.".to_string()
@@ -573,7 +572,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/logs" => {
-                let log_path = match tamagotchi_core::config::Config::logs_dir() {
+                let log_path = match borg_core::config::Config::logs_dir() {
                     Ok(d) => d.join("tui.log"),
                     Err(e) => {
                         self.push_system_message(format!("Error resolving log directory: {e}"));
@@ -614,7 +613,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/doctor" => {
-                let report = tamagotchi_core::doctor::run_diagnostics(&self.config);
+                let report = borg_core::doctor::run_diagnostics(&self.config);
                 self.push_system_message(report.format());
                 return Ok(AppAction::Continue);
             }
@@ -623,7 +622,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/customize" => {
-                if let Ok(data_dir) = tamagotchi_core::config::Config::data_dir() {
+                if let Ok(data_dir) = borg_core::config::Config::data_dir() {
                     self.customize_popup.show(&data_dir);
                 } else {
                     self.push_system_message(
@@ -691,7 +690,7 @@ impl<'a> App<'a> {
 
         // Prefix command: /memory cleanup — list memory files for cleanup
         if trimmed == "/memory cleanup" {
-            match tamagotchi_core::memory::list_memory_files() {
+            match borg_core::memory::list_memory_files() {
                 Ok(files) => {
                     if files.is_empty() {
                         self.push_system_message("No memory files found.".to_string());
@@ -893,7 +892,7 @@ impl<'a> App<'a> {
             AgentEvent::Usage(usage) => {
                 self.session_prompt_tokens += usage.prompt_tokens;
                 self.session_completion_tokens += usage.completion_tokens;
-                if let Ok(db) = tamagotchi_core::db::Database::open() {
+                if let Ok(db) = borg_core::db::Database::open() {
                     let _ = db.log_token_usage(
                         usage.prompt_tokens,
                         usage.completion_tokens,
@@ -918,7 +917,7 @@ impl<'a> App<'a> {
                         .user
                         .agent_name
                         .clone()
-                        .unwrap_or_else(|| "Tamagotchi".to_string());
+                        .unwrap_or_else(|| "Borg".to_string());
                     self.plan_overlay.show(pct, name);
                     self.state = AppState::PlanReview;
                 } else {
@@ -1013,7 +1012,7 @@ impl<'a> App<'a> {
         if self.cells.is_empty() {
             let title = match &self.config.user.agent_name {
                 Some(name) => format!("{name} AI Assistant"),
-                None => "Tamagotchi AI Assistant".to_string(),
+                None => "Borg AI Assistant".to_string(),
             };
             all_lines.push(Line::from(Span::styled(title, theme::bold())));
             let subtitle = match &self.config.user.name {

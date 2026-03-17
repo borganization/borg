@@ -3,7 +3,7 @@ use std::path::Path;
 use tokio::process::Command;
 use tracing::debug;
 
-use tamagotchi_sandbox::policy::SandboxPolicy;
+use borg_sandbox::policy::SandboxPolicy;
 
 /// Output from a script execution.
 pub struct ScriptOutput {

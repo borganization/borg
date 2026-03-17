@@ -5,7 +5,7 @@
 If you discover a security vulnerability, please report it responsibly:
 
 1. **Do not** open a public issue
-2. Email the maintainers or use [GitHub private vulnerability reporting](https://github.com/theognis1002/tamagotchi/security/advisories/new)
+2. Email the maintainers or use [GitHub private vulnerability reporting](https://github.com/borganization/borg/security/advisories/new)
 3. Include steps to reproduce and potential impact
 
 ## Response

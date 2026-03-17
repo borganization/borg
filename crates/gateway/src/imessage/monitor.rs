@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use tamagotchi_core::config::Config;
+use borg_core::config::Config;
 
 use super::echo_cache::EchoCache;
 use super::reflection_guard;

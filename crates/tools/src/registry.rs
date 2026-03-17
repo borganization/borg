@@ -20,7 +20,7 @@ impl ToolRegistry {
     pub fn new() -> Result<Self> {
         let tools_dir = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-            .join(".tamagotchi")
+            .join(".borg")
             .join("tools");
 
         let mut registry = Self {
@@ -105,11 +105,11 @@ impl ToolRegistry {
             .collect()
     }
 
-    pub fn tool_definitions(&self) -> Vec<tamagotchi_core_types::ToolDefinition> {
+    pub fn tool_definitions(&self) -> Vec<borg_core_types::ToolDefinition> {
         self.tools
             .values()
             .map(|t| {
-                tamagotchi_core_types::ToolDefinition::new(
+                borg_core_types::ToolDefinition::new(
                     &t.manifest.name,
                     &t.manifest.description,
                     t.manifest.parameters_json_schema(),
@@ -265,7 +265,7 @@ mod tests {
 }
 
 /// Minimal type aliases so tools crate doesn't depend on full core
-pub mod tamagotchi_core_types {
+pub mod borg_core_types {
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

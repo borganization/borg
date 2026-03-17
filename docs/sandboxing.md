@@ -27,7 +27,7 @@ fs_read = ["/etc/ssl"]    # additional paths the tool can read
 fs_write = ["/tmp"]       # paths the tool can write to
 ```
 
-The tool always has read access to its own directory (`~/.tamagotchi/tools/<name>/`).
+The tool always has read access to its own directory (`~/.borg/tools/<name>/`).
 
 ### Policy fields
 

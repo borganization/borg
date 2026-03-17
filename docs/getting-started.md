@@ -1,6 +1,6 @@
 # Getting Started
 
-Tamagotchi is an AI personal assistant agent built in Rust. The agent writes its own tools at runtime rather than relying on a static plugin framework.
+Borg is an AI personal assistant agent built in Rust. The agent writes its own tools at runtime rather than relying on a static plugin framework.
 
 ## Prerequisites
 
@@ -14,12 +14,12 @@ Tamagotchi is an AI personal assistant agent built in Rust. The agent writes its
 Clone the repository and build from source:
 
 ```sh
-git clone https://github.com/theognis1002/tamagotchi.git
-cd tamagotchi
+git clone https://github.com/borganization/borg.git
+cd borg
 cargo build --release
 ```
 
-The binary is located at `target/release/tamagotchi`.
+The binary is located at `target/release/borg`.
 
 ## Setup
 
@@ -40,7 +40,7 @@ Or add it to your shell profile / `.env` file. See `.env.example` for the templa
 2. Initialize with the onboarding wizard:
 
 ```sh
-tamagotchi init
+borg init
 ```
 
 This launches an interactive TUI that walks you through setup:
@@ -51,10 +51,10 @@ This launches an interactive TUI that walks you through setup:
 
 The wizard writes your choices to `config.toml` and generates a personalized `SOUL.md`. If you cancel mid-wizard, defaults are used instead.
 
-This creates `~/.tamagotchi/` with your customized config, personality, and memory files:
+This creates `~/.borg/` with your customized config, personality, and memory files:
 
 ```
-~/.tamagotchi/
+~/.borg/
 ├── config.toml       # Configuration
 ├── SOUL.md           # Personality prompt
 ├── MEMORY.md         # Memory index
@@ -64,7 +64,7 @@ This creates `~/.tamagotchi/` with your customized config, personality, and memo
 ├── sessions/         # Session persistence (JSON files)
 ├── logs/             # Daily JSONL debug logs
 ├── cache/
-└── tamagotchi.db     # SQLite database (sessions, scheduled tasks)
+└── borg.db     # SQLite database (sessions, scheduled tasks)
 ```
 
 ## Usage
@@ -72,9 +72,9 @@ This creates `~/.tamagotchi/` with your customized config, personality, and memo
 ### Interactive REPL
 
 ```sh
-tamagotchi
+borg
 # or
-tamagotchi chat
+borg chat
 ```
 
 Start a conversation. The agent streams responses, can call tools, and remembers context across turns within a session. Use slash commands like `/compact`, `/undo`, `/memory cleanup`, and `/session list` for session management.
@@ -82,7 +82,7 @@ Start a conversation. The agent streams responses, can call tools, and remembers
 ### One-shot query
 
 ```sh
-tamagotchi ask "What's the weather in Tokyo?"
+borg ask "What's the weather in Tokyo?"
 ```
 
 Send a single message, get a response, and exit.
@@ -94,7 +94,7 @@ Flags:
 ### Daemon mode
 
 ```sh
-tamagotchi daemon
+borg daemon
 ```
 
 Run the agent in the background for scheduled tasks and heartbeat check-ins without the interactive TUI.
@@ -102,9 +102,9 @@ Run the agent in the background for scheduled tasks and heartbeat check-ins with
 ### System service
 
 ```sh
-tamagotchi service install    # install as a system service (launchd/systemd)
-tamagotchi service uninstall  # remove the service
-tamagotchi service status     # check service status
+borg service install    # install as a system service (launchd/systemd)
+borg service uninstall  # remove the service
+borg service status     # check service status
 ```
 
 ## What happens when you chat

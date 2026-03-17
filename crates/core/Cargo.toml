@@ -1,14 +1,14 @@
 [package]
-name = "tamagotchi-core"
-description = "Core agent loop, LLM client, memory, and config for Tamagotchi"
+name = "borg-core"
+description = "Core agent loop, LLM client, memory, and config for Borg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-tamagotchi-tools = { path = "../tools" }
-tamagotchi-apply-patch = { path = "../apply-patch" }
+borg-tools = { path = "../tools" }
+borg-apply-patch = { path = "../apply-patch" }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 eventsource-stream = { workspace = true }

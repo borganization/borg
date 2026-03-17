@@ -4,7 +4,7 @@ use tracing::debug;
 
 use crate::config::Config;
 
-const DEFAULT_SOUL: &str = r#"# Tamagotchi — Your AI Personal Assistant
+const DEFAULT_SOUL: &str = r#"# Borg — Your AI Personal Assistant
 
 You are a helpful, friendly AI personal assistant. You live on your owner's computer and help them with tasks, remember things for them, and occasionally check in to see how they're doing.
 
@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn default_soul_contains_identity() {
-        assert!(DEFAULT_SOUL.contains("Tamagotchi"));
+        assert!(DEFAULT_SOUL.contains("Borg"));
         assert!(DEFAULT_SOUL.contains("AI"));
     }
 
@@ -79,7 +79,7 @@ mod tests {
     fn soul_path_ends_with_soul_md() {
         let path = soul_path().unwrap();
         assert!(path.to_string_lossy().ends_with("SOUL.md"));
-        assert!(path.to_string_lossy().contains(".tamagotchi"));
+        assert!(path.to_string_lossy().contains(".borg"));
     }
 
     #[test]
@@ -88,7 +88,7 @@ mod tests {
         let soul = load_soul().unwrap();
         assert!(!soul.is_empty());
         // Must contain some personality-related content
-        assert!(soul.contains("Tamagotchi") || soul.contains("AI"));
+        assert!(soul.contains("Borg") || soul.contains("AI"));
     }
 
     #[test]

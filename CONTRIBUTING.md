@@ -1,12 +1,12 @@
-# Contributing to Tamagotchi
+# Contributing to Borg
 
 ## Development Setup
 
 1. Install [Rust 1.75+](https://rustup.rs/)
 2. Clone the repository:
    ```sh
-   git clone https://github.com/theognis1002/tamagotchi.git
-   cd tamagotchi
+   git clone https://github.com/borganization/borg.git
+   cd borg
    ```
 3. Build the project:
    ```sh
@@ -21,8 +21,8 @@
 
 ```sh
 cargo test                            # all tests
-cargo test -p tamagotchi-apply-patch  # patch DSL tests
-cargo test -p tamagotchi-core         # config tests
+cargo test -p borg-apply-patch  # patch DSL tests
+cargo test -p borg-core         # config tests
 ```
 
 ## Code Style
@@ -44,4 +44,4 @@ Use conventional prefixes: `fix:`, `feat:`, `refactor:`, `chore:`, `docs:`, `tes
 
 ## Questions?
 
-Open an [issue](https://github.com/theognis1002/tamagotchi/issues) or start a [discussion](https://github.com/theognis1002/tamagotchi/discussions).
+Open an [issue](https://github.com/borganization/borg/issues) or start a [discussion](https://github.com/borganization/borg/discussions).
