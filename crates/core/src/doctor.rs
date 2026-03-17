@@ -742,4 +742,52 @@ mod tests {
         assert!(categories.contains("Config"));
         assert!(categories.contains("Provider"));
     }
+
+    #[test]
+    fn diagnostic_check_pass_fields() {
+        let check = DiagnosticCheck::pass("Config", "config.toml exists");
+        assert_eq!(check.category, "Config");
+        assert_eq!(check.name, "config.toml exists");
+        assert_eq!(check.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn diagnostic_check_fail_includes_detail() {
+        let check = DiagnosticCheck::fail("Provider", "API key", "not found in env");
+        assert_eq!(check.category, "Provider");
+        assert!(matches!(check.status, CheckStatus::Fail(ref msg) if msg == "not found in env"));
+    }
+
+    #[test]
+    fn diagnostic_check_warn_includes_detail() {
+        let check = DiagnosticCheck::warn("Sandbox", "sandbox-exec", "not available on Linux");
+        assert_eq!(check.category, "Sandbox");
+        assert!(
+            matches!(check.status, CheckStatus::Warn(ref msg) if msg == "not available on Linux")
+        );
+    }
+
+    #[test]
+    fn report_format_groups_consecutive_same_category() {
+        let report = DiagnosticReport {
+            checks: vec![
+                DiagnosticCheck::pass("Config", "check A"),
+                DiagnosticCheck::pass("Config", "check C"),
+                DiagnosticCheck::pass("Provider", "check B"),
+            ],
+        };
+        let output = report.format();
+        // Consecutive Config checks should appear under a single Config heading
+        let config_heading_count = output.matches("\nConfig\n").count();
+        assert_eq!(
+            config_heading_count, 1,
+            "Consecutive same-category checks should share one heading"
+        );
+        // check A and check C should both appear before Provider
+        let check_a_pos = output.find("check A").unwrap();
+        let check_c_pos = output.find("check C").unwrap();
+        let provider_pos = output.find("Provider").unwrap();
+        assert!(check_a_pos < check_c_pos);
+        assert!(check_c_pos < provider_pos);
+    }
 }

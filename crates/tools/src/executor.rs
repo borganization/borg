@@ -105,6 +105,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_with_env_passes_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("env_echo.sh");
+        std::fs::write(&script, "#!/bin/bash\necho \"$MY_VAR\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let manifest = bash_manifest("env-tool", "env_echo.sh");
+        let executor = ToolExecutor::new(&manifest, dir.path());
+        let env = vec![("MY_VAR".to_string(), "hello_from_env".to_string())];
+        let result = executor.execute_with_env("{}", &env).await.unwrap();
+        assert_eq!(result.trim(), "hello_from_env");
+    }
+
+    #[tokio::test]
+    async fn execute_bash_tool_stderr_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("stderr_only.sh");
+        std::fs::write(&script, "#!/bin/bash\necho 'oops' >&2\nexit 2\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let manifest = bash_manifest("stderr-tool", "stderr_only.sh");
+        let executor = ToolExecutor::new(&manifest, dir.path());
+        let result = executor.execute("{}").await.unwrap();
+        assert!(result.contains("Error"));
+        assert!(result.contains("oops"));
+    }
+
+    #[tokio::test]
     async fn execute_bash_tool_nonzero_exit() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fail.sh");

@@ -1398,6 +1398,94 @@ mod tests {
         let result = update_task_status(id, "cancelled", "cancelled").unwrap();
         assert!(result.contains(id));
     }
+
+    // ── requires_confirmation tests ──
+
+    #[test]
+    fn requires_confirmation_apply_patch_with_delete() {
+        let args = serde_json::json!({"patch": "*** Delete File: old.py\n*** End Patch"});
+        let result = requires_confirmation("apply_patch", Some(&args));
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("delete"));
+    }
+
+    #[test]
+    fn requires_confirmation_apply_patch_without_delete() {
+        let args = serde_json::json!({"patch": "*** Add File: new.py\n+hello\n*** End Patch"});
+        assert!(requires_confirmation("apply_patch", Some(&args)).is_none());
+    }
+
+    #[test]
+    fn requires_confirmation_write_memory_soul() {
+        let args = serde_json::json!({"filename": "SOUL.md", "content": "new personality"});
+        let result = requires_confirmation("write_memory", Some(&args));
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("SOUL.md"));
+    }
+
+    #[test]
+    fn requires_confirmation_write_memory_other_file() {
+        let args = serde_json::json!({"filename": "MEMORY.md", "content": "notes"});
+        assert!(requires_confirmation("write_memory", Some(&args)).is_none());
+    }
+
+    #[test]
+    fn requires_confirmation_unknown_tool() {
+        let args = serde_json::json!({"key": "value"});
+        assert!(requires_confirmation("list_tools", Some(&args)).is_none());
+    }
+
+    #[test]
+    fn requires_confirmation_apply_patch_no_args() {
+        assert!(requires_confirmation("apply_patch", None).is_none());
+    }
+
+    #[test]
+    fn requires_confirmation_write_memory_no_args() {
+        assert!(requires_confirmation("write_memory", None).is_none());
+    }
+
+    // ── classify_action tests ──
+
+    #[test]
+    fn classify_action_run_shell() {
+        assert!(matches!(
+            classify_action("run_shell"),
+            ActionType::ShellCommand
+        ));
+    }
+
+    #[test]
+    fn classify_action_apply_patch() {
+        assert!(matches!(
+            classify_action("apply_patch"),
+            ActionType::FileWrite
+        ));
+    }
+
+    #[test]
+    fn classify_action_write_memory() {
+        assert!(matches!(
+            classify_action("write_memory"),
+            ActionType::MemoryWrite
+        ));
+    }
+
+    #[test]
+    fn classify_action_web_fetch() {
+        assert!(matches!(
+            classify_action("web_fetch"),
+            ActionType::WebRequest
+        ));
+    }
+
+    #[test]
+    fn classify_action_unknown_tool() {
+        assert!(matches!(
+            classify_action("unknown_tool"),
+            ActionType::ToolCall
+        ));
+    }
 }
 
 /// Check if a tool call requires user confirmation before execution.
