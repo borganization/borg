@@ -1,6 +1,10 @@
 pub mod api;
+pub mod chat_queue;
+pub mod circuit_breaker;
 pub mod dedup;
+pub mod format;
 pub mod parse;
+pub mod polling;
 pub mod types;
 pub mod verify;
 
@@ -132,7 +136,7 @@ mod tests {
     async fn non_text_update_returns_none() {
         let dedup = Mutex::new(UpdateDeduplicator::new());
         let headers = HeaderMap::new();
-        // Photo-only message (no text field)
+        // Message with no text, no media — returns None
         let body = r#"{
             "update_id": 20,
             "message": {
@@ -147,6 +151,28 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn photo_message_returns_placeholder() {
+        let dedup = Mutex::new(UpdateDeduplicator::new());
+        let headers = HeaderMap::new();
+        let body = r#"{
+            "update_id": 21,
+            "message": {
+                "message_id": 1,
+                "from": { "id": 42, "first_name": "Alice", "is_bot": false },
+                "chat": { "id": 42, "type": "private" },
+                "date": 1700000000,
+                "photo": [{ "file_id": "abc", "file_unique_id": "u1", "width": 100, "height": 100 }]
+            }
+        }"#;
+
+        let result = handle_telegram_webhook(&headers, body, None, &dedup)
+            .await
+            .unwrap();
+        let msg = result.unwrap();
+        assert_eq!(msg.text, "[Photo]");
     }
 
     #[tokio::test]
