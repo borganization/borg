@@ -36,6 +36,11 @@ pub enum HistoryCell {
         command: String,
         status: ApprovalStatus,
     },
+    ToolApproval {
+        tool_name: String,
+        reason: String,
+        status: ApprovalStatus,
+    },
     Heartbeat {
         text: String,
     },
@@ -177,6 +182,32 @@ impl HistoryCell {
                     Line::from(vec![
                         Span::styled("  [run_shell] ", theme::error_style()),
                         Span::styled(command.clone(), theme::error_style()),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  Allow? "),
+                        Span::styled(status_text.to_string(), status_style),
+                    ]),
+                ]
+            }
+            HistoryCell::ToolApproval {
+                tool_name,
+                reason,
+                status,
+            } => {
+                let status_text = match status {
+                    ApprovalStatus::Pending => "[y/N]",
+                    ApprovalStatus::Approved => "[approved]",
+                    ApprovalStatus::Denied => "[denied]",
+                };
+                let status_style = match status {
+                    ApprovalStatus::Pending => theme::error_style(),
+                    ApprovalStatus::Approved => theme::success_style(),
+                    ApprovalStatus::Denied => theme::dim(),
+                };
+                vec![
+                    Line::from(vec![
+                        Span::styled(format!("  [{tool_name}] "), theme::error_style()),
+                        Span::styled(reason.clone(), theme::error_style()),
                     ]),
                     Line::from(vec![
                         Span::raw("  Allow? "),
