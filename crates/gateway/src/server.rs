@@ -31,7 +31,9 @@ use crate::telegram::api::TelegramClient;
 use crate::telegram::dedup::UpdateDeduplicator;
 use crate::twilio::api::TwilioClient;
 
-const MAX_BODY_SIZE: usize = 2 * 1024 * 1024; // 2 MB
+use borg_core::constants;
+
+const MAX_BODY_SIZE: usize = constants::GATEWAY_MAX_BODY_SIZE;
 
 struct AppState {
     config: Config,

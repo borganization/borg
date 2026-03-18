@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use std::str::FromStr;
 
+use crate::constants;
 use crate::policy::ExecutionPolicy;
 use crate::provider::Provider;
 use crate::secrets_resolve::SecretRef;
@@ -66,6 +67,8 @@ pub struct Config {
     pub customizations: CustomizationsConfig,
     #[serde(default)]
     pub agents: MultiAgentConfig,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
 }
@@ -167,6 +170,9 @@ pub struct ConversationConfig {
     pub max_history_tokens: usize,
     pub max_iterations: u32,
     pub show_thinking: bool,
+    pub tool_output_max_tokens: usize,
+    pub compaction_marker_tokens: usize,
+    pub max_transcript_chars: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -222,6 +228,11 @@ pub struct GatewayConfig {
     pub rate_limit_per_minute: u32,
     #[serde(default)]
     pub public_url: Option<String>,
+    pub max_body_size: usize,
+    pub telegram_poll_timeout_secs: u64,
+    pub telegram_circuit_failure_threshold: u32,
+    pub telegram_circuit_suspension_secs: u64,
+    pub telegram_dedup_capacity: usize,
 }
 
 fn default_rate_limit() -> u32 {
@@ -238,6 +249,11 @@ impl Default for GatewayConfig {
             request_timeout_ms: 120_000,
             rate_limit_per_minute: default_rate_limit(),
             public_url: None,
+            max_body_size: constants::GATEWAY_MAX_BODY_SIZE,
+            telegram_poll_timeout_secs: constants::TELEGRAM_POLL_TIMEOUT_SECS,
+            telegram_circuit_failure_threshold: constants::TELEGRAM_CIRCUIT_FAILURE_THRESHOLD,
+            telegram_circuit_suspension_secs: constants::TELEGRAM_CIRCUIT_SUSPENSION_SECS,
+            telegram_dedup_capacity: constants::TELEGRAM_DEDUP_CAPACITY,
         }
     }
 }
@@ -334,6 +350,9 @@ impl Default for ConversationConfig {
             max_history_tokens: 32000,
             max_iterations: 25,
             show_thinking: true,
+            tool_output_max_tokens: constants::TOOL_OUTPUT_MAX_TOKENS,
+            compaction_marker_tokens: constants::COMPACTION_MARKER_TOKENS,
+            max_transcript_chars: constants::MAX_TRANSCRIPT_CHARS,
         }
     }
 }
@@ -611,11 +630,55 @@ impl Config {
                 self.budget.warning_threshold = v;
                 Ok(format!("budget.warning_threshold = {v}"))
             }
+            "conversation.tool_output_max_tokens" => {
+                let v: usize = value.parse().with_context(|| "Invalid integer")?;
+                self.conversation.tool_output_max_tokens = v;
+                Ok(format!("conversation.tool_output_max_tokens = {v}"))
+            }
+            "conversation.compaction_marker_tokens" => {
+                let v: usize = value.parse().with_context(|| "Invalid integer")?;
+                self.conversation.compaction_marker_tokens = v;
+                Ok(format!("conversation.compaction_marker_tokens = {v}"))
+            }
+            "conversation.max_transcript_chars" => {
+                let v: usize = value.parse().with_context(|| "Invalid integer")?;
+                self.conversation.max_transcript_chars = v;
+                Ok(format!("conversation.max_transcript_chars = {v}"))
+            }
+            "gateway.max_body_size" => {
+                let v: usize = value.parse().with_context(|| "Invalid integer")?;
+                self.gateway.max_body_size = v;
+                Ok(format!("gateway.max_body_size = {v}"))
+            }
+            "gateway.telegram_poll_timeout_secs" => {
+                let v: u64 = value.parse().with_context(|| "Invalid integer")?;
+                self.gateway.telegram_poll_timeout_secs = v;
+                Ok(format!("gateway.telegram_poll_timeout_secs = {v}"))
+            }
+            "gateway.telegram_circuit_failure_threshold" => {
+                let v: u32 = value.parse().with_context(|| "Invalid integer")?;
+                self.gateway.telegram_circuit_failure_threshold = v;
+                Ok(format!("gateway.telegram_circuit_failure_threshold = {v}"))
+            }
+            "gateway.telegram_circuit_suspension_secs" => {
+                let v: u64 = value.parse().with_context(|| "Invalid integer")?;
+                self.gateway.telegram_circuit_suspension_secs = v;
+                Ok(format!("gateway.telegram_circuit_suspension_secs = {v}"))
+            }
+            "gateway.telegram_dedup_capacity" => {
+                let v: usize = value.parse().with_context(|| "Invalid integer")?;
+                self.gateway.telegram_dedup_capacity = v;
+                Ok(format!("gateway.telegram_dedup_capacity = {v}"))
+            }
             _ => anyhow::bail!(
                 "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
                  sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled, \
                  skills.max_context_tokens, conversation.max_iterations, conversation.show_thinking, \
-                 security.secret_detection, security.host_audit, budget.monthly_token_limit, budget.warning_threshold"
+                 conversation.tool_output_max_tokens, conversation.compaction_marker_tokens, \
+                 conversation.max_transcript_chars, security.secret_detection, security.host_audit, \
+                 budget.monthly_token_limit, budget.warning_threshold, gateway.max_body_size, \
+                 gateway.telegram_poll_timeout_secs, gateway.telegram_circuit_failure_threshold, \
+                 gateway.telegram_circuit_suspension_secs, gateway.telegram_dedup_capacity"
             ),
         }
     }

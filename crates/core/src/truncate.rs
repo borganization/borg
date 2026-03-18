@@ -4,7 +4,9 @@
 //! Inspired by codex-rs truncation patterns. Keeps the beginning and end of
 //! output so the LLM can see both the start context and the final result.
 
-const APPROX_BYTES_PER_TOKEN: usize = 4;
+use crate::constants;
+
+const APPROX_BYTES_PER_TOKEN: usize = constants::APPROX_BYTES_PER_TOKEN;
 
 /// Truncate output to fit within a token budget, preserving head and tail.
 ///

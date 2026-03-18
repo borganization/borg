@@ -1,8 +1,10 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const FAILURE_THRESHOLD: u32 = 10;
-const SUSPENSION_SECS: u64 = 300; // 5 minutes
+use borg_core::constants;
+
+const FAILURE_THRESHOLD: u32 = constants::TELEGRAM_CIRCUIT_FAILURE_THRESHOLD;
+const SUSPENSION_SECS: u64 = constants::TELEGRAM_CIRCUIT_SUSPENSION_SECS;
 
 /// Circuit breaker for Telegram API calls (primarily sendChatAction).
 ///

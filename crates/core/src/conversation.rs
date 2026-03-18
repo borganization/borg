@@ -5,10 +5,12 @@ use crate::llm::LlmClient;
 use crate::tokenizer::estimate_tokens;
 use crate::types::{ContentPart, Message, MessageContent, Role};
 
+use crate::constants;
+
 /// Tokens reserved for the compaction summary marker.
-const COMPACTION_MARKER_TOKENS: usize = 200;
+const COMPACTION_MARKER_TOKENS: usize = constants::COMPACTION_MARKER_TOKENS;
 /// Max characters from the transcript sent to the LLM summarizer.
-const MAX_TRANSCRIPT_CHARS: usize = 4000;
+const MAX_TRANSCRIPT_CHARS: usize = constants::MAX_TRANSCRIPT_CHARS;
 
 /// Estimate the token count of a single message, including role overhead.
 fn message_tokens(msg: &Message) -> usize {

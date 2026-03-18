@@ -97,12 +97,22 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum SettingsAction {
-    /// Update a configuration setting
+    /// Update a configuration setting (writes to DB, not config.toml)
     Set {
         /// Setting key (e.g. temperature, model, sandbox.enabled)
         key: String,
         /// New value
         value: String,
+    },
+    /// Show the effective value and source for a setting
+    Get {
+        /// Setting key
+        key: String,
+    },
+    /// Remove a DB override, reverting to config.toml or default
+    Unset {
+        /// Setting key
+        key: String,
     },
 }
 
@@ -274,6 +284,8 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Settings { action }) => match action {
             Some(SettingsAction::Set { key, value }) => run_settings_set(&key, &value)?,
+            Some(SettingsAction::Get { key }) => run_settings_get(&key)?,
+            Some(SettingsAction::Unset { key }) => run_settings_unset(&key)?,
             None => run_settings_show()?,
         },
         Some(Commands::Logs { count }) => run_logs(count)?,
@@ -442,16 +454,34 @@ fn run_skills() -> Result<()> {
 }
 
 fn run_settings_show() -> Result<()> {
-    let config = borg_core::config::Config::load()?;
-    println!("{}", config.display_settings());
+    let resolver = borg_core::settings::SettingsResolver::load()?;
+    let all = resolver.list_all()?;
+    println!("Settings:");
+    for info in &all {
+        println!("  {:40} = {:20} [{}]", info.key, info.value, info.source);
+    }
     Ok(())
 }
 
 fn run_settings_set(key: &str, value: &str) -> Result<()> {
-    let mut config = borg_core::config::Config::load()?;
-    let confirmation = config.apply_setting(key, value)?;
-    config.save()?;
+    let resolver = borg_core::settings::SettingsResolver::load()?;
+    let confirmation = resolver.set(key, value)?;
     println!("Updated: {confirmation}");
+    Ok(())
+}
+
+fn run_settings_get(key: &str) -> Result<()> {
+    let resolver = borg_core::settings::SettingsResolver::load()?;
+    let (value, source) = resolver.get_with_source(key)?;
+    println!("{key} = {value} [{source}]");
+    Ok(())
+}
+
+fn run_settings_unset(key: &str) -> Result<()> {
+    let resolver = borg_core::settings::SettingsResolver::load()?;
+    resolver.unset(key)?;
+    let (value, source) = resolver.get_with_source(key)?;
+    println!("Unset {key} — effective value: {value} [{source}]");
     Ok(())
 }
 
@@ -769,6 +799,32 @@ mod tests {
                 assert_eq!(value, "0.5");
             }
             _ => panic!("Expected Settings Set"),
+        }
+    }
+
+    #[test]
+    fn test_parse_settings_get() {
+        let cli = Cli::try_parse_from(["borg", "settings", "get", "temperature"]).unwrap();
+        match cli.command {
+            Some(Commands::Settings {
+                action: Some(SettingsAction::Get { key }),
+            }) => {
+                assert_eq!(key, "temperature");
+            }
+            _ => panic!("Expected Settings Get"),
+        }
+    }
+
+    #[test]
+    fn test_parse_settings_unset() {
+        let cli = Cli::try_parse_from(["borg", "settings", "unset", "temperature"]).unwrap();
+        match cli.command {
+            Some(Commands::Settings {
+                action: Some(SettingsAction::Unset { key }),
+            }) => {
+                assert_eq!(key, "temperature");
+            }
+            _ => panic!("Expected Settings Unset"),
         }
     }
 

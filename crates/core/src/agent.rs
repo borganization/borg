@@ -21,8 +21,10 @@ use crate::truncate::truncate_output;
 use crate::types::{FunctionCall, Message, ToolCall, ToolDefinition};
 use borg_tools::registry::ToolRegistry;
 
+use crate::constants;
+
 /// Max tokens for tool output before truncation (head + tail preserved).
-const TOOL_OUTPUT_MAX_TOKENS: usize = 4000;
+const TOOL_OUTPUT_MAX_TOKENS: usize = constants::TOOL_OUTPUT_MAX_TOKENS;
 
 const SECURITY_POLICY: &str = "\
 # Security Policy

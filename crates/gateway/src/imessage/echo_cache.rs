@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use borg_core::constants;
 use sha2::{Digest, Sha256};
 
 /// Cache of recently sent messages to detect echoes.
@@ -26,8 +27,8 @@ impl EchoCache {
         Self {
             text_entries: HashMap::new(),
             id_entries: HashMap::new(),
-            text_ttl: Duration::from_secs(5),
-            id_ttl: Duration::from_secs(60),
+            text_ttl: constants::ECHO_CACHE_TEXT_TTL,
+            id_ttl: constants::ECHO_CACHE_ID_TTL,
         }
     }
 

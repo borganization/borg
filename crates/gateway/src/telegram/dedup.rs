@@ -1,6 +1,8 @@
 use std::collections::{HashSet, VecDeque};
 
-const DEFAULT_CAPACITY: usize = 1000;
+use borg_core::constants;
+
+const DEFAULT_CAPACITY: usize = constants::TELEGRAM_DEDUP_CAPACITY;
 
 /// Bounded deduplicator for Telegram update IDs.
 /// Uses a HashSet for O(1) lookups with a VecDeque for eviction order.
