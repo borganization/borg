@@ -5,7 +5,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use borg_core::config::HeartbeatConfig;
 use borg_core::llm::LlmClient;
@@ -85,6 +85,7 @@ impl HeartbeatScheduler {
         }
     }
 
+    #[instrument(skip_all)]
     async fn tick(&mut self, tx: &mpsc::Sender<HeartbeatEvent>) {
         if self.is_quiet_hours() {
             debug!("Heartbeat: in quiet hours, skipping");

@@ -170,7 +170,8 @@ pub async fn invoke_agent(
     }
 
     // Create Agent, load session, send message
-    let mut agent = Agent::new(config.clone()).context("Failed to create agent")?;
+    let mut agent = Agent::new(config.clone(), borg_core::telemetry::BorgMetrics::noop())
+        .context("Failed to create agent")?;
 
     if let Err(e) = agent.load_session(&session_id) {
         warn!(

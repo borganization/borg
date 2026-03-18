@@ -503,7 +503,12 @@ fn run_sub_agent(
     Box::pin(async move {
         use crate::agent::{Agent, AgentEvent};
 
-        let mut agent = Agent::new_sub_agent(config.clone(), depth, &agents_config)?;
+        let mut agent = Agent::new_sub_agent(
+            config.clone(),
+            depth,
+            &agents_config,
+            crate::telemetry::BorgMetrics::noop(),
+        )?;
 
         // Inject fork context if provided
         if let Some(context) = fork_context {

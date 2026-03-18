@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::config::Config;
 use crate::provider::Provider;
@@ -233,6 +233,7 @@ impl LlmClient {
 
     /// Stream chat with cancellation support and retry logic.
     /// Supports multi-key fallback: on 401/429 errors, rotates to the next available key.
+    #[instrument(skip_all, fields(llm.provider = %self.provider, llm.model = %self.config.llm.model))]
     pub async fn stream_chat_with_cancel(
         &mut self,
         messages: &[Message],

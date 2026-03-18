@@ -15,6 +15,7 @@ use tracing::{info, warn};
 
 use borg_core::config::Config;
 use borg_core::db::Database;
+use borg_core::telemetry::BorgMetrics;
 
 use crate::discord::api::DiscordClient;
 use crate::google_chat::api::GoogleChatClient;
@@ -42,6 +43,7 @@ struct AppState {
     request_timeout: Duration,
     health: Arc<RwLock<ChannelHealthRegistry>>,
     rate_limiter: Option<Arc<Mutex<SlidingWindowLimiter>>>,
+    metrics: BorgMetrics,
     telegram_client: Option<Arc<TelegramClient>>,
     telegram_dedup: Arc<Mutex<UpdateDeduplicator>>,
     telegram_secret: Option<String>,
@@ -62,11 +64,16 @@ struct AppState {
 pub struct GatewayServer {
     config: Config,
     shutdown: CancellationToken,
+    metrics: BorgMetrics,
 }
 
 impl GatewayServer {
-    pub fn new(config: Config, shutdown: CancellationToken) -> Result<Self> {
-        Ok(Self { config, shutdown })
+    pub fn new(config: Config, shutdown: CancellationToken, metrics: BorgMetrics) -> Result<Self> {
+        Ok(Self {
+            config,
+            shutdown,
+            metrics,
+        })
     }
 
     pub async fn run(self) -> Result<()> {
@@ -237,6 +244,7 @@ impl GatewayServer {
             request_timeout: Duration::from_millis(gateway_config.request_timeout_ms),
             health: health.clone(),
             rate_limiter,
+            metrics: self.metrics.clone(),
             telegram_client: telegram_client.clone(),
             telegram_dedup: telegram_dedup.clone(),
             telegram_secret,
@@ -614,6 +622,8 @@ async fn webhook_handler(
     headers: HeaderMap,
     body: String,
 ) -> WebhookResponse {
+    state.metrics.gateway_requests.add(1, &[]);
+
     let channel = match state.registry.get(&name) {
         Some(c) => c,
         None => {

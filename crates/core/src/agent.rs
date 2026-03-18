@@ -1,7 +1,9 @@
+use std::time::Instant;
+
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info_span, instrument, warn, Instrument};
 
 use crate::config::Config;
 use crate::conversation::{compact_history, history_tokens, normalize_history, undo_last_turn};
@@ -16,6 +18,7 @@ use crate::secrets::redact_secrets;
 use crate::session::Session;
 use crate::skills::load_skills_context;
 use crate::soul::load_soul;
+use crate::telemetry::BorgMetrics;
 use crate::tool_handlers;
 use crate::truncate::truncate_output;
 use crate::types::{FunctionCall, Message, ToolCall, ToolDefinition};
@@ -200,10 +203,11 @@ pub struct Agent {
     rate_guard: SessionRateGuard,
     agent_control: Option<crate::multi_agent::AgentControl>,
     spawn_depth: u32,
+    metrics: BorgMetrics,
 }
 
 impl Agent {
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(config: Config, metrics: BorgMetrics) -> Result<Self> {
         let _ = LlmClient::new(config.clone())?;
         let tool_registry = ToolRegistry::new()?;
         let policy = config.policy.clone();
@@ -229,6 +233,7 @@ impl Agent {
             rate_guard,
             agent_control,
             spawn_depth: 0,
+            metrics,
         })
     }
 
@@ -236,6 +241,7 @@ impl Agent {
         config: Config,
         spawn_depth: u32,
         agents_config: &crate::config::MultiAgentConfig,
+        metrics: BorgMetrics,
     ) -> Result<Self> {
         let _ = LlmClient::new(config.clone())?;
         let tool_registry = ToolRegistry::new()?;
@@ -263,6 +269,7 @@ impl Agent {
             rate_guard,
             agent_control,
             spawn_depth,
+            metrics,
         })
     }
 
@@ -343,6 +350,10 @@ impl Agent {
         &mut self.config
     }
 
+    pub fn metrics(&self) -> &BorgMetrics {
+        &self.metrics
+    }
+
     /// Compact conversation history using LLM summarization, returning (before_tokens, after_tokens).
     pub async fn compact(&mut self) -> (usize, usize) {
         let before = history_tokens(&self.history);
@@ -376,6 +387,7 @@ impl Agent {
         (self.history.len(), history_tokens(&self.history))
     }
 
+    #[instrument(skip_all)]
     fn build_system_prompt(&self) -> Result<String> {
         let soul = load_soul()?;
         let memory = load_memory_context(self.config.memory.max_context_tokens)?;
@@ -486,6 +498,7 @@ impl Agent {
         self.run_agent_loop(event_tx, cancel).await
     }
 
+    #[instrument(skip_all, fields(session_id = %self.session.meta.id, turn_count = self.turn_count))]
     pub async fn run_agent_loop(
         &mut self,
         event_tx: mpsc::Sender<AgentEvent>,
@@ -548,6 +561,7 @@ impl Agent {
             }
 
             iteration += 1;
+            self.metrics.agent_iterations.add(1, &[]);
             if iteration > max_iterations {
                 let _ = event_tx
                     .send(AgentEvent::Error(format!(
@@ -617,6 +631,8 @@ impl Agent {
                 Some(tool_defs.as_slice())
             };
 
+            let llm_start = Instant::now();
+            self.metrics.llm_requests.add(1, &[]);
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
             let messages_clone = messages.clone();
             let tools_clone = tools.map(<[ToolDefinition]>::to_vec);
@@ -677,6 +693,10 @@ impl Agent {
                                 tool_calls[index].arguments.push_str(&arguments_delta);
                             }
                             Some(StreamEvent::Usage(usage)) => {
+                                let total = usage.prompt_tokens + usage.completion_tokens;
+                                if total > 0 {
+                                    self.metrics.llm_tokens.add(total, &[]);
+                                }
                                 let _ = event_tx.send(AgentEvent::Usage(usage)).await;
                             }
                             Some(StreamEvent::Done) => break,
@@ -696,6 +716,9 @@ impl Agent {
             }
 
             let _ = stream_handle.await;
+            self.metrics
+                .llm_duration
+                .record(llm_start.elapsed().as_secs_f64(), &[]);
 
             // Flush any remaining buffered text from the internal-tag filter
             if let Some(remaining) = tag_filter.flush() {
@@ -734,6 +757,7 @@ impl Agent {
                 if let Some(ref mut ctrl) = self.agent_control {
                     ctrl.shutdown_all();
                 }
+                self.metrics.agent_turns.add(1, &[]);
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
             }
@@ -897,10 +921,15 @@ impl Agent {
                 })
                 .await;
 
+            let tool_start = Instant::now();
             let raw_result = self
                 .execute_tool(name, args, event_tx)
+                .instrument(info_span!("tool.execute", tool.name = %name))
                 .await
                 .unwrap_or_else(|e| format!("Error: {e}"));
+            let tool_elapsed = tool_start.elapsed().as_secs_f64();
+            self.metrics.tool_executions.add(1, &[]);
+            self.metrics.tool_duration.record(tool_elapsed, &[]);
             let truncated = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
             let redacted = if self.config.security.secret_detection {
                 redact_secrets(&truncated)

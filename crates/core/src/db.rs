@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Datelike;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
+use tracing::instrument;
 
 use crate::config::Config;
 
@@ -156,6 +157,7 @@ pub struct UpdateTask<'a> {
 
 impl Database {
     /// Open (or create) the database at `~/.borg/borg.db`.
+    #[instrument(skip_all)]
     pub fn open() -> Result<Self> {
         let path = Self::db_path()?;
         if let Some(parent) = path.parent() {
@@ -1055,6 +1057,7 @@ impl Database {
 
     // ── Message persistence ──
 
+    #[instrument(skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub fn insert_message(
         &self,
@@ -1343,6 +1346,7 @@ impl Database {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     pub fn monthly_token_total(&self) -> Result<u64> {
         let now = chrono::Utc::now();
         let first_of_month = now.date_naive().with_day(1).unwrap_or(now.date_naive());

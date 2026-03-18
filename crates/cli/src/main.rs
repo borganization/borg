@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -186,47 +188,62 @@ async fn main() -> Result<()> {
         Some(Commands::Start) | Some(Commands::Chat) | None
     );
 
-    // _guard must live for the program's duration to flush logs
+    // _guard and _telemetry_guard must live for the program's duration to flush logs
     let _guard;
+    let _telemetry_guard;
 
-    if tui_mode {
-        let (non_blocking, guard) = match borg_core::config::Config::logs_dir() {
-            Ok(log_dir) => {
-                let _ = std::fs::create_dir_all(&log_dir);
-                let mut opts = std::fs::OpenOptions::new();
-                opts.create(true).append(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    opts.mode(0o600);
-                }
-                match opts.open(log_dir.join("tui.log")) {
-                    Ok(f) => tracing_appender::non_blocking(f),
-                    Err(e) => {
-                        eprintln!("Warning: could not open log file: {e}");
-                        tracing_appender::non_blocking(std::io::sink())
+    {
+        let config = borg_core::config::Config::load().unwrap_or_default();
+        let (otel_layer, tg) = borg_core::telemetry::init_telemetry(&config.telemetry)
+            .unwrap_or_else(|e| {
+                eprintln!("Warning: OpenTelemetry init failed: {e}");
+                (None, borg_core::telemetry::TelemetryGuard::noop())
+            });
+        _telemetry_guard = tg;
+
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+
+        if tui_mode {
+            let (non_blocking, guard) = match borg_core::config::Config::logs_dir() {
+                Ok(log_dir) => {
+                    let _ = std::fs::create_dir_all(&log_dir);
+                    let mut opts = std::fs::OpenOptions::new();
+                    opts.create(true).append(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        opts.mode(0o600);
+                    }
+                    match opts.open(log_dir.join("tui.log")) {
+                        Ok(f) => tracing_appender::non_blocking(f),
+                        Err(e) => {
+                            eprintln!("Warning: could not open log file: {e}");
+                            tracing_appender::non_blocking(std::io::sink())
+                        }
                     }
                 }
-            }
-            Err(_) => tracing_appender::non_blocking(std::io::sink()),
-        };
-        _guard = Some(guard);
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-            )
-            .with_target(false)
-            .with_ansi(false)
-            .with_writer(non_blocking)
-            .init();
-    } else {
-        _guard = None;
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-            )
-            .with_target(false)
-            .init();
+                Err(_) => tracing_appender::non_blocking(std::io::sink()),
+            };
+            _guard = Some(guard);
+            let fmt_layer = tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(non_blocking);
+            tracing_subscriber::registry()
+                .with(otel_layer)
+                .with(env_filter)
+                .with(fmt_layer)
+                .init();
+        } else {
+            _guard = None;
+            let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+            tracing_subscriber::registry()
+                .with(otel_layer)
+                .with(env_filter)
+                .with(fmt_layer)
+                .init();
+        }
     }
 
     // Set up a global cancellation token for graceful shutdown
@@ -322,7 +339,8 @@ fn ensure_onboarded() -> Result<()> {
 
 async fn run_gateway(shutdown: CancellationToken) -> Result<()> {
     let config = borg_core::config::Config::load()?;
-    let gateway = borg_gateway::GatewayServer::new(config, shutdown)?;
+    let metrics = borg_core::telemetry::BorgMetrics::from_config(&config);
+    let gateway = borg_gateway::GatewayServer::new(config, shutdown, metrics)?;
     gateway.run().await
 }
 
