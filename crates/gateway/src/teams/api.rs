@@ -77,7 +77,13 @@ impl TeamsClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("Failed to read Teams token error response body: {e}");
+                    String::new()
+                }
+            };
             bail!("Token request failed ({status}): {body}");
         }
 
@@ -206,7 +212,13 @@ impl TeamsClient {
                 continue;
             }
 
-            let error_body = resp.text().await.unwrap_or_default();
+            let error_body = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("Failed to read Teams error response body: {e}");
+                    String::new()
+                }
+            };
             bail!("Teams API request failed ({status}): {error_body}");
         }
     }

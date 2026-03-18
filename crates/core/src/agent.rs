@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -29,6 +30,10 @@ use crate::constants;
 /// Max tokens for tool output before truncation (head + tail preserved).
 const TOOL_OUTPUT_MAX_TOKENS: usize = constants::TOOL_OUTPUT_MAX_TOKENS;
 
+/// Maximum number of parallel tool calls allowed in a single LLM response.
+/// Prevents OOM from malformed stream events with huge indices.
+const MAX_TOOL_CALLS: usize = 128;
+
 const SECURITY_POLICY: &str = "\
 # Security Policy
 
@@ -59,11 +64,46 @@ const SECURITY_POLICY: &str = "\
 - Never encode sensitive data (API keys, passwords) into URLs, tool arguments, or outbound messages unless explicitly requested for a legitimate purpose.";
 
 /// Check integrity of a plugin-installed tool. Returns a block message if tampered.
+/// Fails closed: any error during verification blocks the tool (except when
+/// the tool simply has no plugin tracking, in which case it passes).
 fn check_tool_integrity(name: &str) -> Option<String> {
-    let db = Database::open().ok()?;
-    let cust_id = db.get_tool_plugin_id(name).ok()??;
-    let data_dir = Config::data_dir().ok()?;
-    let result = crate::integrity::verify_integrity(&db, &cust_id, &data_dir).ok()?;
+    let db = match Database::open() {
+        Ok(db) => db,
+        Err(e) => {
+            warn!("Integrity check for tool '{name}' failed to open DB: {e}");
+            return Some(format!(
+                "Blocked: tool '{name}' integrity check failed (database unavailable). Re-install via /plugins to fix."
+            ));
+        }
+    };
+    let cust_id = match db.get_tool_plugin_id(name) {
+        Ok(Some(id)) => id,
+        Ok(None) => return None, // Tool has no plugin tracking — pass
+        Err(e) => {
+            warn!("Integrity check for tool '{name}' failed to query plugin id: {e}");
+            return Some(format!(
+                "Blocked: tool '{name}' integrity check failed (query error). Re-install via /plugins to fix."
+            ));
+        }
+    };
+    let data_dir = match Config::data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Integrity check for tool '{name}' failed to resolve data dir: {e}");
+            return Some(format!(
+                "Blocked: tool '{name}' integrity check failed (data dir unavailable). Re-install via /plugins to fix."
+            ));
+        }
+    };
+    let result = match crate::integrity::verify_integrity(&db, &cust_id, &data_dir) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Integrity check for tool '{name}' failed during verification: {e}");
+            return Some(format!(
+                "Blocked: tool '{name}' integrity check failed (verification error). Re-install via /plugins to fix."
+            ));
+        }
+    };
     if result.ok {
         return None;
     }
@@ -219,6 +259,7 @@ pub struct Agent {
     metrics: BorgMetrics,
     browser_session: Option<crate::browser::BrowserSession>,
     config_rx: Option<tokio::sync::watch::Receiver<Config>>,
+    db: Mutex<Option<Database>>,
 }
 
 impl Agent {
@@ -237,6 +278,13 @@ impl Agent {
         } else {
             None
         };
+        let db = match Database::open() {
+            Ok(db) => Some(db),
+            Err(e) => {
+                warn!("Failed to open database on agent init: {e}");
+                None
+            }
+        };
         Ok(Self {
             config,
             history: Vec::new(),
@@ -251,6 +299,7 @@ impl Agent {
             metrics,
             browser_session: None,
             config_rx: None,
+            db: Mutex::new(db),
         })
     }
 
@@ -288,6 +337,13 @@ impl Agent {
         } else {
             None
         };
+        let db = match Database::open() {
+            Ok(db) => Some(db),
+            Err(e) => {
+                warn!("Failed to open database on sub-agent init: {e}");
+                None
+            }
+        };
         Ok(Self {
             config,
             history: Vec::new(),
@@ -302,6 +358,7 @@ impl Agent {
             metrics,
             browser_session: None,
             config_rx: None,
+            db: Mutex::new(db),
         })
     }
 
@@ -359,16 +416,20 @@ impl Agent {
             }
             _ => (msg.text_content().map(str::to_string), None),
         };
-        if let Ok(db) = Database::open() {
-            let _ = db.insert_message(
-                &session_id,
-                role,
-                content_text.as_deref(),
-                tool_calls_json.as_deref(),
-                msg.tool_call_id.as_deref(),
-                msg.timestamp.as_deref(),
-                content_parts_json.as_deref(),
-            );
+        if let Ok(guard) = self.db.lock() {
+            if let Some(ref db) = *guard {
+                if let Err(e) = db.insert_message(
+                    &session_id,
+                    role,
+                    content_text.as_deref(),
+                    tool_calls_json.as_deref(),
+                    msg.tool_call_id.as_deref(),
+                    msg.timestamp.as_deref(),
+                    content_parts_json.as_deref(),
+                ) {
+                    warn!("Failed to persist message to SQLite: {e}");
+                }
+            }
         }
         self.history.push(msg);
     }
@@ -793,35 +854,43 @@ impl Agent {
                             Some(StreamEvent::ToolCallDelta {
                                 index, id, name, arguments_delta,
                             }) => {
-                                while tool_calls.len() <= index {
-                                    tool_calls.push(PartialToolCall::default());
+                                if index >= MAX_TOOL_CALLS {
+                                    warn!("Tool call index {index} exceeds limit {MAX_TOOL_CALLS}, ignoring");
+                                } else {
+                                    while tool_calls.len() <= index {
+                                        tool_calls.push(PartialToolCall::default());
+                                    }
+                                    if let Some(id) = id {
+                                        tool_calls[index].id = id;
+                                    }
+                                    if let Some(name) = name {
+                                        tool_calls[index].name = name;
+                                    }
+                                    tool_calls[index].arguments.push_str(&arguments_delta);
                                 }
-                                if let Some(id) = id {
-                                    tool_calls[index].id = id;
-                                }
-                                if let Some(name) = name {
-                                    tool_calls[index].name = name;
-                                }
-                                tool_calls[index].arguments.push_str(&arguments_delta);
                             }
                             Some(StreamEvent::Usage(usage)) => {
                                 let total = usage.prompt_tokens + usage.completion_tokens;
                                 if total > 0 {
                                     self.metrics.llm_tokens.add(total, &[]);
-                                    if let Ok(db) = Database::open() {
-                                        let cost = crate::pricing::estimate_cost(
-                                            &usage.model,
-                                            usage.prompt_tokens,
-                                            usage.completion_tokens,
-                                        );
-                                        let _ = db.log_token_usage(
-                                            usage.prompt_tokens,
-                                            usage.completion_tokens,
-                                            total,
-                                            &usage.provider,
-                                            &usage.model,
-                                            cost,
-                                        );
+                                    if let Ok(guard) = self.db.lock() {
+                                        if let Some(ref db) = *guard {
+                                            let cost = crate::pricing::estimate_cost(
+                                                &usage.model,
+                                                usage.prompt_tokens,
+                                                usage.completion_tokens,
+                                            );
+                                            if let Err(e) = db.log_token_usage(
+                                                usage.prompt_tokens,
+                                                usage.completion_tokens,
+                                                total,
+                                                &usage.provider,
+                                                &usage.model,
+                                                cost,
+                                            ) {
+                                                warn!("Failed to log token usage: {e}");
+                                            }
+                                        }
                                     }
                                 }
                                 let _ = event_tx.send(AgentEvent::Usage(usage)).await;
@@ -1160,7 +1229,7 @@ impl Agent {
                         )
                         .await
                         {
-                            tracing::debug!("Failed to embed memory {filename}: {e}");
+                            tracing::warn!("Failed to embed memory {filename}: {e}");
                         }
                     });
                 }

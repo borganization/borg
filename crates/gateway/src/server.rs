@@ -108,7 +108,7 @@ impl GatewayServer {
         // Initialize native Telegram client if token is available
         let telegram_client = match telegram_token {
             Some(token) => {
-                let client = TelegramClient::new(&token);
+                let client = TelegramClient::new(&token)?;
                 match client.get_me().await {
                     Ok(me) => {
                         info!(
@@ -653,10 +653,23 @@ async fn webhook_handler(
         }
     }
 
-    // Acquire concurrency permit
-    let _permit = match state.semaphore.try_acquire() {
-        Ok(p) => p,
+    // Acquire concurrency permit with brief backpressure window
+    let _permit = match tokio::time::timeout(
+        Duration::from_secs(5),
+        state.semaphore.acquire(),
+    )
+    .await
+    {
+        Ok(Ok(p)) => p,
+        Ok(Err(_)) => {
+            // Semaphore closed
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({ "error": "Server shutting down" })),
+            );
+        }
         Err(_) => {
+            // Timed out waiting for a permit
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 axum::Json(serde_json::json!({ "error": "Too many concurrent requests" })),
@@ -878,22 +891,20 @@ async fn handle_slack_webhook(
         }
     };
 
-    if let crate::slack::SlackWebhookResult::Challenge(challenge) = webhook_result {
-        return (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "challenge": challenge })),
-        );
-    }
-
-    if matches!(webhook_result, crate::slack::SlackWebhookResult::Skip) {
-        return (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "ok": true })),
-        );
-    }
-
-    let crate::slack::SlackWebhookResult::Message(inbound) = webhook_result else {
-        unreachable!()
+    let inbound = match webhook_result {
+        crate::slack::SlackWebhookResult::Challenge(challenge) => {
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "challenge": challenge })),
+            );
+        }
+        crate::slack::SlackWebhookResult::Skip => {
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            );
+        }
+        crate::slack::SlackWebhookResult::Message(inbound) => inbound,
     };
 
     let result = tokio::time::timeout(state.request_timeout, async {
@@ -1483,7 +1494,7 @@ async fn drain_pending_deliveries(
     state: &Arc<AppState>,
     health: &Arc<RwLock<ChannelHealthRegistry>>,
 ) {
-    let db = match Database::open() {
+    let mut db = match Database::open() {
         Ok(db) => db,
         Err(e) => {
             warn!("Drain loop: failed to open database: {e}");
