@@ -2,7 +2,6 @@
 pub struct NamePool {
     pool: Vec<&'static str>,
     index: usize,
-    generation: usize,
 }
 
 const DEFAULT_NAMES: &[&str] = &[
@@ -39,7 +38,6 @@ impl NamePool {
         Self {
             pool: DEFAULT_NAMES.to_vec(),
             index: 0,
-            generation: 0,
         }
     }
 
@@ -47,10 +45,6 @@ impl NamePool {
     pub fn next_name(&mut self) -> String {
         let base = self.pool[self.index % self.pool.len()];
         self.index += 1;
-
-        if self.index > self.pool.len() && self.index % self.pool.len() == 1 {
-            self.generation += 1;
-        }
 
         let gen = self.index.saturating_sub(1) / self.pool.len();
         if gen == 0 {

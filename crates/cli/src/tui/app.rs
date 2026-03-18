@@ -941,6 +941,9 @@ impl<'a> App<'a> {
             AgentEvent::SubAgentUpdate { .. } => {
                 // Sub-agent updates are informational; no TUI action needed yet.
             }
+            AgentEvent::ToolOutputDelta { .. } => {
+                // Tool output streaming; no TUI action needed yet.
+            }
         }
     }
 
