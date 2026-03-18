@@ -16,6 +16,8 @@ use tracing::{info, warn};
 use borg_core::config::Config;
 use borg_core::db::Database;
 
+use crate::discord::api::DiscordClient;
+use crate::google_chat::api::GoogleChatClient;
 use crate::handler;
 use crate::handler::InboundMessage;
 use crate::health::ChannelHealthRegistry;
@@ -24,6 +26,7 @@ use crate::rate_limit::SlidingWindowLimiter;
 use crate::registry::ChannelRegistry;
 use crate::retry::RetryPolicy;
 use crate::slack::api::SlackClient;
+use crate::teams::api::TeamsClient;
 use crate::telegram::api::TelegramClient;
 use crate::telegram::dedup::UpdateDeduplicator;
 use crate::twilio::api::TwilioClient;
@@ -46,6 +49,12 @@ struct AppState {
     twilio_auth_token: Option<String>,
     twilio_phone_number: Option<String>,
     twilio_whatsapp_number: Option<String>,
+    discord_client: Option<Arc<DiscordClient>>,
+    discord_public_key: Option<String>,
+    teams_client: Option<Arc<TeamsClient>>,
+    teams_app_secret: Option<String>,
+    google_chat_client: Option<Arc<GoogleChatClient>>,
+    google_chat_token: Option<String>,
 }
 
 pub struct GatewayServer {
@@ -170,6 +179,55 @@ impl GatewayServer {
             _ => None,
         };
 
+        // Initialize native Discord client if token is available
+        let discord_token = self.config.resolve_credential_or_env("DISCORD_BOT_TOKEN");
+        let discord_public_key = self.config.resolve_credential_or_env("DISCORD_PUBLIC_KEY");
+
+        let discord_client = match discord_token {
+            Some(token) => {
+                let client = DiscordClient::new(&token);
+                match client.get_current_user().await {
+                    Ok(user) => {
+                        info!("Discord native integration active (bot: {})", user.username);
+                        Some(Arc::new(client))
+                    }
+                    Err(e) => {
+                        warn!("DISCORD_BOT_TOKEN set but /users/@me failed: {e}");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
+        // Initialize native Teams client if credentials are available
+        let teams_app_id = self.config.resolve_credential_or_env("TEAMS_APP_ID");
+        let teams_app_secret = self.config.resolve_credential_or_env("TEAMS_APP_SECRET");
+
+        let teams_client = match (&teams_app_id, &teams_app_secret) {
+            (Some(app_id), Some(app_secret)) => {
+                info!(
+                    "Teams native integration active (app: {}...)",
+                    &app_id[..app_id.len().min(8)]
+                );
+                Some(Arc::new(TeamsClient::new(app_id, app_secret)))
+            }
+            _ => None,
+        };
+
+        // Initialize native Google Chat client if token is available
+        let google_chat_service_token = self
+            .config
+            .resolve_credential_or_env("GOOGLE_CHAT_SERVICE_TOKEN");
+        let google_chat_token = self
+            .config
+            .resolve_credential_or_env("GOOGLE_CHAT_WEBHOOK_TOKEN");
+
+        let google_chat_client = google_chat_service_token.map(|token| {
+            info!("Google Chat native integration active");
+            Arc::new(GoogleChatClient::new(&token))
+        });
+
         let state = Arc::new(AppState {
             config: self.config.clone(),
             registry,
@@ -186,6 +244,12 @@ impl GatewayServer {
             twilio_auth_token,
             twilio_phone_number,
             twilio_whatsapp_number,
+            discord_client,
+            discord_public_key,
+            teams_client,
+            teams_app_secret,
+            google_chat_client,
+            google_chat_token,
         });
 
         let app = Router::new()
@@ -607,6 +671,20 @@ async fn webhook_handler(
         }
     }
 
+    if name == "discord" {
+        if let Some(ref discord_client) = state.discord_client {
+            return handle_discord_webhook_route(&state, discord_client, &headers, &body).await;
+        }
+    }
+
+    if name == "teams" && state.teams_client.is_some() {
+        return handle_teams_webhook_route(&state, &headers, &body).await;
+    }
+
+    if name == "google-chat" || name == "google_chat" || name == "googlechat" {
+        return handle_google_chat_webhook_route(&state, &body).await;
+    }
+
     // Convert headers to JSON
     let mut headers_map = serde_json::Map::new();
     for (key, value) in headers.iter() {
@@ -947,6 +1025,314 @@ async fn send_telegram_response(
         }
     } else {
         health.write().await.record_outbound("telegram");
+    }
+}
+
+async fn handle_discord_webhook_route(
+    state: &Arc<AppState>,
+    discord_client: &Arc<DiscordClient>,
+    headers: &HeaderMap,
+    body: &str,
+) -> WebhookResponse {
+    use crate::discord::DiscordWebhookResult;
+
+    let webhook_result = match crate::discord::handle_discord_webhook(
+        headers,
+        body,
+        state.discord_public_key.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Discord webhook verification/parse error: {e:#}");
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({ "error": "Unauthorized" })),
+            );
+        }
+    };
+
+    match webhook_result {
+        DiscordWebhookResult::Pong(response) => (
+            StatusCode::OK,
+            axum::Json(serde_json::to_value(response).unwrap_or_default()),
+        ),
+        DiscordWebhookResult::Skip => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": true })),
+        ),
+        DiscordWebhookResult::Message(inbound, interaction) => {
+            let channel_id = inbound.channel_id.clone().unwrap_or_default();
+
+            // Send deferred response so Discord doesn't time out
+            if let Err(e) = discord_client
+                .create_interaction_response(
+                    &interaction.id,
+                    &interaction.token,
+                    &crate::discord::types::InteractionResponse::deferred(),
+                )
+                .await
+            {
+                warn!("Failed to send Discord deferred response: {e}");
+            }
+
+            let result = tokio::time::timeout(state.request_timeout, async {
+                let (response_text, _session_id) =
+                    handler::invoke_agent("discord", &inbound, &state.config, Some(&state.health))
+                        .await?;
+
+                // Try to edit the deferred response first
+                if let Some(app_id) = &interaction.application_id {
+                    if let Err(e) = discord_client
+                        .edit_original_response(app_id, &interaction.token, &response_text)
+                        .await
+                    {
+                        warn!("Failed to edit Discord interaction response: {e}");
+                        // Fall back to sending a channel message
+                        if let Err(e2) = discord_client
+                            .send_message(&channel_id, &response_text)
+                            .await
+                        {
+                            warn!("Failed to send Discord channel message: {e2}");
+                            state
+                                .health
+                                .write()
+                                .await
+                                .record_error("discord", &e2.to_string());
+                        } else {
+                            state.health.write().await.record_outbound("discord");
+                        }
+                    } else {
+                        state.health.write().await.record_outbound("discord");
+                    }
+                } else if let Err(e) = discord_client
+                    .send_message(&channel_id, &response_text)
+                    .await
+                {
+                    warn!("Failed to send Discord message: {e}");
+                    state
+                        .health
+                        .write()
+                        .await
+                        .record_error("discord", &e.to_string());
+                } else {
+                    state.health.write().await.record_outbound("discord");
+                }
+
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+
+            match result {
+                Ok(Ok(())) => (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({ "ok": true })),
+                ),
+                Ok(Err(e)) => {
+                    warn!("Discord agent/send error: {e:#}");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(serde_json::json!({ "error": "Internal server error" })),
+                    )
+                }
+                Err(_) => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    axum::Json(serde_json::json!({ "error": "Request timed out" })),
+                ),
+            }
+        }
+    }
+}
+
+async fn handle_teams_webhook_route(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    body: &str,
+) -> WebhookResponse {
+    let parsed = match crate::teams::handle_teams_webhook(
+        headers,
+        body,
+        state.teams_app_secret.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Teams webhook verification/parse error: {e:#}");
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({ "error": "Unauthorized" })),
+            );
+        }
+    };
+
+    let (inbound, activity) = match parsed {
+        Some(pair) => pair,
+        None => {
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            );
+        }
+    };
+
+    let teams_client = match &state.teams_client {
+        Some(c) => c.clone(),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": "Teams client not configured" })),
+            );
+        }
+    };
+
+    let result = tokio::time::timeout(state.request_timeout, async {
+        let (response_text, _session_id) =
+            handler::invoke_agent("teams", &inbound, &state.config, Some(&state.health)).await?;
+
+        let service_url = activity
+            .service_url
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Missing service_url in Teams activity"))?;
+        let conversation_id = activity
+            .conversation
+            .as_ref()
+            .map(|c| c.id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing conversation in Teams activity"))?;
+
+        if let Err(e) = teams_client
+            .reply_to_activity(service_url, conversation_id, &activity.id, &response_text)
+            .await
+        {
+            warn!("Failed to send Teams reply: {e}");
+            state
+                .health
+                .write()
+                .await
+                .record_error("teams", &e.to_string());
+        } else {
+            state.health.write().await.record_outbound("teams");
+        }
+
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": true })),
+        ),
+        Ok(Err(e)) => {
+            warn!("Teams agent/send error: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": "Internal server error" })),
+            )
+        }
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            axum::Json(serde_json::json!({ "error": "Request timed out" })),
+        ),
+    }
+}
+
+async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> WebhookResponse {
+    let inbound = match crate::google_chat::handle_google_chat_webhook(
+        body,
+        state.google_chat_token.as_deref(),
+    ) {
+        Ok(Some(msg)) => msg,
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            );
+        }
+        Err(e) => {
+            warn!("Google Chat webhook error: {e:#}");
+            // Return 200 to avoid retries from Google
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            );
+        }
+    };
+
+    let space_name = inbound.channel_id.clone().unwrap_or_default();
+    let thread_name = inbound.thread_id.clone();
+
+    // If we have a REST API client, invoke agent and reply asynchronously
+    if let Some(ref gc_client) = state.google_chat_client {
+        let gc_client = gc_client.clone();
+        let config = state.config.clone();
+        let health = state.health.clone();
+
+        let result = tokio::time::timeout(state.request_timeout, async {
+            let (response_text, _session_id) =
+                handler::invoke_agent("google-chat", &inbound, &config, Some(&health)).await?;
+
+            if let Err(e) = gc_client
+                .send_message(&space_name, &response_text, thread_name.as_deref())
+                .await
+            {
+                warn!("Failed to send Google Chat response: {e}");
+                health
+                    .write()
+                    .await
+                    .record_error("google-chat", &e.to_string());
+            } else {
+                health.write().await.record_outbound("google-chat");
+            }
+
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            ),
+            Ok(Err(e)) => {
+                warn!("Google Chat agent/send error: {e:#}");
+                (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({ "ok": true })),
+                )
+            }
+            Err(_) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                axum::Json(serde_json::json!({ "error": "Request timed out" })),
+            ),
+        }
+    } else {
+        // No async client — invoke agent and return synchronous response
+        let result = tokio::time::timeout(state.request_timeout, async {
+            let (response_text, _session_id) =
+                handler::invoke_agent("google-chat", &inbound, &state.config, Some(&state.health))
+                    .await?;
+            state.health.write().await.record_outbound("google-chat");
+            Ok::<_, anyhow::Error>(response_text)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(text)) => (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "text": text })),
+            ),
+            Ok(Err(e)) => {
+                warn!("Google Chat agent error: {e:#}");
+                (
+                    StatusCode::OK,
+                    axum::Json(
+                        serde_json::json!({ "text": "Sorry, I encountered an error processing your message." }),
+                    ),
+                )
+            }
+            Err(_) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                axum::Json(serde_json::json!({ "text": "Request timed out." })),
+            ),
+        }
     }
 }
 
