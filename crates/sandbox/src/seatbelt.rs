@@ -34,19 +34,23 @@ pub fn generate_profile(
     tool_dir: &Path,
     runtime_bin: Option<&str>,
 ) -> Result<String, String> {
-    let tool_dir_str = tool_dir.to_string_lossy();
+    // Canonicalize to resolve symlinks (e.g., /var -> /private/var on macOS)
+    let canonical_dir = tool_dir
+        .canonicalize()
+        .unwrap_or_else(|_| tool_dir.to_path_buf());
+    let tool_dir_str = canonical_dir.to_string_lossy();
     validate_seatbelt_path(&tool_dir_str)?;
 
     let mut profile = String::from("(version 1)\n(deny default)\n");
 
-    // Restrict process-exec to the runtime binary and system shells
+    // Restrict process-exec to the runtime binary and standard system paths
     if let Some(bin) = runtime_bin {
         validate_seatbelt_path(bin)?;
         profile.push_str(&format!("(allow process-exec (literal \"{bin}\"))\n"));
-        // Allow /bin/sh and /usr/bin/env which runtimes may need
-        profile.push_str("(allow process-exec (literal \"/bin/sh\"))\n");
-        profile.push_str("(allow process-exec (literal \"/bin/bash\"))\n");
-        profile.push_str("(allow process-exec (literal \"/usr/bin/env\"))\n");
+        // Allow standard system binaries that scripts may invoke (cat, grep, curl, etc.)
+        profile.push_str("(allow process-exec (subpath \"/bin\"))\n");
+        profile.push_str("(allow process-exec (subpath \"/usr/bin\"))\n");
+        profile.push_str("(allow process-exec (subpath \"/usr/local/bin\"))\n");
     } else {
         profile.push_str("(allow process-exec)\n");
     }
@@ -54,25 +58,21 @@ pub fn generate_profile(
     profile.push_str("(allow sysctl-read)\n");
     profile.push_str("(allow mach-lookup)\n");
 
-    // Allow reading the tool directory
-    profile.push_str(&format!(
-        "(allow file-read* (subpath \"{tool_dir_str}\"))\n"
-    ));
+    // Allow unrestricted file reads — runtimes need to read from many system
+    // paths for dynamic linking, config, locale, etc. The security boundary is
+    // write/exec/network restriction. Sensitive paths are filtered at the
+    // manifest level via the blocked_paths security config.
+    profile.push_str("(allow file-read*)\n");
 
-    // Allow reading standard system paths
-    profile.push_str("(allow file-read* (subpath \"/usr\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/lib\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/System\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/Library\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/dev\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/private/tmp\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/private/var\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/bin\"))\n");
-    profile.push_str("(allow file-read* (subpath \"/sbin\"))\n");
-
+    // Allow writing to /dev (stdout/stderr file descriptors)
+    profile.push_str("(allow file-write* (subpath \"/dev\"))\n");
     // Allow writing to /tmp
     profile.push_str("(allow file-write* (subpath \"/private/tmp\"))\n");
     profile.push_str("(allow file-write* (subpath \"/tmp\"))\n");
+    // Allow writing to the tool's working directory
+    profile.push_str(&format!(
+        "(allow file-write* (subpath \"{tool_dir_str}\"))\n"
+    ));
 
     // Additional read paths from policy
     for path in &policy.fs_read {
@@ -115,7 +115,10 @@ mod tests {
     #[test]
     fn profile_includes_tool_dir() {
         let profile = generate_profile(&default_policy(), Path::new("/my/tool/dir"), None).unwrap();
-        assert!(profile.contains("(allow file-read* (subpath \"/my/tool/dir\"))"));
+        // Tool dir should have write access
+        assert!(profile.contains("(allow file-write* (subpath \"/my/tool/dir\"))"));
+        // Reads are allowed globally
+        assert!(profile.contains("(allow file-read*)"));
     }
 
     #[test]
