@@ -1,5 +1,7 @@
 pub mod chunker;
+pub mod discord;
 pub mod executor;
+pub mod google_chat;
 pub mod handler;
 pub mod health;
 #[cfg(target_os = "macos")]
@@ -10,6 +12,7 @@ pub mod registry;
 pub mod retry;
 pub mod server;
 pub mod slack;
+pub mod teams;
 pub mod telegram;
 pub mod twilio;
 
