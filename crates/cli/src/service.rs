@@ -139,13 +139,13 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                         tracing::info!("Executing scheduled task: {task_name} ({task_id})");
                         let started_at = chrono::Utc::now().timestamp();
 
-                        let soul = borg_core::soul::load_soul().unwrap_or_default();
+                        let identity = borg_core::identity::load_identity().unwrap_or_default();
                         let memory =
                             borg_core::memory::load_memory_context(4000).unwrap_or_default();
                         let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
 
                         let system = format!(
-                            "{soul}\n\n# Current Time\n{time}\n\n{memory}\n\n\
+                            "{identity}\n\n# Current Time\n{time}\n\n{memory}\n\n\
                              # Scheduled Task\nYou are executing a scheduled task: \"{task_name}\"\n\
                              Respond with the task result. Be concise."
                         );

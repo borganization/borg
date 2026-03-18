@@ -8,7 +8,7 @@ All memory lives in `~/.borg/`:
 
 | File | Purpose | Loaded |
 |------|---------|--------|
-| `SOUL.md` | Personality and behavioral instructions | Always (as system prompt prefix) |
+| `IDENTITY.md` | Personality and behavioral instructions | Always (as system prompt prefix) |
 | `MEMORY.md` | Memory index — high-level notes | Always (first in memory context) |
 | `memory/*.md` | Topic-specific memories | By recency, within token budget |
 
@@ -42,12 +42,12 @@ The agent uses the `write_memory` tool:
 }
 ```
 
-- `filename`: target file (`SOUL.md`, `MEMORY.md`, or any name for a topic file)
+- `filename`: target file (`IDENTITY.md`, `MEMORY.md`, or any name for a topic file)
 - `content`: text to write
 - `append`: if `true`, appends to existing content instead of overwriting
 
 Special filenames:
-- `SOUL.md` — writes to `~/.borg/SOUL.md` (personality)
+- `IDENTITY.md` — writes to `~/.borg/IDENTITY.md` (personality)
 - `MEMORY.md` — writes to `~/.borg/MEMORY.md` (index)
 - Anything else — writes to `~/.borg/memory/<filename>`
 
@@ -72,11 +72,11 @@ Memory filenames are validated to prevent path traversal:
 
 Secrets in tool output are automatically redacted when `security.secret_detection` is enabled (default: true).
 
-## SOUL.md
+## IDENTITY.md
 
-The personality file is special — it's loaded as the first part of the system prompt (before memory context). The agent can modify its own personality by writing to `SOUL.md`. Changes persist across sessions.
+The personality file is special — it's loaded as the first part of the system prompt (before memory context). The agent can modify its own personality by writing to `IDENTITY.md`. Changes persist across sessions.
 
-The default `SOUL.md` is created by `borg init`.
+The default `IDENTITY.md` is created by `borg init`.
 
 ## Session persistence
 

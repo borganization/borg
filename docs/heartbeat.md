@@ -52,7 +52,7 @@ The daemon runs in the foreground as a background-friendly process. It executes 
 
 ## Heartbeat prompt
 
-Each heartbeat sends the agent's personality (SOUL.md), memory context, and current time, along with instructions to:
+Each heartbeat sends the agent's personality (IDENTITY.md), memory context, and current time, along with instructions to:
 - Share something useful, timely, or caring if appropriate
 - Respond with an empty message if there's nothing meaningful to say
 - Keep it brief — one or two sentences max

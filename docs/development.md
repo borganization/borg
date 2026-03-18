@@ -65,7 +65,7 @@ borg/
 │   │   │   ├── llm.rs          # multi-provider SSE streaming client
 │   │   │   ├── provider.rs     # provider enum + auto-detection
 │   │   │   ├── config.rs       # config parsing with serde defaults
-│   │   │   ├── soul.rs         # SOUL.md load/save
+│   │   │   ├── identity.rs     # IDENTITY.md load/save
 │   │   │   ├── memory.rs       # memory loading with token budget
 │   │   │   ├── skills.rs       # skills loading, parsing, budgeting
 │   │   │   ├── types.rs        # Message, ToolCall, ToolDefinition

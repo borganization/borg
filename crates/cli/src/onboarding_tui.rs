@@ -122,6 +122,9 @@ struct OnboardingState {
     // Review
     review_focus: ReviewFocus,
 
+    // Validation hints
+    api_key_required_hint: bool,
+
     // Result
     done: bool,
     cancelled: bool,
@@ -157,6 +160,7 @@ impl OnboardingState {
             custom_budget_input: String::new(),
             custom_budget_editing: false,
             review_focus: ReviewFocus::Confirm,
+            api_key_required_hint: false,
             done: false,
             cancelled: false,
         }
@@ -469,18 +473,37 @@ impl OnboardingState {
             KeyCode::Tab => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.prev_tab();
+                } else if self.api_key_input.trim().is_empty() {
+                    self.api_key_required_hint = true;
                 } else {
+                    self.api_key_required_hint = false;
                     self.next_tab();
                 }
             }
-            KeyCode::Right => self.next_tab(),
+            KeyCode::Right => {
+                if self.api_key_input.trim().is_empty() {
+                    self.api_key_required_hint = true;
+                } else {
+                    self.api_key_required_hint = false;
+                    self.next_tab();
+                }
+            }
             KeyCode::Left => self.prev_tab(),
-            KeyCode::Enter => self.next_tab(),
+            KeyCode::Enter => {
+                if self.api_key_input.trim().is_empty() {
+                    self.api_key_required_hint = true;
+                } else {
+                    self.api_key_required_hint = false;
+                    self.next_tab();
+                }
+            }
             KeyCode::Backspace => {
                 self.api_key_input.pop();
+                self.api_key_required_hint = false;
             }
             KeyCode::Char(c) => {
                 self.api_key_input.push(c);
+                self.api_key_required_hint = false;
             }
             _ => {}
         }
@@ -914,7 +937,7 @@ fn render_api_key(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingStat
             theme::dim(),
         )));
         lines.push(Line::from(Span::styled(
-            "  Leave empty to skip",
+            "  Required to continue",
             theme::dim(),
         )));
         lines.push(Line::default());
@@ -925,6 +948,14 @@ fn render_api_key(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingStat
             Span::raw(masked),
             Span::styled("_", Style::default().fg(theme::CYAN)),
         ]));
+
+        if state.api_key_required_hint {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                "  ⚠ Please enter your API key to continue",
+                Style::default().fg(theme::YELLOW),
+            )));
+        }
     }
 
     frame.render_widget(Paragraph::new(lines), area);
@@ -1034,8 +1065,6 @@ fn render_review(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState
 
     let api_key_display = if state.api_key_existing {
         "(already set)".to_string()
-    } else if state.api_key_input.trim().is_empty() {
-        "(skipped)".to_string()
     } else {
         let k = state.api_key_input.trim();
         if k.len() > 8 {

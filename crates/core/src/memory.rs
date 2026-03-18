@@ -149,7 +149,7 @@ fn validate_memory_filename(filename: &str) -> Result<()> {
 fn resolve_memory_path(filename: &str) -> Result<PathBuf> {
     validate_memory_filename(filename)?;
     match filename {
-        "SOUL.md" => Config::soul_path(),
+        "IDENTITY.md" => Config::identity_path(),
         "MEMORY.md" => memory_index_path(),
         _ => Ok(memory_dir()?.join(filename)),
     }
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn read_memory_special_filenames() {
-        let _result = read_memory("SOUL.md");
+        let _result = read_memory("IDENTITY.md");
         let _result = read_memory("MEMORY.md");
     }
 
@@ -351,12 +351,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_memory_path_soul() {
-        let path = resolve_memory_path("SOUL.md").unwrap();
+    fn resolve_memory_path_identity() {
+        let path = resolve_memory_path("IDENTITY.md").unwrap();
         assert!(path.to_string_lossy().contains(".borg"));
-        assert!(path.to_string_lossy().ends_with("SOUL.md"));
+        assert!(path.to_string_lossy().ends_with("IDENTITY.md"));
         // Should NOT be inside memory/ subdirectory
-        assert!(!path.to_string_lossy().contains("memory/SOUL.md"));
+        assert!(!path.to_string_lossy().contains("memory/IDENTITY.md"));
     }
 
     #[test]
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn validate_accepts_simple_filenames() {
-        assert!(validate_memory_filename("SOUL.md").is_ok());
+        assert!(validate_memory_filename("IDENTITY.md").is_ok());
         assert!(validate_memory_filename("MEMORY.md").is_ok());
         assert!(validate_memory_filename("notes.md").is_ok());
         assert!(validate_memory_filename("my-topic.md").is_ok());
