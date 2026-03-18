@@ -136,6 +136,186 @@ fn load_memory_files_from_dir(
     Ok(())
 }
 
+/// Load memory context with files ordered by semantic ranking.
+/// Files in `ranked_global`/`ranked_local` are loaded in that order.
+/// Files not present in rankings are appended at the end in mtime order.
+#[instrument(skip_all, fields(token_budget = max_tokens))]
+pub fn load_memory_context_ranked(
+    max_tokens: usize,
+    ranked_global: &[(String, f32)],
+    ranked_local: &[(String, f32)],
+) -> Result<String> {
+    let mut parts = Vec::new();
+    let mut estimated_tokens = 0;
+
+    // Always load MEMORY.md first (global)
+    let index_path = memory_index_path()?;
+    if index_path.exists() {
+        let content = std::fs::read_to_string(&index_path)?;
+        let tokens = estimate_tokens(&content);
+        if tokens < max_tokens {
+            parts.push(format!(
+                "<memory_file name=\"MEMORY.md\">\n{content}\n</memory_file>"
+            ));
+            estimated_tokens += tokens;
+            debug!("Loaded MEMORY.md ({tokens} estimated tokens)");
+        }
+    }
+
+    // Load global memory/*.md in ranked order
+    let mem_dir = memory_dir()?;
+    load_memory_files_ranked(
+        &mem_dir,
+        "Memory",
+        ranked_global,
+        max_tokens,
+        &mut estimated_tokens,
+        &mut parts,
+    )?;
+
+    // Load local project memory
+    if let Ok(cwd) = std::env::current_dir() {
+        let local_mem_dir = cwd.join(".borg").join("memory");
+        if local_mem_dir.exists() {
+            // Also load local MEMORY.md if present
+            let local_index = cwd.join(".borg").join("MEMORY.md");
+            if local_index.exists() {
+                let content = std::fs::read_to_string(&local_index)?;
+                let tokens = estimate_tokens(&content);
+                if estimated_tokens + tokens <= max_tokens {
+                    parts.push(format!(
+                        "<memory_file name=\"Local MEMORY.md\">\n{content}\n</memory_file>"
+                    ));
+                    estimated_tokens += tokens;
+                    debug!("Loaded local MEMORY.md ({tokens} estimated tokens)");
+                }
+            }
+            load_memory_files_ranked(
+                &local_mem_dir,
+                "Local Memory",
+                ranked_local,
+                max_tokens,
+                &mut estimated_tokens,
+                &mut parts,
+            )?;
+        }
+    }
+
+    if parts.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(parts.join("\n\n"))
+    }
+}
+
+/// Load memory files in ranked order, appending unranked files by mtime at the end.
+fn load_memory_files_ranked(
+    dir: &std::path::Path,
+    label: &str,
+    rankings: &[(String, f32)],
+    max_tokens: usize,
+    estimated_tokens: &mut usize,
+    parts: &mut Vec<String>,
+) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    // Collect all .md files in directory
+    let all_files: std::collections::HashSet<String> = std::fs::read_dir(dir)?
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
+        .filter_map(|e| {
+            e.path()
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+        })
+        .collect();
+
+    // Track which files we've loaded
+    let mut loaded = std::collections::HashSet::new();
+
+    // First: load ranked files in order
+    for (filename, _score) in rankings {
+        if !all_files.contains(filename) {
+            continue;
+        }
+        let path = dir.join(filename);
+        if !path.exists() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let tokens = estimate_tokens(&content);
+        if *estimated_tokens + tokens > max_tokens {
+            debug!("Skipping {} (would exceed token budget)", path.display());
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        parts.push(format!(
+            "<memory_file name=\"{label}: {stem}\">\n{content}\n</memory_file>"
+        ));
+        *estimated_tokens += tokens;
+        loaded.insert(filename.clone());
+        debug!(
+            "Loaded {}/{filename} ({tokens} estimated tokens, ranked)",
+            dir.display()
+        );
+    }
+
+    // Second: load unranked files by mtime (most recent first)
+    let mut unranked: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(std::result::Result::ok)
+        .filter(|e| {
+            e.path().extension().map(|ext| ext == "md").unwrap_or(false)
+                && !loaded.contains(
+                    &e.path()
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
+                )
+        })
+        .collect();
+    unranked.sort_by(|a, b| {
+        let time_a = a.metadata().and_then(|m| m.modified()).ok();
+        let time_b = b.metadata().and_then(|m| m.modified()).ok();
+        time_b.cmp(&time_a)
+    });
+
+    for entry in unranked {
+        let content = std::fs::read_to_string(entry.path())?;
+        let tokens = estimate_tokens(&content);
+        if *estimated_tokens + tokens > max_tokens {
+            debug!(
+                "Skipping {} (would exceed token budget)",
+                entry.path().display()
+            );
+            continue;
+        }
+        let filename = entry
+            .path()
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        parts.push(format!(
+            "<memory_file name=\"{label}: {filename}\">\n{content}\n</memory_file>"
+        ));
+        *estimated_tokens += tokens;
+        debug!(
+            "Loaded {}/{}.md ({tokens} estimated tokens, unranked)",
+            dir.display(),
+            filename
+        );
+    }
+
+    Ok(())
+}
+
 fn validate_memory_filename(filename: &str) -> Result<()> {
     if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
         bail!("Invalid memory filename: must not contain path separators or '..'");
@@ -429,5 +609,90 @@ mod tests {
         assert!(validate_memory_filename("MEMORY.md").is_ok());
         assert!(validate_memory_filename("notes.md").is_ok());
         assert!(validate_memory_filename("my-topic.md").is_ok());
+    }
+
+    #[test]
+    fn load_memory_files_ranked_respects_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        std::fs::write(dir.join("a.md"), "content_a").unwrap();
+        std::fs::write(dir.join("b.md"), "content_b").unwrap();
+        std::fs::write(dir.join("c.md"), "content_c").unwrap();
+
+        // Rank: c first, then a, then b
+        let rankings = vec![
+            ("c.md".to_string(), 0.9),
+            ("a.md".to_string(), 0.5),
+            ("b.md".to_string(), 0.3),
+        ];
+
+        let mut parts = Vec::new();
+        let mut tokens = 0;
+        load_memory_files_ranked(dir, "Test", &rankings, 100_000, &mut tokens, &mut parts).unwrap();
+
+        let combined = parts.join("\n");
+        let pos_c = combined.find("content_c").unwrap();
+        let pos_a = combined.find("content_a").unwrap();
+        let pos_b = combined.find("content_b").unwrap();
+        assert!(
+            pos_c < pos_a,
+            "c (rank 0.9) should appear before a (rank 0.5)"
+        );
+        assert!(
+            pos_a < pos_b,
+            "a (rank 0.5) should appear before b (rank 0.3)"
+        );
+    }
+
+    #[test]
+    fn load_memory_files_ranked_includes_unranked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        std::fs::write(dir.join("ranked.md"), "ranked_content").unwrap();
+        std::fs::write(dir.join("unranked.md"), "unranked_content").unwrap();
+
+        let rankings = vec![("ranked.md".to_string(), 1.0)];
+
+        let mut parts = Vec::new();
+        let mut tokens = 0;
+        load_memory_files_ranked(dir, "Test", &rankings, 100_000, &mut tokens, &mut parts).unwrap();
+
+        let combined = parts.join("\n");
+        assert!(combined.contains("ranked_content"));
+        assert!(
+            combined.contains("unranked_content"),
+            "Unranked files should be appended"
+        );
+
+        // Ranked should appear before unranked
+        let pos_r = combined.find("ranked_content").unwrap();
+        let pos_u = combined.find("unranked_content").unwrap();
+        assert!(pos_r < pos_u);
+    }
+
+    #[test]
+    fn load_memory_files_ranked_respects_token_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        let big_content = "budgetword ".repeat(5000);
+        std::fs::write(dir.join("big.md"), &big_content).unwrap();
+        std::fs::write(dir.join("small.md"), "tiny").unwrap();
+
+        let rankings = vec![("big.md".to_string(), 1.0), ("small.md".to_string(), 0.5)];
+
+        let mut parts = Vec::new();
+        let mut tokens = 0;
+        // Budget of 50 tokens — big.md should be skipped, small.md should fit
+        load_memory_files_ranked(dir, "Test", &rankings, 50, &mut tokens, &mut parts).unwrap();
+
+        let combined = parts.join("\n");
+        assert!(
+            !combined.contains("budgetword"),
+            "Big file exceeding budget should be skipped"
+        );
+        assert!(combined.contains("tiny"), "Small file should fit in budget");
     }
 }
