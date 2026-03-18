@@ -74,6 +74,7 @@ System prompt assembled each turn: `IDENTITY.md` + current time + memory context
 | `read_pdf` | Extract text from a PDF file with token-aware truncation |
 | `create_channel` | Create/modify channel integrations in `~/.borg/channels/` via patch DSL |
 | `list_channels` | List all messaging channels with status and webhook paths |
+| `browser` | Headless Chrome automation (navigate, click, type, screenshot, get_text, evaluate_js, close). Requires `browser.enabled = true` |
 | `security_audit` | Run host security audit (firewall, ports, SSH, permissions, encryption, updates, services). Requires `security.host_audit = true` |
 
 ## User Tools
@@ -369,7 +370,7 @@ Six-layer defense against prompt injection attacks:
 | `crates/core/src/skills.rs` | Skills loading, parsing, progressive token budgeting |
 | `crates/core/src/hooks.rs` | Lifecycle hook system (trait, registry, dispatch) |
 | `crates/core/src/doctor.rs` | Diagnostic checks and report formatting |
-| `crates/core/src/browser.rs` | Chrome detection, agent-browser CLI check |
+| `crates/core/src/browser.rs` | Chrome detection, CDP session management, browser automation |
 | `crates/core/src/host_audit.rs` | Host security audit checks (firewall, ports, SSH, permissions, encryption, updates, services) |
 | `crates/core/src/sanitize.rs` | Prompt injection detection (scoring-based, regex patterns, untrusted content wrapping) |
 | `crates/core/src/rate_guard.rs` | Per-session rate limiting for tool calls, shell commands, file/memory writes, web requests |

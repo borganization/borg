@@ -654,9 +654,9 @@ fn render(
 
         let chunks = Layout::vertical([
             Constraint::Length(LOGO_HEIGHT + 1), // logo + 1 line padding below
-            Constraint::Length(1), // tab bar
-            Constraint::Min(8),    // content
-            Constraint::Length(1), // footer
+            Constraint::Length(1),               // tab bar
+            Constraint::Min(8),                  // content
+            Constraint::Length(1),               // footer
         ])
         .split(area);
 
