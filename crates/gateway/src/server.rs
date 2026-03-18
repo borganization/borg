@@ -26,6 +26,7 @@ use crate::retry::RetryPolicy;
 use crate::slack::api::SlackClient;
 use crate::telegram::api::TelegramClient;
 use crate::telegram::dedup::UpdateDeduplicator;
+use crate::twilio::api::TwilioClient;
 
 const MAX_BODY_SIZE: usize = 2 * 1024 * 1024; // 2 MB
 
@@ -41,6 +42,10 @@ struct AppState {
     telegram_secret: Option<String>,
     slack_client: Option<Arc<SlackClient>>,
     slack_signing_secret: Option<String>,
+    twilio_client: Option<Arc<TwilioClient>>,
+    twilio_auth_token: Option<String>,
+    twilio_phone_number: Option<String>,
+    twilio_whatsapp_number: Option<String>,
 }
 
 pub struct GatewayServer {
@@ -146,6 +151,25 @@ impl GatewayServer {
             None => None,
         };
 
+        // Initialize native Twilio client if credentials are available
+        let twilio_account_sid = self.config.resolve_credential_or_env("TWILIO_ACCOUNT_SID");
+        let twilio_auth_token = self.config.resolve_credential_or_env("TWILIO_AUTH_TOKEN");
+        let twilio_phone_number = self.config.resolve_credential_or_env("TWILIO_PHONE_NUMBER");
+        let twilio_whatsapp_number = self
+            .config
+            .resolve_credential_or_env("TWILIO_WHATSAPP_NUMBER");
+
+        let twilio_client = match (&twilio_account_sid, &twilio_auth_token) {
+            (Some(sid), Some(token)) => {
+                info!(
+                    "Twilio native integration active (account: {}...)",
+                    &sid[..sid.len().min(8)]
+                );
+                Some(Arc::new(TwilioClient::new(sid, token)))
+            }
+            _ => None,
+        };
+
         let state = Arc::new(AppState {
             config: self.config.clone(),
             registry,
@@ -158,6 +182,10 @@ impl GatewayServer {
             telegram_secret,
             slack_client,
             slack_signing_secret,
+            twilio_client,
+            twilio_auth_token,
+            twilio_phone_number,
+            twilio_whatsapp_number,
         });
 
         let app = Router::new()
@@ -266,7 +294,10 @@ impl GatewayServer {
                 continue;
             }
 
-            // iMessage is handled natively by the daemon — skip its poll loop here
+            // iMessage is handled natively by the daemon — skip its poll loop here.
+            // When the imessage feature is off, a user-created "imessage" channel
+            // falls through to the generic poll loop, which is the intended behavior.
+            #[cfg(target_os = "macos")]
             if channel.manifest.name == "imessage" {
                 info!(
                     "Skipping poll loop for '{}' (handled natively)",
@@ -570,6 +601,12 @@ async fn webhook_handler(
         }
     }
 
+    if name == "twilio" || name == "whatsapp" || name == "sms" {
+        if let Some(ref twilio_client) = state.twilio_client {
+            return handle_twilio_webhook(&state, twilio_client, &headers, &body).await;
+        }
+    }
+
     // Convert headers to JSON
     let mut headers_map = serde_json::Map::new();
     for (key, value) in headers.iter() {
@@ -757,6 +794,120 @@ async fn handle_slack_webhook(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({ "error": "Internal server error" })),
+            )
+        }
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            axum::Json(serde_json::json!({ "error": "Request timed out" })),
+        ),
+    }
+}
+
+async fn handle_twilio_webhook(
+    state: &Arc<AppState>,
+    twilio_client: &Arc<TwilioClient>,
+    headers: &HeaderMap,
+    body: &str,
+) -> WebhookResponse {
+    use crate::twilio::types::TwilioChannelType;
+
+    // Verify signature if auth token is available
+    if let Some(ref auth_token) = state.twilio_auth_token {
+        if let Some(ref public_url) = state.config.gateway.public_url {
+            let webhook_url = format!("{public_url}/webhook/twilio");
+            if let Err(e) = crate::twilio::verify::verify_twilio_signature(
+                headers,
+                &webhook_url,
+                body,
+                auth_token,
+            ) {
+                warn!("Twilio signature verification failed: {e}");
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": "Unauthorized" })),
+                );
+            }
+        } else {
+            // Without public_url, we cannot verify Twilio signatures since
+            // the full URL is part of the HMAC input. Log and proceed.
+            warn!("Twilio webhook received without gateway.public_url — signature not verified");
+        }
+    }
+
+    // Parse inbound message
+    let parsed = match crate::twilio::parse::parse_webhook(body) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("Failed to parse Twilio webhook: {e}");
+            // Twilio expects 200 even on parse errors to avoid retries
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            );
+        }
+    };
+
+    let channel_type = parsed.channel_type;
+    let sender = parsed.message.sender_id.clone();
+
+    let result = tokio::time::timeout(state.request_timeout, async {
+        let (response_text, _session_id) = handler::invoke_agent(
+            channel_type.as_str(),
+            &parsed.message,
+            &state.config,
+            Some(&state.health),
+        )
+        .await?;
+
+        let from_number = match channel_type {
+            TwilioChannelType::WhatsApp => state.twilio_whatsapp_number.as_deref(),
+            TwilioChannelType::Sms => state.twilio_phone_number.as_deref(),
+        };
+
+        if let Some(from) = from_number {
+            let send_result = match channel_type {
+                TwilioChannelType::WhatsApp => {
+                    twilio_client
+                        .send_whatsapp(from, &sender, &response_text)
+                        .await
+                }
+                TwilioChannelType::Sms => {
+                    twilio_client.send_sms(from, &sender, &response_text).await
+                }
+            };
+
+            if let Err(e) = send_result {
+                warn!("Failed to send Twilio {channel_type} response: {e}");
+                state
+                    .health
+                    .write()
+                    .await
+                    .record_error(channel_type.as_str(), &e.to_string());
+            } else {
+                state
+                    .health
+                    .write()
+                    .await
+                    .record_outbound(channel_type.as_str());
+            }
+        } else {
+            warn!("No outbound phone number configured for {channel_type}");
+        }
+
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": true })),
+        ),
+        Ok(Err(e)) => {
+            warn!("Twilio agent/send error: {e:#}");
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
             )
         }
         Err(_) => (

@@ -317,6 +317,13 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
         std::fs::create_dir_all(data_dir.join(sub))?;
     }
 
+    // Install bundled skills to filesystem
+    match borg_core::skills::install_default_skills(&data_dir) {
+        Ok(0) => {}
+        Ok(n) => println!("  Installed {n} default skill(s)"),
+        Err(e) => eprintln!("  Warning: failed to install default skills: {e}"),
+    }
+
     // Write config.toml (skip if already exists to avoid clobbering manual edits)
     let config_path = data_dir.join("config.toml");
     if config_path.exists() {
