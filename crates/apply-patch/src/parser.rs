@@ -10,15 +10,27 @@ pub enum ParseError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatchOperation {
-    AddFile { path: String, content: String },
-    UpdateFile { path: String, hunks: Vec<Hunk> },
-    DeleteFile { path: String },
+    AddFile {
+        path: String,
+        content: String,
+    },
+    UpdateFile {
+        path: String,
+        move_to: Option<String>,
+        hunks: Vec<Hunk>,
+    },
+    DeleteFile {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hunk {
+    pub context_hint: Option<String>,
     pub search: String,
     pub replace: String,
+    pub is_end_of_file: bool,
+    pub source_line: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -33,6 +45,8 @@ const END_PATCH_MARKER: &str = "*** End Patch";
 const ADD_FILE_MARKER: &str = "*** Add File: ";
 const DELETE_FILE_MARKER: &str = "*** Delete File: ";
 const UPDATE_FILE_MARKER: &str = "*** Update File: ";
+const MOVE_TO_MARKER: &str = "*** Move to: ";
+const EOF_MARKER: &str = "*** End of File";
 
 /// Parse a patch string into a structured `Patch`.
 ///
@@ -106,6 +120,20 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
         } else if let Some(path) = line.strip_prefix(UPDATE_FILE_MARKER) {
             let path = path.trim().to_string();
             i += 1;
+
+            // Check for optional *** Move to: line
+            let move_to = if i < lines.len() {
+                let next = lines[i].trim();
+                if let Some(dest) = next.strip_prefix(MOVE_TO_MARKER) {
+                    i += 1;
+                    Some(dest.trim().to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let mut hunks = Vec::new();
 
             // Parse chunks until we hit a *** marker (next operation or end)
@@ -118,15 +146,36 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
                     continue;
                 }
 
-                if hunk_line.starts_with("@@") {
-                    // Consume the @@ header line
+                if let Some(after_at) = hunk_line.strip_prefix("@@") {
+                    let hunk_source_line = i + 1; // 1-based line number
+
+                    // Extract context hint from @@ header (strip trailing @@ if present)
+                    let context_hint = {
+                        let trimmed = after_at.trim();
+                        let trimmed = trimmed.strip_suffix("@@").unwrap_or(trimmed).trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    };
+
                     i += 1;
                     let mut search_lines = Vec::new();
                     let mut replace_lines = Vec::new();
+                    let mut is_end_of_file = false;
 
                     // Collect diff lines: must start with ' ', '-', or '+'
                     while i < lines.len() {
                         let l = lines[i];
+
+                        // Check for *** End of File marker
+                        if l.trim() == EOF_MARKER {
+                            is_end_of_file = true;
+                            i += 1;
+                            break;
+                        }
+
                         if let Some(removed) = l.strip_prefix('-') {
                             search_lines.push(removed);
                         } else if let Some(added) = l.strip_prefix('+') {
@@ -146,8 +195,11 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
                     }
 
                     hunks.push(Hunk {
+                        context_hint,
                         search: search_lines.join("\n"),
                         replace: replace_lines.join("\n"),
+                        is_end_of_file,
+                        source_line: hunk_source_line,
                     });
                 } else {
                     // Non-@@ non-blank line — skip (shouldn't happen in well-formed input)
@@ -155,7 +207,11 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
                 }
             }
 
-            operations.push(PatchOperation::UpdateFile { path, hunks });
+            operations.push(PatchOperation::UpdateFile {
+                path,
+                move_to,
+                hunks,
+            });
         } else if let Some(path) = line.strip_prefix(DELETE_FILE_MARKER) {
             let path = path.trim().to_string();
             operations.push(PatchOperation::DeleteFile { path });
@@ -342,7 +398,7 @@ mod tests {
         let patch = parse_patch(input).unwrap();
         assert_eq!(patch.operations.len(), 1);
         match &patch.operations[0] {
-            PatchOperation::UpdateFile { path, hunks } => {
+            PatchOperation::UpdateFile { path, hunks, .. } => {
                 assert_eq!(path, "src/lib.rs");
                 assert_eq!(hunks.len(), 1);
                 assert!(hunks[0].search.contains("println!(\"hi\");"));
@@ -420,7 +476,7 @@ mod tests {
         let patch = parse_patch(input).unwrap();
         assert_eq!(patch.operations.len(), 2);
         match &patch.operations[0] {
-            PatchOperation::UpdateFile { path, hunks } => {
+            PatchOperation::UpdateFile { path, hunks, .. } => {
                 assert_eq!(path, "file.py");
                 assert_eq!(hunks.len(), 1);
                 assert!(hunks[0].replace.contains("line"));
@@ -490,7 +546,7 @@ mod tests {
             other => panic!("Expected AddFile, got {:?}", other),
         }
         match &patch.operations[1] {
-            PatchOperation::UpdateFile { path, hunks } => {
+            PatchOperation::UpdateFile { path, hunks, .. } => {
                 assert_eq!(path, "src/app.py");
                 assert_eq!(hunks.len(), 1);
                 assert!(hunks[0].search.contains("print(\"Hi\")"));
@@ -573,6 +629,147 @@ mod tests {
                 assert_eq!(content, "hi");
             }
             other => panic!("Expected AddFile, got {:?}", other),
+        }
+    }
+
+    // ── New feature tests ──
+
+    #[test]
+    fn parse_move_to() {
+        let input = "\
+*** Begin Patch
+*** Update File: old.rs
+*** Move to: new.rs
+@@
+-old
++new
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile {
+                path,
+                move_to,
+                hunks,
+                ..
+            } => {
+                assert_eq!(path, "old.rs");
+                assert_eq!(move_to.as_deref(), Some("new.rs"));
+                assert_eq!(hunks.len(), 1);
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_end_of_file_marker() {
+        let input = "\
+*** Begin Patch
+*** Update File: f.txt
+@@
+-old
++new
+*** End of File
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert_eq!(hunks.len(), 1);
+                assert!(hunks[0].is_end_of_file);
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_context_hint() {
+        let input = "\
+*** Begin Patch
+*** Update File: f.txt
+@@ fn hello()
+ fn hello() {
+-    old();
++    new();
+ }
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert_eq!(hunks[0].context_hint.as_deref(), Some("fn hello()"));
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_source_line_tracking() {
+        let input = "\
+*** Begin Patch
+*** Update File: f.txt
+@@
+-old
++new
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                // @@ is on line 3 (1-indexed)
+                assert_eq!(hunks[0].source_line, 3);
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_no_context_hint_gives_none() {
+        let input = "\
+*** Begin Patch
+*** Update File: f.txt
+@@
+-old
++new
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert!(hunks[0].context_hint.is_none());
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_no_eof_marker_gives_false() {
+        let input = "\
+*** Begin Patch
+*** Update File: f.txt
+@@
+-old
++new
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert!(!hunks[0].is_end_of_file);
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_update_without_move_to() {
+        let input = "\
+*** Begin Patch
+*** Update File: f.txt
+@@
+-old
++new
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { move_to, .. } => {
+                assert!(move_to.is_none());
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
         }
     }
 }
