@@ -171,6 +171,12 @@ pub enum AgentEvent {
         reason: String,
         respond: oneshot::Sender<bool>,
     },
+    /// Real-time output line from a running tool.
+    ToolOutputDelta {
+        name: String,
+        delta: String,
+        is_stderr: bool,
+    },
     Usage(UsageData),
     SubAgentUpdate {
         agent_id: String,
@@ -506,7 +512,7 @@ impl Agent {
                             .as_deref()
                             .unwrap_or("(no output)")
                     );
-                    self.persist_message(Message::user(&ctx));
+                    self.persist_message(Message::tool_result("sub-agent", &ctx));
                 }
             }
 

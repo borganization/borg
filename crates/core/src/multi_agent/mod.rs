@@ -150,10 +150,10 @@ impl AgentControl {
             child_config.llm.model = model.to_string();
         }
 
-        // Sub-agents auto-approve shell commands (like gateway mode)
+        // Sub-agents auto-approve shell commands but preserve deny list
         child_config.policy = crate::policy::ExecutionPolicy {
             auto_approve: vec!["*".to_string()],
-            deny: vec![],
+            deny: parent_config.policy.deny.clone(),
         };
 
         child_config
@@ -479,6 +479,12 @@ impl AgentControl {
     }
 }
 
+impl Drop for AgentControl {
+    fn drop(&mut self) {
+        self.shutdown_all();
+    }
+}
+
 /// Run a sub-agent task. Returns the final text response.
 /// Uses Box::pin to break the async recursion cycle (Agent -> AgentControl -> spawn -> Agent).
 #[allow(clippy::too_many_arguments)]
@@ -560,7 +566,8 @@ fn run_sub_agent(
                             let _ = respond.send(true);
                         }
                         Some(AgentEvent::ToolConfirmation { respond, .. }) => {
-                            let _ = respond.send(true);
+                            // Deny dangerous ops in sub-agents (like gateway mode)
+                            let _ = respond.send(false);
                         }
                         _ => {}
                     }
