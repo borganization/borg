@@ -578,13 +578,13 @@ mod tests {
         let tmp = std::env::temp_dir().join("borg-customize-test-cred-phase");
         popup.show(&tmp);
 
-        // Telegram requires credentials — select it
-        let telegram_idx = popup
+        // Gmail requires credentials — select it
+        let gmail_idx = popup
             .items
             .iter()
-            .position(|i| i.def.id == "messaging/telegram")
-            .expect("Telegram should be in catalog");
-        popup.cursor = telegram_idx;
+            .position(|i| i.def.id == "email/gmail")
+            .expect("Gmail should be in catalog");
+        popup.cursor = gmail_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -606,12 +606,12 @@ mod tests {
         let tmp = std::env::temp_dir().join("borg-customize-test-cred-esc");
         popup.show(&tmp);
 
-        let telegram_idx = popup
+        let gmail_idx = popup
             .items
             .iter()
-            .position(|i| i.def.id == "messaging/telegram")
-            .expect("Telegram should be in catalog");
-        popup.cursor = telegram_idx;
+            .position(|i| i.def.id == "email/gmail")
+            .expect("Gmail should be in catalog");
+        popup.cursor = gmail_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -631,12 +631,12 @@ mod tests {
         let tmp = std::env::temp_dir().join("borg-customize-test-cred-bs");
         popup.show(&tmp);
 
-        let telegram_idx = popup
+        let gmail_idx = popup
             .items
             .iter()
-            .position(|i| i.def.id == "messaging/telegram")
-            .expect("Telegram should be in catalog");
-        popup.cursor = telegram_idx;
+            .position(|i| i.def.id == "email/gmail")
+            .expect("Gmail should be in catalog");
+        popup.cursor = gmail_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -668,13 +668,13 @@ mod tests {
         let tmp = std::env::temp_dir().join("borg-customize-test-cred-enter");
         popup.show(&tmp);
 
-        // Telegram has 1 required credential
-        let telegram_idx = popup
+        // Gmail has 1 required credential
+        let gmail_idx = popup
             .items
             .iter()
-            .position(|i| i.def.id == "messaging/telegram")
-            .expect("Telegram should be in catalog");
-        popup.cursor = telegram_idx;
+            .position(|i| i.def.id == "email/gmail")
+            .expect("Gmail should be in catalog");
+        popup.cursor = gmail_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -688,7 +688,7 @@ mod tests {
         // Submit with Enter
         let result = popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        // Telegram has 1 credential, so this should complete
+        // Gmail has 1 credential, so this should complete
         assert!(result.is_some());
         let actions = result.expect("should have actions");
         let install_action = actions
@@ -697,7 +697,7 @@ mod tests {
             .expect("should have install action");
         if let CustomizeAction::Install { credentials, .. } = install_action {
             assert_eq!(credentials.len(), 1);
-            assert_eq!(credentials[0].0, "TELEGRAM_BOT_TOKEN");
+            assert_eq!(credentials[0].0, "GMAIL_API_KEY");
             assert_eq!(credentials[0].1, "my-bot-token");
         }
     }

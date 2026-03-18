@@ -727,6 +727,16 @@ impl Config {
             })
             .collect()
     }
+
+    /// Resolve a credential by name: credential store first, then env var fallback.
+    /// Returns `None` if not found or empty.
+    pub fn resolve_credential_or_env(&self, name: &str) -> Option<String> {
+        self.credentials
+            .get(name)
+            .and_then(|cv| cv.resolve().ok())
+            .or_else(|| std::env::var(name).ok())
+            .filter(|t| !t.is_empty())
+    }
 }
 
 #[cfg(test)]

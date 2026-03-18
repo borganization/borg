@@ -21,6 +21,7 @@ pub mod skills;
 pub mod soul;
 pub mod tasks;
 pub mod tokenizer;
+pub mod tool_handlers;
 pub mod truncate;
 pub mod types;
 pub mod web;

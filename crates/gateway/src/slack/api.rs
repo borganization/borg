@@ -8,6 +8,8 @@ use super::types::{AuthTestResponse, PostMessageRequest};
 use crate::chunker;
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
+const MESSAGE_CHUNK_SIZE: usize = 4000;
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A client for the Slack Web API.
 #[derive(Clone)]
@@ -20,7 +22,7 @@ impl SlackClient {
     pub fn new(token: &str) -> Self {
         Self {
             client: Client::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(HTTP_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
             token: token.to_string(),
@@ -58,7 +60,7 @@ impl SlackClient {
         text: &str,
         thread_ts: Option<&str>,
     ) -> Result<()> {
-        let chunks = chunker::chunk_text(text, 4000);
+        let chunks = chunker::chunk_text(text, MESSAGE_CHUNK_SIZE);
         let chunks = if chunks.is_empty() {
             vec![text.to_string()]
         } else {

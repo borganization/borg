@@ -5,6 +5,8 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
+const TIMESTAMP_REPLAY_WINDOW_SECS: u64 = 300;
+
 /// Verify a Slack request signature using HMAC-SHA256.
 ///
 /// Slack signs requests with `v0=HMAC-SHA256(signing_secret, "v0:{timestamp}:{body}")`.
@@ -21,7 +23,7 @@ pub fn verify_slack_signature(headers: &HeaderMap, body: &str, signing_secret: &
         .parse()
         .map_err(|_| anyhow::anyhow!("Invalid X-Slack-Request-Timestamp: not an integer"))?;
     let now = chrono::Utc::now().timestamp();
-    if (now - ts).unsigned_abs() > 300 {
+    if (now - ts).unsigned_abs() > TIMESTAMP_REPLAY_WINDOW_SECS {
         bail!("Slack request timestamp too old (replay protection)");
     }
 

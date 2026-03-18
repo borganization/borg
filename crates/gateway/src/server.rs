@@ -27,6 +27,8 @@ use crate::slack::api::SlackClient;
 use crate::telegram::api::TelegramClient;
 use crate::telegram::dedup::UpdateDeduplicator;
 
+const MAX_BODY_SIZE: usize = 2 * 1024 * 1024; // 2 MB
+
 struct AppState {
     config: Config,
     registry: ChannelRegistry,
@@ -75,22 +77,10 @@ impl GatewayServer {
             None
         };
 
-        // Resolve Telegram bot token via credential store, falling back to env var
-        let telegram_token = self
-            .config
-            .credentials
-            .get("TELEGRAM_BOT_TOKEN")
-            .and_then(|cv| cv.resolve().ok())
-            .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok())
-            .filter(|t| !t.is_empty());
-
-        // Resolve webhook secret via credential store, falling back to env var
+        let telegram_token = self.config.resolve_credential_or_env("TELEGRAM_BOT_TOKEN");
         let telegram_secret = self
             .config
-            .credentials
-            .get("TELEGRAM_WEBHOOK_SECRET")
-            .and_then(|cv| cv.resolve().ok())
-            .or_else(|| std::env::var("TELEGRAM_WEBHOOK_SECRET").ok());
+            .resolve_credential_or_env("TELEGRAM_WEBHOOK_SECRET");
 
         // Initialize native Telegram client if token is available
         let telegram_client = match telegram_token {
@@ -129,21 +119,10 @@ impl GatewayServer {
 
         let telegram_dedup = Arc::new(Mutex::new(UpdateDeduplicator::new()));
 
-        // Resolve Slack credentials via credential store, falling back to env vars
-        let slack_token = self
-            .config
-            .credentials
-            .get("SLACK_BOT_TOKEN")
-            .and_then(|cv| cv.resolve().ok())
-            .or_else(|| std::env::var("SLACK_BOT_TOKEN").ok())
-            .filter(|t| !t.is_empty());
-
+        let slack_token = self.config.resolve_credential_or_env("SLACK_BOT_TOKEN");
         let slack_signing_secret = self
             .config
-            .credentials
-            .get("SLACK_SIGNING_SECRET")
-            .and_then(|cv| cv.resolve().ok())
-            .or_else(|| std::env::var("SLACK_SIGNING_SECRET").ok());
+            .resolve_credential_or_env("SLACK_SIGNING_SECRET");
 
         // Initialize native Slack client if token is available
         let slack_client = match slack_token {
@@ -186,7 +165,7 @@ impl GatewayServer {
             .route("/health/channels", get(channel_health_handler))
             .route("/channels", get(list_channels_handler))
             .route("/webhook/{name}", post(webhook_handler))
-            .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
+            .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
             .with_state(state.clone());
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -537,7 +516,7 @@ async fn webhook_handler(
     Path(name): Path<String>,
     headers: HeaderMap,
     body: String,
-) -> impl IntoResponse {
+) -> WebhookResponse {
     let channel = match state.registry.get(&name) {
         Some(c) => c,
         None => {
@@ -578,163 +557,16 @@ async fn webhook_handler(
         }
     };
 
-    // Native Telegram handling
+    // Native channel handling
     if name == "telegram" {
         if let Some(ref tg_client) = state.telegram_client {
-            let result = tokio::time::timeout(state.request_timeout, async {
-                let inbound = crate::telegram::handle_telegram_webhook(
-                    &headers,
-                    &body,
-                    state.telegram_secret.as_deref(),
-                    &state.telegram_dedup,
-                )
-                .await?;
-
-                let inbound = match inbound {
-                    Some(msg) => msg,
-                    None => return Ok::<_, anyhow::Error>("(skipped)".to_string()),
-                };
-
-                let chat_id: i64 = inbound
-                    .channel_id
-                    .as_deref()
-                    .and_then(|id| id.parse().ok())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Missing or invalid chat_id in Telegram update")
-                    })?;
-
-                let thread_id: Option<i64> =
-                    inbound.thread_id.as_deref().and_then(|id| id.parse().ok());
-
-                let reply_to: Option<i64> =
-                    inbound.message_id.as_deref().and_then(|id| id.parse().ok());
-
-                // Send typing indicator
-                let _ = tg_client.send_typing(chat_id).await;
-
-                // Invoke agent
-                let (response_text, _session_id) =
-                    handler::invoke_agent("telegram", &inbound, &state.config, Some(&state.health))
-                        .await?;
-
-                // Send response with HTML formatting and plain-text fallback
-                send_telegram_response(
-                    tg_client,
-                    chat_id,
-                    &response_text,
-                    thread_id,
-                    reply_to,
-                    &state.health,
-                )
-                .await;
-
-                Ok(response_text)
-            })
-            .await;
-
-            return match result {
-                Ok(Ok(_)) => (
-                    StatusCode::OK,
-                    axum::Json(serde_json::json!({ "ok": true })),
-                ),
-                Ok(Err(e)) => {
-                    warn!("Telegram webhook error: {e:#}");
-                    (
-                        StatusCode::OK,
-                        axum::Json(serde_json::json!({ "ok": true })),
-                    )
-                }
-                Err(_) => (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    axum::Json(serde_json::json!({ "error": "Request timed out" })),
-                ),
-            };
+            return handle_telegram_webhook(&state, tg_client, &headers, &body).await;
         }
     }
 
-    // Native Slack handling
     if name == "slack" {
         if let Some(ref slack_client) = state.slack_client {
-            // Signature verification + envelope parsing (sync, no timeout needed)
-            let webhook_result = match crate::slack::handle_slack_webhook(
-                &headers,
-                &body,
-                state.slack_signing_secret.as_deref(),
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("Slack webhook verification/parse error: {e:#}");
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        axum::Json(serde_json::json!({ "error": "Unauthorized" })),
-                    );
-                }
-            };
-
-            // Handle challenge immediately (no agent invocation needed)
-            if let crate::slack::SlackWebhookResult::Challenge(challenge) = webhook_result {
-                return (
-                    StatusCode::OK,
-                    axum::Json(serde_json::json!({ "challenge": challenge })),
-                );
-            }
-
-            // Handle skip
-            if matches!(webhook_result, crate::slack::SlackWebhookResult::Skip) {
-                return (
-                    StatusCode::OK,
-                    axum::Json(serde_json::json!({ "ok": true })),
-                );
-            }
-
-            // Must be Message — invoke agent with timeout
-            let crate::slack::SlackWebhookResult::Message(inbound) = webhook_result else {
-                unreachable!()
-            };
-
-            let result = tokio::time::timeout(state.request_timeout, async {
-                let channel_id = inbound.channel_id.clone().unwrap_or_default();
-                let thread_ts = inbound.thread_ts.clone();
-
-                let (response_text, _session_id) =
-                    handler::invoke_agent("slack", &inbound, &state.config, Some(&state.health))
-                        .await?;
-
-                if let Err(e) = slack_client
-                    .post_message(&channel_id, &response_text, thread_ts.as_deref())
-                    .await
-                {
-                    warn!("Failed to send Slack response: {e}");
-                    state
-                        .health
-                        .write()
-                        .await
-                        .record_error("slack", &e.to_string());
-                } else {
-                    state.health.write().await.record_outbound("slack");
-                }
-
-                Ok::<_, anyhow::Error>(())
-            })
-            .await;
-
-            return match result {
-                Ok(Ok(())) => (
-                    StatusCode::OK,
-                    axum::Json(serde_json::json!({ "ok": true })),
-                ),
-                Ok(Err(e)) => {
-                    warn!("Slack agent/send error: {e:#}");
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        axum::Json(serde_json::json!({ "error": "Internal server error" })),
-                    )
-                }
-                Err(_) => (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    axum::Json(serde_json::json!({ "error": "Request timed out" })),
-                ),
-            };
+            return handle_slack_webhook(&state, slack_client, &headers, &body).await;
         }
     }
 
@@ -770,6 +602,158 @@ async fn webhook_handler(
         ),
         Ok(Err(e)) => {
             warn!("Webhook handler error for '{name}': {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": "Internal server error" })),
+            )
+        }
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            axum::Json(serde_json::json!({ "error": "Request timed out" })),
+        ),
+    }
+}
+
+type WebhookResponse = (StatusCode, axum::Json<serde_json::Value>);
+
+async fn handle_telegram_webhook(
+    state: &Arc<AppState>,
+    tg_client: &Arc<TelegramClient>,
+    headers: &HeaderMap,
+    body: &str,
+) -> WebhookResponse {
+    let result = tokio::time::timeout(state.request_timeout, async {
+        let inbound = crate::telegram::handle_telegram_webhook(
+            headers,
+            body,
+            state.telegram_secret.as_deref(),
+            &state.telegram_dedup,
+        )
+        .await?;
+
+        let inbound = match inbound {
+            Some(msg) => msg,
+            None => return Ok::<_, anyhow::Error>("(skipped)".to_string()),
+        };
+
+        let chat_id: i64 = inbound
+            .channel_id
+            .as_deref()
+            .and_then(|id| id.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("Missing or invalid chat_id in Telegram update"))?;
+
+        let thread_id: Option<i64> = inbound.thread_id.as_deref().and_then(|id| id.parse().ok());
+        let reply_to: Option<i64> = inbound.message_id.as_deref().and_then(|id| id.parse().ok());
+
+        let _ = tg_client.send_typing(chat_id).await;
+
+        let (response_text, _session_id) =
+            handler::invoke_agent("telegram", &inbound, &state.config, Some(&state.health)).await?;
+
+        send_telegram_response(
+            tg_client,
+            chat_id,
+            &response_text,
+            thread_id,
+            reply_to,
+            &state.health,
+        )
+        .await;
+
+        Ok(response_text)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(_)) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": true })),
+        ),
+        Ok(Err(e)) => {
+            warn!("Telegram webhook error: {e:#}");
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            )
+        }
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            axum::Json(serde_json::json!({ "error": "Request timed out" })),
+        ),
+    }
+}
+
+async fn handle_slack_webhook(
+    state: &Arc<AppState>,
+    slack_client: &Arc<SlackClient>,
+    headers: &HeaderMap,
+    body: &str,
+) -> WebhookResponse {
+    let webhook_result = match crate::slack::handle_slack_webhook(
+        headers,
+        body,
+        state.slack_signing_secret.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Slack webhook verification/parse error: {e:#}");
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({ "error": "Unauthorized" })),
+            );
+        }
+    };
+
+    if let crate::slack::SlackWebhookResult::Challenge(challenge) = webhook_result {
+        return (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "challenge": challenge })),
+        );
+    }
+
+    if matches!(webhook_result, crate::slack::SlackWebhookResult::Skip) {
+        return (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": true })),
+        );
+    }
+
+    let crate::slack::SlackWebhookResult::Message(inbound) = webhook_result else {
+        unreachable!()
+    };
+
+    let result = tokio::time::timeout(state.request_timeout, async {
+        let channel_id = inbound.channel_id.clone().unwrap_or_default();
+        let thread_ts = inbound.thread_ts.clone();
+
+        let (response_text, _session_id) =
+            handler::invoke_agent("slack", &inbound, &state.config, Some(&state.health)).await?;
+
+        if let Err(e) = slack_client
+            .post_message(&channel_id, &response_text, thread_ts.as_deref())
+            .await
+        {
+            warn!("Failed to send Slack response: {e}");
+            state
+                .health
+                .write()
+                .await
+                .record_error("slack", &e.to_string());
+        } else {
+            state.health.write().await.record_outbound("slack");
+        }
+
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": true })),
+        ),
+        Ok(Err(e)) => {
+            warn!("Slack agent/send error: {e:#}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({ "error": "Internal server error" })),
