@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 
 use borg_core::agent::{Agent, AgentEvent};
 use borg_core::config::Config;
+use borg_core::telemetry::BorgMetrics;
 
 pub async fn run() -> Result<()> {
     crate::tui::run().await
@@ -11,7 +12,8 @@ pub async fn run() -> Result<()> {
 
 pub async fn one_shot(message: &str, auto_approve: bool, json_output: bool) -> Result<()> {
     let config = Config::load()?;
-    let mut agent = Agent::new(config)?;
+    let metrics = BorgMetrics::from_config(&config);
+    let mut agent = Agent::new(config, metrics)?;
 
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
 

@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 
 use borg_core::agent::{Agent, AgentEvent};
 use borg_core::config::Config;
+use borg_core::telemetry::BorgMetrics;
 use borg_heartbeat::scheduler::{HeartbeatEvent, HeartbeatScheduler};
 
 use app::{App, AppAction};
@@ -38,15 +39,16 @@ use history::HistoryCell;
 
 /// Spawn the gateway server and/or iMessage monitor if channels are installed.
 /// Returns `true` if anything was actually spawned.
-fn spawn_gateway(config: &Config, shutdown: CancellationToken) -> bool {
+fn spawn_gateway(config: &Config, shutdown: CancellationToken, metrics: BorgMetrics) -> bool {
     let mut spawned = false;
 
     if let Ok(registry) = borg_gateway::ChannelRegistry::new() {
         if !registry.list_channels().is_empty() {
             let gw_config = config.clone();
             let gw_shutdown = shutdown.clone();
+            let gw_metrics = metrics;
             tokio::spawn(async move {
-                match borg_gateway::GatewayServer::new(gw_config, gw_shutdown) {
+                match borg_gateway::GatewayServer::new(gw_config, gw_shutdown, gw_metrics) {
                     Ok(server) => {
                         if let Err(e) = server.run().await {
                             tracing::error!("Gateway exited with error: {e}");
@@ -96,7 +98,7 @@ fn restart_gateway(gateway_shutdown: &Arc<Mutex<CancellationToken>>) -> String {
     // Reload config and spawn
     match Config::load() {
         Ok(config) => {
-            if spawn_gateway(&config, new_token) {
+            if spawn_gateway(&config, new_token, BorgMetrics::noop()) {
                 "Gateway restarted.".to_string()
             } else {
                 "No channels installed — gateway not started.".to_string()
@@ -118,7 +120,8 @@ impl Drop for TerminalGuard {
 
 pub async fn run() -> Result<()> {
     let config = Config::load()?;
-    let mut agent = Agent::new(config.clone())?;
+    let metrics = BorgMetrics::from_config(&config);
+    let mut agent = Agent::new(config.clone(), metrics.clone())?;
 
     // Try to resume the last session
     let mut resumed_info: Option<(String, usize)> = None;
@@ -151,7 +154,7 @@ pub async fn run() -> Result<()> {
     let gateway_shutdown_token = CancellationToken::new();
     let _gateway_guard = gateway_shutdown_token.clone().drop_guard();
     if config.gateway.enabled {
-        spawn_gateway(&config, gateway_shutdown_token.clone());
+        spawn_gateway(&config, gateway_shutdown_token.clone(), metrics.clone());
     }
     let gateway_shutdown = Arc::new(Mutex::new(gateway_shutdown_token));
 

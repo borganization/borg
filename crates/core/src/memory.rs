@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use std::path::PathBuf;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::config::Config;
 use crate::tokenizer::estimate_tokens;
@@ -19,6 +19,7 @@ pub fn memory_index_path() -> Result<PathBuf> {
     Config::memory_index_path()
 }
 
+#[instrument(skip_all, fields(token_budget = max_tokens))]
 pub fn load_memory_context(max_tokens: usize) -> Result<String> {
     let mut parts = Vec::new();
     let mut estimated_tokens = 0;

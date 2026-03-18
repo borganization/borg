@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::config::Config;
 use crate::tokenizer::estimate_tokens;
@@ -312,6 +312,7 @@ pub fn load_all_skills(
     Ok(skills)
 }
 
+#[instrument(skip_all)]
 pub fn load_skills_context(
     max_tokens: usize,
     resolved_creds: &std::collections::HashMap<String, String>,
