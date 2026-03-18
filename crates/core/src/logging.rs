@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 use crate::secrets::redact_secrets;
-use crate::types::Message;
+use crate::types::{Message, MessageContent};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LogEntry {
@@ -64,7 +64,11 @@ pub fn log_message(message: &Message) {
 
     let kind = match message.role {
         crate::types::Role::User => {
-            let content = redact_secrets(message.text_content().unwrap_or(""));
+            let full = message
+                .content
+                .as_ref()
+                .map_or_else(String::new, MessageContent::full_text);
+            let content = redact_secrets(&full);
             LogEntryKind::UserMessage { content }
         }
         crate::types::Role::Assistant => LogEntryKind::AssistantMessage {

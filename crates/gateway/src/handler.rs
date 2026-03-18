@@ -17,6 +17,16 @@ use crate::health::ChannelHealthRegistry;
 use crate::registry::RegisteredChannel;
 use crate::retry::{self, RetryOutcome, RetryPolicy};
 
+/// A media attachment on an inbound message.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InboundAttachment {
+    pub mime_type: String,
+    /// Base64-encoded binary content.
+    pub data: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
 /// Normalized inbound message parsed from the channel's inbound script.
 #[derive(Debug, serde::Deserialize)]
 pub struct InboundMessage {
@@ -31,7 +41,7 @@ pub struct InboundMessage {
     #[serde(default)]
     pub thread_ts: Option<String>,
     #[serde(default)]
-    pub attachments: Vec<String>,
+    pub attachments: Vec<InboundAttachment>,
 }
 
 /// Process a webhook request for a channel end-to-end.
