@@ -137,6 +137,7 @@ pub struct SubAgentRunRow {
     pub completed_at: Option<i64>,
 }
 
+#[derive(Debug)]
 pub struct ModelUsageRow {
     pub provider: String,
     pub model: String,
@@ -1539,6 +1540,7 @@ impl Database {
         Ok(total as u64)
     }
 
+    #[instrument(skip_all)]
     pub fn monthly_total_cost(&self) -> Result<Option<f64>> {
         let start_ts = Self::month_start_ts()?;
         let mut stmt = self
@@ -1548,6 +1550,7 @@ impl Database {
         Ok(cost)
     }
 
+    #[instrument(skip_all)]
     pub fn monthly_usage_by_model(&self) -> Result<Vec<ModelUsageRow>> {
         let start_ts = Self::month_start_ts()?;
         let mut stmt = self.conn.prepare(

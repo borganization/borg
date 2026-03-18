@@ -96,6 +96,8 @@ enum Commands {
         #[command(subcommand)]
         action: Option<TasksAction>,
     },
+    /// Show token usage and cost breakdown for the current month
+    Usage,
     /// Permanently delete all Borg data and uninstall the service
     Uninstall,
 }
@@ -321,6 +323,7 @@ async fn main() -> Result<()> {
             Some(TasksAction::Pause { id }) => run_tasks_update_status(&id, "paused")?,
             Some(TasksAction::Resume { id }) => run_tasks_update_status(&id, "active")?,
         },
+        Some(Commands::Usage) => run_usage()?,
         Some(Commands::Uninstall) => run_uninstall()?,
     }
 
@@ -345,6 +348,54 @@ async fn run_gateway(shutdown: CancellationToken) -> Result<()> {
     let metrics = borg_core::telemetry::BorgMetrics::from_config(&config);
     let gateway = borg_gateway::GatewayServer::new(config, shutdown, metrics)?;
     gateway.run().await
+}
+
+fn run_usage() -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    let total_tokens = db.monthly_token_total()?;
+    let total_cost = db.monthly_total_cost()?;
+    let by_model = db.monthly_usage_by_model()?;
+
+    println!("Token usage for current month");
+    println!("────────────────────────────────────────");
+    println!("Total tokens: {total_tokens}");
+    if let Some(cost) = total_cost {
+        println!("Estimated cost: ${cost:.4}");
+    }
+
+    if !by_model.is_empty() {
+        println!();
+        println!(
+            "{:<40} {:>10} {:>10} {:>10} {:>10}",
+            "Model", "Input", "Output", "Total", "Cost"
+        );
+        println!("{}", "─".repeat(84));
+        for row in &by_model {
+            let label = if row.model.is_empty() {
+                "(unknown)".to_string()
+            } else {
+                row.model.clone()
+            };
+            let cost_str = match row.total_cost_usd {
+                Some(c) => format!("${c:.4}"),
+                None => "—".to_string(),
+            };
+            println!(
+                "{:<40} {:>10} {:>10} {:>10} {:>10}",
+                label, row.prompt_tokens, row.completion_tokens, row.total_tokens, cost_str
+            );
+        }
+    }
+
+    let config = borg_core::config::Config::load().unwrap_or_default();
+    let budget_limit = config.budget.monthly_token_limit;
+    if budget_limit > 0 {
+        let pct = total_tokens as f64 / budget_limit as f64 * 100.0;
+        println!();
+        println!("Budget: {total_tokens}/{budget_limit} tokens ({pct:.1}%) used");
+    }
+
+    Ok(())
 }
 
 fn run_doctor() -> Result<()> {
