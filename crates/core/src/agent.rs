@@ -1025,8 +1025,14 @@ impl Agent {
                 if let Some(block_msg) = check_tool_integrity(name) {
                     return Ok(block_msg);
                 }
-                tool_handlers::handle_user_tool(name, args_json, &self.config, &self.tool_registry)
-                    .await
+                tool_handlers::handle_user_tool(
+                    name,
+                    args_json,
+                    &self.config,
+                    &self.tool_registry,
+                    event_tx,
+                )
+                .await
             }
         }
     }

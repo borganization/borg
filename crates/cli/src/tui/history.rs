@@ -50,6 +50,11 @@ pub enum HistoryCell {
     Thinking {
         text: String,
     },
+    ToolStreaming {
+        #[allow(dead_code)]
+        name: String,
+        lines: Vec<(String, bool)>,
+    },
 }
 
 /// Truncate a string to at most `max_bytes` bytes at a valid UTF-8 boundary.
@@ -241,6 +246,39 @@ impl HistoryCell {
                     lines.push(Line::from(Span::styled(l.to_string(), style)));
                 }
                 lines
+            }
+            HistoryCell::ToolStreaming {
+                lines: tool_lines, ..
+            } => {
+                let _ = width;
+                let mut rendered: Vec<Line<'static>> = Vec::new();
+                let total = tool_lines.len();
+                let max_visible = 8;
+                let skip = total.saturating_sub(max_visible);
+                if skip > 0 {
+                    rendered.push(Line::from(Span::styled(
+                        format!("  ... ({skip} lines above)"),
+                        theme::dim(),
+                    )));
+                }
+                for (line_text, is_stderr) in tool_lines.iter().skip(skip) {
+                    let style = if *is_stderr {
+                        theme::error_style()
+                    } else {
+                        theme::dim()
+                    };
+                    let display = if line_text.len() > 200 {
+                        format!("{}...", truncate_str(line_text, 197))
+                    } else {
+                        line_text.clone()
+                    };
+                    let prefix = if *is_stderr { "! " } else { "\u{2502} " };
+                    rendered.push(Line::from(vec![
+                        Span::styled(format!("  {prefix}"), style),
+                        Span::styled(display, style),
+                    ]));
+                }
+                rendered
             }
         }
     }
