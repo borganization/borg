@@ -330,9 +330,9 @@ fn ensure_onboarded() -> Result<()> {
     if !config_path.exists() {
         init_data_dir()?;
     }
-    // Auto-install service if not already present (non-fatal)
-    if let Err(e) = service::ensure_service_installed() {
-        tracing::warn!("Auto-install service: {e}");
+    // Auto-start daemon service (non-fatal)
+    if let Err(e) = service::ensure_service_running() {
+        tracing::warn!("Auto-start service: {e}");
     }
     Ok(())
 }
@@ -367,9 +367,9 @@ fn init_data_dir() -> Result<()> {
             let env_var = provider.default_env_var();
             onboarding::apply_onboarding(&result)?;
 
-            // Auto-install service after successful onboarding (non-fatal)
-            if let Err(e) = service::ensure_service_installed() {
-                tracing::warn!("Auto-install service during onboarding: {e}");
+            // Auto-start daemon service after successful onboarding (non-fatal)
+            if let Err(e) = service::ensure_service_running() {
+                tracing::warn!("Auto-start service during onboarding: {e}");
             }
 
             println!();

@@ -194,7 +194,6 @@ pub struct WebConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TasksConfig {
-    pub enabled: bool,
     pub max_concurrent: usize,
 }
 
@@ -241,7 +240,6 @@ impl Default for TelemetryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GatewayConfig {
-    pub enabled: bool,
     pub host: String,
     pub port: u16,
     pub max_concurrent: usize,
@@ -264,7 +262,6 @@ fn default_rate_limit() -> u32 {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             host: "127.0.0.1".into(),
             port: 7842,
             max_concurrent: 10,
@@ -412,7 +409,6 @@ impl Default for WebConfig {
 impl Default for TasksConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             max_concurrent: 3,
         }
     }
@@ -1104,7 +1100,6 @@ agent_name = "Buddy"
     #[test]
     fn default_tasks_config_values() {
         let cfg = TasksConfig::default();
-        assert!(!cfg.enabled);
         assert_eq!(cfg.max_concurrent, 3);
     }
 
@@ -1179,11 +1174,10 @@ enabled = false
     fn partial_tasks_config_defaults_remaining_fields() {
         let toml_str = r#"
 [tasks]
-enabled = true
+max_concurrent = 5
 "#;
         let cfg: Config = toml::from_str(toml_str).expect("should parse");
-        assert!(cfg.tasks.enabled);
-        assert_eq!(cfg.tasks.max_concurrent, 3);
+        assert_eq!(cfg.tasks.max_concurrent, 5);
     }
 
     #[test]
