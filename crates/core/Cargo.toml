@@ -42,9 +42,13 @@ opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true }
 chromiumoxide = { workspace = true }
+unicode-normalization = { workspace = true }
+notify = { workspace = true }
+image = { workspace = true }
+async-trait = "0.1"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-tempfile = "3"

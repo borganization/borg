@@ -21,11 +21,11 @@ static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
             label: "GitHub Token",
         },
         SecretPattern {
-            regex: compile_regex(r"sk-ant-[A-Za-z0-9_-]{32,}"),
+            regex: compile_regex(r"sk[-_]ant[-_][A-Za-z0-9_-]{32,}"),
             label: "Anthropic API Key",
         },
         SecretPattern {
-            regex: compile_regex(r"sk-proj-[A-Za-z0-9_-]{32,}"),
+            regex: compile_regex(r"sk[-_]proj[-_][A-Za-z0-9_-]{32,}"),
             label: "OpenAI Project Key",
         },
         SecretPattern {
@@ -53,6 +53,12 @@ static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
         SecretPattern {
             regex: compile_regex(r"(?:password|passwd|pwd)\s*[=:]\s*(\S{8,64})"),
             label: "Password Assignment",
+        },
+        SecretPattern {
+            regex: compile_regex(
+                r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|mssql)://[^\s]{8,}",
+            ),
+            label: "Database Connection String",
         },
     ]
 });
@@ -132,5 +138,27 @@ mod tests {
         let input = "SLACK_TOKEN=xoxb-1234567890-abcdefghijklmnopqrstuvwx";
         let result = redact_secrets(input);
         assert!(result.contains("[REDACTED Slack Token]"));
+    }
+
+    #[test]
+    fn redacts_database_connection_string() {
+        let input = "DATABASE_URL=postgresql://user:pass@localhost:5432/mydb";
+        let result = redact_secrets(input);
+        assert!(result.contains("[REDACTED Database Connection String]"));
+        assert!(!result.contains("pass@localhost"));
+    }
+
+    #[test]
+    fn redacts_mongodb_connection_string() {
+        let input = "MONGO=mongodb+srv://admin:secret@cluster0.example.net/db";
+        let result = redact_secrets(input);
+        assert!(result.contains("[REDACTED Database Connection String]"));
+    }
+
+    #[test]
+    fn redacts_underscore_variant_api_keys() {
+        let input = "key=sk_ant_api03_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345678";
+        let result = redact_secrets(input);
+        assert!(result.contains("[REDACTED Anthropic API Key]"));
     }
 }

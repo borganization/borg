@@ -218,6 +218,7 @@ pub struct Agent {
     spawn_depth: u32,
     metrics: BorgMetrics,
     browser_session: Option<crate::browser::BrowserSession>,
+    config_rx: Option<tokio::sync::watch::Receiver<Config>>,
 }
 
 impl Agent {
@@ -249,7 +250,21 @@ impl Agent {
             spawn_depth: 0,
             metrics,
             browser_session: None,
+            config_rx: None,
         })
+    }
+
+    /// Set a config watch receiver for hot reload.
+    pub fn set_config_watcher(&mut self, rx: tokio::sync::watch::Receiver<Config>) {
+        self.config_rx = Some(rx);
+    }
+
+    /// Replace config, re-derive dependent state (policy, rate limits).
+    fn reload_config(&mut self, new_config: Config) {
+        self.policy = new_config.policy.clone();
+        self.rate_guard
+            .update_limits(new_config.security.action_limits.clone());
+        self.config = new_config;
     }
 
     pub fn new_sub_agent(
@@ -286,6 +301,7 @@ impl Agent {
             spawn_depth,
             metrics,
             browser_session: None,
+            config_rx: None,
         })
     }
 
@@ -588,6 +604,17 @@ impl Agent {
         let mut iteration: usize = 0;
 
         loop {
+            // Hot-reload config between turns (in-flight keeps old config)
+            if let Some(ref mut rx) = self.config_rx {
+                if rx.has_changed().unwrap_or(false) {
+                    let new_config = rx.borrow_and_update().clone();
+                    info_span!("config_reload").in_scope(|| {
+                        warn!("Config reloaded from disk");
+                    });
+                    self.reload_config(new_config);
+                }
+            }
+
             if cancel.is_cancelled() {
                 if let Some(ref mut ctrl) = self.agent_control {
                     ctrl.shutdown_all();
@@ -1119,7 +1146,11 @@ impl Agent {
                     let filename = args["filename"].as_str().unwrap_or_default().to_string();
                     let scope = args["scope"].as_str().unwrap_or("global").to_string();
                     // Read the full file content after write (handles append mode correctly)
-                    let full_content = crate::memory::read_memory(&filename).unwrap_or_default();
+                    // Redact secrets before generating embeddings to prevent leaking
+                    // sensitive data to the embedding API provider
+                    let full_content = crate::secrets::redact_secrets(
+                        &crate::memory::read_memory(&filename).unwrap_or_default(),
+                    );
                     tokio::spawn(async move {
                         if let Err(e) = crate::embeddings::embed_memory_file(
                             &config,
@@ -1502,6 +1533,13 @@ fn requires_confirmation(tool_name: &str, args: Option<&serde_json::Value>) -> O
                 }
             }
             None
+        }
+        "create_tool" => Some("Will create/modify executable tool in ~/.borg/tools/".to_string()),
+        "create_channel" => {
+            Some("Will create/modify webhook channel integration in ~/.borg/channels/".to_string())
+        }
+        "apply_skill_patch" => {
+            Some("Will create/modify agent skill instructions in ~/.borg/skills/".to_string())
         }
         _ => None,
     }

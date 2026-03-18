@@ -7,6 +7,10 @@ use crate::handler::InboundMessage;
 pub struct TwilioInbound {
     pub message: InboundMessage,
     pub channel_type: TwilioChannelType,
+    /// Audio media URL for transcription (if the message contains audio).
+    pub audio_url: Option<String>,
+    /// MIME type of the audio media.
+    pub audio_mime: Option<String>,
 }
 
 /// Parse a Twilio webhook body (form-urlencoded) into a typed inbound message.
@@ -15,6 +19,16 @@ pub fn parse_webhook(body: &str) -> Result<TwilioInbound> {
         .map_err(|e| anyhow::anyhow!("Failed to parse Twilio webhook: {e}"))?;
 
     let channel_type = webhook.channel_type();
+
+    // Extract audio media info
+    let (audio_url, audio_mime) = if webhook.has_audio_media() {
+        (
+            webhook.media_url_0.clone(),
+            webhook.media_content_type_0.clone(),
+        )
+    } else {
+        (None, None)
+    };
 
     if webhook.body.trim().is_empty() {
         let has_media = webhook
@@ -36,6 +50,8 @@ pub fn parse_webhook(body: &str) -> Result<TwilioInbound> {
                     attachments: Vec::new(),
                 },
                 channel_type,
+                audio_url,
+                audio_mime,
             });
         }
 
@@ -53,6 +69,8 @@ pub fn parse_webhook(body: &str) -> Result<TwilioInbound> {
             attachments: Vec::new(),
         },
         channel_type,
+        audio_url,
+        audio_mime,
     })
 }
 

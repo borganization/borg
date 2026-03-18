@@ -32,13 +32,31 @@ pub fn identity_path() -> Result<PathBuf> {
 }
 
 pub fn load_identity() -> Result<String> {
-    let path = identity_path()?;
+    load_identity_with_override(None)
+}
+
+/// Load identity, optionally from an override path.
+/// Used by gateway routing to support per-binding identity files.
+pub fn load_identity_with_override(override_path: Option<&std::path::Path>) -> Result<String> {
+    let path = if let Some(p) = override_path {
+        p.to_path_buf()
+    } else {
+        identity_path()?
+    };
+
     if path.exists() {
         let content = std::fs::read_to_string(&path)?;
-        debug!("Loaded IDENTITY.md ({} bytes)", content.len());
+        debug!(
+            "Loaded identity from {} ({} bytes)",
+            path.display(),
+            content.len()
+        );
         Ok(content)
     } else {
-        debug!("No IDENTITY.md found, using default");
+        debug!(
+            "No identity file found at {}, using default",
+            path.display()
+        );
         Ok(DEFAULT_IDENTITY.to_string())
     }
 }

@@ -14,17 +14,19 @@ use tokio::sync::Mutex;
 
 use crate::handler::InboundMessage;
 use dedup::UpdateDeduplicator;
+pub use parse::TelegramAudioRef;
 
 /// Process an incoming Telegram webhook request.
 ///
 /// Flow: validate body → verify secret → dedup → parse → return.
 /// Returns `Ok(None)` for non-text updates or duplicates.
+/// The optional `TelegramAudioRef` indicates the message contains audio for transcription.
 pub async fn handle_telegram_webhook(
     headers: &HeaderMap,
     body: &str,
     secret: Option<&str>,
     dedup: &Mutex<UpdateDeduplicator>,
-) -> Result<Option<InboundMessage>> {
+) -> Result<Option<(InboundMessage, Option<TelegramAudioRef>)>> {
     // Validate and parse the update JSON
     let update = verify::validate_update(body)?;
 
@@ -43,7 +45,7 @@ pub async fn handle_telegram_webhook(
         }
     }
 
-    // Parse into InboundMessage
+    // Parse into InboundMessage + optional audio ref
     Ok(parse::parse_update(&update))
 }
 
@@ -88,7 +90,7 @@ mod tests {
         let result = handle_telegram_webhook(&headers, &body, None, &dedup)
             .await
             .unwrap();
-        let msg = result.unwrap();
+        let (msg, _audio) = result.unwrap();
         assert_eq!(msg.text, "hello");
         assert_eq!(msg.sender_id, "42");
     }
@@ -171,7 +173,7 @@ mod tests {
         let result = handle_telegram_webhook(&headers, body, None, &dedup)
             .await
             .unwrap();
-        let msg = result.unwrap();
+        let (msg, _) = result.unwrap();
         assert_eq!(msg.text, "[Photo]");
     }
 

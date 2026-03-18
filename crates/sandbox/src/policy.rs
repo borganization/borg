@@ -14,12 +14,25 @@ pub struct SandboxCommand {
 }
 
 /// Check if a path matches any blocked path pattern.
-/// Blocked patterns are basename fragments (e.g., ".ssh", "credentials").
+/// Blocked patterns are matched against individual path components (split by `/`)
+/// to avoid false positives from substring matching (e.g., `.aws_backup` matching `.aws`).
 fn is_path_blocked(path: &str, blocked_paths: &[String]) -> bool {
+    // Canonicalize by resolving `..` and `.` segments
+    let normalized = std::path::Path::new(path);
+    let components: Vec<&str> = normalized
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+
     for blocked in blocked_paths {
-        // Match if the path contains the blocked pattern as a path component
-        if path.contains(blocked) {
-            return true;
+        // Check if any path component matches or starts with the blocked pattern
+        for component in &components {
+            if *component == blocked.as_str() || component.starts_with(&format!("{blocked}/")) {
+                return true;
+            }
         }
     }
     false
@@ -249,6 +262,15 @@ mod tests {
         assert!(is_path_blocked("/home/user/.ssh/id_rsa", &blocked));
         assert!(is_path_blocked("/project/.env", &blocked));
         assert!(!is_path_blocked("/home/user/code", &blocked));
+    }
+
+    #[test]
+    fn is_path_blocked_no_false_positive_on_prefix() {
+        let blocked = vec![".aws".into()];
+        // `.aws_backup` is a different component and should NOT be blocked
+        assert!(!is_path_blocked("/home/user/.aws_backup/data", &blocked));
+        // `.aws` itself should still be blocked
+        assert!(is_path_blocked("/home/user/.aws/config", &blocked));
     }
 
     #[test]

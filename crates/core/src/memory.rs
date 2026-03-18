@@ -21,10 +21,18 @@ pub fn memory_index_path() -> Result<PathBuf> {
 
 #[instrument(skip_all, fields(token_budget = max_tokens))]
 pub fn load_memory_context(max_tokens: usize) -> Result<String> {
+    load_memory_context_scoped(max_tokens, None)
+}
+
+/// Load memory context, optionally from a scoped subdirectory.
+/// When `scope` is Some, loads from `~/.borg/memory/scopes/{scope}/` instead of `~/.borg/memory/`.
+/// Global MEMORY.md is always loaded regardless of scope.
+#[instrument(skip_all, fields(token_budget = max_tokens, scope = ?scope))]
+pub fn load_memory_context_scoped(max_tokens: usize, scope: Option<&str>) -> Result<String> {
     let mut parts = Vec::new();
     let mut estimated_tokens = 0;
 
-    // Load MEMORY.md first
+    // Load MEMORY.md first (always global)
     let index_path = memory_index_path()?;
     if index_path.exists() {
         let content = std::fs::read_to_string(&index_path)?;
@@ -38,11 +46,31 @@ pub fn load_memory_context(max_tokens: usize) -> Result<String> {
         }
     }
 
-    // Load memory/*.md files, sorted by modification time (most recent first)
-    let mem_dir = memory_dir()?;
+    // Load memory files — from scoped dir if scope is set, otherwise from default memory dir
+    let mem_dir = if let Some(scope_name) = scope {
+        // Validate scope name to prevent path traversal
+        if scope_name.contains("..") || scope_name.contains('/') || scope_name.contains('\\') {
+            bail!("Invalid memory scope name: must not contain path separators or '..'");
+        }
+        let scoped_dir = Config::data_dir()?
+            .join("memory")
+            .join("scopes")
+            .join(scope_name);
+        if !scoped_dir.exists() {
+            std::fs::create_dir_all(&scoped_dir)?;
+        }
+        scoped_dir
+    } else {
+        memory_dir()?
+    };
+    let label = if scope.is_some() {
+        "Scoped Memory"
+    } else {
+        "Memory"
+    };
     load_memory_files_from_dir(
         &mem_dir,
-        "Memory",
+        label,
         max_tokens,
         &mut estimated_tokens,
         &mut parts,
