@@ -115,7 +115,9 @@ impl SandboxPolicy {
         let profile = match generate_profile(self, tool_dir, Some(program)) {
             Ok(p) => p,
             Err(e) => {
-                tracing::error!("Failed to generate sandbox profile: {e}. Refusing to run unsandboxed.");
+                tracing::error!(
+                    "Failed to generate sandbox profile: {e}. Refusing to run unsandboxed."
+                );
                 // Fail closed: return a command that immediately exits with error
                 return SandboxCommand {
                     program: "/bin/sh".to_string(),

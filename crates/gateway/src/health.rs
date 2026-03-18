@@ -179,4 +179,85 @@ mod tests {
         let s = snap.iter().find(|s| s.name == "slack").unwrap();
         assert_eq!(s.reconnect_attempts, 2);
     }
+
+    #[test]
+    fn error_message_truncation() {
+        let mut reg = ChannelHealthRegistry::new();
+        let long_msg = "x".repeat(1000);
+        reg.record_error("test", &long_msg);
+
+        let snap = reg.snapshot();
+        let s = snap.iter().find(|s| s.name == "test").unwrap();
+        let err = s.last_error.as_ref().unwrap();
+        assert!(err.len() <= 512, "error should be truncated to 512 chars");
+        assert!(err.ends_with("..."));
+    }
+
+    #[test]
+    fn error_message_short_not_truncated() {
+        let mut reg = ChannelHealthRegistry::new();
+        reg.record_error("test", "short error");
+
+        let snap = reg.snapshot();
+        let s = snap.iter().find(|s| s.name == "test").unwrap();
+        assert_eq!(s.last_error.as_deref(), Some("short error"));
+    }
+
+    #[test]
+    fn multiple_channels_independent() {
+        let mut reg = ChannelHealthRegistry::new();
+        reg.register("slack");
+        reg.register("telegram");
+
+        reg.record_inbound("slack");
+        reg.record_inbound("slack");
+        reg.record_inbound("telegram");
+
+        let snap = reg.snapshot();
+        let slack = snap.iter().find(|s| s.name == "slack").unwrap();
+        let tg = snap.iter().find(|s| s.name == "telegram").unwrap();
+        assert_eq!(slack.inbound_count, 2);
+        assert_eq!(tg.inbound_count, 1);
+    }
+
+    #[test]
+    fn empty_registry_snapshot() {
+        let reg = ChannelHealthRegistry::new();
+        let snap = reg.snapshot();
+        assert!(snap.is_empty());
+    }
+
+    #[test]
+    fn register_same_channel_twice_no_reset() {
+        let mut reg = ChannelHealthRegistry::new();
+        reg.register("slack");
+        reg.record_inbound("slack");
+        reg.register("slack"); // re-register should not reset
+
+        let snap = reg.snapshot();
+        let s = snap.iter().find(|s| s.name == "slack").unwrap();
+        assert_eq!(s.inbound_count, 1);
+    }
+
+    #[test]
+    fn uptime_is_nonnegative() {
+        let mut reg = ChannelHealthRegistry::new();
+        reg.register("test");
+        let snap = reg.snapshot();
+        // Uptime should be 0 or very small since we just created it
+        assert!(snap[0].uptime_secs <= 1);
+    }
+
+    #[test]
+    fn snapshot_serializable() {
+        let mut reg = ChannelHealthRegistry::new();
+        reg.register("test");
+        reg.record_inbound("test");
+        reg.record_error("test", "oops");
+
+        let snap = reg.snapshot();
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"test\""));
+        assert!(json.contains("\"oops\""));
+    }
 }
