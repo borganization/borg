@@ -67,8 +67,6 @@ pub struct Config {
     #[serde(default)]
     pub agents: MultiAgentConfig,
     #[serde(default)]
-    pub media: crate::media_understanding::MediaUnderstandingConfig,
-    #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
 }
 
