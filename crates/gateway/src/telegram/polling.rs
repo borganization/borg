@@ -10,12 +10,14 @@ use super::dedup::UpdateDeduplicator;
 use super::parse::parse_update;
 use super::types::Update;
 
-const POLL_TIMEOUT_SECS: u64 = 30;
-const MIN_BACKOFF: Duration = Duration::from_secs(2);
-const MAX_BACKOFF: Duration = Duration::from_secs(30);
-const BACKOFF_FACTOR: f64 = 1.8;
-const JITTER_FRACTION: f64 = 0.25;
-const STALL_TIMEOUT: Duration = Duration::from_secs(90);
+use borg_core::constants;
+
+const POLL_TIMEOUT_SECS: u64 = constants::TELEGRAM_POLL_TIMEOUT_SECS;
+const MIN_BACKOFF: Duration = constants::TELEGRAM_MIN_BACKOFF;
+const MAX_BACKOFF: Duration = constants::TELEGRAM_MAX_BACKOFF;
+const BACKOFF_FACTOR: f64 = constants::TELEGRAM_BACKOFF_FACTOR;
+const JITTER_FRACTION: f64 = constants::TELEGRAM_JITTER_FRACTION;
+const STALL_TIMEOUT: Duration = constants::TELEGRAM_STALL_TIMEOUT;
 
 /// Callback invoked for each parsed inbound message during polling.
 pub type PollCallback = Arc<

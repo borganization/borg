@@ -1,8 +1,10 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-const HIGH_RISK_THRESHOLD: u8 = 50;
-const FLAGGED_THRESHOLD: u8 = 20;
+use crate::constants;
+
+const HIGH_RISK_THRESHOLD: u8 = constants::INJECTION_HIGH_RISK_THRESHOLD;
+const FLAGGED_THRESHOLD: u8 = constants::INJECTION_FLAGGED_THRESHOLD;
 
 fn compile_regex(pattern: &str) -> Regex {
     Regex::new(pattern).unwrap_or_else(|e| panic!("bad regex: {e}"))

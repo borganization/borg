@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod config;
+pub mod constants;
 pub mod conversation;
 pub mod db;
 pub mod doctor;
@@ -21,6 +22,7 @@ pub mod sanitize;
 pub mod secrets;
 pub mod secrets_resolve;
 pub mod session;
+pub mod settings;
 pub mod skills;
 pub mod soul;
 pub mod tasks;

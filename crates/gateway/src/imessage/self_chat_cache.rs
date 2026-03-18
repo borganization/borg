@@ -1,10 +1,11 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use borg_core::constants;
 use sha2::{Digest, Sha256};
 
-const MAX_ENTRIES: usize = 512;
-const TTL: Duration = Duration::from_secs(10);
+const MAX_ENTRIES: usize = constants::SELF_CHAT_CACHE_MAX_ENTRIES;
+const TTL: Duration = constants::SELF_CHAT_CACHE_TTL;
 
 struct Entry {
     text_hash: String,

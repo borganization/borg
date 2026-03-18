@@ -89,11 +89,12 @@ pub async fn one_shot(message: &str, auto_approve: bool, json_output: bool) -> R
                 }
                 AgentEvent::ToolResult { name, result } => {
                     if !json_output {
-                        let preview = if result.len() > 200 {
-                            &result[..200]
-                        } else {
-                            &result
-                        };
+                        let preview =
+                            if result.len() > borg_core::constants::TOOL_RESULT_PREVIEW_CHARS {
+                                &result[..borg_core::constants::TOOL_RESULT_PREVIEW_CHARS]
+                            } else {
+                                &result
+                            };
                         eprintln!("[{name} done] {preview}");
                     }
                 }

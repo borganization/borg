@@ -191,8 +191,7 @@ fn is_configured(def: &PluginDef, config: &Config) -> bool {
 
 /// Set up a plugin: prompt for credentials, store in keychain, update config.
 pub fn add_plugin(name: &str) -> Result<()> {
-    let def =
-        find_plugin(name).ok_or_else(|| anyhow::anyhow!("Unknown plugin: {name}"))?;
+    let def = find_plugin(name).ok_or_else(|| anyhow::anyhow!("Unknown plugin: {name}"))?;
 
     let config = Config::load().unwrap_or_default();
 
@@ -299,8 +298,7 @@ pub fn add_plugin(name: &str) -> Result<()> {
 
 /// Remove a plugin's credentials.
 pub fn remove_plugin(name: &str) -> Result<()> {
-    let def =
-        find_plugin(name).ok_or_else(|| anyhow::anyhow!("Unknown plugin: {name}"))?;
+    let def = find_plugin(name).ok_or_else(|| anyhow::anyhow!("Unknown plugin: {name}"))?;
 
     let service_name = format!("borg-{name}");
 

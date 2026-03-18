@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::constants;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionType {
     ToolCall,
@@ -50,16 +52,31 @@ macro_rules! serde_default {
     };
 }
 
-serde_default!(default_tool_calls_warn, 50);
-serde_default!(default_tool_calls_block, 100);
-serde_default!(default_shell_commands_warn, 20);
-serde_default!(default_shell_commands_block, 50);
-serde_default!(default_file_writes_warn, 15);
-serde_default!(default_file_writes_block, 30);
-serde_default!(default_memory_writes_warn, 10);
-serde_default!(default_memory_writes_block, 20);
-serde_default!(default_web_requests_warn, 20);
-serde_default!(default_web_requests_block, 50);
+serde_default!(default_tool_calls_warn, constants::RATE_TOOL_CALLS_WARN);
+serde_default!(default_tool_calls_block, constants::RATE_TOOL_CALLS_BLOCK);
+serde_default!(
+    default_shell_commands_warn,
+    constants::RATE_SHELL_COMMANDS_WARN
+);
+serde_default!(
+    default_shell_commands_block,
+    constants::RATE_SHELL_COMMANDS_BLOCK
+);
+serde_default!(default_file_writes_warn, constants::RATE_FILE_WRITES_WARN);
+serde_default!(default_file_writes_block, constants::RATE_FILE_WRITES_BLOCK);
+serde_default!(
+    default_memory_writes_warn,
+    constants::RATE_MEMORY_WRITES_WARN
+);
+serde_default!(
+    default_memory_writes_block,
+    constants::RATE_MEMORY_WRITES_BLOCK
+);
+serde_default!(default_web_requests_warn, constants::RATE_WEB_REQUESTS_WARN);
+serde_default!(
+    default_web_requests_block,
+    constants::RATE_WEB_REQUESTS_BLOCK
+);
 
 impl Default for ActionLimits {
     fn default() -> Self {
