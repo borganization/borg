@@ -157,7 +157,13 @@ pub fn recover_session_from_db(session_id: &str) -> Result<Option<Vec<Message>>>
             .as_deref()
             .and_then(|j| serde_json::from_str(j).ok());
         let content = if let Some(parts_json) = &row.content_parts_json {
-            serde_json::from_str(parts_json).ok()
+            match serde_json::from_str(parts_json) {
+                Ok(parts) => Some(parts),
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize content_parts_json: {e}");
+                    row.content.map(MessageContent::Text)
+                }
+            }
         } else {
             row.content.map(MessageContent::Text)
         };

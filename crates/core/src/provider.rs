@@ -116,28 +116,29 @@ impl Provider {
     }
 
     /// Whether a model supports vision (image inputs).
+    ///
+    /// Defaults to `true` for providers where most modern models support vision,
+    /// only blocklisting known text-only models. This avoids false negatives
+    /// that would silently downgrade multimodal messages.
     pub fn supports_vision(&self, model: &str) -> bool {
+        let m = model.to_lowercase();
         match self {
-            Provider::Anthropic => {
-                model.contains("claude-3")
-                    || model.contains("claude-sonnet")
-                    || model.contains("claude-opus")
-            }
+            // All Claude 3+ models support vision; only older/embedding models don't
+            Provider::Anthropic => !m.contains("claude-2") && !m.contains("claude-instant"),
+            // Most modern OpenAI models support vision
             Provider::OpenAi => {
-                model.contains("gpt-4o")
-                    || model.contains("gpt-4-vision")
-                    || model.contains("gpt-4-turbo")
+                !m.contains("gpt-3.5")
+                    && !m.contains("davinci")
+                    && !m.contains("babbage")
+                    && !m.contains("ada")
+                    && !m.contains("whisper")
+                    && !m.contains("tts")
+                    && !m.contains("dall-e")
+                    && !m.contains("embedding")
             }
             Provider::Gemini => true,
-            Provider::OpenRouter => {
-                model.contains("claude-3")
-                    || model.contains("claude-sonnet")
-                    || model.contains("claude-opus")
-                    || model.contains("gpt-4o")
-                    || model.contains("gpt-4-vision")
-                    || model.contains("gpt-4-turbo")
-                    || model.contains("gemini")
-            }
+            // For OpenRouter, default to true; let the underlying model reject if unsupported
+            Provider::OpenRouter => true,
         }
     }
 

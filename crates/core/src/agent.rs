@@ -316,15 +316,22 @@ impl Agent {
             .tool_calls
             .as_ref()
             .and_then(|tc| serde_json::to_string(tc).ok());
-        let content_parts_json = match &msg.content {
-            Some(crate::types::MessageContent::Parts(parts)) => serde_json::to_string(parts).ok(),
-            _ => None,
+        let (content_text, content_parts_json) = match &msg.content {
+            Some(crate::types::MessageContent::Parts(parts)) => {
+                let full = msg
+                    .content
+                    .as_ref()
+                    .map(crate::types::MessageContent::full_text);
+                let parts_json = serde_json::to_string(parts).ok();
+                (full, parts_json)
+            }
+            _ => (msg.text_content().map(str::to_string), None),
         };
         if let Ok(db) = Database::open() {
             let _ = db.insert_message(
                 &session_id,
                 role,
-                msg.text_content(),
+                content_text.as_deref(),
                 tool_calls_json.as_deref(),
                 msg.tool_call_id.as_deref(),
                 msg.timestamp.as_deref(),

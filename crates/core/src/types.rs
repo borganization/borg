@@ -15,6 +15,7 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MediaData {
     pub mime_type: String,
+    /// Base64-encoded binary content.
     pub data: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
@@ -52,10 +53,17 @@ impl Serialize for ContentPart {
                 map.end()
             }
             ContentPart::AudioBase64 { media } => {
-                let data_uri = format!("data:{};base64,{}", media.mime_type, media.data);
+                let format = media
+                    .mime_type
+                    .strip_prefix("audio/")
+                    .unwrap_or("mp3")
+                    .to_string();
                 let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("type", "audio")?;
-                map.serialize_entry("audio", &serde_json::json!({"url": data_uri}))?;
+                map.serialize_entry("type", "input_audio")?;
+                map.serialize_entry(
+                    "input_audio",
+                    &serde_json::json!({"data": media.data, "format": format}),
+                )?;
                 map.end()
             }
         }
@@ -88,6 +96,9 @@ impl<'de> Deserialize<'de> for ContentPart {
                     .and_then(|u| u.as_str())
                     .unwrap_or("")
                     .to_string();
+                if url.is_empty() {
+                    return Err(de::Error::custom("image_url has empty url"));
+                }
                 if url.starts_with("data:") {
                     match crate::media::parse_data_uri(&url) {
                         Ok(media) => Ok(ContentPart::ImageBase64 { media }),
@@ -97,20 +108,27 @@ impl<'de> Deserialize<'de> for ContentPart {
                     Ok(ContentPart::ImageUrl { url })
                 }
             }
-            "audio" => {
-                let url = obj
-                    .get("audio")
-                    .and_then(|o| o.get("url"))
-                    .and_then(|u| u.as_str())
+            "input_audio" => {
+                let audio_obj = obj.get("input_audio");
+                let data = audio_obj
+                    .and_then(|o| o.get("data"))
+                    .and_then(|d| d.as_str())
                     .unwrap_or("")
                     .to_string();
-                if url.starts_with("data:") {
-                    match crate::media::parse_data_uri(&url) {
-                        Ok(media) => Ok(ContentPart::AudioBase64 { media }),
-                        Err(_) => Ok(ContentPart::Text(format!("[audio: {url}]"))),
-                    }
+                let format = audio_obj
+                    .and_then(|o| o.get("format"))
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("mp3");
+                if data.is_empty() {
+                    Ok(ContentPart::Text("[audio: empty]".to_string()))
                 } else {
-                    Ok(ContentPart::Text(format!("[audio: {url}]")))
+                    Ok(ContentPart::AudioBase64 {
+                        media: MediaData {
+                            mime_type: format!("audio/{format}"),
+                            data,
+                            filename: None,
+                        },
+                    })
                 }
             }
             _ => Ok(ContentPart::Text(format!("[unknown content type: {typ}]"))),
@@ -127,6 +145,7 @@ pub enum MessageContent {
 }
 
 impl MessageContent {
+    /// Returns the first text part. For full text across all parts, use `full_text()`.
     pub fn text(&self) -> Option<&str> {
         match self {
             MessageContent::Text(s) => Some(s),
@@ -137,10 +156,51 @@ impl MessageContent {
         }
     }
 
+    /// Concatenate all text parts, with placeholders for non-text content.
+    pub fn full_text(&self) -> String {
+        match self {
+            MessageContent::Text(s) => s.clone(),
+            MessageContent::Parts(parts) => {
+                let mut out = String::new();
+                for part in parts {
+                    match part {
+                        ContentPart::Text(t) => {
+                            if !out.is_empty() && !out.ends_with('\n') {
+                                out.push(' ');
+                            }
+                            out.push_str(t);
+                        }
+                        ContentPart::ImageBase64 { media } => {
+                            out.push_str(&format!(
+                                " [image: {}]",
+                                media.filename.as_deref().unwrap_or("attached")
+                            ));
+                        }
+                        ContentPart::ImageUrl { url } => {
+                            out.push_str(&format!(" [image: {url}]"));
+                        }
+                        ContentPart::AudioBase64 { media } => {
+                            out.push_str(&format!(
+                                " [audio: {}]",
+                                media.filename.as_deref().unwrap_or("attached")
+                            ));
+                        }
+                    }
+                }
+                out
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             MessageContent::Text(s) => s.is_empty(),
-            MessageContent::Parts(parts) => parts.is_empty(),
+            MessageContent::Parts(parts) => {
+                parts.is_empty()
+                    || parts
+                        .iter()
+                        .all(|p| matches!(p, ContentPart::Text(t) if t.is_empty()))
+            }
         }
     }
 }
