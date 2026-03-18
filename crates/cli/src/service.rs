@@ -80,17 +80,20 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
         println!("Gateway server started.");
     }
 
-    // Start native iMessage monitor if channel is installed
-    let imessage_dir = Config::data_dir()?.join("channels/imessage");
-    if imessage_dir.join("channel.toml").exists() {
-        let im_config = config.clone();
-        let im_shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            match borg_gateway::imessage::start_imessage_monitor(im_config, im_shutdown).await {
-                Ok(_handle) => tracing::info!("iMessage monitor started"),
-                Err(e) => tracing::error!("iMessage monitor failed: {e}"),
-            }
-        });
+    // Start native iMessage monitor if channel is installed (macOS only)
+    #[cfg(target_os = "macos")]
+    {
+        let imessage_dir = Config::data_dir()?.join("channels/imessage");
+        if imessage_dir.join("channel.toml").exists() {
+            let im_config = config.clone();
+            let im_shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                match borg_gateway::imessage::start_imessage_monitor(im_config, im_shutdown).await {
+                    Ok(_handle) => tracing::info!("iMessage monitor started"),
+                    Err(e) => tracing::error!("iMessage monitor failed: {e}"),
+                }
+            });
+        }
     }
 
     println!("Daemon running. Press Ctrl+C to stop.");

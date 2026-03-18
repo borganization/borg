@@ -35,6 +35,7 @@ regex = { workspace = true }
 pdf-extract = { workspace = true }
 shellexpand = { workspace = true }
 sha2 = { workspace = true }
+base64 = "0.22"
 
 [lints]
 workspace = true

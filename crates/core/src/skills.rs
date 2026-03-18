@@ -29,6 +29,24 @@ const BUILTIN_1PASSWORD: &str = include_str!("../skills/1password/SKILL.md");
 const BUILTIN_BROWSER: &str = include_str!("../skills/browser/SKILL.md");
 const BUILTIN_SCHEDULER: &str = include_str!("../skills/scheduler/SKILL.md");
 
+const BUNDLED_SKILLS: &[(&str, &str)] = &[
+    ("slack", BUILTIN_SLACK),
+    ("discord", BUILTIN_DISCORD),
+    ("github", BUILTIN_GITHUB),
+    ("weather", BUILTIN_WEATHER),
+    ("skill-creator", BUILTIN_SKILL_CREATOR),
+    ("git", BUILTIN_GIT),
+    ("http", BUILTIN_HTTP),
+    ("search", BUILTIN_SEARCH),
+    ("docker", BUILTIN_DOCKER),
+    ("database", BUILTIN_DATABASE),
+    ("notes", BUILTIN_NOTES),
+    ("calendar", BUILTIN_CALENDAR),
+    ("1password", BUILTIN_1PASSWORD),
+    ("browser", BUILTIN_BROWSER),
+    ("scheduler", BUILTIN_SCHEDULER),
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SkillSource {
     BuiltIn,
@@ -175,38 +193,43 @@ pub fn skills_dir() -> Result<PathBuf> {
     Config::skills_dir()
 }
 
+/// Install bundled skills to the filesystem at `data_dir/skills/<name>/SKILL.md`.
+/// Skips any skill that already exists (preserving user customizations).
+pub fn install_default_skills(data_dir: &std::path::Path) -> Result<usize> {
+    let skills_dir = data_dir.join("skills");
+    let mut installed = 0;
+
+    for &(name, content) in BUNDLED_SKILLS {
+        let skill_dir = skills_dir.join(name);
+        let skill_file = skill_dir.join("SKILL.md");
+
+        if skill_file.exists() {
+            continue;
+        }
+
+        std::fs::create_dir_all(&skill_dir)?;
+        std::fs::write(&skill_file, content)?;
+        installed += 1;
+        debug!("Installed default skill: {name}");
+    }
+
+    Ok(installed)
+}
+
 pub fn load_all_skills(
     resolved_creds: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<Skill>> {
-    let builtins_raw = [
-        BUILTIN_SLACK,
-        BUILTIN_DISCORD,
-        BUILTIN_GITHUB,
-        BUILTIN_WEATHER,
-        BUILTIN_SKILL_CREATOR,
-        BUILTIN_GIT,
-        BUILTIN_HTTP,
-        BUILTIN_SEARCH,
-        BUILTIN_DOCKER,
-        BUILTIN_DATABASE,
-        BUILTIN_NOTES,
-        BUILTIN_CALENDAR,
-        BUILTIN_1PASSWORD,
-        BUILTIN_BROWSER,
-        BUILTIN_SCHEDULER,
-    ];
-
     let mut skills: Vec<Skill> = Vec::new();
-    let mut builtin_names: Vec<String> = Vec::new();
 
-    for raw in builtins_raw {
-        match load_builtin_skill(raw, resolved_creds) {
-            Ok(skill) => {
-                builtin_names.push(skill.manifest.name.clone());
-                skills.push(skill);
-            }
-            Err(e) => {
-                debug!("Failed to load built-in skill: {e}");
+    {
+        for &(_name, content) in BUNDLED_SKILLS {
+            match load_builtin_skill(content, resolved_creds) {
+                Ok(skill) => {
+                    skills.push(skill);
+                }
+                Err(e) => {
+                    debug!("Failed to load built-in skill: {e}");
+                }
             }
         }
     }
@@ -423,23 +446,7 @@ Body here.
 
     #[test]
     fn builtins_parse_correctly() {
-        for (name, content) in [
-            ("slack", BUILTIN_SLACK),
-            ("discord", BUILTIN_DISCORD),
-            ("github", BUILTIN_GITHUB),
-            ("weather", BUILTIN_WEATHER),
-            ("skill-creator", BUILTIN_SKILL_CREATOR),
-            ("git", BUILTIN_GIT),
-            ("http", BUILTIN_HTTP),
-            ("search", BUILTIN_SEARCH),
-            ("docker", BUILTIN_DOCKER),
-            ("database", BUILTIN_DATABASE),
-            ("notes", BUILTIN_NOTES),
-            ("calendar", BUILTIN_CALENDAR),
-            ("1password", BUILTIN_1PASSWORD),
-            ("browser", BUILTIN_BROWSER),
-            ("scheduler", BUILTIN_SCHEDULER),
-        ] {
+        for &(name, content) in BUNDLED_SKILLS {
             let (manifest, body) = parse_skill_md(content)
                 .unwrap_or_else(|e| panic!("Built-in skill '{name}' failed to parse: {e}"));
             assert_eq!(manifest.name, name);
@@ -493,6 +500,31 @@ Short body.
         assert!(names.contains(&"1password"));
         assert!(names.contains(&"browser"));
         assert!(names.contains(&"scheduler"));
+    }
+
+    #[test]
+    fn install_default_skills_writes_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let count = install_default_skills(tmp.path()).unwrap();
+        assert_eq!(count, BUNDLED_SKILLS.len());
+
+        for &(name, _) in BUNDLED_SKILLS {
+            let skill_file = tmp.path().join("skills").join(name).join("SKILL.md");
+            assert!(skill_file.exists(), "Missing: {}", skill_file.display());
+        }
+    }
+
+    #[test]
+    fn install_default_skills_no_overwrite() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("skills/slack");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "custom content").unwrap();
+
+        install_default_skills(tmp.path()).unwrap();
+
+        let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(content, "custom content");
     }
 
     #[test]

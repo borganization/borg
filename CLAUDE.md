@@ -31,11 +31,16 @@ cargo clippy -- -D warnings
 
 Binary name is `borg`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` at runtime (see `.env.example`).
 
+All integrations are compiled unconditionally into a single binary. iMessage is macOS-only via `#[cfg(target_os = "macos")]`.
+
 ## CLI Commands
 
 - `borg` or `borg chat` — interactive REPL
 - `borg ask "message"` — one-shot query
 - `borg init` — interactive onboarding wizard (name, personality, provider, model selection)
+- `borg add <name>` — set up an integration's credentials (e.g. `borg add telegram`)
+- `borg remove <name>` — remove an integration's credentials
+- `borg plugins` — list all integrations with configured/unconfigured status
 - `borg gateway` — start webhook gateway server for messaging channels
 - `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
 - `/customize` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
@@ -196,7 +201,7 @@ During `borg init`, the onboarding wizard generates a personalized SOUL.md based
 
 ## Skills
 
-Skills are instruction bundles (SKILL.md files with YAML frontmatter) that teach the agent how to use external CLI tools via `run_shell`. Distinct from "tools" which are sandboxed executable scripts.
+Skills are instruction bundles (SKILL.md files with YAML frontmatter) that teach the agent how to use external CLI tools via `run_shell`. Distinct from "tools" which are sandboxed executable scripts. Built-in skills are embedded via `include_str!` and always compiled in. During `borg init`, bundled skills are extracted to `~/.borg/skills/`.
 
 - **Built-in skills**: Embedded via `include_str!` in `crates/core/skills/*/SKILL.md` (slack, discord, github, weather, skill-creator, git, http, search, docker, database, notes, calendar, 1password, browser)
 - **User skills**: `~/.borg/skills/<name>/SKILL.md` — created via `apply_skill_patch`
@@ -345,6 +350,7 @@ Six-layer defense against prompt injection attacks:
 |------|------|
 | `crates/cli/src/main.rs` | Entry point, clap commands, init |
 | `crates/cli/src/onboarding.rs` | TUI onboarding wizard (inquire-based) |
+| `crates/cli/src/plugins.rs` | Integration catalog, `borg add/remove/plugins` commands |
 | `crates/cli/src/repl.rs` | Interactive loop + heartbeat rendering |
 | `crates/core/src/agent.rs` | Conversation loop + tool dispatch |
 | `crates/core/src/provider.rs` | Provider enum, auto-detection, headers |
@@ -375,14 +381,16 @@ Six-layer defense against prompt injection attacks:
 | `crates/gateway/src/server.rs` | Axum HTTP server (webhook routes, native Telegram + Slack) |
 | `crates/gateway/src/slack/` | Native Slack Bot API integration (types, verify, parse, api) |
 | `crates/gateway/src/telegram/` | Native Telegram Bot API integration (types, verify, parse, api, dedup) |
+| `crates/gateway/src/twilio/` | Native Twilio integration (WhatsApp + SMS) |
 | `crates/gateway/src/handler.rs` | Webhook handler: verify -> parse -> agent -> respond |
+| `crates/core/src/integrations/` | Native tool integrations (Gmail, Outlook, Calendar, Notion, Linear) |
 
 ## Testing
 
 ```sh
-cargo test                              # all tests
-cargo test -p borg-apply-patch    # 13 patch tests
-cargo test -p borg-core           # config + skills tests
-cargo test -p borg-gateway        # channel manifest + registry tests
-cargo test -p borg-customizations # catalog + installer tests
+cargo test                                               # all tests
+cargo test -p borg-apply-patch                           # 13 patch tests
+cargo test -p borg-core                                  # config + skills tests
+cargo test -p borg-gateway                               # channel manifest + registry tests
+cargo test -p borg-customizations                        # catalog + installer tests
 ```

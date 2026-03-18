@@ -371,6 +371,8 @@ impl Agent {
                 td.function.parameters.clone(),
             ));
         }
+        // Append integration tools (gmail, outlook, etc.)
+        tools.extend(crate::integrations::enabled_tool_definitions());
         tools
     }
 
@@ -858,6 +860,13 @@ impl Agent {
             "read_pdf" => tool_handlers::handle_read_pdf(&args),
             "security_audit" => tool_handlers::handle_security_audit(&args, &self.config),
             _ => {
+                // Try integration tools first
+                if let Some(result) =
+                    crate::integrations::dispatch_tool_call(name, &args, &self.config).await
+                {
+                    return result.map_err(|e| anyhow::anyhow!(e));
+                }
+
                 if let Some(block_msg) = check_tool_integrity(name) {
                     return Ok(block_msg);
                 }

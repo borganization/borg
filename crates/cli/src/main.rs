@@ -7,6 +7,7 @@ use uuid::Uuid;
 mod logo;
 mod onboarding;
 mod onboarding_tui;
+mod plugins;
 mod repl;
 mod service;
 mod tui;
@@ -56,6 +57,18 @@ enum Commands {
     Tools,
     /// List skills with availability status
     Skills,
+    /// Set up an integration (e.g. borg add telegram)
+    Add {
+        /// Integration name
+        name: String,
+    },
+    /// Remove an integration's credentials
+    Remove {
+        /// Integration name
+        name: String,
+    },
+    /// List all available integrations and their status
+    Plugins,
     /// Show or update configuration settings
     Settings {
         #[command(subcommand)]
@@ -237,6 +250,9 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Tools) => run_tools()?,
         Some(Commands::Skills) => run_skills()?,
+        Some(Commands::Add { name }) => plugins::add_integration(&name)?,
+        Some(Commands::Remove { name }) => plugins::remove_integration(&name)?,
+        Some(Commands::Plugins) => plugins::list_integrations()?,
         Some(Commands::Settings { action }) => match action {
             Some(SettingsAction::Set { key, value }) => run_settings_set(&key, &value)?,
             None => run_settings_show()?,
