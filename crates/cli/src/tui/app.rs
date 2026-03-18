@@ -941,8 +941,22 @@ impl<'a> App<'a> {
             AgentEvent::SubAgentUpdate { .. } => {
                 // Sub-agent updates are informational; no TUI action needed yet.
             }
-            AgentEvent::ToolOutputDelta { .. } => {
-                // Tool output streaming; no TUI action needed yet.
+            AgentEvent::ToolOutputDelta {
+                name,
+                delta,
+                is_stderr,
+            } => {
+                if let Some(HistoryCell::ToolStreaming { lines, .. }) = self.cells.last_mut() {
+                    lines.push((delta, is_stderr));
+                } else {
+                    self.cells.push(HistoryCell::ToolStreaming {
+                        name,
+                        lines: vec![(delta, is_stderr)],
+                    });
+                }
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
             }
         }
     }
