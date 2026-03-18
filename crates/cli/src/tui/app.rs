@@ -938,6 +938,9 @@ impl<'a> App<'a> {
                 self.plan_mode = false;
                 self.state = AppState::Idle;
             }
+            AgentEvent::SubAgentUpdate { .. } => {
+                // Sub-agent updates are informational; no TUI action needed yet.
+            }
         }
     }
 

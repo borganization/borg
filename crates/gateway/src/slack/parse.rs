@@ -44,6 +44,7 @@ pub fn parse_event(callback: &EventCallback) -> Option<InboundMessage> {
         thread_id: None,
         message_id: None,
         thread_ts: event.thread_ts.clone(),
+        attachments: Vec::new(),
     })
 }
 

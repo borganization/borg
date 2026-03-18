@@ -172,6 +172,11 @@ pub enum AgentEvent {
         respond: oneshot::Sender<bool>,
     },
     Usage(UsageData),
+    SubAgentUpdate {
+        agent_id: String,
+        nickname: String,
+        status: String,
+    },
     TurnComplete,
     Error(String),
 }
@@ -185,25 +190,76 @@ pub struct Agent {
     hook_registry: HookRegistry,
     turn_count: u32,
     rate_guard: SessionRateGuard,
+    agent_control: Option<crate::multi_agent::AgentControl>,
+    spawn_depth: u32,
 }
 
 impl Agent {
     pub fn new(config: Config) -> Result<Self> {
-        // Validate that the LLM client can be constructed (provider + API key present)
         let _ = LlmClient::new(config.clone())?;
         let tool_registry = ToolRegistry::new()?;
         let policy = config.policy.clone();
         let rate_guard = SessionRateGuard::new(config.security.action_limits.clone());
+        let session = Session::new();
+        let agent_control = if config.agents.enabled {
+            Some(crate::multi_agent::AgentControl::new(
+                &config.agents,
+                &session.meta.id,
+                0,
+            ))
+        } else {
+            None
+        };
         Ok(Self {
             config,
             history: Vec::new(),
             tool_registry,
-            session: Session::new(),
+            session,
             policy,
             hook_registry: HookRegistry::new(),
             turn_count: 0,
             rate_guard,
+            agent_control,
+            spawn_depth: 0,
         })
+    }
+
+    pub fn new_sub_agent(
+        config: Config,
+        spawn_depth: u32,
+        agents_config: &crate::config::MultiAgentConfig,
+    ) -> Result<Self> {
+        let _ = LlmClient::new(config.clone())?;
+        let tool_registry = ToolRegistry::new()?;
+        let policy = config.policy.clone();
+        let rate_guard = SessionRateGuard::new(config.security.action_limits.clone());
+        let session = Session::new();
+        let agent_control = if agents_config.enabled && spawn_depth < agents_config.max_spawn_depth
+        {
+            Some(crate::multi_agent::AgentControl::new(
+                agents_config,
+                &session.meta.id,
+                spawn_depth,
+            ))
+        } else {
+            None
+        };
+        Ok(Self {
+            config,
+            history: Vec::new(),
+            tool_registry,
+            session,
+            policy,
+            hook_registry: HookRegistry::new(),
+            turn_count: 0,
+            rate_guard,
+            agent_control,
+            spawn_depth,
+        })
+    }
+
+    pub fn inject_history_message(&mut self, msg: Message) {
+        self.history.push(msg);
     }
 
     pub fn hook_registry_mut(&mut self) -> &mut HookRegistry {
@@ -245,14 +301,19 @@ impl Agent {
             .tool_calls
             .as_ref()
             .and_then(|tc| serde_json::to_string(tc).ok());
+        let content_parts_json = match &msg.content {
+            Some(crate::types::MessageContent::Parts(parts)) => serde_json::to_string(parts).ok(),
+            _ => None,
+        };
         if let Ok(db) = Database::open() {
             let _ = db.insert_message(
                 &session_id,
                 role,
-                msg.content.as_deref(),
+                msg.text_content(),
                 tool_calls_json.as_deref(),
                 msg.tool_call_id.as_deref(),
                 msg.timestamp.as_deref(),
+                content_parts_json.as_deref(),
             );
         }
         self.history.push(msg);
@@ -373,6 +434,12 @@ impl Agent {
         }
         // Append integration tools (gmail, outlook, etc.)
         tools.extend(crate::integrations::enabled_tool_definitions());
+        if self.agent_control.is_some() {
+            tools.extend(crate::multi_agent::tools::tool_definitions(
+                self.spawn_depth,
+                self.config.agents.max_spawn_depth,
+            ));
+        }
         tools
     }
 
@@ -398,6 +465,19 @@ impl Agent {
         self.run_agent_loop(event_tx, cancel).await
     }
 
+    /// Send a pre-constructed Message (e.g. multimodal) through the agent loop.
+    pub async fn send_message_raw(
+        &mut self,
+        msg: Message,
+        event_tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        log_message(&msg);
+        self.persist_message(msg);
+        self.turn_count += 1;
+        self.run_agent_loop(event_tx, cancel).await
+    }
+
     pub async fn run_agent_loop(
         &mut self,
         event_tx: mpsc::Sender<AgentEvent>,
@@ -408,8 +488,26 @@ impl Agent {
 
         loop {
             if cancel.is_cancelled() {
+                if let Some(ref mut ctrl) = self.agent_control {
+                    ctrl.shutdown_all();
+                }
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
+            }
+            if let Some(ref mut ctrl) = self.agent_control {
+                for completion in ctrl.drain_completions() {
+                    let ctx = format!(
+                        "[Sub-agent \"{}\" (id: {}) status: {}]\n{}",
+                        completion.nickname,
+                        completion.agent_id,
+                        completion.status.as_str(),
+                        completion
+                            .final_response
+                            .as_deref()
+                            .unwrap_or("(no output)")
+                    );
+                    self.persist_message(Message::user(&ctx));
+                }
             }
 
             // Budget enforcement
@@ -479,8 +577,9 @@ impl Agent {
                 .iter()
                 .rev()
                 .find(|m| m.role == crate::types::Role::User)
-                .and_then(|m| m.content.clone())
-                .unwrap_or_default();
+                .and_then(|m| m.text_content())
+                .unwrap_or("")
+                .to_string();
             let hook_data = if iteration == 1 {
                 HookData::AgentStart {
                     user_message: user_msg,
@@ -624,6 +723,9 @@ impl Agent {
                 log_message(&msg);
                 self.persist_message(msg);
                 self.auto_save();
+                if let Some(ref mut ctrl) = self.agent_control {
+                    ctrl.shutdown_all();
+                }
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
             }
@@ -678,7 +780,7 @@ impl Agent {
             } else {
                 Message {
                     role: crate::types::Role::Assistant,
-                    content: Some(text_content.clone()),
+                    content: Some(crate::types::MessageContent::Text(text_content.clone())),
                     tool_calls: Some(tc.clone()),
                     tool_call_id: None,
                     timestamp: Some(chrono::Local::now().to_rfc3339()),
@@ -859,6 +961,53 @@ impl Agent {
             "manage_tasks" => tool_handlers::handle_manage_tasks(&args, &self.config),
             "read_pdf" => tool_handlers::handle_read_pdf(&args),
             "security_audit" => tool_handlers::handle_security_audit(&args, &self.config),
+            "spawn_agent" => {
+                if let Some(ref mut ctrl) = self.agent_control {
+                    let history = if args["fork_context"].as_bool().unwrap_or(false) {
+                        Some(self.history.as_slice())
+                    } else {
+                        None
+                    };
+                    crate::multi_agent::tools::handle_spawn_agent(
+                        &args,
+                        ctrl,
+                        &self.config,
+                        history,
+                    )
+                    .await
+                } else {
+                    Ok("Error: Multi-agent system is not enabled.".to_string())
+                }
+            }
+            "send_to_agent" => {
+                if let Some(ref ctrl) = self.agent_control {
+                    crate::multi_agent::tools::handle_send_to_agent(&args, ctrl).await
+                } else {
+                    Ok("Error: Multi-agent system is not enabled.".to_string())
+                }
+            }
+            "wait_for_agent" => {
+                if let Some(ref mut ctrl) = self.agent_control {
+                    crate::multi_agent::tools::handle_wait_for_agent(&args, ctrl).await
+                } else {
+                    Ok("Error: Multi-agent system is not enabled.".to_string())
+                }
+            }
+            "list_agents" => {
+                if let Some(ref ctrl) = self.agent_control {
+                    crate::multi_agent::tools::handle_list_agents(ctrl)
+                } else {
+                    Ok("Error: Multi-agent system is not enabled.".to_string())
+                }
+            }
+            "close_agent" => {
+                if let Some(ref mut ctrl) = self.agent_control {
+                    crate::multi_agent::tools::handle_close_agent(&args, ctrl)
+                } else {
+                    Ok("Error: Multi-agent system is not enabled.".to_string())
+                }
+            }
+            "manage_roles" => crate::multi_agent::tools::handle_manage_roles(&args),
             _ => {
                 // Try integration tools first
                 if let Some(result) =

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::types::{Message, Role, ToolCall};
+use crate::types::{Message, MessageContent, Role, ToolCall};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -100,7 +100,7 @@ impl Session {
         // Auto-title from first user message
         if self.meta.title == "New conversation" {
             if let Some(msg) = history.iter().find(|m| m.role == Role::User) {
-                if let Some(content) = &msg.content {
+                if let Some(content) = msg.text_content() {
                     let title: String = content.chars().take(60).collect();
                     self.meta.title = if content.chars().count() > 60 {
                         format!("{title}...")
@@ -156,9 +156,14 @@ pub fn recover_session_from_db(session_id: &str) -> Result<Option<Vec<Message>>>
             .tool_calls_json
             .as_deref()
             .and_then(|j| serde_json::from_str(j).ok());
+        let content = if let Some(parts_json) = &row.content_parts_json {
+            serde_json::from_str(parts_json).ok()
+        } else {
+            row.content.map(MessageContent::Text)
+        };
         messages.push(Message {
             role,
-            content: row.content,
+            content,
             tool_calls,
             tool_call_id: row.tool_call_id,
             timestamp: row.timestamp,
