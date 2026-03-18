@@ -64,6 +64,47 @@ impl<'a> ToolExecutor<'a> {
 
         Ok(output.stdout)
     }
+
+    pub async fn execute_streaming<F>(
+        &self,
+        args_json: &str,
+        extra_env: &[(String, String)],
+        blocked_paths: &[String],
+        on_output: F,
+    ) -> Result<String>
+    where
+        F: FnMut(&str, bool) + Send,
+    {
+        let entrypoint = self.tool_dir.join(&self.manifest.entrypoint);
+        let sandbox_policy = self
+            .manifest
+            .sandbox_policy()
+            .with_tildes_expanded()
+            .with_blocked_paths_filtered(blocked_paths);
+
+        let runner = ScriptRunner {
+            runtime: &self.manifest.runtime,
+            script_path: &entrypoint,
+            work_dir: self.tool_dir,
+            sandbox_policy,
+            timeout_ms: self.manifest.timeout_ms,
+            extra_env,
+            name: &self.manifest.name,
+        };
+
+        let output = runner.run_streaming(args_json, on_output).await?;
+
+        if !output.success() {
+            let code = output.exit_code.unwrap_or(-1);
+            info!("Tool '{}' exited with code {code}", self.manifest.name);
+            if !output.stderr.is_empty() {
+                return Ok(format!("Error (exit {code}): {}", output.stderr));
+            }
+            return Ok(format!("Error (exit {code}): {}", output.stdout));
+        }
+
+        Ok(output.stdout)
+    }
 }
 
 #[cfg(test)]

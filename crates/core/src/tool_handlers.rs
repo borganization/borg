@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::AgentEvent;
@@ -140,6 +141,79 @@ pub fn handle_list_channels() -> Result<String> {
     })
 }
 
+/// Read stdout/stderr from a child process line-by-line, emitting `ToolOutputDelta` events.
+async fn stream_child_output(
+    child: &mut tokio::process::Child,
+    timeout: Duration,
+    event_tx: &mpsc::Sender<AgentEvent>,
+    tool_name: &str,
+) -> Result<(String, String, Option<i32>)> {
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let mut stdout_buf = String::new();
+    let mut stderr_buf = String::new();
+
+    let streaming_future = async {
+        let mut stdout_lines = stdout_pipe.map(|p| BufReader::new(p).lines());
+        let mut stderr_lines = stderr_pipe.map(|p| BufReader::new(p).lines());
+        let mut stdout_done = stdout_lines.is_none();
+        let mut stderr_done = stderr_lines.is_none();
+
+        while !stdout_done || !stderr_done {
+            tokio::select! {
+                line = async {
+                    match stdout_lines.as_mut() {
+                        Some(reader) => reader.next_line().await,
+                        None => std::future::pending().await,
+                    }
+                }, if !stdout_done => {
+                    match line {
+                        Ok(Some(l)) => {
+                            let _ = event_tx.try_send(AgentEvent::ToolOutputDelta {
+                                name: tool_name.to_string(),
+                                delta: l.clone(),
+                                is_stderr: false,
+                            });
+                            stdout_buf.push_str(&l);
+                            stdout_buf.push('\n');
+                        }
+                        _ => { stdout_done = true; }
+                    }
+                }
+                line = async {
+                    match stderr_lines.as_mut() {
+                        Some(reader) => reader.next_line().await,
+                        None => std::future::pending().await,
+                    }
+                }, if !stderr_done => {
+                    match line {
+                        Ok(Some(l)) => {
+                            let _ = event_tx.try_send(AgentEvent::ToolOutputDelta {
+                                name: tool_name.to_string(),
+                                delta: l.clone(),
+                                is_stderr: true,
+                            });
+                            stderr_buf.push_str(&l);
+                            stderr_buf.push('\n');
+                        }
+                        _ => { stderr_done = true; }
+                    }
+                }
+            }
+        }
+
+        child.wait().await
+    };
+
+    let status = tokio::time::timeout(timeout, streaming_future)
+        .await
+        .map_err(|_| anyhow::anyhow!("command timed out after {}ms", timeout.as_millis()))?
+        .context("Failed to wait for shell process")?;
+
+    Ok((stdout_buf, stderr_buf, status.code()))
+}
+
 pub async fn handle_run_shell(
     args: &serde_json::Value,
     config: &Config,
@@ -177,25 +251,35 @@ pub async fn handle_run_shell(
 
     let resolved_creds = config.resolve_credentials();
     let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-c").arg(command);
+    cmd.arg("-c")
+        .arg(command)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     for (key, val) in &resolved_creds {
         cmd.env(key, val);
     }
-    let child = cmd.output();
 
-    match tokio::time::timeout(timeout_dur, child).await {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let status = output.status.code().unwrap_or(-1);
+    let mut child = cmd
+        .kill_on_drop(true)
+        .spawn()
+        .context("Failed to spawn shell command")?;
+
+    match stream_child_output(&mut child, timeout_dur, event_tx, "run_shell").await {
+        Ok((stdout, stderr, code)) => {
+            let status = code.unwrap_or(-1);
             Ok(format!(
                 "Exit code: {status}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
             ))
         }
-        Ok(Err(e)) => Err(anyhow::anyhow!("Failed to execute shell command: {e}")),
-        Err(_) => Ok(format!(
-            "Error: command timed out after {timeout_ms}ms\nCommand: {command}"
-        )),
+        Err(e) => {
+            if e.to_string().contains("timed out") {
+                Ok(format!(
+                    "Error: command timed out after {timeout_ms}ms\nCommand: {command}"
+                ))
+            } else {
+                Err(e)
+            }
+        }
     }
 }
 
@@ -426,6 +510,7 @@ pub async fn handle_user_tool(
     args_json: &str,
     config: &Config,
     registry: &ToolRegistry,
+    event_tx: &mpsc::Sender<AgentEvent>,
 ) -> Result<String> {
     let cred_names = registry.tool_credentials(name);
     let extra_env: Vec<(String, String)> = cred_names
@@ -439,8 +524,23 @@ pub async fn handle_user_tool(
             })
         })
         .collect();
+    let tool_name = name.to_string();
+    let tx = event_tx.clone();
+    let on_output = move |line: &str, is_stderr: bool| {
+        let _ = tx.try_send(AgentEvent::ToolOutputDelta {
+            name: tool_name.clone(),
+            delta: line.to_string(),
+            is_stderr,
+        });
+    };
     match registry
-        .execute_tool_full(name, args_json, &extra_env, &config.security.blocked_paths)
+        .execute_tool_streaming(
+            name,
+            args_json,
+            &extra_env,
+            &config.security.blocked_paths,
+            on_output,
+        )
         .await
     {
         Ok(result) => Ok(result),

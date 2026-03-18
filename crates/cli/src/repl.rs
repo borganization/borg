@@ -97,6 +97,14 @@ pub async fn one_shot(message: &str, auto_approve: bool, json_output: bool) -> R
                         eprintln!("[{name} done] {preview}");
                     }
                 }
+                AgentEvent::ToolOutputDelta {
+                    delta, is_stderr, ..
+                } => {
+                    if !json_output {
+                        let prefix = if is_stderr { "! " } else { "" };
+                        eprintln!("  {prefix}{delta}");
+                    }
+                }
                 _ => {}
             }
         }

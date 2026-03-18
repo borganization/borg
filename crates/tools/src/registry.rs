@@ -150,6 +150,28 @@ impl ToolRegistry {
             .await
     }
 
+    pub async fn execute_tool_streaming<F>(
+        &self,
+        name: &str,
+        args_json: &str,
+        extra_env: &[(String, String)],
+        blocked_paths: &[String],
+        on_output: F,
+    ) -> Result<String>
+    where
+        F: FnMut(&str, bool) + Send,
+    {
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown tool: {name}"))?;
+
+        let executor = ToolExecutor::new(&tool.manifest, &tool.dir);
+        executor
+            .execute_streaming(args_json, extra_env, blocked_paths, on_output)
+            .await
+    }
+
     pub fn tool_credentials(&self, name: &str) -> Vec<String> {
         self.tools
             .get(name)
