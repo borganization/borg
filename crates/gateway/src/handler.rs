@@ -52,12 +52,14 @@ pub async fn handle_webhook(
             );
         }
 
-        let secret = std::env::var(secret_env).with_context(|| {
-            format!(
-                "Verification env var '{secret_env}' not set for channel '{}'",
-                channel.manifest.name
-            )
-        })?;
+        let secret = config
+            .resolve_credential_or_env(secret_env)
+            .with_context(|| {
+                format!(
+                    "Verification credential '{secret_env}' not found for channel '{}'",
+                    channel.manifest.name
+                )
+            })?;
 
         let verify_input = serde_json::json!({
             "headers": headers_json,
@@ -261,13 +263,13 @@ async fn process_message(
 
     let (response_text, _session_id) = invoke_agent(channel_name, &inbound, config, health).await?;
 
-    // Prepare auth tokens
+    // Prepare auth tokens (resolve from credential store, falling back to env vars)
     let token = channel
         .manifest
         .auth
         .token_env
         .as_deref()
-        .and_then(|env| std::env::var(env).ok())
+        .and_then(|env| config.resolve_credential_or_env(env))
         .unwrap_or_default();
 
     let secret = channel
@@ -275,7 +277,7 @@ async fn process_message(
         .auth
         .secret_env
         .as_deref()
-        .and_then(|env| std::env::var(env).ok())
+        .and_then(|env| config.resolve_credential_or_env(env))
         .unwrap_or_default();
 
     let executor = ChannelExecutor::new(&channel.manifest, &channel.dir);

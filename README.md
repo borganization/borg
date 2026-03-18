@@ -51,8 +51,25 @@ Borg is an AI assistant that runs locally on your machine, remembers you across 
 | `borg` | Start an interactive conversation |
 | `borg ask "..."` | Ask a quick question and get a one-shot answer |
 | `borg init` | Run the setup wizard (name, personality, provider) |
+| `borg add <name>` | Set up an integration (e.g. `borg add telegram`) |
+| `borg remove <name>` | Remove an integration's credentials |
+| `borg plugins` | See all available integrations and their status |
 | `borg gateway` | Start the webhook server for messaging integrations |
 | `borg doctor` | Check that everything is configured correctly |
+
+## Integrations
+
+Everything is compiled into one binary. Set up integrations by configuring credentials:
+
+```sh
+borg add telegram        # configure Telegram bot token
+borg add gmail           # configure Gmail API key
+borg plugins             # see all available integrations
+```
+
+**Available integrations:** Telegram, Slack, Twilio (WhatsApp + SMS), Gmail, Outlook, Google Calendar, Notion, Linear. iMessage is built-in on macOS (no credentials needed).
+
+Skills and channels can also be added at runtime — Borg creates its own tools and skills on the fly without recompiling.
 
 ## Contributing
 
