@@ -67,7 +67,10 @@ pub fn handle_apply_skill_patch(args: &serde_json::Value) -> Result<String> {
     let base_dir = Config::skills_dir()?;
     std::fs::create_dir_all(&base_dir)?;
     match apply_patch_to_dir(patch, &base_dir) {
-        Ok(_) => Ok("Skill patch applied successfully.".to_string()),
+        Ok(affected) => Ok(format!(
+            "Skill patch applied successfully.\n{}",
+            affected.format_summary()
+        )),
         Err(e) => Ok(format!("Error applying skill patch: {e}")),
     }
 }
@@ -78,8 +81,8 @@ pub fn handle_apply_patch(args: &serde_json::Value) -> Result<String> {
         std::env::current_dir().context("Failed to determine current working directory")?;
     match apply_patch_to_dir(patch, &base_dir) {
         Ok(affected) => Ok(format!(
-            "Patch applied successfully. Files affected: {}",
-            affected.join(", ")
+            "Patch applied successfully.\n{}",
+            affected.format_summary()
         )),
         Err(e) => Ok(format!("Error applying patch: {e}")),
     }
@@ -90,9 +93,12 @@ pub fn handle_create_tool(args: &serde_json::Value, registry: &mut ToolRegistry)
     let base_dir = Config::tools_dir()?;
     std::fs::create_dir_all(&base_dir)?;
     match apply_patch_to_dir(patch, &base_dir) {
-        Ok(_) => {
+        Ok(affected) => {
             *registry = ToolRegistry::new()?;
-            Ok("Patch applied successfully. Tool registry reloaded.".to_string())
+            Ok(format!(
+                "Patch applied successfully. Tool registry reloaded.\n{}",
+                affected.format_summary()
+            ))
         }
         Err(e) => Ok(format!("Error applying patch: {e}")),
     }
@@ -103,7 +109,10 @@ pub fn handle_create_channel(args: &serde_json::Value) -> Result<String> {
     let base_dir = Config::channels_dir()?;
     std::fs::create_dir_all(&base_dir)?;
     match apply_patch_to_dir(patch, &base_dir) {
-        Ok(_) => Ok("Channel patch applied successfully.".to_string()),
+        Ok(affected) => Ok(format!(
+            "Channel patch applied successfully.\n{}",
+            affected.format_summary()
+        )),
         Err(e) => Ok(format!("Error applying channel patch: {e}")),
     }
 }
