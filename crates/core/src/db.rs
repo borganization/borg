@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Datelike;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 
 use crate::config::Config;
@@ -53,6 +53,7 @@ pub struct MessageRow {
     pub session_id: String,
     pub role: String,
     pub content: Option<String>,
+    pub content_parts_json: Option<String>,
     pub tool_calls_json: Option<String>,
     pub tool_call_id: Option<String>,
     pub timestamp: Option<String>,
@@ -88,6 +89,38 @@ pub struct CustomizationRow {
     pub version: String,
     pub installed_at: i64,
     pub verified_at: Option<i64>,
+}
+
+/// Agent role row from SQLite.
+#[derive(Debug, Clone)]
+pub struct AgentRoleRow {
+    pub name: String,
+    pub description: String,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub temperature: Option<f32>,
+    pub system_instructions: Option<String>,
+    pub tools_allowed: Option<String>,
+    pub max_iterations: Option<i64>,
+    pub is_builtin: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Sub-agent run row from SQLite.
+#[derive(Debug, Clone)]
+pub struct SubAgentRunRow {
+    pub id: String,
+    pub nickname: String,
+    pub role: String,
+    pub parent_session_id: String,
+    pub session_id: String,
+    pub depth: u32,
+    pub status: String,
+    pub result_text: Option<String>,
+    pub error_text: Option<String>,
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
 }
 
 /// Parameters for creating a new scheduled task.
@@ -150,7 +183,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 6;
+    const CURRENT_VERSION: u32 = 8;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -180,6 +213,12 @@ impl Database {
         }
         if current < 6 {
             self.migrate_v6()?;
+        }
+        if current < 7 {
+            self.migrate_v7()?;
+        }
+        if current < 8 {
+            self.migrate_v8()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -408,6 +447,244 @@ impl Database {
             ",
         )?;
         Ok(())
+    }
+
+    /// V7: Add agent_roles and sub_agent_runs tables for multi-agent system
+    fn migrate_v7(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS agent_roles (
+                name TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                model TEXT,
+                provider TEXT,
+                temperature REAL,
+                system_instructions TEXT,
+                tools_allowed TEXT,
+                max_iterations INTEGER,
+                is_builtin INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sub_agent_runs (
+                id TEXT PRIMARY KEY,
+                nickname TEXT NOT NULL,
+                role TEXT NOT NULL,
+                parent_session_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                depth INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending_init',
+                result_text TEXT,
+                error_text TEXT,
+                created_at INTEGER NOT NULL,
+                completed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_sub_agent_runs_parent
+                ON sub_agent_runs(parent_session_id);
+            ",
+        )?;
+        crate::multi_agent::roles::seed_builtin_roles(self)?;
+        Ok(())
+    }
+
+    /// V8: Add content_parts_json column to messages for multimodal content
+    fn migrate_v8(&self) -> Result<()> {
+        self.conn
+            .execute_batch("ALTER TABLE messages ADD COLUMN content_parts_json TEXT;")
+            .or_else(|e| {
+                let msg = e.to_string();
+                if msg.contains("duplicate column") || msg.contains("already exists") {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
+        Ok(())
+    }
+
+    // ── Agent Roles ──
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_role(
+        &self,
+        name: &str,
+        description: &str,
+        model: Option<&str>,
+        provider: Option<&str>,
+        temperature: Option<f32>,
+        system_instructions: Option<&str>,
+        tools_allowed: Option<&str>,
+        max_iterations: Option<i64>,
+        is_builtin: bool,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO agent_roles (name, description, model, provider, temperature, system_instructions, tools_allowed, max_iterations, is_builtin, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+            params![name, description, model, provider, temperature, system_instructions, tools_allowed, max_iterations, is_builtin as i32, now],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_role(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        model: Option<&str>,
+        provider: Option<&str>,
+        temperature: Option<f32>,
+        system_instructions: Option<&str>,
+        tools_allowed: Option<&str>,
+        max_iterations: Option<i64>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "UPDATE agent_roles SET description = COALESCE(?2, description), model = COALESCE(?3, model), provider = COALESCE(?4, provider), temperature = COALESCE(?5, temperature), system_instructions = COALESCE(?6, system_instructions), tools_allowed = COALESCE(?7, tools_allowed), max_iterations = COALESCE(?8, max_iterations), updated_at = ?1 WHERE name = ?9",
+            params![now, description, model, provider, temperature, system_instructions, tools_allowed, max_iterations, name],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_role(&self, name: &str) -> Result<bool> {
+        let count = self
+            .conn
+            .execute("DELETE FROM agent_roles WHERE name = ?1", params![name])?;
+        Ok(count > 0)
+    }
+
+    pub fn get_role(&self, name: &str) -> Result<Option<AgentRoleRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, description, model, provider, temperature, system_instructions, tools_allowed, max_iterations, is_builtin, created_at, updated_at FROM agent_roles WHERE name = ?1",
+        )?;
+        let row = stmt
+            .query_row(params![name], |row| {
+                Ok(AgentRoleRow {
+                    name: row.get(0)?,
+                    description: row.get(1)?,
+                    model: row.get(2)?,
+                    provider: row.get(3)?,
+                    temperature: row.get(4)?,
+                    system_instructions: row.get(5)?,
+                    tools_allowed: row.get(6)?,
+                    max_iterations: row.get(7)?,
+                    is_builtin: row.get::<_, i32>(8)? != 0,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn list_roles(&self) -> Result<Vec<AgentRoleRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, description, model, provider, temperature, system_instructions, tools_allowed, max_iterations, is_builtin, created_at, updated_at FROM agent_roles ORDER BY name",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(AgentRoleRow {
+                    name: row.get(0)?,
+                    description: row.get(1)?,
+                    model: row.get(2)?,
+                    provider: row.get(3)?,
+                    temperature: row.get(4)?,
+                    system_instructions: row.get(5)?,
+                    tools_allowed: row.get(6)?,
+                    max_iterations: row.get(7)?,
+                    is_builtin: row.get::<_, i32>(8)? != 0,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // ── Sub-Agent Runs ──
+
+    pub fn insert_sub_agent_run(
+        &self,
+        id: &str,
+        nickname: &str,
+        role: &str,
+        parent_session_id: &str,
+        session_id: &str,
+        depth: u32,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO sub_agent_runs (id, nickname, role, parent_session_id, session_id, depth, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending_init', ?7)",
+            params![id, nickname, role, parent_session_id, session_id, depth, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_sub_agent_status(
+        &self,
+        id: &str,
+        status: &str,
+        result_text: Option<&str>,
+        error_text: Option<&str>,
+    ) -> Result<()> {
+        let completed_at = if status == "completed" || status == "errored" || status == "shutdown" {
+            Some(chrono::Utc::now().timestamp())
+        } else {
+            None
+        };
+        self.conn.execute(
+            "UPDATE sub_agent_runs SET status = ?2, result_text = ?3, error_text = ?4, completed_at = ?5 WHERE id = ?1",
+            params![id, status, result_text, error_text, completed_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_sub_agent_runs(&self, parent_session_id: &str) -> Result<Vec<SubAgentRunRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, nickname, role, parent_session_id, session_id, depth, status, result_text, error_text, created_at, completed_at FROM sub_agent_runs WHERE parent_session_id = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt
+            .query_map(params![parent_session_id], |row| {
+                Ok(SubAgentRunRow {
+                    id: row.get(0)?,
+                    nickname: row.get(1)?,
+                    role: row.get(2)?,
+                    parent_session_id: row.get(3)?,
+                    session_id: row.get(4)?,
+                    depth: row.get(5)?,
+                    status: row.get(6)?,
+                    result_text: row.get(7)?,
+                    error_text: row.get(8)?,
+                    created_at: row.get(9)?,
+                    completed_at: row.get(10)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_sub_agent_run(&self, id: &str) -> Result<Option<SubAgentRunRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, nickname, role, parent_session_id, session_id, depth, status, result_text, error_text, created_at, completed_at FROM sub_agent_runs WHERE id = ?1",
+        )?;
+        let row = stmt
+            .query_row(params![id], |row| {
+                Ok(SubAgentRunRow {
+                    id: row.get(0)?,
+                    nickname: row.get(1)?,
+                    role: row.get(2)?,
+                    parent_session_id: row.get(3)?,
+                    session_id: row.get(4)?,
+                    depth: row.get(5)?,
+                    status: row.get(6)?,
+                    result_text: row.get(7)?,
+                    error_text: row.get(8)?,
+                    created_at: row.get(9)?,
+                    completed_at: row.get(10)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
     }
 
     // ── Delivery Queue ──
@@ -716,6 +993,7 @@ impl Database {
 
     // ── Message persistence ──
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_message(
         &self,
         session_id: &str,
@@ -724,19 +1002,20 @@ impl Database {
         tool_calls_json: Option<&str>,
         tool_call_id: Option<&str>,
         timestamp: Option<&str>,
+        content_parts_json: Option<&str>,
     ) -> Result<i64> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(
-            "INSERT INTO messages (session_id, role, content, tool_calls_json, tool_call_id, timestamp, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![session_id, role, content, tool_calls_json, tool_call_id, timestamp, now],
+            "INSERT INTO messages (session_id, role, content, tool_calls_json, tool_call_id, timestamp, created_at, content_parts_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![session_id, role, content, tool_calls_json, tool_call_id, timestamp, now, content_parts_json],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
     pub fn load_session_messages(&self, session_id: &str) -> Result<Vec<MessageRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, role, content, tool_calls_json, tool_call_id, timestamp, created_at
+            "SELECT id, session_id, role, content, tool_calls_json, tool_call_id, timestamp, created_at, content_parts_json
              FROM messages WHERE session_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt
@@ -750,6 +1029,7 @@ impl Database {
                     tool_call_id: row.get(5)?,
                     timestamp: row.get(6)?,
                     created_at: row.get(7)?,
+                    content_parts_json: row.get(8)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1371,6 +1651,7 @@ mod tests {
             None,
             None,
             Some("2026-01-01T00:00:00Z"),
+            None,
         )
         .expect("insert user msg");
         db.insert_message(
@@ -1380,9 +1661,10 @@ mod tests {
             None,
             None,
             Some("2026-01-01T00:00:01Z"),
+            None,
         )
         .expect("insert assistant msg");
-        db.insert_message("s2", "user", Some("Other session"), None, None, None)
+        db.insert_message("s2", "user", Some("Other session"), None, None, None, None)
             .expect("insert other session msg");
 
         let msgs = db.load_session_messages("s1").expect("load");
@@ -1395,9 +1677,9 @@ mod tests {
     #[test]
     fn delete_session_messages() {
         let db = test_db();
-        db.insert_message("s1", "user", Some("msg1"), None, None, None)
+        db.insert_message("s1", "user", Some("msg1"), None, None, None, None)
             .expect("insert");
-        db.insert_message("s1", "user", Some("msg2"), None, None, None)
+        db.insert_message("s1", "user", Some("msg2"), None, None, None, None)
             .expect("insert");
         let deleted = db.delete_session_messages("s1").expect("delete");
         assert_eq!(deleted, 2);
@@ -1410,7 +1692,7 @@ mod tests {
         let db = test_db();
         let tc_json =
             r#"[{"id":"c1","type":"function","function":{"name":"test","arguments":"{}"}}]"#;
-        db.insert_message("s1", "assistant", None, Some(tc_json), None, None)
+        db.insert_message("s1", "assistant", None, Some(tc_json), None, None, None)
             .expect("insert");
         let msgs = db.load_session_messages("s1").expect("load");
         assert_eq!(msgs.len(), 1);
@@ -1468,6 +1750,7 @@ mod tests {
             Some("result data"),
             None,
             Some("call_abc123"),
+            None,
             None,
         )
         .expect("insert");

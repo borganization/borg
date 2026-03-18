@@ -64,11 +64,11 @@ pub fn log_message(message: &Message) {
 
     let kind = match message.role {
         crate::types::Role::User => {
-            let content = redact_secrets(&message.content.clone().unwrap_or_default());
+            let content = redact_secrets(message.text_content().unwrap_or(""));
             LogEntryKind::UserMessage { content }
         }
         crate::types::Role::Assistant => LogEntryKind::AssistantMessage {
-            content: message.content.as_deref().map(redact_secrets),
+            content: message.text_content().map(redact_secrets),
             tool_calls: message.tool_calls.as_ref().map(|tcs| {
                 tcs.iter()
                     .map(|tc| LogToolCall {
@@ -81,7 +81,7 @@ pub fn log_message(message: &Message) {
         },
         crate::types::Role::Tool => LogEntryKind::ToolResult {
             tool_call_id: message.tool_call_id.clone().unwrap_or_default(),
-            content: redact_secrets(&message.content.clone().unwrap_or_default()),
+            content: redact_secrets(message.text_content().unwrap_or("")),
         },
         crate::types::Role::System => return,
     };

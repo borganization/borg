@@ -30,6 +30,8 @@ pub struct InboundMessage {
     pub message_id: Option<String>,
     #[serde(default)]
     pub thread_ts: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
 
 /// Process a webhook request for a channel end-to-end.

@@ -1,3 +1,5 @@
+use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -9,10 +11,177 @@ pub enum Role {
     Tool,
 }
 
+/// Media attachment data.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MediaData {
+    pub mime_type: String,
+    pub data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+}
+
+/// A single content part in a multi-modal message.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContentPart {
+    Text(String),
+    ImageBase64 { media: MediaData },
+    ImageUrl { url: String },
+    AudioBase64 { media: MediaData },
+}
+
+impl Serialize for ContentPart {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ContentPart::Text(t) => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "text")?;
+                map.serialize_entry("text", t)?;
+                map.end()
+            }
+            ContentPart::ImageBase64 { media } => {
+                let data_uri = format!("data:{};base64,{}", media.mime_type, media.data);
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "image_url")?;
+                map.serialize_entry("image_url", &serde_json::json!({"url": data_uri}))?;
+                map.end()
+            }
+            ContentPart::ImageUrl { url } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "image_url")?;
+                map.serialize_entry("image_url", &serde_json::json!({"url": url}))?;
+                map.end()
+            }
+            ContentPart::AudioBase64 { media } => {
+                let data_uri = format!("data:{};base64,{}", media.mime_type, media.data);
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "audio")?;
+                map.serialize_entry("audio", &serde_json::json!({"url": data_uri}))?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentPart {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v: serde_json::Value = serde_json::Value::deserialize(deserializer)?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| de::Error::custom("expected object"))?;
+        let typ = obj
+            .get("type")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| de::Error::custom("missing 'type'"))?;
+        match typ {
+            "text" => {
+                let text = obj
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(ContentPart::Text(text))
+            }
+            "image_url" => {
+                let url = obj
+                    .get("image_url")
+                    .and_then(|o| o.get("url"))
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if url.starts_with("data:") {
+                    match crate::media::parse_data_uri(&url) {
+                        Ok(media) => Ok(ContentPart::ImageBase64 { media }),
+                        Err(_) => Ok(ContentPart::ImageUrl { url }),
+                    }
+                } else {
+                    Ok(ContentPart::ImageUrl { url })
+                }
+            }
+            "audio" => {
+                let url = obj
+                    .get("audio")
+                    .and_then(|o| o.get("url"))
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if url.starts_with("data:") {
+                    match crate::media::parse_data_uri(&url) {
+                        Ok(media) => Ok(ContentPart::AudioBase64 { media }),
+                        Err(_) => Ok(ContentPart::Text(format!("[audio: {url}]"))),
+                    }
+                } else {
+                    Ok(ContentPart::Text(format!("[audio: {url}]")))
+                }
+            }
+            _ => Ok(ContentPart::Text(format!("[unknown content type: {typ}]"))),
+        }
+    }
+}
+
+/// Message content: plain text or structured parts.
+/// Serializes as string when text-only (backward compat), array when multimodal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            MessageContent::Text(s) => Some(s),
+            MessageContent::Parts(parts) => parts.iter().find_map(|p| match p {
+                ContentPart::Text(t) => Some(t.as_str()),
+                _ => None,
+            }),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            MessageContent::Text(s) => s.is_empty(),
+            MessageContent::Parts(parts) => parts.is_empty(),
+        }
+    }
+}
+
+impl Serialize for MessageContent {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            MessageContent::Text(s) => serializer.serialize_str(s),
+            MessageContent::Parts(parts) => parts.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ContentVisitor;
+        impl<'de> Visitor<'de> for ContentVisitor {
+            type Value = MessageContent;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "a string or array of content parts")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(MessageContent::Text(v.to_string()))
+            }
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok(MessageContent::Text(v))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+                let parts =
+                    Vec::<ContentPart>::deserialize(de::value::SeqAccessDeserializer::new(seq))?;
+                Ok(MessageContent::Parts(parts))
+            }
+        }
+        deserializer.deserialize_any(ContentVisitor)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,17 +233,17 @@ impl Message {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: Role::System,
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
-            timestamp: None, // system prompts don't need timestamps
+            timestamp: None,
         }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: Role::User,
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             timestamp: Some(Self::now_rfc3339()),
@@ -84,7 +253,7 @@ impl Message {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             timestamp: Some(Self::now_rfc3339()),
@@ -94,11 +263,25 @@ impl Message {
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             timestamp: Some(Self::now_rfc3339()),
         }
+    }
+
+    pub fn user_multimodal(parts: Vec<ContentPart>) -> Self {
+        Self {
+            role: Role::User,
+            content: Some(MessageContent::Parts(parts)),
+            tool_calls: None,
+            tool_call_id: None,
+            timestamp: Some(Self::now_rfc3339()),
+        }
+    }
+
+    pub fn text_content(&self) -> Option<&str> {
+        self.content.as_ref().and_then(|c| c.text())
     }
 }
 
@@ -127,7 +310,7 @@ mod tests {
     fn message_system_constructor() {
         let msg = Message::system("You are helpful.");
         assert_eq!(msg.role, Role::System);
-        assert_eq!(msg.content.as_deref(), Some("You are helpful."));
+        assert_eq!(msg.text_content(), Some("You are helpful."));
         assert!(msg.tool_calls.is_none());
         assert!(msg.tool_call_id.is_none());
     }
@@ -136,21 +319,21 @@ mod tests {
     fn message_user_constructor() {
         let msg = Message::user("Hello");
         assert_eq!(msg.role, Role::User);
-        assert_eq!(msg.content.as_deref(), Some("Hello"));
+        assert_eq!(msg.text_content(), Some("Hello"));
     }
 
     #[test]
     fn message_assistant_constructor() {
         let msg = Message::assistant("Hi there");
         assert_eq!(msg.role, Role::Assistant);
-        assert_eq!(msg.content.as_deref(), Some("Hi there"));
+        assert_eq!(msg.text_content(), Some("Hi there"));
     }
 
     #[test]
     fn message_tool_result_constructor() {
         let msg = Message::tool_result("call_123", "result text");
         assert_eq!(msg.role, Role::Tool);
-        assert_eq!(msg.content.as_deref(), Some("result text"));
+        assert_eq!(msg.text_content(), Some("result text"));
         assert_eq!(msg.tool_call_id.as_deref(), Some("call_123"));
         assert!(msg.tool_calls.is_none());
     }
@@ -159,10 +342,10 @@ mod tests {
     fn message_constructors_accept_string_types() {
         let owned = String::from("owned string");
         let msg = Message::user(owned);
-        assert_eq!(msg.content.as_deref(), Some("owned string"));
+        assert_eq!(msg.text_content(), Some("owned string"));
 
         let msg2 = Message::system("static str");
-        assert_eq!(msg2.content.as_deref(), Some("static str"));
+        assert_eq!(msg2.text_content(), Some("static str"));
     }
 
     #[test]
@@ -232,5 +415,86 @@ mod tests {
         assert_eq!(json["tool_call_id"], "call_1");
         assert_eq!(json["content"], "success");
         assert_eq!(json["is_error"], false);
+    }
+
+    #[test]
+    fn message_content_text_serializes_as_string() {
+        let mc = MessageContent::Text("hi".to_string());
+        let json = serde_json::to_value(&mc).unwrap();
+        assert_eq!(json, serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn message_content_parts_serializes_as_array() {
+        let mc = MessageContent::Parts(vec![
+            ContentPart::Text("hello".to_string()),
+            ContentPart::ImageUrl {
+                url: "https://example.com/img.png".to_string(),
+            },
+        ]);
+        let json = serde_json::to_value(&mc).unwrap();
+        assert!(json.is_array());
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[1]["type"], "image_url");
+    }
+
+    #[test]
+    fn message_content_deserializes_from_string() {
+        let mc: MessageContent = serde_json::from_str("\"hello\"").unwrap();
+        assert_eq!(mc, MessageContent::Text("hello".to_string()));
+    }
+
+    #[test]
+    fn message_content_deserializes_from_array() {
+        let json = r#"[{"type":"text","text":"hi"}]"#;
+        let mc: MessageContent = serde_json::from_str(json).unwrap();
+        match mc {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 1);
+                assert!(matches!(&parts[0], ContentPart::Text(t) if t == "hi"));
+            }
+            _ => panic!("expected Parts"),
+        }
+    }
+
+    #[test]
+    fn content_part_image_base64_serializes_openai_format() {
+        let part = ContentPart::ImageBase64 {
+            media: MediaData {
+                mime_type: "image/png".to_string(),
+                data: "abc123".to_string(),
+                filename: None,
+            },
+        };
+        let json = serde_json::to_value(&part).unwrap();
+        assert_eq!(json["type"], "image_url");
+        assert_eq!(json["image_url"]["url"], "data:image/png;base64,abc123");
+    }
+
+    #[test]
+    fn user_multimodal_constructor() {
+        let parts = vec![
+            ContentPart::Text("Describe this".to_string()),
+            ContentPart::ImageUrl {
+                url: "https://example.com/img.png".to_string(),
+            },
+        ];
+        let msg = Message::user_multimodal(parts);
+        assert_eq!(msg.role, Role::User);
+        assert_eq!(msg.text_content(), Some("Describe this"));
+        match &msg.content {
+            Some(MessageContent::Parts(p)) => assert_eq!(p.len(), 2),
+            _ => panic!("expected Parts"),
+        }
+    }
+
+    #[test]
+    fn text_only_message_serialization_unchanged() {
+        let msg = Message::user("test message");
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["content"], "test message");
+        assert_eq!(json["role"], "user");
     }
 }

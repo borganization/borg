@@ -133,7 +133,7 @@ impl HeartbeatScheduler {
         let messages = vec![Message::system(system), Message::user("*heartbeat tick*")];
 
         let response = self.llm.chat(&messages, None).await?;
-        Ok(response.content)
+        Ok(response.text_content().map(String::from))
     }
 
     fn is_quiet_hours(&self) -> bool {

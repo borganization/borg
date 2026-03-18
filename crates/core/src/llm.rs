@@ -569,7 +569,7 @@ impl LlmClient {
         let system_text: Option<String> = messages
             .iter()
             .find(|m| m.role == Role::System)
-            .and_then(|m| m.content.clone());
+            .and_then(|m| m.text_content().map(String::from));
 
         // Convert messages (skip system)
         let anthropic_messages = build_anthropic_messages(messages);
@@ -826,16 +826,60 @@ fn build_anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         }
 
         match msg.role {
-            Role::User => {
-                result.push(serde_json::json!({
-                    "role": "user",
-                    "content": msg.content.as_deref().unwrap_or(""),
-                }));
-            }
+            Role::User => match &msg.content {
+                Some(crate::types::MessageContent::Parts(parts)) => {
+                    let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+                    for part in parts {
+                        match part {
+                            crate::types::ContentPart::Text(t) => {
+                                content_blocks.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": t,
+                                }));
+                            }
+                            crate::types::ContentPart::ImageBase64 { media } => {
+                                content_blocks.push(serde_json::json!({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media.mime_type,
+                                        "data": media.data,
+                                    },
+                                }));
+                            }
+                            crate::types::ContentPart::ImageUrl { url } => {
+                                content_blocks.push(serde_json::json!({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "url",
+                                        "url": url,
+                                    },
+                                }));
+                            }
+                            crate::types::ContentPart::AudioBase64 { media } => {
+                                content_blocks.push(serde_json::json!({
+                                        "type": "text",
+                                        "text": format!("[audio: {}]", media.filename.as_deref().unwrap_or("audio")),
+                                    }));
+                            }
+                        }
+                    }
+                    result.push(serde_json::json!({
+                        "role": "user",
+                        "content": content_blocks,
+                    }));
+                }
+                _ => {
+                    result.push(serde_json::json!({
+                        "role": "user",
+                        "content": msg.text_content().unwrap_or(""),
+                    }));
+                }
+            },
             Role::Assistant => {
                 let mut content_blocks: Vec<serde_json::Value> = Vec::new();
 
-                if let Some(ref text) = msg.content {
+                if let Some(text) = msg.text_content() {
                     if !text.is_empty() {
                         content_blocks.push(serde_json::json!({
                             "type": "text",
@@ -873,7 +917,7 @@ fn build_anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                 let tool_result_block = serde_json::json!({
                     "type": "tool_result",
                     "tool_use_id": msg.tool_call_id.as_deref().unwrap_or(""),
-                    "content": msg.content.as_deref().unwrap_or(""),
+                    "content": msg.text_content().unwrap_or(""),
                 });
 
                 // Anthropic requires tool results in a user message. Merge with previous
@@ -935,7 +979,7 @@ fn parse_anthropic_response(resp: &serde_json::Value) -> Result<Message> {
     let content = if text_parts.is_empty() {
         None
     } else {
-        Some(text_parts.join(""))
+        Some(crate::types::MessageContent::Text(text_parts.join("")))
     };
 
     let tool_calls = if tool_calls.is_empty() {
@@ -1100,7 +1144,7 @@ mod tests {
 
         let msg = parse_anthropic_response(&resp).unwrap();
         assert_eq!(msg.role, Role::Assistant);
-        assert_eq!(msg.content.as_deref(), Some("Hello there!"));
+        assert_eq!(msg.text_content(), Some("Hello there!"));
         assert!(msg.tool_calls.is_none());
     }
 
@@ -1120,7 +1164,7 @@ mod tests {
         });
 
         let msg = parse_anthropic_response(&resp).unwrap();
-        assert_eq!(msg.content.as_deref(), Some("Let me check."));
+        assert_eq!(msg.text_content(), Some("Let me check."));
         let tcs = msg.tool_calls.unwrap();
         assert_eq!(tcs.len(), 1);
         assert_eq!(tcs[0].id, "toolu_123");

@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod credentials;
 mod logo;
 mod onboarding;
 mod onboarding_tui;
@@ -69,6 +70,11 @@ enum Commands {
     },
     /// List all available integrations and their status
     Plugins,
+    /// List agent roles or show role details
+    Agents {
+        #[command(subcommand)]
+        action: Option<AgentsAction>,
+    },
     /// Show or update configuration settings
     Settings {
         #[command(subcommand)]
@@ -133,6 +139,15 @@ enum TasksAction {
     Resume {
         /// Task ID (or prefix)
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentsAction {
+    /// Show details of a specific role
+    Show {
+        /// Role name
+        name: String,
     },
 }
 
@@ -253,6 +268,10 @@ async fn main() -> Result<()> {
         Some(Commands::Add { name }) => plugins::add_integration(&name)?,
         Some(Commands::Remove { name }) => plugins::remove_integration(&name)?,
         Some(Commands::Plugins) => plugins::list_integrations()?,
+        Some(Commands::Agents { action }) => match action {
+            Some(AgentsAction::Show { name }) => run_agents_show(&name)?,
+            None => run_agents_list()?,
+        },
         Some(Commands::Settings { action }) => match action {
             Some(SettingsAction::Set { key, value }) => run_settings_set(&key, &value)?,
             None => run_settings_show()?,
@@ -529,6 +548,58 @@ fn truncate_str(s: &str, max: usize) -> String {
     } else {
         format!("{}…", &s[..max - 1])
     }
+}
+
+fn run_agents_list() -> Result<()> {
+    let roles = borg_core::multi_agent::roles::list_all_roles();
+    if roles.is_empty() {
+        println!("No agent roles configured.");
+    } else {
+        println!("{:15} {:50} {:6} TOOLS", "NAME", "DESCRIPTION", "TEMP");
+        for role in &roles {
+            let temp = role
+                .temperature
+                .map(|t| format!("{t:.1}"))
+                .unwrap_or_else(|| "-".to_string());
+            let tools = role
+                .tools_allowed
+                .as_ref()
+                .map(|t| t.join(", "))
+                .unwrap_or_else(|| "all".to_string());
+            let desc = if role.description.len() > 50 {
+                format!("{}...", &role.description[..47])
+            } else {
+                role.description.clone()
+            };
+            println!("{:15} {:50} {:6} {}", role.name, desc, temp, tools);
+        }
+    }
+    Ok(())
+}
+
+fn run_agents_show(name: &str) -> Result<()> {
+    match borg_core::multi_agent::roles::load_role(name) {
+        Some(role) => {
+            println!("Role: {}", role.name);
+            println!("Description: {}", role.description);
+            if let Some(model) = &role.model {
+                println!("Model: {model}");
+            }
+            if let Some(temp) = role.temperature {
+                println!("Temperature: {temp}");
+            }
+            if let Some(tools) = &role.tools_allowed {
+                println!("Tools: {}", tools.join(", "));
+            } else {
+                println!("Tools: all");
+            }
+            if let Some(instructions) = &role.system_instructions {
+                println!("Instructions: {instructions}");
+            }
+        }
+        None => println!("Role '{name}' not found."),
+    }
+    Ok(())
 }
 
 fn run_uninstall() -> Result<()> {

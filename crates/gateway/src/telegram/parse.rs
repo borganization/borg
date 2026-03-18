@@ -60,6 +60,7 @@ pub fn parse_update(update: &Update) -> Option<InboundMessage> {
             thread_id,
             message_id,
             thread_ts: None,
+            attachments: Vec::new(),
         });
     }
 
@@ -85,6 +86,7 @@ pub fn parse_update(update: &Update) -> Option<InboundMessage> {
             thread_id,
             message_id,
             thread_ts: None,
+            attachments: Vec::new(),
         });
     }
 

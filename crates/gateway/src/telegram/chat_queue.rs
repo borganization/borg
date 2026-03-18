@@ -119,6 +119,7 @@ mod tests {
             thread_id: None,
             message_id: None,
             thread_ts: None,
+            attachments: Vec::new(),
         }
     }
 

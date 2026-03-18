@@ -115,6 +115,32 @@ impl Provider {
         }
     }
 
+    /// Whether a model supports vision (image inputs).
+    pub fn supports_vision(&self, model: &str) -> bool {
+        match self {
+            Provider::Anthropic => {
+                model.contains("claude-3")
+                    || model.contains("claude-sonnet")
+                    || model.contains("claude-opus")
+            }
+            Provider::OpenAi => {
+                model.contains("gpt-4o")
+                    || model.contains("gpt-4-vision")
+                    || model.contains("gpt-4-turbo")
+            }
+            Provider::Gemini => true,
+            Provider::OpenRouter => {
+                model.contains("claude-3")
+                    || model.contains("claude-sonnet")
+                    || model.contains("claude-opus")
+                    || model.contains("gpt-4o")
+                    || model.contains("gpt-4-vision")
+                    || model.contains("gpt-4-turbo")
+                    || model.contains("gemini")
+            }
+        }
+    }
+
     /// String identifier for config serialization.
     pub fn as_str(&self) -> &'static str {
         match self {

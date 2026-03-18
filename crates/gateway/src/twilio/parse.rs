@@ -33,6 +33,7 @@ pub fn parse_webhook(body: &str) -> Result<TwilioInbound> {
                     message_id: Some(webhook.message_sid),
                     thread_id: None,
                     thread_ts: None,
+                    attachments: Vec::new(),
                 },
                 channel_type,
             });
@@ -49,6 +50,7 @@ pub fn parse_webhook(body: &str) -> Result<TwilioInbound> {
             message_id: Some(webhook.message_sid),
             thread_id: None,
             thread_ts: None,
+            attachments: Vec::new(),
         },
         channel_type,
     })
