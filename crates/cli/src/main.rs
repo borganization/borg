@@ -265,9 +265,9 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Tools) => run_tools()?,
         Some(Commands::Skills) => run_skills()?,
-        Some(Commands::Add { name }) => plugins::add_integration(&name)?,
-        Some(Commands::Remove { name }) => plugins::remove_integration(&name)?,
-        Some(Commands::Plugins) => plugins::list_integrations()?,
+        Some(Commands::Add { name }) => plugins::add_plugin(&name)?,
+        Some(Commands::Remove { name }) => plugins::remove_plugin(&name)?,
+        Some(Commands::Plugins) => plugins::list_plugins()?,
         Some(Commands::Agents { action }) => match action {
             Some(AgentsAction::Show { name }) => run_agents_show(&name)?,
             None => run_agents_list()?,

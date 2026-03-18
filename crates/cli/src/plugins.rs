@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use borg_core::config::Config;
 
-pub struct IntegrationDef {
+pub struct PluginDef {
     pub name: &'static str,
     pub description: &'static str,
     pub category: &'static str,
@@ -16,8 +16,8 @@ pub struct CredentialSpec {
     pub help: &'static str,
 }
 
-pub const INTEGRATIONS: &[IntegrationDef] = &[
-    IntegrationDef {
+pub const PLUGINS: &[PluginDef] = &[
+    PluginDef {
         name: "telegram",
         description: "Telegram Bot API",
         category: "messaging",
@@ -28,7 +28,7 @@ pub const INTEGRATIONS: &[IntegrationDef] = &[
         }],
         is_channel: true,
     },
-    IntegrationDef {
+    PluginDef {
         name: "slack",
         description: "Slack Bot API",
         category: "messaging",
@@ -46,7 +46,7 @@ pub const INTEGRATIONS: &[IntegrationDef] = &[
         ],
         is_channel: true,
     },
-    IntegrationDef {
+    PluginDef {
         name: "twilio",
         description: "WhatsApp + SMS via Twilio",
         category: "messaging",
@@ -69,7 +69,54 @@ pub const INTEGRATIONS: &[IntegrationDef] = &[
         ],
         is_channel: true,
     },
-    IntegrationDef {
+    PluginDef {
+        name: "discord",
+        description: "Discord Bot API",
+        category: "messaging",
+        credentials: &[
+            CredentialSpec {
+                key: "DISCORD_BOT_TOKEN",
+                label: "Bot Token",
+                help: "Get from Discord Developer Portal > Bot",
+            },
+            CredentialSpec {
+                key: "DISCORD_PUBLIC_KEY",
+                label: "Public Key",
+                help: "Get from Discord Developer Portal > General Information",
+            },
+        ],
+        is_channel: true,
+    },
+    PluginDef {
+        name: "teams",
+        description: "Microsoft Teams Bot",
+        category: "messaging",
+        credentials: &[
+            CredentialSpec {
+                key: "TEAMS_APP_ID",
+                label: "App ID",
+                help: "Get from Azure Portal > Bot registration",
+            },
+            CredentialSpec {
+                key: "TEAMS_APP_SECRET",
+                label: "App Secret",
+                help: "Get from Azure Portal > Bot registration > Certificates & secrets",
+            },
+        ],
+        is_channel: true,
+    },
+    PluginDef {
+        name: "google-chat",
+        description: "Google Chat Bot",
+        category: "messaging",
+        credentials: &[CredentialSpec {
+            key: "GOOGLE_CHAT_WEBHOOK_TOKEN",
+            label: "Verification Token",
+            help: "Get from Google Cloud Console > Chat API configuration",
+        }],
+        is_channel: true,
+    },
+    PluginDef {
         name: "gmail",
         description: "Gmail API",
         category: "email",
@@ -80,7 +127,7 @@ pub const INTEGRATIONS: &[IntegrationDef] = &[
         }],
         is_channel: false,
     },
-    IntegrationDef {
+    PluginDef {
         name: "outlook",
         description: "Outlook via Microsoft Graph",
         category: "email",
@@ -91,7 +138,7 @@ pub const INTEGRATIONS: &[IntegrationDef] = &[
         }],
         is_channel: false,
     },
-    IntegrationDef {
+    PluginDef {
         name: "google-calendar",
         description: "Google Calendar API",
         category: "productivity",
@@ -102,7 +149,7 @@ pub const INTEGRATIONS: &[IntegrationDef] = &[
         }],
         is_channel: false,
     },
-    IntegrationDef {
+    PluginDef {
         name: "notion",
         description: "Notion API",
         category: "productivity",
@@ -113,7 +160,7 @@ pub const INTEGRATIONS: &[IntegrationDef] = &[
         }],
         is_channel: false,
     },
-    IntegrationDef {
+    PluginDef {
         name: "linear",
         description: "Linear GraphQL API",
         category: "productivity",
@@ -126,13 +173,13 @@ pub const INTEGRATIONS: &[IntegrationDef] = &[
     },
 ];
 
-/// Look up an integration by name.
-pub fn find_integration(name: &str) -> Option<&'static IntegrationDef> {
-    INTEGRATIONS.iter().find(|i| i.name == name)
+/// Look up a plugin by name.
+pub fn find_plugin(name: &str) -> Option<&'static PluginDef> {
+    PLUGINS.iter().find(|i| i.name == name)
 }
 
-/// Check if an integration's credentials are already configured.
-fn is_configured(def: &IntegrationDef, config: &Config) -> bool {
+/// Check if a plugin's credentials are already configured.
+fn is_configured(def: &PluginDef, config: &Config) -> bool {
     if def.credentials.is_empty() {
         return true;
     }
@@ -142,10 +189,10 @@ fn is_configured(def: &IntegrationDef, config: &Config) -> bool {
     })
 }
 
-/// Set up an integration: prompt for credentials, store in keychain, update config.
-pub fn add_integration(name: &str) -> Result<()> {
+/// Set up a plugin: prompt for credentials, store in keychain, update config.
+pub fn add_plugin(name: &str) -> Result<()> {
     let def =
-        find_integration(name).ok_or_else(|| anyhow::anyhow!("Unknown integration: {name}"))?;
+        find_plugin(name).ok_or_else(|| anyhow::anyhow!("Unknown plugin: {name}"))?;
 
     let config = Config::load().unwrap_or_default();
 
@@ -250,10 +297,10 @@ pub fn add_integration(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Remove an integration's credentials.
-pub fn remove_integration(name: &str) -> Result<()> {
+/// Remove a plugin's credentials.
+pub fn remove_plugin(name: &str) -> Result<()> {
     let def =
-        find_integration(name).ok_or_else(|| anyhow::anyhow!("Unknown integration: {name}"))?;
+        find_plugin(name).ok_or_else(|| anyhow::anyhow!("Unknown plugin: {name}"))?;
 
     let service_name = format!("borg-{name}");
 
@@ -281,15 +328,15 @@ pub fn remove_integration(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// List all integrations with their configured/unconfigured status.
-pub fn list_integrations() -> Result<()> {
+/// List all plugins with their configured/unconfigured status.
+pub fn list_plugins() -> Result<()> {
     let config = Config::load().unwrap_or_default();
 
     let categories = ["messaging", "email", "productivity"];
     let category_labels = ["Messaging", "Email", "Productivity"];
 
     for (cat, label) in categories.iter().zip(category_labels.iter()) {
-        let items: Vec<_> = INTEGRATIONS.iter().filter(|i| i.category == *cat).collect();
+        let items: Vec<_> = PLUGINS.iter().filter(|i| i.category == *cat).collect();
         if items.is_empty() {
             continue;
         }
@@ -351,22 +398,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn find_known_integration() {
-        assert!(find_integration("telegram").is_some());
-        assert!(find_integration("slack").is_some());
-        assert!(find_integration("gmail").is_some());
-        assert!(find_integration("notion").is_some());
-        assert!(find_integration("linear").is_some());
+    fn find_known_plugin() {
+        assert!(find_plugin("telegram").is_some());
+        assert!(find_plugin("slack").is_some());
+        assert!(find_plugin("discord").is_some());
+        assert!(find_plugin("teams").is_some());
+        assert!(find_plugin("google-chat").is_some());
+        assert!(find_plugin("gmail").is_some());
+        assert!(find_plugin("notion").is_some());
+        assert!(find_plugin("linear").is_some());
     }
 
     #[test]
-    fn find_unknown_integration() {
-        assert!(find_integration("nonexistent").is_none());
+    fn find_unknown_plugin() {
+        assert!(find_plugin("nonexistent").is_none());
     }
 
     #[test]
-    fn all_integrations_have_names_and_descriptions() {
-        for def in INTEGRATIONS {
+    fn all_plugins_have_names_and_descriptions() {
+        for def in PLUGINS {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());
             assert!(!def.category.is_empty());
@@ -374,8 +424,8 @@ mod tests {
     }
 
     #[test]
-    fn channel_integrations_have_credentials() {
-        for def in INTEGRATIONS {
+    fn channel_plugins_have_credentials() {
+        for def in PLUGINS {
             if def.is_channel && def.name != "imessage" {
                 assert!(
                     !def.credentials.is_empty(),
