@@ -10,6 +10,9 @@ use super::types::{ApiResponse, FileInfo, SendMessageRequest, Update, User};
 use crate::chunker;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
+const MESSAGE_CHUNK_SIZE: usize = 4000;
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A client for the Telegram Bot API.
 #[derive(Clone)]
@@ -23,8 +26,8 @@ impl TelegramClient {
     pub fn new(token: &str) -> Self {
         Self {
             client: Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
+                .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                .timeout(HTTP_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
             token: token.to_string(),
@@ -70,7 +73,7 @@ impl TelegramClient {
         message_thread_id: Option<i64>,
         reply_to_message_id: Option<i64>,
     ) -> Result<()> {
-        let chunks = chunker::chunk_text(text, 4000);
+        let chunks = chunker::chunk_text(text, MESSAGE_CHUNK_SIZE);
         let chunks = if chunks.is_empty() {
             vec![text.to_string()]
         } else {

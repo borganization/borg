@@ -42,36 +42,24 @@ pub struct ActionLimits {
     pub web_requests_block: u32,
 }
 
-fn default_tool_calls_warn() -> u32 {
-    50
+macro_rules! serde_default {
+    ($name:ident, $value:expr) => {
+        fn $name() -> u32 {
+            $value
+        }
+    };
 }
-fn default_tool_calls_block() -> u32 {
-    100
-}
-fn default_shell_commands_warn() -> u32 {
-    20
-}
-fn default_shell_commands_block() -> u32 {
-    50
-}
-fn default_file_writes_warn() -> u32 {
-    15
-}
-fn default_file_writes_block() -> u32 {
-    30
-}
-fn default_memory_writes_warn() -> u32 {
-    10
-}
-fn default_memory_writes_block() -> u32 {
-    20
-}
-fn default_web_requests_warn() -> u32 {
-    20
-}
-fn default_web_requests_block() -> u32 {
-    50
-}
+
+serde_default!(default_tool_calls_warn, 50);
+serde_default!(default_tool_calls_block, 100);
+serde_default!(default_shell_commands_warn, 20);
+serde_default!(default_shell_commands_block, 50);
+serde_default!(default_file_writes_warn, 15);
+serde_default!(default_file_writes_block, 30);
+serde_default!(default_memory_writes_warn, 10);
+serde_default!(default_memory_writes_block, 20);
+serde_default!(default_web_requests_warn, 20);
+serde_default!(default_web_requests_block, 50);
 
 impl Default for ActionLimits {
     fn default() -> Self {

@@ -52,6 +52,18 @@ impl DiagnosticCheck {
             status,
         }
     }
+
+    /// Create a check from a Result: pass on Ok, fail on Err.
+    pub fn from_result<T, E: std::fmt::Display>(
+        category: &'static str,
+        name: impl Into<String>,
+        result: Result<T, E>,
+    ) -> Self {
+        match result {
+            Ok(_) => Self::pass(category, name),
+            Err(e) => Self::fail(category, name, format!("{e}")),
+        }
+    }
 }
 
 pub struct DiagnosticReport {
@@ -475,16 +487,11 @@ fn check_data_dir(checks: &mut Vec<DiagnosticCheck>) {
         }
     }
 
-    match Database::open() {
-        Ok(_) => checks.push(DiagnosticCheck::pass("Data", "database accessible")),
-        Err(e) => {
-            checks.push(DiagnosticCheck::fail(
-                "Data",
-                "database accessible",
-                format!("{e}"),
-            ));
-        }
-    }
+    checks.push(DiagnosticCheck::from_result(
+        "Data",
+        "database accessible",
+        Database::open(),
+    ));
 }
 
 fn check_gateway(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
