@@ -138,6 +138,33 @@ impl<'a> App<'a> {
         }
     }
 
+    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> AppAction {
+        use crossterm::event::MouseEventKind;
+        if self.command_popup.is_visible()
+            || self.file_popup.is_visible()
+            || self.plugins_popup.is_visible()
+            || self.settings_popup.is_visible()
+            || self.schedule_popup.is_visible()
+            || self.plan_overlay.visible
+        {
+            return AppAction::Continue;
+        }
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_offset = self.scroll_offset.saturating_add(5);
+                self.auto_scroll = false;
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(5);
+                if self.scroll_offset == 0 {
+                    self.auto_scroll = true;
+                }
+            }
+            _ => {}
+        }
+        AppAction::Continue
+    }
+
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Result<AppAction> {
         use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -438,27 +465,18 @@ impl<'a> App<'a> {
                          Ctrl+C       — Cancel / Quit\n  \
                          Shift+Tab    — Toggle plan mode\n  \
                          PageUp/Down  — Scroll transcript\n  \
+                         Mouse wheel  — Scroll transcript\n  \
                          /            — Show command menu"
                             .to_string(),
                     );
                     return Ok(AppAction::Continue);
                 }
 
+                // IMPORTANT: Up/Down arrows ALWAYS go to composer for input history navigation.
+                // Do NOT add special-case arms that intercept Up/Down for transcript scrolling —
+                // that regresses shell-like history recall. Use PageUp/PageDown or mouse wheel
+                // for transcript scrolling instead.
                 match key.code {
-                    KeyCode::Up
-                        if self.composer.is_empty() && !self.composer.is_browsing_history() =>
-                    {
-                        self.scroll_offset = self.scroll_offset.saturating_add(1);
-                        self.auto_scroll = false;
-                        return Ok(AppAction::Continue);
-                    }
-                    KeyCode::Down if !self.composer.is_browsing_history() => {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(1);
-                        if self.scroll_offset == 0 {
-                            self.auto_scroll = true;
-                        }
-                        return Ok(AppAction::Continue);
-                    }
                     KeyCode::PageUp => {
                         self.scroll_offset = self.scroll_offset.saturating_add(20);
                         self.auto_scroll = false;
@@ -1338,103 +1356,153 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    // --- Up arrow: transcript scroll vs history navigation ---
+    // --- Up/Down arrow: always history navigation (never transcript scroll) ---
 
     #[test]
-    fn up_arrow_scrolls_transcript_when_composer_empty() {
+    fn up_arrow_does_not_scroll_transcript_when_composer_empty() {
         let mut app = make_app();
         assert!(app.composer.is_empty());
         assert_eq!(app.scroll_offset, 0);
 
-        let action = app.handle_key(key(KeyCode::Up)).unwrap();
-        assert!(matches!(action, AppAction::Continue));
-        assert_eq!(app.scroll_offset, 1);
-        assert!(!app.auto_scroll);
+        app.handle_key(key(KeyCode::Up)).unwrap();
+        // Up should NOT scroll transcript — it goes to composer for history
+        assert_eq!(app.scroll_offset, 0);
     }
 
     #[test]
     fn up_arrow_does_not_scroll_transcript_when_composer_has_text() {
         let mut app = make_app();
         app.composer.set_text("hello");
-        assert!(!app.composer.is_empty());
 
-        let action = app.handle_key(key(KeyCode::Up)).unwrap();
-        assert!(matches!(action, AppAction::Continue));
-        // Should NOT have scrolled — Up was forwarded to composer for history
+        app.handle_key(key(KeyCode::Up)).unwrap();
         assert_eq!(app.scroll_offset, 0);
     }
 
     #[test]
     fn up_arrow_navigates_history_when_composer_has_text() {
         let mut app = make_app();
-        // Submit a message to create history
         app.composer.set_text("first message");
         app.composer.handle_key(key(KeyCode::Enter));
-        // Type something new
         app.composer.set_text("draft");
 
         app.handle_key(key(KeyCode::Up)).unwrap();
-        // Composer should now show the history entry, not the draft
         assert_eq!(app.composer.text(), "first message");
         assert!(app.composer.is_browsing_history());
     }
 
     #[test]
-    fn up_arrow_repeated_scrolls_transcript_incrementally() {
+    fn up_arrow_recalls_history_when_composer_empty() {
+        let mut app = make_app();
+        app.composer.set_text("first");
+        app.composer.handle_key(key(KeyCode::Enter));
+        app.composer.set_text("second");
+        app.composer.handle_key(key(KeyCode::Enter));
+        assert!(app.composer.is_empty());
+
+        app.handle_key(key(KeyCode::Up)).unwrap();
+        assert_eq!(app.composer.text(), "second");
+        app.handle_key(key(KeyCode::Up)).unwrap();
+        assert_eq!(app.composer.text(), "first");
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn up_arrow_repeated_does_not_scroll_transcript() {
         let mut app = make_app();
 
         app.handle_key(key(KeyCode::Up)).unwrap();
         app.handle_key(key(KeyCode::Up)).unwrap();
         app.handle_key(key(KeyCode::Up)).unwrap();
-        assert_eq!(app.scroll_offset, 3);
+        // No transcript scrolling — Up always goes to composer
+        assert_eq!(app.scroll_offset, 0);
     }
 
-    // --- Down arrow: transcript scroll vs history navigation ---
+    // --- Down arrow: always history navigation (never transcript scroll) ---
 
     #[test]
-    fn down_arrow_scrolls_transcript_when_not_browsing_history() {
+    fn down_arrow_does_not_scroll_transcript() {
         let mut app = make_app();
         app.scroll_offset = 5;
         app.auto_scroll = false;
 
-        let action = app.handle_key(key(KeyCode::Down)).unwrap();
-        assert!(matches!(action, AppAction::Continue));
-        assert_eq!(app.scroll_offset, 4);
-        assert!(!app.auto_scroll);
-    }
-
-    #[test]
-    fn down_arrow_restores_auto_scroll_at_zero() {
-        let mut app = make_app();
-        app.scroll_offset = 1;
-        app.auto_scroll = false;
-
         app.handle_key(key(KeyCode::Down)).unwrap();
-        assert_eq!(app.scroll_offset, 0);
-        assert!(app.auto_scroll);
+        // Down goes to composer, does NOT change scroll offset
+        assert_eq!(app.scroll_offset, 5);
     }
 
     #[test]
     fn down_arrow_navigates_history_when_browsing() {
         let mut app = make_app();
-        // Build history: two entries
         app.composer.set_text("msg1");
         app.composer.handle_key(key(KeyCode::Enter));
         app.composer.set_text("msg2");
         app.composer.handle_key(key(KeyCode::Enter));
 
-        // Type a draft so Up goes to composer (not transcript scroll)
-        app.composer.set_text("draft");
         app.handle_key(key(KeyCode::Up)).unwrap(); // -> msg2
         app.handle_key(key(KeyCode::Up)).unwrap(); // -> msg1
         assert!(app.composer.is_browsing_history());
         assert_eq!(app.composer.text(), "msg1");
 
-        // Down should go forward in history, not scroll transcript
         app.handle_key(key(KeyCode::Down)).unwrap();
         assert_eq!(app.composer.text(), "msg2");
-        // scroll_offset untouched
         assert_eq!(app.scroll_offset, 0);
+    }
+
+    // --- Mouse scroll ---
+
+    #[test]
+    fn mouse_scroll_up_increases_offset() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let mut app = make_app();
+
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        let action = app.handle_mouse(event);
+        assert!(matches!(action, AppAction::Continue));
+        assert_eq!(app.scroll_offset, 5);
+        assert!(!app.auto_scroll);
+    }
+
+    #[test]
+    fn mouse_scroll_down_decreases_offset() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let mut app = make_app();
+        app.scroll_offset = 10;
+        app.auto_scroll = false;
+
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        let action = app.handle_mouse(event);
+        assert!(matches!(action, AppAction::Continue));
+        assert_eq!(app.scroll_offset, 5);
+        assert!(!app.auto_scroll);
+    }
+
+    #[test]
+    fn mouse_scroll_down_to_zero_enables_auto_scroll() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let mut app = make_app();
+        app.scroll_offset = 3;
+        app.auto_scroll = false;
+
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        let action = app.handle_mouse(event);
+        assert!(matches!(action, AppAction::Continue));
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.auto_scroll);
     }
 
     // --- PageUp / PageDown ---
