@@ -806,17 +806,6 @@ fn render_style(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState)
         )));
     }
 
-    // Preview selected style
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled("  Preview:", theme::dim())));
-    let preview = STYLES[state.style_cursor].soul_snippet;
-    for line in preview.lines().take(5) {
-        lines.push(Line::from(Span::styled(
-            format!("    {line}"),
-            theme::dim(),
-        )));
-    }
-
     frame.render_widget(Paragraph::new(lines), area);
 }
 
