@@ -1791,6 +1791,87 @@ mod tests {
     }
 
     #[test]
+    fn mark_failed_no_next_retry_immediately_reclaimable() {
+        let db = test_db();
+        db.enqueue_delivery(&new_delivery("d1", "slack", "user1", None, "{}", 3))
+            .unwrap();
+        let _ = db.claim_pending_deliveries(10).unwrap();
+
+        // Mark failed with no next_retry_at (None) -> immediately reclaimable
+        db.mark_failed("d1", "transient error", None).unwrap();
+
+        let claimed = db.claim_pending_deliveries(10).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, "d1");
+    }
+
+    #[test]
+    fn claim_pending_deliveries_respects_limit() {
+        let db = test_db();
+        db.enqueue_delivery(&new_delivery("d1", "slack", "u1", None, "{}", 3))
+            .unwrap();
+        db.enqueue_delivery(&new_delivery("d2", "slack", "u2", None, "{}", 3))
+            .unwrap();
+        db.enqueue_delivery(&new_delivery("d3", "slack", "u3", None, "{}", 3))
+            .unwrap();
+
+        let claimed = db.claim_pending_deliveries(2).unwrap();
+        assert_eq!(claimed.len(), 2);
+    }
+
+    #[test]
+    fn load_session_messages_unknown_session_empty() {
+        let db = test_db();
+        let msgs = db
+            .load_session_messages("nonexistent-session-id")
+            .expect("load");
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn list_sessions_ordered_by_most_recent() {
+        let db = test_db();
+        db.upsert_session("s1", 100, 100, 500, "gpt-4", "First")
+            .expect("upsert");
+        db.upsert_session("s2", 200, 300, 1000, "gpt-4", "Second")
+            .expect("upsert");
+        db.upsert_session("s3", 150, 200, 750, "gpt-4", "Third")
+            .expect("upsert");
+
+        let sessions = db.list_sessions(10).expect("list");
+        assert_eq!(sessions.len(), 3);
+        // Most recently updated first
+        assert_eq!(sessions[0].id, "s2"); // updated_at = 300
+        assert_eq!(sessions[1].id, "s3"); // updated_at = 200
+        assert_eq!(sessions[2].id, "s1"); // updated_at = 100
+    }
+
+    #[test]
+    fn insert_credential_round_trip() {
+        let db = test_db();
+        db.insert_customization("email/gmail", "Gmail", "tool", "email")
+            .expect("insert cust");
+        db.insert_credential(
+            "email/gmail",
+            "GMAIL_TOKEN",
+            "env",
+            None,
+            Some("GMAIL_TOKEN"),
+        )
+        .expect("insert cred 1");
+        db.insert_credential(
+            "email/gmail",
+            "GMAIL_SECRET",
+            "env",
+            None,
+            Some("GMAIL_SECRET"),
+        )
+        .expect("insert cred 2");
+        let deleted = db.delete_credentials_for("email/gmail").expect("delete");
+        assert_eq!(deleted, 2);
+    }
+
+    #[test]
     fn delivery_queue_replay_unfinished() {
         let db = test_db();
         db.enqueue_delivery(&new_delivery("d1", "slack", "user1", None, "{}", 3))

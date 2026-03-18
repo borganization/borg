@@ -1167,4 +1167,66 @@ mod tests {
         );
         assert!(!err.is_retryable());
     }
+
+    // ── parse_retry_after tests ──
+
+    #[test]
+    fn parse_retry_after_valid_json() {
+        let body = r#"{"error":{"retry_after":2.5}}"#;
+        let result = parse_retry_after(body);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), Duration::from_secs_f64(2.5));
+    }
+
+    #[test]
+    fn parse_retry_after_missing_field() {
+        let body = r#"{"error":{"message":"rate limited"}}"#;
+        assert!(parse_retry_after(body).is_none());
+    }
+
+    #[test]
+    fn parse_retry_after_non_json() {
+        assert!(parse_retry_after("not json at all").is_none());
+    }
+
+    // ── classify_network_error tests ──
+
+    #[test]
+    fn classify_network_error_is_retryable() {
+        let err = classify_network_error(anyhow::anyhow!("connection reset"));
+        assert!(err.is_retryable());
+        if let LlmError::Retryable { retry_after, .. } = &err {
+            assert!(retry_after.is_none());
+        } else {
+            panic!("expected Retryable");
+        }
+    }
+
+    // ── LlmError display tests ──
+
+    #[test]
+    fn llm_error_retryable_display() {
+        let err = LlmError::Retryable {
+            source: anyhow::anyhow!("timeout"),
+            retry_after: None,
+        };
+        assert!(err.is_retryable());
+        assert!(err.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn llm_error_fatal_display() {
+        let err = LlmError::Fatal {
+            source: anyhow::anyhow!("bad key"),
+        };
+        assert!(!err.is_retryable());
+        assert!(err.to_string().contains("bad key"));
+    }
+
+    #[test]
+    fn llm_error_interrupted_display() {
+        let err = LlmError::Interrupted;
+        assert!(!err.is_retryable());
+        assert_eq!(err.to_string(), "request interrupted");
+    }
 }

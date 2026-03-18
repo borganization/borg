@@ -807,4 +807,24 @@ mod tests {
         assert!(!checks.is_empty());
         assert!(checks.iter().all(|c| c.category == CATEGORY));
     }
+
+    #[test]
+    fn parse_ssh_config_empty_string() {
+        assert!(parse_ssh_config("").is_empty());
+    }
+
+    #[test]
+    fn parse_listening_ports_multiple_risky() {
+        let output = "vsftpd 1234 root 3u IPv4 TCP *:21 (LISTEN)\ntelnetd 5678 root 4u IPv4 TCP *:23 (LISTEN)\n";
+        let findings = parse_listening_ports(output);
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().any(|f| f.contains("FTP")));
+        assert!(findings.iter().any(|f| f.contains("Telnet")));
+    }
+
+    #[test]
+    fn parse_macos_firewall_unexpected_output() {
+        let status = parse_macos_firewall("something completely unexpected");
+        assert!(matches!(status, CheckStatus::Warn(_)));
+    }
 }
