@@ -3,6 +3,36 @@ use std::path::Path;
 use tracing::{debug, info};
 
 use crate::parser::{Hunk, Patch, PatchOperation};
+use crate::seek_sequence::seek_sequence;
+
+/// Categorized list of files affected by a patch application.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AffectedPaths {
+    pub added: Vec<String>,
+    pub modified: Vec<String>,
+    pub deleted: Vec<String>,
+    pub moved: Vec<(String, String)>, // (from, to)
+}
+
+impl AffectedPaths {
+    /// Format as a human-readable summary with prefixed lines.
+    pub fn format_summary(&self) -> String {
+        let mut lines = Vec::new();
+        for p in &self.added {
+            lines.push(format!("A {p}"));
+        }
+        for p in &self.modified {
+            lines.push(format!("M {p}"));
+        }
+        for p in &self.deleted {
+            lines.push(format!("D {p}"));
+        }
+        for (from, to) in &self.moved {
+            lines.push(format!("R {from} \u{2192} {to}"));
+        }
+        lines.join("\n")
+    }
+}
 
 fn validate_patch_path(path: &str, base_dir: &Path) -> Result<()> {
     let full = base_dir.join(path);
@@ -50,21 +80,29 @@ enum FileSnapshot {
     DidNotExist,
 }
 
-pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
+pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<AffectedPaths> {
     // Validate all paths up front before making any changes
     for op in &patch.operations {
-        let path = match op {
-            PatchOperation::AddFile { path, .. }
-            | PatchOperation::UpdateFile { path, .. }
-            | PatchOperation::DeleteFile { path } => path,
-        };
-        validate_patch_path(path, base_dir)?;
+        match op {
+            PatchOperation::AddFile { path, .. } => {
+                validate_patch_path(path, base_dir)?;
+            }
+            PatchOperation::UpdateFile { path, move_to, .. } => {
+                validate_patch_path(path, base_dir)?;
+                if let Some(dest) = move_to {
+                    validate_patch_path(dest, base_dir)?;
+                }
+            }
+            PatchOperation::DeleteFile { path } => {
+                validate_patch_path(path, base_dir)?;
+            }
+        }
     }
 
-    let mut affected_files = Vec::new();
+    let mut affected = AffectedPaths::default();
     let mut snapshots: Vec<(String, FileSnapshot)> = Vec::new();
 
-    let result = apply_patch_inner(patch, base_dir, &mut affected_files, &mut snapshots);
+    let result = apply_patch_inner(patch, base_dir, &mut affected, &mut snapshots);
 
     if let Err(e) = result {
         // Rollback: restore all snapshotted files
@@ -83,13 +121,13 @@ pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<Vec<String>> {
         return Err(e);
     }
 
-    Ok(affected_files)
+    Ok(affected)
 }
 
 fn apply_patch_inner(
     patch: &Patch,
     base_dir: &Path,
-    affected_files: &mut Vec<String>,
+    affected: &mut AffectedPaths,
     snapshots: &mut Vec<(String, FileSnapshot)>,
 ) -> Result<()> {
     for op in &patch.operations {
@@ -111,9 +149,13 @@ fn apply_patch_inner(
                 std::fs::write(&full_path, content)
                     .with_context(|| format!("Failed to write {path}"))?;
                 info!("Added file: {path}");
-                affected_files.push(path.clone());
+                affected.added.push(path.clone());
             }
-            PatchOperation::UpdateFile { path, hunks } => {
+            PatchOperation::UpdateFile {
+                path,
+                move_to,
+                hunks,
+            } => {
                 let full_path = base_dir.join(path);
                 if !full_path.exists() {
                     bail!("Cannot update non-existent file: {path}");
@@ -123,16 +165,35 @@ fn apply_patch_inner(
                     .with_context(|| format!("Failed to read {path}"))?;
                 snapshots.push((path.clone(), FileSnapshot::Existed(original.clone())));
 
-                let mut content = original;
-                for hunk in hunks {
-                    content = apply_hunk(&content, hunk)
-                        .with_context(|| format!("Failed to apply hunk to {path}"))?;
-                }
+                let content = apply_hunks(&original, hunks, path)?;
 
-                std::fs::write(&full_path, &content)
-                    .with_context(|| format!("Failed to write {path}"))?;
-                info!("Updated file: {path}");
-                affected_files.push(path.clone());
+                if let Some(dest) = move_to {
+                    // Move/rename: write to destination, delete original
+                    let dest_path = base_dir.join(dest);
+                    if let Some(parent) = dest_path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .with_context(|| format!("Failed to create directory for {dest}"))?;
+                    }
+                    // Snapshot destination if it exists
+                    if dest_path.exists() {
+                        let existing = std::fs::read_to_string(&dest_path)
+                            .with_context(|| format!("Failed to read existing {dest}"))?;
+                        snapshots.push((dest.clone(), FileSnapshot::Existed(existing)));
+                    } else {
+                        snapshots.push((dest.clone(), FileSnapshot::DidNotExist));
+                    }
+                    std::fs::write(&dest_path, &content)
+                        .with_context(|| format!("Failed to write {dest}"))?;
+                    std::fs::remove_file(&full_path)
+                        .with_context(|| format!("Failed to delete original {path}"))?;
+                    info!("Moved file: {path} -> {dest}");
+                    affected.moved.push((path.clone(), dest.clone()));
+                } else {
+                    std::fs::write(&full_path, &content)
+                        .with_context(|| format!("Failed to write {path}"))?;
+                    info!("Updated file: {path}");
+                    affected.modified.push(path.clone());
+                }
             }
             PatchOperation::DeleteFile { path } => {
                 let full_path = base_dir.join(path);
@@ -146,7 +207,7 @@ fn apply_patch_inner(
                 } else {
                     debug!("File already absent: {path}");
                 }
-                affected_files.push(path.clone());
+                affected.deleted.push(path.clone());
             }
         }
     }
@@ -154,57 +215,106 @@ fn apply_patch_inner(
     Ok(())
 }
 
-fn apply_hunk(content: &str, hunk: &Hunk) -> Result<String> {
-    if hunk.search.is_empty() {
-        // Append mode
-        return Ok(format!("{content}\n{}", hunk.replace));
-    }
-
-    // Try exact match first
-    if let Some(pos) = content.find(&hunk.search) {
-        let mut result = String::with_capacity(content.len());
-        result.push_str(&content[..pos]);
-        result.push_str(&hunk.replace);
-        result.push_str(&content[pos + hunk.search.len()..]);
-        return Ok(result);
-    }
-
-    // Try whitespace-normalized match
-    let content_lines: Vec<&str> = content.lines().collect();
-    let search_lines: Vec<&str> = hunk.search.lines().collect();
-
-    for start in 0..content_lines.len() {
-        if start + search_lines.len() > content_lines.len() {
-            break;
-        }
-
-        let window = &content_lines[start..start + search_lines.len()];
-        let window_normalized: Vec<String> =
-            window.iter().map(|l| normalize_whitespace(l)).collect();
-        let search_normalized: Vec<String> = search_lines
-            .iter()
-            .map(|l| normalize_whitespace(l))
-            .collect();
-
-        if window_normalized == search_normalized {
-            let mut result_lines: Vec<&str> = Vec::new();
-            result_lines.extend(&content_lines[..start]);
-            for line in hunk.replace.lines() {
-                result_lines.push(line);
-            }
-            result_lines.extend(&content_lines[start + search_lines.len()..]);
-            return Ok(result_lines.join("\n"));
-        }
-    }
-
-    bail!(
-        "Could not find search text in file:\n---\n{}\n---",
-        hunk.search
-    )
+/// A computed replacement: the matched line range and the new lines to substitute.
+struct Replacement {
+    start_idx: usize,
+    old_line_count: usize,
+    new_lines: Vec<String>,
 }
 
-fn normalize_whitespace(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+/// Apply all hunks to content using two-phase approach:
+/// 1. Compute phase: find match positions in original content
+/// 2. Apply phase: apply replacements in descending order
+fn apply_hunks(content: &str, hunks: &[Hunk], file_path: &str) -> Result<String> {
+    if hunks.is_empty() {
+        return Ok(content.to_string());
+    }
+
+    let content_lines: Vec<String> = content.lines().map(String::from).collect();
+    let mut replacements: Vec<Replacement> = Vec::new();
+    let mut cursor = 0usize;
+
+    // Compute phase: find each hunk's match position in the original content
+    for hunk in hunks {
+        if hunk.search.is_empty() {
+            // Append mode: place at end of file
+            replacements.push(Replacement {
+                start_idx: content_lines.len(),
+                old_line_count: 0,
+                new_lines: hunk.replace.lines().map(String::from).collect(),
+            });
+            continue;
+        }
+
+        let search_lines: Vec<String> = hunk.search.lines().map(String::from).collect();
+
+        // If context_hint is present, try to find the context line first to narrow search
+        let search_start = if let Some(ref hint) = hunk.context_hint {
+            find_context_hint(&content_lines, hint, cursor).unwrap_or(cursor)
+        } else {
+            cursor
+        };
+
+        if let Some(idx) = seek_sequence(
+            &content_lines,
+            &search_lines,
+            search_start,
+            hunk.is_end_of_file,
+        ) {
+            let new_lines: Vec<String> = hunk.replace.lines().map(String::from).collect();
+            cursor = idx + search_lines.len();
+            replacements.push(Replacement {
+                start_idx: idx,
+                old_line_count: search_lines.len(),
+                new_lines,
+            });
+        } else {
+            bail!(
+                "Could not find search text in file '{}' (patch line {}):\n---\n{}\n---",
+                file_path,
+                hunk.source_line,
+                hunk.search
+            );
+        }
+    }
+
+    // Apply phase: sort by descending start_idx so earlier replacements don't shift later ones
+    replacements.sort_by(|a, b| b.start_idx.cmp(&a.start_idx));
+
+    // Validate no overlapping replacements
+    for window in replacements.windows(2) {
+        // window[0] has higher start_idx, window[1] has lower
+        let earlier = &window[1];
+        let later = &window[0];
+        if earlier.start_idx + earlier.old_line_count > later.start_idx {
+            bail!(
+                "Overlapping hunks detected in '{}': lines {}..{} and {}..{}",
+                file_path,
+                earlier.start_idx,
+                earlier.start_idx + earlier.old_line_count,
+                later.start_idx,
+                later.start_idx + later.old_line_count,
+            );
+        }
+    }
+
+    let mut result_lines = content_lines;
+    for rep in replacements {
+        let end = rep.start_idx + rep.old_line_count;
+        result_lines.splice(rep.start_idx..end, rep.new_lines);
+    }
+
+    let mut result = result_lines.join("\n");
+    if content.ends_with('\n') && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    Ok(result)
+}
+
+/// Find a context hint line in content, starting from cursor.
+fn find_context_hint(lines: &[String], hint: &str, cursor: usize) -> Option<usize> {
+    let hint_trimmed = hint.trim();
+    (cursor..lines.len()).find(|&i| lines[i].trim().contains(hint_trimmed))
 }
 
 #[cfg(test)]
@@ -217,6 +327,16 @@ mod tests {
         Patch { operations: ops }
     }
 
+    fn simple_hunk(search: &str, replace: &str) -> Hunk {
+        Hunk {
+            context_hint: None,
+            search: search.to_string(),
+            replace: replace.to_string(),
+            is_end_of_file: false,
+            source_line: 0,
+        }
+    }
+
     #[test]
     fn add_new_file() {
         let dir = TempDir::new().unwrap();
@@ -225,7 +345,7 @@ mod tests {
             content: "hello world".to_string(),
         }]);
         let affected = apply_patch(&patch, dir.path()).unwrap();
-        assert_eq!(affected, vec!["sub/dir/hello.txt"]);
+        assert_eq!(affected.added, vec!["sub/dir/hello.txt"]);
         let content = std::fs::read_to_string(dir.path().join("sub/dir/hello.txt")).unwrap();
         assert_eq!(content, "hello world");
     }
@@ -241,7 +361,7 @@ mod tests {
             path: "doomed.txt".to_string(),
         }]);
         let affected = apply_patch(&patch, dir.path()).unwrap();
-        assert_eq!(affected, vec!["doomed.txt"]);
+        assert_eq!(affected.deleted, vec!["doomed.txt"]);
         assert!(!file_path.exists());
     }
 
@@ -251,9 +371,8 @@ mod tests {
         let patch = make_patch(vec![PatchOperation::DeleteFile {
             path: "ghost.txt".to_string(),
         }]);
-        // Should not error — the code treats missing files as already absent
         let affected = apply_patch(&patch, dir.path()).unwrap();
-        assert_eq!(affected, vec!["ghost.txt"]);
+        assert_eq!(affected.deleted, vec!["ghost.txt"]);
     }
 
     #[test]
@@ -264,10 +383,8 @@ mod tests {
 
         let patch = make_patch(vec![PatchOperation::UpdateFile {
             path: "main.rs".to_string(),
-            hunks: vec![Hunk {
-                search: "    old();".to_string(),
-                replace: "    new();".to_string(),
-            }],
+            move_to: None,
+            hunks: vec![simple_hunk("    old();", "    new();")],
         }]);
         apply_patch(&patch, dir.path()).unwrap();
         let content = std::fs::read_to_string(&file_path).unwrap();
@@ -279,15 +396,17 @@ mod tests {
     fn update_file_whitespace_normalized_match() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("ws.rs");
-        // File has extra spaces/tabs
-        std::fs::write(&file_path, "fn  run() {\n\t   do_thing() ;\n}\n").unwrap();
+        // File has leading/trailing whitespace differences
+        std::fs::write(&file_path, "  fn run() {  \n\t do_thing() ;\t\n}\n").unwrap();
 
+        // Search lines differ only in leading/trailing whitespace — seek_sequence trim handles this
         let patch = make_patch(vec![PatchOperation::UpdateFile {
             path: "ws.rs".to_string(),
-            hunks: vec![Hunk {
-                search: "fn run() {\n do_thing() ;".to_string(),
-                replace: "fn run() {\n    do_thing();".to_string(),
-            }],
+            move_to: None,
+            hunks: vec![simple_hunk(
+                "fn run() {\ndo_thing() ;",
+                "fn run() {\n    do_thing();",
+            )],
         }]);
         apply_patch(&patch, dir.path()).unwrap();
         let content = std::fs::read_to_string(&file_path).unwrap();
@@ -302,10 +421,11 @@ mod tests {
 
         let patch = make_patch(vec![PatchOperation::UpdateFile {
             path: "nope.rs".to_string(),
-            hunks: vec![Hunk {
-                search: "this text does not exist anywhere".to_string(),
-                replace: "replacement".to_string(),
-            }],
+            move_to: None,
+            hunks: vec![simple_hunk(
+                "this text does not exist anywhere",
+                "replacement",
+            )],
         }]);
         let result = apply_patch(&patch, dir.path());
         assert!(result.is_err());
@@ -321,6 +441,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let patch = make_patch(vec![PatchOperation::UpdateFile {
             path: "missing.rs".to_string(),
+            move_to: None,
             hunks: vec![],
         }]);
         let result = apply_patch(&patch, dir.path());
@@ -348,6 +469,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let patch = make_patch(vec![PatchOperation::UpdateFile {
             path: "../../../etc/passwd".to_string(),
+            move_to: None,
             hunks: vec![],
         }]);
         let result = apply_patch(&patch, dir.path());
@@ -374,7 +496,6 @@ mod tests {
 
     /// End-to-end test: parse + apply a patch that creates a file whose content
     /// contains embedded patch DSL markers (e.g., a README documenting the DSL).
-    /// With '+' prefix encoding, embedded markers are unambiguous.
     #[test]
     fn end_to_end_add_file_with_embedded_patch_markers() {
         let dir = TempDir::new().unwrap();
@@ -397,17 +518,14 @@ mod tests {
 
         let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
 
-        // Should create exactly one file
-        assert_eq!(affected, vec!["README.md"]);
+        assert_eq!(affected.added, vec!["README.md"]);
         assert!(dir.path().join("README.md").exists());
 
-        // Should NOT create spurious files from embedded patch markers
         assert!(
             !dir.path().join("tool-name").exists(),
             "Should not create tool-name/ directory from embedded patch example"
         );
 
-        // Content should be complete and include the embedded markers
         let content = std::fs::read_to_string(dir.path().join("README.md")).unwrap();
         assert!(content.contains("# My Project"));
         assert!(content.contains("*** Begin Patch"));
@@ -420,7 +538,6 @@ mod tests {
     fn end_to_end_full_patch() {
         let dir = TempDir::new().unwrap();
 
-        // Pre-create a file to update and one to delete
         std::fs::write(dir.path().join("update.txt"), "foo\nbar\nbaz\n").unwrap();
         std::fs::write(dir.path().join("delete.txt"), "gone").unwrap();
 
@@ -437,18 +554,388 @@ mod tests {
 *** End Patch";
 
         let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
-        assert_eq!(affected.len(), 3);
+        assert_eq!(affected.added.len(), 1);
+        assert_eq!(affected.modified.len(), 1);
+        assert_eq!(affected.deleted.len(), 1);
 
-        // New file created
         let content = std::fs::read_to_string(dir.path().join("new.txt")).unwrap();
         assert_eq!(content, "hello world");
 
-        // File updated
         let content = std::fs::read_to_string(dir.path().join("update.txt")).unwrap();
         assert!(content.contains("BAR"));
         assert!(!content.contains("\nbar\n"));
 
-        // File deleted
         assert!(!dir.path().join("delete.txt").exists());
+    }
+
+    // ── New tests for ported features ──
+
+    #[test]
+    fn move_file_operation() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("old.txt"), "hello\nworld\n").unwrap();
+
+        let patch_text = "\
+*** Begin Patch
+*** Update File: old.txt
+*** Move to: new.txt
+@@
+-hello
++HELLO
+*** End Patch";
+
+        let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        assert_eq!(
+            affected.moved,
+            vec![("old.txt".to_string(), "new.txt".to_string())]
+        );
+        assert!(!dir.path().join("old.txt").exists());
+        let content = std::fs::read_to_string(dir.path().join("new.txt")).unwrap();
+        assert!(content.contains("HELLO"));
+        assert!(content.contains("world"));
+    }
+
+    #[test]
+    fn move_file_path_traversal_blocked() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("src.txt"), "data").unwrap();
+
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "src.txt".to_string(),
+            move_to: Some("../../etc/evil.txt".to_string()),
+            hunks: vec![],
+        }]);
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Path traversal"));
+    }
+
+    #[test]
+    fn eof_marker_matches_at_end() {
+        let dir = TempDir::new().unwrap();
+        // Two occurrences of "foo\nbar" — one early, one at the very end
+        std::fs::write(
+            dir.path().join("f.txt"),
+            "header\nfoo\nbar\nmiddle\nfoo\nbar",
+        )
+        .unwrap();
+
+        // This patch should match the second "foo\nbar" (at end) due to EOF marker
+        let patch_text = "\
+*** Begin Patch
+*** Update File: f.txt
+@@
+-foo
+-bar
++FOO
++BAR
+*** End of File
+*** End Patch";
+
+        let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        assert_eq!(affected.modified, vec!["f.txt"]);
+        let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        // The second occurrence (at end) should be replaced
+        assert!(content.contains("FOO\nBAR"));
+        // First occurrence should still be lowercase
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines[1], "foo");
+        assert_eq!(lines[2], "bar");
+    }
+
+    #[test]
+    fn context_hint_disambiguates_hunks() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("f.txt"),
+            "fn alpha() {\n    x = 1;\n}\nfn beta() {\n    x = 1;\n}\n",
+        )
+        .unwrap();
+
+        let patch_text = "\
+*** Begin Patch
+*** Update File: f.txt
+@@ fn beta()
+     x = 1;
+-}
++    y = 2;
++}
+*** End Patch";
+
+        crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        // beta should have y = 2 inserted
+        assert!(content.contains("fn beta() {\n    x = 1;\n    y = 2;\n}"));
+        // alpha should be untouched
+        assert!(content.contains("fn alpha() {\n    x = 1;\n}"));
+    }
+
+    #[test]
+    fn unicode_fuzzy_matching_in_file() {
+        let dir = TempDir::new().unwrap();
+        // File uses em dash and smart quotes
+        std::fs::write(
+            dir.path().join("f.txt"),
+            "value \u{2014} \u{201C}hello\u{201D}\n",
+        )
+        .unwrap();
+
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "f.txt".to_string(),
+            move_to: None,
+            hunks: vec![Hunk {
+                context_hint: None,
+                search: "value - \"hello\"".to_string(),
+                replace: "value - \"world\"".to_string(),
+                is_end_of_file: false,
+                source_line: 1,
+            }],
+        }]);
+
+        apply_patch(&patch, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        assert!(content.contains("world"));
+    }
+
+    #[test]
+    fn two_phase_descending_replacement() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
+
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "f.txt".to_string(),
+            move_to: None,
+            hunks: vec![simple_hunk("bbb", "BBB\nBBB2"), simple_hunk("ddd", "DDD")],
+        }]);
+
+        apply_patch(&patch, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        assert_eq!(content, "aaa\nBBB\nBBB2\nccc\nDDD\neee\n");
+    }
+
+    #[test]
+    fn error_message_includes_source_line() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "hello\n").unwrap();
+
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "f.txt".to_string(),
+            move_to: None,
+            hunks: vec![Hunk {
+                context_hint: None,
+                search: "nonexistent".to_string(),
+                replace: "x".to_string(),
+                is_end_of_file: false,
+                source_line: 42,
+            }],
+        }]);
+
+        let err = apply_patch(&patch, dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("patch line 42"),
+            "error should contain line number: {err}"
+        );
+        assert!(
+            err.contains("f.txt"),
+            "error should contain filename: {err}"
+        );
+    }
+
+    #[test]
+    fn affected_paths_format_summary() {
+        let paths = AffectedPaths {
+            added: vec!["a.txt".to_string()],
+            modified: vec!["b.txt".to_string()],
+            deleted: vec!["c.txt".to_string()],
+            moved: vec![("d.txt".to_string(), "e.txt".to_string())],
+        };
+        let summary = paths.format_summary();
+        assert!(summary.contains("A a.txt"));
+        assert!(summary.contains("M b.txt"));
+        assert!(summary.contains("D c.txt"));
+        assert!(summary.contains("R d.txt"));
+        assert!(summary.contains("e.txt"));
+    }
+
+    #[test]
+    fn trailing_newline_preserved() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "aaa\nbbb\nccc\n").unwrap();
+
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "f.txt".to_string(),
+            move_to: None,
+            hunks: vec![simple_hunk("bbb", "BBB")],
+        }]);
+        apply_patch(&patch, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        assert!(
+            content.ends_with('\n'),
+            "trailing newline should be preserved"
+        );
+        assert_eq!(content, "aaa\nBBB\nccc\n");
+    }
+
+    #[test]
+    fn no_trailing_newline_not_added() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "aaa\nbbb").unwrap();
+
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "f.txt".to_string(),
+            move_to: None,
+            hunks: vec![simple_hunk("bbb", "BBB")],
+        }]);
+        apply_patch(&patch, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        assert!(!content.ends_with('\n'), "should not add trailing newline");
+        assert_eq!(content, "aaa\nBBB");
+    }
+
+    #[test]
+    fn rollback_on_multi_op_failure() {
+        let dir = TempDir::new().unwrap();
+        // First op: add file (will succeed)
+        // Second op: update non-matching hunk (will fail)
+        std::fs::write(dir.path().join("existing.txt"), "hello\n").unwrap();
+
+        let patch = make_patch(vec![
+            PatchOperation::AddFile {
+                path: "new.txt".to_string(),
+                content: "new content".to_string(),
+            },
+            PatchOperation::UpdateFile {
+                path: "existing.txt".to_string(),
+                move_to: None,
+                hunks: vec![simple_hunk("nonexistent search text", "replacement")],
+            },
+        ]);
+
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_err());
+        // The added file should be rolled back
+        assert!(
+            !dir.path().join("new.txt").exists(),
+            "added file should be rolled back on failure"
+        );
+        // The existing file should be untouched
+        let content = std::fs::read_to_string(dir.path().join("existing.txt")).unwrap();
+        assert_eq!(content, "hello\n");
+    }
+
+    #[test]
+    fn move_with_failed_hunk_rolls_back() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("src.txt"), "hello\nworld\n").unwrap();
+
+        let patch_text = "\
+*** Begin Patch
+*** Update File: src.txt
+*** Move to: dest.txt
+@@
+-nonexistent
++replacement
+*** End Patch";
+
+        let result = crate::apply_patch_to_dir(patch_text, dir.path());
+        assert!(result.is_err());
+        // Source should still exist, destination should not
+        assert!(dir.path().join("src.txt").exists());
+        assert!(!dir.path().join("dest.txt").exists());
+    }
+
+    #[test]
+    fn append_hunk_empty_search() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "existing\n").unwrap();
+
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "f.txt".to_string(),
+            move_to: None,
+            hunks: vec![simple_hunk("", "appended line")],
+        }]);
+        apply_patch(&patch, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        assert!(content.contains("appended line"));
+    }
+
+    #[test]
+    fn context_hint_with_trailing_at_signs() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("f.txt"),
+            "fn alpha() {\n    x = 1;\n}\nfn beta() {\n    x = 1;\n}\n",
+        )
+        .unwrap();
+
+        // Use @@ fn beta() @@ format (trailing @@)
+        let patch_text = "\
+*** Begin Patch
+*** Update File: f.txt
+@@ fn beta() @@
+     x = 1;
+-}
++    y = 2;
++}
+*** End Patch";
+
+        crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        assert!(content.contains("fn beta() {\n    x = 1;\n    y = 2;\n}"));
+    }
+
+    #[test]
+    fn move_to_subdirectory() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("old.txt"), "content\n").unwrap();
+
+        let patch_text = "\
+*** Begin Patch
+*** Update File: old.txt
+*** Move to: sub/dir/new.txt
+*** End Patch";
+
+        let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        assert_eq!(
+            affected.moved,
+            vec![("old.txt".to_string(), "sub/dir/new.txt".to_string())]
+        );
+        assert!(!dir.path().join("old.txt").exists());
+        let content = std::fs::read_to_string(dir.path().join("sub/dir/new.txt")).unwrap();
+        assert_eq!(content, "content\n");
+    }
+
+    #[test]
+    fn end_to_end_move_with_hunks() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("old.rs"), "fn old() {\n    1\n}\n").unwrap();
+
+        let patch_text = "\
+*** Begin Patch
+*** Update File: old.rs
+*** Move to: new.rs
+@@
+-fn old() {
++fn new() {
+*** End Patch";
+
+        let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        assert_eq!(
+            affected.moved,
+            vec![("old.rs".to_string(), "new.rs".to_string())]
+        );
+        assert!(!dir.path().join("old.rs").exists());
+        let content = std::fs::read_to_string(dir.path().join("new.rs")).unwrap();
+        assert!(content.contains("fn new()"));
+    }
+
+    #[test]
+    fn affected_paths_empty_default() {
+        let paths = AffectedPaths::default();
+        assert!(paths.added.is_empty());
+        assert!(paths.modified.is_empty());
+        assert!(paths.deleted.is_empty());
+        assert!(paths.moved.is_empty());
+        assert!(paths.format_summary().is_empty());
     }
 }
