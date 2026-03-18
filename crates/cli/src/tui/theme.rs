@@ -40,6 +40,10 @@ pub fn popup_selected() -> Style {
     Style::default().bg(Color::Rgb(3, 49, 46)).fg(Color::White)
 }
 
+pub fn file_mention_style() -> Style {
+    Style::default().fg(CYAN).add_modifier(Modifier::UNDERLINED)
+}
+
 /// Style for user message lines — subtle background tint when terminal bg is known.
 pub fn user_message_style() -> Style {
     match super::colors::user_message_bg() {

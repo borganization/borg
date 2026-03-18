@@ -2,6 +2,7 @@ mod app;
 mod colors;
 mod command_popup;
 mod composer;
+mod file_popup;
 mod external_editor;
 mod history;
 mod layout;
