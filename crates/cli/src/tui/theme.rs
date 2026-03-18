@@ -8,6 +8,7 @@ pub const DIM_WHITE: Color = Color::DarkGray;
 pub const BORDER: Color = Color::Rgb(3, 113, 113);
 
 pub const BULLET: &str = "•";
+pub const CHEVRON: &str = "›";
 pub const TREE_END: &str = "└";
 pub const INPUT_PROMPT: &str = "› ";
 
@@ -37,4 +38,12 @@ pub fn error_style() -> Style {
 
 pub fn popup_selected() -> Style {
     Style::default().bg(Color::Rgb(3, 49, 46)).fg(Color::White)
+}
+
+/// Style for user message lines — subtle background tint when terminal bg is known.
+pub fn user_message_style() -> Style {
+    match super::colors::user_message_bg() {
+        Some(bg) => Style::default().bg(bg),
+        None => Style::default(),
+    }
 }

@@ -680,8 +680,13 @@ fn render_logo(frame: &mut ratatui::Frame, area: Rect) {
             ))
         })
         .collect();
-    let logo = Paragraph::new(lines).alignment(Alignment::Center);
-    frame.render_widget(logo, area);
+    // Left-align text within a centered block so all lines share the same offset
+    let max_width = LOGO.lines().map(str::len).max().unwrap_or(0) as u16;
+    let logo_width = max_width.min(area.width);
+    let x_offset = area.x + area.width.saturating_sub(logo_width) / 2;
+    let centered_area = Rect::new(x_offset, area.y, logo_width, area.height);
+    let logo = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(logo, centered_area);
 }
 
 fn render_tab_bar(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
