@@ -3,15 +3,15 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::catalog::CustomizationDef;
+use crate::catalog::PluginDef;
 use crate::{InstallEvent, InstallResult, TemplateTarget};
 
-/// Install a customization: extract templates, set up credentials, record in DB.
+/// Install a plugin: extract templates, set up credentials, record in DB.
 ///
 /// Credential prompting is handled by the caller (TUI) — this function receives
 /// pre-collected credentials as key-value pairs.
 pub async fn install(
-    def: &CustomizationDef,
+    def: &PluginDef,
     data_dir: &std::path::Path,
     credentials: &[(String, String)],
     progress_tx: Option<&mpsc::Sender<InstallEvent>>,
@@ -92,8 +92,8 @@ pub async fn install(
     Ok(result)
 }
 
-/// Uninstall a customization: delete files and keychain entries.
-pub fn uninstall(def: &CustomizationDef, data_dir: &std::path::Path) -> Result<()> {
+/// Uninstall a plugin: delete files and keychain entries.
+pub fn uninstall(def: &PluginDef, data_dir: &std::path::Path) -> Result<()> {
     // Determine the directory name from the first template
     let first_tmpl = def.templates.first().context("no templates")?;
     let dir_name = first_tmpl
@@ -123,7 +123,7 @@ pub fn uninstall(def: &CustomizationDef, data_dir: &std::path::Path) -> Result<(
 }
 
 /// Check if an integration is already installed on the filesystem.
-pub fn is_installed(def: &CustomizationDef, data_dir: &std::path::Path) -> bool {
+pub fn is_installed(def: &PluginDef, data_dir: &std::path::Path) -> bool {
     let first_tmpl = match def.templates.first() {
         Some(t) => t,
         None => return false,
@@ -149,10 +149,7 @@ pub fn is_installed(def: &CustomizationDef, data_dir: &std::path::Path) -> bool 
 
 /// Compute SHA-256 hashes of all template files after installation.
 /// Returns `(relative_path, hex_hash)` pairs.
-pub fn compute_file_hashes(
-    def: &CustomizationDef,
-    data_dir: &std::path::Path,
-) -> Vec<(String, String)> {
+pub fn compute_file_hashes(def: &PluginDef, data_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut hashes = Vec::new();
     for tmpl in def.templates {
         let base = match tmpl.target {
@@ -175,7 +172,7 @@ pub fn compute_file_hashes(
     hashes
 }
 
-fn check_prerequisites(def: &CustomizationDef) -> Result<()> {
+fn check_prerequisites(def: &PluginDef) -> Result<()> {
     if !def.platform.is_available() {
         anyhow::bail!(
             "{} requires {}",
@@ -197,7 +194,7 @@ fn check_prerequisites(def: &CustomizationDef) -> Result<()> {
     Ok(())
 }
 
-fn write_templates(def: &CustomizationDef, data_dir: &std::path::Path) -> Result<()> {
+fn write_templates(def: &PluginDef, data_dir: &std::path::Path) -> Result<()> {
     for tmpl in def.templates {
         let base = match tmpl.target {
             TemplateTarget::Channels => data_dir.join("channels"),
@@ -217,7 +214,7 @@ fn write_templates(def: &CustomizationDef, data_dir: &std::path::Path) -> Result
     Ok(())
 }
 
-fn make_scripts_executable(def: &CustomizationDef, data_dir: &std::path::Path) -> Result<()> {
+fn make_scripts_executable(def: &PluginDef, data_dir: &std::path::Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

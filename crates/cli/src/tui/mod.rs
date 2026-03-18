@@ -1,12 +1,12 @@
 mod app;
 mod command_popup;
 mod composer;
-mod customize_popup;
 mod external_editor;
 mod history;
 mod layout;
 mod markdown;
 mod plan_overlay;
+mod plugins_popup;
 mod schedule_popup;
 mod settings_popup;
 mod spinner;
@@ -447,7 +447,7 @@ async fn run_event_loop(
                     }
                 }
             }
-            AppAction::RunCustomize { actions } => {
+            AppAction::RunPlugins { actions } => {
                 let data_dir = match borg_core::config::Config::data_dir() {
                     Ok(dir) => dir,
                     Err(e) => {
@@ -459,9 +459,9 @@ async fn run_event_loop(
 
                 for action in actions {
                     match action {
-                        customize_popup::CustomizeAction::Install { id, credentials } => {
-                            if let Some(def) = borg_customizations::catalog::find_by_id(&id) {
-                                match borg_customizations::installer::install(
+                        plugins_popup::PluginAction::Install { id, credentials } => {
+                            if let Some(def) = borg_plugins::catalog::find_by_id(&id) {
+                                match borg_plugins::installer::install(
                                     def,
                                     &data_dir,
                                     &credentials,
@@ -472,15 +472,13 @@ async fn run_event_loop(
                                     Ok(install_result) => {
                                         // Record in DB + store file hashes
                                         if let Ok(db) = borg_core::db::Database::open() {
-                                            if let Err(e) = db.insert_customization(
+                                            if let Err(e) = db.insert_plugin(
                                                 def.id,
                                                 def.name,
                                                 &def.kind.to_string(),
                                                 &def.category.to_string(),
                                             ) {
-                                                tracing::warn!(
-                                                    "Failed to record customization: {e}"
-                                                );
+                                                tracing::warn!("Failed to record plugin: {e}");
                                             }
 
                                             // Store file hashes for integrity verification
@@ -500,25 +498,32 @@ async fn run_event_loop(
                                                     first_tmpl.relative_path.split('/').next()
                                                 {
                                                     match def.kind {
-                                                        borg_customizations::CustomizationKind::Tool => {
-                                                            if let Err(e) = db.insert_installed_tool(
-                                                                item_name,
-                                                                def.description,
-                                                                "python",
-                                                                def.id,
-                                                            ) {
-                                                                tracing::warn!("Failed to register tool: {e}");
+                                                        borg_plugins::PluginKind::Tool => {
+                                                            if let Err(e) = db
+                                                                .insert_installed_tool(
+                                                                    item_name,
+                                                                    def.description,
+                                                                    "python",
+                                                                    def.id,
+                                                                )
+                                                            {
+                                                                tracing::warn!(
+                                                                    "Failed to register tool: {e}"
+                                                                );
                                                             }
                                                         }
-                                                        borg_customizations::CustomizationKind::Channel => {
-                                                            let webhook = format!("/webhook/{item_name}");
-                                                            if let Err(e) = db.insert_installed_channel(
-                                                                item_name,
-                                                                def.description,
-                                                                "python",
-                                                                def.id,
-                                                                &webhook,
-                                                            ) {
+                                                        borg_plugins::PluginKind::Channel => {
+                                                            let webhook =
+                                                                format!("/webhook/{item_name}");
+                                                            if let Err(e) = db
+                                                                .insert_installed_channel(
+                                                                    item_name,
+                                                                    def.description,
+                                                                    "python",
+                                                                    def.id,
+                                                                    &webhook,
+                                                                )
+                                                            {
                                                                 tracing::warn!("Failed to register channel: {e}");
                                                             }
                                                         }
@@ -529,8 +534,7 @@ async fn run_event_loop(
 
                                         // Wire credential entries + gateway config in one load/save
                                         if !install_result.credential_entries.is_empty()
-                                            || def.kind
-                                                == borg_customizations::CustomizationKind::Channel
+                                            || def.kind == borg_plugins::PluginKind::Channel
                                         {
                                             if let Ok(mut cfg) = Config::load() {
                                                 for entry in &install_result.credential_entries {
@@ -551,9 +555,7 @@ async fn run_event_loop(
                                         for note in &install_result.notes {
                                             msg.push_str(&format!("\n  {note}"));
                                         }
-                                        if def.kind
-                                            == borg_customizations::CustomizationKind::Channel
-                                        {
+                                        if def.kind == borg_plugins::PluginKind::Channel {
                                             let gw_msg = restart_gateway(gateway_shutdown);
                                             msg.push_str(&format!("\n  {gw_msg}"));
                                         }
@@ -566,12 +568,12 @@ async fn run_event_loop(
                                 }
                             }
                         }
-                        customize_popup::CustomizeAction::Uninstall { id } => {
-                            if let Some(def) = borg_customizations::catalog::find_by_id(&id) {
-                                match borg_customizations::installer::uninstall(def, &data_dir) {
+                        plugins_popup::PluginAction::Uninstall { id } => {
+                            if let Some(def) = borg_plugins::catalog::find_by_id(&id) {
+                                match borg_plugins::installer::uninstall(def, &data_dir) {
                                     Ok(()) => {
                                         if let Ok(db) = borg_core::db::Database::open() {
-                                            let _ = db.delete_customization(def.id);
+                                            let _ = db.delete_plugin(def.id);
                                         }
                                         // Remove credential entries from config
                                         if !def.required_credentials.is_empty() {

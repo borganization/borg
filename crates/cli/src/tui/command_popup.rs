@@ -73,7 +73,7 @@ const COMMANDS: &[SlashCommandDef] = &[
         description: "Load session by ID",
     },
     SlashCommandDef {
-        name: "/customize",
+        name: "/plugins",
         description: "Integration marketplace",
     },
     SlashCommandDef {

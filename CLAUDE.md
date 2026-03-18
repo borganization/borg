@@ -15,7 +15,7 @@ crates/
   sandbox/          Library: macOS Seatbelt + Linux Bubblewrap policies
   apply-patch/      Library: patch DSL parser + filesystem applicator
   gateway/          Library: webhook gateway for messaging channel integrations
-  customizations/   Library: marketplace catalog, template installer, TUI integration
+  plugins/          Library: marketplace catalog, plugin installer, TUI integration
 ```
 
 **Data directory:** `~/.borg/` — config, personality, memory, user-created tools, logs.
@@ -43,11 +43,11 @@ All integrations are compiled unconditionally into a single binary. iMessage is 
 - `borg plugins` — list all integrations with configured/unconfigured status
 - `borg gateway` — start webhook gateway server for messaging channels
 - `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
-- `/customize` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
+- `/plugins` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
 
-## Customizations
+## Plugins
 
-Template marketplace for one-click installation of channel and tool integrations. Templates are embedded in the binary via `include_str!` and installed to `~/.borg/channels/` or `~/.borg/tools/`. Categories: Messaging (WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). **Note:** Telegram and Slack are native Rust integrations in the gateway crate (not templates).
+Plugin marketplace for one-click installation of channel and tool integrations. Plugin files are embedded in the binary via `include_str!` and installed to `~/.borg/channels/` or `~/.borg/tools/`. Categories: Messaging (WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). **Note:** Telegram and Slack are native Rust integrations in the gateway crate (not plugins).
 
 ## Agent Loop
 
@@ -391,5 +391,5 @@ cargo test                                               # all tests
 cargo test -p borg-apply-patch                           # 13 patch tests
 cargo test -p borg-core                                  # config + skills tests
 cargo test -p borg-gateway                               # channel manifest + registry tests
-cargo test -p borg-customizations                        # catalog + installer tests
+cargo test -p borg-plugins                               # catalog + installer tests
 ```
