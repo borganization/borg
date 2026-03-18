@@ -4,6 +4,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use borg_core::config::Config;
+use borg_core::db::Database;
+use borg_core::settings::SettingSource;
 
 use super::app::AppAction;
 use super::theme;
@@ -36,6 +38,7 @@ pub struct SettingsPopup {
     selected: usize,
     mode: EditMode,
     status_message: Option<(String, bool)>, // (message, is_success)
+    db: Option<Database>,
 }
 
 const SETTINGS: &[SettingEntry] = &[
@@ -123,16 +126,66 @@ const SETTINGS: &[SettingEntry] = &[
         kind: SettingKind::Float,
         category: "Budget",
     },
+    SettingEntry {
+        key: "conversation.tool_output_max_tokens",
+        label: "Tool output max tokens",
+        kind: SettingKind::Uint,
+        category: "Agent",
+    },
+    SettingEntry {
+        key: "conversation.compaction_marker_tokens",
+        label: "Compaction marker tokens",
+        kind: SettingKind::Uint,
+        category: "Agent",
+    },
+    SettingEntry {
+        key: "conversation.max_transcript_chars",
+        label: "Max transcript chars",
+        kind: SettingKind::Uint,
+        category: "Agent",
+    },
+    SettingEntry {
+        key: "gateway.max_body_size",
+        label: "Max body size (bytes)",
+        kind: SettingKind::Uint,
+        category: "Gateway",
+    },
+    SettingEntry {
+        key: "gateway.telegram_poll_timeout_secs",
+        label: "Telegram poll timeout (s)",
+        kind: SettingKind::Uint,
+        category: "Gateway",
+    },
+    SettingEntry {
+        key: "gateway.telegram_circuit_failure_threshold",
+        label: "Circuit breaker threshold",
+        kind: SettingKind::Uint,
+        category: "Gateway",
+    },
+    SettingEntry {
+        key: "gateway.telegram_circuit_suspension_secs",
+        label: "Circuit suspension (s)",
+        kind: SettingKind::Uint,
+        category: "Gateway",
+    },
+    SettingEntry {
+        key: "gateway.telegram_dedup_capacity",
+        label: "Dedup capacity",
+        kind: SettingKind::Uint,
+        category: "Gateway",
+    },
 ];
 
 impl SettingsPopup {
     pub fn new() -> Self {
+        let db = Database::open().ok();
         Self {
             visible: false,
             entries: SETTINGS,
             selected: 0,
             mode: EditMode::Browsing,
             status_message: None,
+            db,
         }
     }
 
@@ -171,9 +224,31 @@ impl SettingsPopup {
             "skills.max_context_tokens" => format!("{}", config.skills.max_context_tokens),
             "conversation.max_iterations" => format!("{}", config.conversation.max_iterations),
             "conversation.show_thinking" => format!("{}", config.conversation.show_thinking),
+            "conversation.tool_output_max_tokens" => {
+                format!("{}", config.conversation.tool_output_max_tokens)
+            }
+            "conversation.compaction_marker_tokens" => {
+                format!("{}", config.conversation.compaction_marker_tokens)
+            }
+            "conversation.max_transcript_chars" => {
+                format!("{}", config.conversation.max_transcript_chars)
+            }
             "security.secret_detection" => format!("{}", config.security.secret_detection),
             "budget.monthly_token_limit" => format!("{}", config.budget.monthly_token_limit),
             "budget.warning_threshold" => format!("{}", config.budget.warning_threshold),
+            "gateway.max_body_size" => format!("{}", config.gateway.max_body_size),
+            "gateway.telegram_poll_timeout_secs" => {
+                format!("{}", config.gateway.telegram_poll_timeout_secs)
+            }
+            "gateway.telegram_circuit_failure_threshold" => {
+                format!("{}", config.gateway.telegram_circuit_failure_threshold)
+            }
+            "gateway.telegram_circuit_suspension_secs" => {
+                format!("{}", config.gateway.telegram_circuit_suspension_secs)
+            }
+            "gateway.telegram_dedup_capacity" => {
+                format!("{}", config.gateway.telegram_dedup_capacity)
+            }
             _ => "?".to_string(),
         }
     }
@@ -236,7 +311,7 @@ impl SettingsPopup {
                     let key_str = entry.key;
                     match config.apply_setting(key_str, &value) {
                         Ok(confirmation) => {
-                            if let Err(e) = config.save() {
+                            if let Err(e) = self.save_setting(key_str, &value) {
                                 self.status_message = Some((format!("Save failed: {e}"), false));
                                 self.mode = EditMode::Browsing;
                                 return Ok(None);
@@ -274,7 +349,7 @@ impl SettingsPopup {
         let new_val = if current == "true" { "false" } else { "true" };
         match config.apply_setting(entry.key, new_val) {
             Ok(confirmation) => {
-                if let Err(e) = config.save() {
+                if let Err(e) = self.save_setting(entry.key, new_val) {
                     self.status_message = Some((format!("Save failed: {e}"), false));
                     return Ok(None);
                 }
@@ -289,6 +364,24 @@ impl SettingsPopup {
                 Ok(None)
             }
         }
+    }
+
+    /// Save a setting to DB if available, otherwise fall back to config.toml.
+    fn save_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        if let Some(ref db) = self.db {
+            db.set_setting(key, value)?;
+        }
+        Ok(())
+    }
+
+    /// Get the source of a setting value.
+    fn setting_source(&self, key: &str) -> SettingSource {
+        if let Some(ref db) = self.db {
+            if let Ok(Some(_)) = db.get_setting(key) {
+                return SettingSource::Database;
+            }
+        }
+        SettingSource::Default
     }
 
     pub fn render(&self, frame: &mut Frame, config: &Config) {
@@ -341,6 +434,12 @@ impl SettingsPopup {
 
             row_indices.push(lines.len());
             let value = self.current_value(config, entry.key);
+            let source = self.setting_source(entry.key);
+            let source_tag = match source {
+                SettingSource::Database => " [db]",
+                SettingSource::ConfigToml => " [toml]",
+                SettingSource::Default => "",
+            };
             let is_selected = i == self.selected;
 
             let display_value = if is_selected {
@@ -348,15 +447,15 @@ impl SettingsPopup {
                     format!("{buffer}_")
                 } else if entry.kind == SettingKind::Bool {
                     let check = if value == "true" { "x" } else { " " };
-                    format!("[{check}]")
+                    format!("[{check}]{source_tag}")
                 } else {
-                    value.clone()
+                    format!("{value}{source_tag}")
                 }
             } else if entry.kind == SettingKind::Bool {
                 let check = if value == "true" { "x" } else { " " };
-                format!("[{check}]")
+                format!("[{check}]{source_tag}")
             } else {
-                value
+                format!("{value}{source_tag}")
             };
 
             let label_width = inner.width.saturating_sub(4) as usize;
@@ -538,7 +637,7 @@ mod tests {
     #[test]
     fn all_settings_covered() {
         let popup = SettingsPopup::new();
-        assert_eq!(popup.entries.len(), 14);
+        assert_eq!(popup.entries.len(), 22);
 
         let cfg = Config::default();
         for entry in popup.entries {

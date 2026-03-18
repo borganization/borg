@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use borg_core::constants;
 use tracing::{info, warn};
 
 use crate::executor::ChannelExecutor;
@@ -16,11 +17,11 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            max_retries: 5,
-            initial_delay_ms: 5000,
-            max_delay_ms: 300_000,
-            backoff_factor: 2.0,
-            jitter_factor: 0.1,
+            max_retries: constants::RETRY_MAX_RETRIES,
+            initial_delay_ms: constants::RETRY_INITIAL_DELAY_MS,
+            max_delay_ms: constants::RETRY_MAX_DELAY_MS,
+            backoff_factor: constants::RETRY_BACKOFF_FACTOR,
+            jitter_factor: constants::RETRY_JITTER_FACTOR,
         }
     }
 }
