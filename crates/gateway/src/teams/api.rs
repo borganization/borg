@@ -34,16 +34,16 @@ pub struct TeamsClient {
 }
 
 impl TeamsClient {
-    pub fn new(app_id: &str, app_secret: &str) -> Self {
-        Self {
+    pub fn new(app_id: &str, app_secret: &str) -> Result<Self> {
+        Ok(Self {
             client: Client::builder()
                 .timeout(HTTP_TIMEOUT)
                 .build()
-                .unwrap_or_default(),
+                .context("Failed to build Teams HTTP client")?,
             app_id: app_id.to_string(),
             app_secret: app_secret.to_string(),
             token_cache: RwLock::new(None),
-        }
+        })
     }
 
     /// Get a valid OAuth2 access token, fetching a new one if the cache is empty or expired.

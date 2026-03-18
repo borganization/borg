@@ -21,14 +21,14 @@ pub struct GoogleChatClient {
 }
 
 impl GoogleChatClient {
-    pub fn new(token: &str) -> Self {
-        Self {
+    pub fn new(token: &str) -> Result<Self> {
+        Ok(Self {
             client: Client::builder()
                 .timeout(HTTP_TIMEOUT)
                 .build()
-                .unwrap_or_default(),
+                .context("Failed to build Google Chat HTTP client")?,
             token: token.to_string(),
-        }
+        })
     }
 
     /// Send a message to a Google Chat space, automatically chunking at 4096 chars.
@@ -113,7 +113,13 @@ impl GoogleChatClient {
             }
 
             if !status.is_success() {
-                let error_body = resp.text().await.unwrap_or_default();
+                let error_body = match resp.text().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!("Failed to read Google Chat error response body: {e}");
+                        String::new()
+                    }
+                };
                 bail!(
                     "Google Chat API error ({}): {}",
                     status.as_u16(),
