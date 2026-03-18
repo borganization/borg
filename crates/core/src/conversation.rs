@@ -11,6 +11,10 @@ use crate::constants;
 const COMPACTION_MARKER_TOKENS: usize = constants::COMPACTION_MARKER_TOKENS;
 /// Max characters from the transcript sent to the LLM summarizer.
 const MAX_TRANSCRIPT_CHARS: usize = constants::MAX_TRANSCRIPT_CHARS;
+/// Conservative token estimate per image (OpenAI high-detail ≈ 765).
+const IMAGE_TOKEN_ESTIMATE: usize = 765;
+/// Rough token estimate for audio (based on ~1 token per 4 bytes of decoded audio).
+const AUDIO_TOKEN_ESTIMATE_MIN: usize = 200;
 
 /// Estimate the token count of a single message, including role overhead.
 fn message_tokens(msg: &Message) -> usize {
@@ -22,8 +26,15 @@ fn message_tokens(msg: &Message) -> usize {
             .iter()
             .map(|p| match p {
                 ContentPart::Text(t) => estimate_tokens(t),
-                ContentPart::ImageBase64 { .. } | ContentPart::ImageUrl { .. } => 765,
-                ContentPart::AudioBase64 { .. } => 0,
+                ContentPart::ImageBase64 { .. } | ContentPart::ImageUrl { .. } => {
+                    IMAGE_TOKEN_ESTIMATE
+                }
+                ContentPart::AudioBase64 { media } => {
+                    // Rough estimate: base64 length / 4 * 3 gives decoded bytes,
+                    // then ~1 token per 16 bytes of audio data.
+                    let decoded_bytes = media.data.len() * 3 / 4;
+                    (decoded_bytes / 16).max(AUDIO_TOKEN_ESTIMATE_MIN)
+                }
             })
             .sum(),
         None => 0,
@@ -117,6 +128,37 @@ pub async fn compact_history(history: &mut Vec<Message>, max_tokens: usize, llm:
     *history = compacted;
 }
 
+/// Build a text representation of multimodal parts for summarization.
+fn summarize_parts(parts: &[ContentPart]) -> String {
+    let mut out = String::new();
+    for part in parts {
+        match part {
+            ContentPart::Text(t) => {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(t);
+            }
+            ContentPart::ImageBase64 { media } => {
+                out.push_str(&format!(
+                    " [image: {}]",
+                    media.filename.as_deref().unwrap_or("attached")
+                ));
+            }
+            ContentPart::ImageUrl { url } => {
+                out.push_str(&format!(" [image: {url}]"));
+            }
+            ContentPart::AudioBase64 { media } => {
+                out.push_str(&format!(
+                    " [audio: {}]",
+                    media.filename.as_deref().unwrap_or("attached")
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Use the LLM to generate a concise summary of dropped conversation messages.
 async fn summarize_with_llm(messages: &[Message], llm: &LlmClient) -> String {
     // Build a transcript of dropped messages for the LLM to summarize
@@ -129,15 +171,23 @@ async fn summarize_with_llm(messages: &[Message], llm: &LlmClient) -> String {
             Role::System => "System",
         };
 
-        if let Some(content) = msg.text_content() {
-            // Truncate very long messages to avoid sending too much to the summarizer
-            let truncated: String = content.chars().take(500).collect();
-            let ts = msg
-                .timestamp
-                .as_deref()
-                .map(|t| format!(" [{t}]"))
-                .unwrap_or_default();
-            transcript.push_str(&format!("{role_label}{ts}: {truncated}\n"));
+        let ts = msg
+            .timestamp
+            .as_deref()
+            .map(|t| format!(" [{t}]"))
+            .unwrap_or_default();
+        match &msg.content {
+            Some(MessageContent::Parts(parts)) => {
+                let full = summarize_parts(parts);
+                let truncated: String = full.chars().take(500).collect();
+                transcript.push_str(&format!("{role_label}{ts}: {truncated}\n"));
+            }
+            _ => {
+                if let Some(content) = msg.text_content() {
+                    let truncated: String = content.chars().take(500).collect();
+                    transcript.push_str(&format!("{role_label}{ts}: {truncated}\n"));
+                }
+            }
         }
 
         if let Some(tcs) = &msg.tool_calls {
