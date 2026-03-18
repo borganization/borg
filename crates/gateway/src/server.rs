@@ -815,6 +815,72 @@ async fn send_telegram_response(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn loopback_connect_info() -> ConnectInfo<std::net::SocketAddr> {
+        ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+    }
+
+    fn non_loopback_connect_info() -> ConnectInfo<std::net::SocketAddr> {
+        ConnectInfo(std::net::SocketAddr::from(([192, 168, 1, 100], 12345)))
+    }
+
+    #[test]
+    fn extract_client_ip_xff_from_loopback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("1.2.3.4, 5.6.7.8"),
+        );
+        let info = loopback_connect_info();
+        assert_eq!(extract_client_ip(&headers, &info), "1.2.3.4");
+    }
+
+    #[test]
+    fn extract_client_ip_xri_from_loopback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
+        let info = loopback_connect_info();
+        assert_eq!(extract_client_ip(&headers, &info), "10.0.0.1");
+    }
+
+    #[test]
+    fn extract_client_ip_xff_takes_precedence_over_xri() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
+        headers.insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
+        let info = loopback_connect_info();
+        assert_eq!(extract_client_ip(&headers, &info), "1.2.3.4");
+    }
+
+    #[test]
+    fn extract_client_ip_ignores_headers_from_non_loopback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4"));
+        let info = non_loopback_connect_info();
+        assert_eq!(extract_client_ip(&headers, &info), "192.168.1.100");
+    }
+
+    #[test]
+    fn extract_client_ip_no_proxy_headers_returns_peer() {
+        let headers = HeaderMap::new();
+        let info = loopback_connect_info();
+        assert_eq!(extract_client_ip(&headers, &info), "127.0.0.1");
+    }
+
+    #[test]
+    fn extract_client_ip_empty_xff_falls_to_xri() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static(""));
+        headers.insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
+        let info = loopback_connect_info();
+        assert_eq!(extract_client_ip(&headers, &info), "10.0.0.1");
+    }
+}
+
 /// Background task: claim pending deliveries and attempt to send them.
 async fn drain_pending_deliveries(
     state: &Arc<AppState>,
