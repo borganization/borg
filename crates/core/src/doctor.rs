@@ -156,6 +156,9 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
     // Customizations checks
     check_customizations(&mut checks);
 
+    // Agent config checks
+    check_agents(config, &mut checks);
+
     // Host security checks
     if config.security.host_audit {
         crate::host_audit::run_host_security_checks(&mut checks);
@@ -693,6 +696,41 @@ fn check_customizations(checks: &mut Vec<DiagnosticCheck>) {
             ));
         }
     }
+}
+
+fn check_agents(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
+    if !config.agents.enabled {
+        checks.push(DiagnosticCheck::warn(
+            "Agents",
+            "multi-agent system",
+            "disabled",
+        ));
+        return;
+    }
+    checks.push(DiagnosticCheck::pass(
+        "Agents",
+        format!(
+            "multi-agent enabled (depth={}, children={}, concurrent={})",
+            config.agents.max_spawn_depth,
+            config.agents.max_children_per_agent,
+            config.agents.max_concurrent,
+        ),
+    ));
+    if config.agents.max_spawn_depth > 3 {
+        checks.push(DiagnosticCheck::warn(
+            "Agents",
+            "spawn depth",
+            format!(
+                "max_spawn_depth={} is high (recommended ≤3)",
+                config.agents.max_spawn_depth
+            ),
+        ));
+    }
+    let roles = crate::multi_agent::roles::list_all_roles();
+    checks.push(DiagnosticCheck::pass(
+        "Agents",
+        format!("{} role(s) available", roles.len()),
+    ));
 }
 
 #[cfg(test)]

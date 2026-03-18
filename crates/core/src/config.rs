@@ -65,6 +65,10 @@ pub struct Config {
     #[serde(default)]
     pub customizations: CustomizationsConfig,
     #[serde(default)]
+    pub agents: MultiAgentConfig,
+    #[serde(default)]
+    pub media: crate::media_understanding::MediaUnderstandingConfig,
+    #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
 }
 
@@ -80,6 +84,26 @@ impl Default for CustomizationsConfig {
         Self {
             enabled: true,
             auto_verify: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MultiAgentConfig {
+    pub enabled: bool,
+    pub max_spawn_depth: u32,
+    pub max_children_per_agent: u32,
+    pub max_concurrent: u32,
+}
+
+impl Default for MultiAgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_spawn_depth: 1,
+            max_children_per_agent: 5,
+            max_concurrent: 3,
         }
     }
 }

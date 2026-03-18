@@ -172,7 +172,7 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                                 Ok(Ok(response)) => {
                                     let duration_ms =
                                         (chrono::Utc::now().timestamp() - started_at) * 1000;
-                                    let result_text = response.content.as_deref().unwrap_or("");
+                                    let result_text = response.text_content().unwrap_or("");
                                     let _ = db.record_task_run(
                                         &task_id,
                                         started_at,

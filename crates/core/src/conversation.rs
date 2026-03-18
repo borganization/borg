@@ -3,7 +3,7 @@ use tracing::{debug, warn};
 
 use crate::llm::LlmClient;
 use crate::tokenizer::estimate_tokens;
-use crate::types::{Message, Role};
+use crate::types::{ContentPart, Message, MessageContent, Role};
 
 /// Tokens reserved for the compaction summary marker.
 const COMPACTION_MARKER_TOKENS: usize = 200;
@@ -14,7 +14,18 @@ const MAX_TRANSCRIPT_CHARS: usize = 4000;
 fn message_tokens(msg: &Message) -> usize {
     // Role token overhead (~4 tokens for role + formatting)
     let role_overhead = 4;
-    let content_tokens = msg.content.as_deref().map(estimate_tokens).unwrap_or(0);
+    let content_tokens = match &msg.content {
+        Some(MessageContent::Text(s)) => estimate_tokens(s),
+        Some(MessageContent::Parts(parts)) => parts
+            .iter()
+            .map(|p| match p {
+                ContentPart::Text(t) => estimate_tokens(t),
+                ContentPart::ImageBase64 { .. } | ContentPart::ImageUrl { .. } => 765,
+                ContentPart::AudioBase64 { .. } => 0,
+            })
+            .sum(),
+        None => 0,
+    };
     let tool_call_tokens: usize = msg
         .tool_calls
         .as_ref()
@@ -116,7 +127,7 @@ async fn summarize_with_llm(messages: &[Message], llm: &LlmClient) -> String {
             Role::System => "System",
         };
 
-        if let Some(content) = &msg.content {
+        if let Some(content) = msg.text_content() {
             // Truncate very long messages to avoid sending too much to the summarizer
             let truncated: String = content.chars().take(500).collect();
             let ts = msg
@@ -151,7 +162,7 @@ async fn summarize_with_llm(messages: &[Message], llm: &LlmClient) -> String {
 
     match llm.chat(&summarize_messages, None).await {
         Ok(response) => {
-            let summary_text = response.content.unwrap_or_default();
+            let summary_text = response.text_content().unwrap_or("").to_string();
             format!(
                 "[Earlier conversation was summarized to fit context limits.]\n\n{summary_text}"
             )
@@ -251,7 +262,7 @@ pub fn normalize_history(history: &mut Vec<Message>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FunctionCall, Message, Role, ToolCall};
+    use crate::types::{FunctionCall, Message, MessageContent, Role, ToolCall};
 
     fn make_user(text: &str) -> Message {
         Message::user(text)
@@ -267,7 +278,7 @@ mod tests {
             content: if text.is_empty() {
                 None
             } else {
-                Some(text.to_string())
+                Some(MessageContent::Text(text.to_string()))
             },
             tool_calls: Some(vec![ToolCall {
                 id: call_id.to_string(),
@@ -459,7 +470,7 @@ mod tests {
         assert!(has_result, "Should synthesize missing tool result");
         assert!(history
             .iter()
-            .any(|m| m.content.as_deref().unwrap_or("").contains("aborted")));
+            .any(|m| m.text_content().unwrap_or("").contains("aborted")));
     }
 
     #[test]
@@ -510,10 +521,7 @@ mod tests {
         let removed = undo_last_turn(&mut history);
         assert_eq!(removed, 1);
         assert_eq!(history.len(), 3);
-        assert_eq!(
-            history.last().unwrap().content.as_deref(),
-            Some("do something")
-        );
+        assert_eq!(history.last().unwrap().text_content(), Some("do something"));
     }
 
     #[test]
@@ -528,7 +536,7 @@ mod tests {
         // Should remove everything after the user message
         assert_eq!(removed, 3);
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].content.as_deref(), Some("test"));
+        assert_eq!(history[0].text_content(), Some("test"));
     }
 
     #[test]
