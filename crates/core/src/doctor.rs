@@ -156,6 +156,9 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
     // Plugins checks
     check_plugins(&mut checks);
 
+    // Browser checks
+    check_browser(config, &mut checks);
+
     // Agent config checks
     check_agents(config, &mut checks);
 
@@ -683,6 +686,52 @@ fn check_plugins(checks: &mut Vec<DiagnosticCheck>) {
     }
 }
 
+fn check_browser(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
+    if !config.browser.enabled {
+        checks.push(DiagnosticCheck::warn(
+            "Browser",
+            "browser automation",
+            "disabled in config",
+        ));
+        return;
+    }
+
+    let detection = crate::browser::find_chrome(config.browser.executable.as_deref());
+    if let Some(ref exe) = detection.executable {
+        checks.push(DiagnosticCheck::pass(
+            "Browser",
+            format!("Chrome detected: {}", exe.display()),
+        ));
+    } else {
+        checks.push(DiagnosticCheck::warn(
+            "Browser",
+            "Chrome/Chromium detection",
+            "no Chrome-like browser found",
+        ));
+    }
+
+    if crate::browser::detect_agent_browser() {
+        checks.push(DiagnosticCheck::pass(
+            "Browser",
+            "agent-browser CLI available",
+        ));
+    } else {
+        checks.push(DiagnosticCheck::warn(
+            "Browser",
+            "agent-browser CLI",
+            "not found — install with: npm i -g agent-browser",
+        ));
+    }
+
+    checks.push(DiagnosticCheck::pass(
+        "Browser",
+        format!(
+            "config: headless={}, cdp_port={}, timeout={}ms",
+            config.browser.headless, config.browser.cdp_port, config.browser.timeout_ms
+        ),
+    ));
+}
+
 fn check_agents(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
     if !config.agents.enabled {
         checks.push(DiagnosticCheck::warn(
@@ -819,5 +868,25 @@ mod tests {
         let provider_pos = output.find("Provider").unwrap();
         assert!(check_a_pos < check_c_pos);
         assert!(check_c_pos < provider_pos);
+    }
+
+    #[test]
+    fn run_diagnostics_includes_browser_category() {
+        let config = Config::default();
+        let report = run_diagnostics(&config);
+        let categories: std::collections::HashSet<&str> =
+            report.checks.iter().map(|c| c.category).collect();
+        assert!(categories.contains("Browser"));
+    }
+
+    #[test]
+    fn browser_disabled_produces_warn() {
+        let mut checks = Vec::new();
+        let mut config = Config::default();
+        config.browser.enabled = false;
+        check_browser(&config, &mut checks);
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(checks[0].status, CheckStatus::Warn(_)));
+        assert_eq!(checks[0].category, "Browser");
     }
 }
