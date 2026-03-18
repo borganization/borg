@@ -188,6 +188,8 @@ pub enum AgentEvent {
         nickname: String,
         status: String,
     },
+    /// Emitted between tool result and next LLM stream to indicate preparation work.
+    Preparing,
     TurnComplete,
     Error(String),
 }
@@ -577,6 +579,11 @@ impl Agent {
                     .await;
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
+            }
+
+            // Signal TUI that we're preparing the next LLM call (iterations 2+)
+            if iteration > 1 {
+                let _ = event_tx.send(AgentEvent::Preparing).await;
             }
 
             normalize_history(&mut self.history);
