@@ -218,6 +218,28 @@ impl Default for BudgetConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct TelemetryConfig {
+    pub tracing_enabled: bool,
+    pub metrics_enabled: bool,
+    pub otlp_endpoint: String,
+    pub service_name: String,
+    pub sampling_ratio: f64,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            tracing_enabled: false,
+            metrics_enabled: false,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            service_name: "borg".to_string(),
+            sampling_ratio: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GatewayConfig {
     pub enabled: bool,
     pub host: String,
@@ -510,7 +532,12 @@ impl Config {
              security.secret_detection = {}\n  \
              security.host_audit = {}\n  \
              budget.monthly_token_limit = {}\n  \
-             budget.warning_threshold = {}",
+             budget.warning_threshold = {}\n  \
+             telemetry.tracing_enabled = {}\n  \
+             telemetry.metrics_enabled = {}\n  \
+             telemetry.otlp_endpoint = {}\n  \
+             telemetry.service_name = {}\n  \
+             telemetry.sampling_ratio = {}",
             self.llm.model,
             self.llm.temperature,
             self.llm.max_tokens,
@@ -525,6 +552,11 @@ impl Config {
             self.security.host_audit,
             self.budget.monthly_token_limit,
             self.budget.warning_threshold,
+            self.telemetry.tracing_enabled,
+            self.telemetry.metrics_enabled,
+            self.telemetry.otlp_endpoint,
+            self.telemetry.service_name,
+            self.telemetry.sampling_ratio,
         )
     }
 
@@ -670,6 +702,38 @@ impl Config {
                 self.gateway.telegram_dedup_capacity = v;
                 Ok(format!("gateway.telegram_dedup_capacity = {v}"))
             }
+            "telemetry.tracing_enabled" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for telemetry.tracing_enabled")?;
+                self.telemetry.tracing_enabled = v;
+                Ok(format!("telemetry.tracing_enabled = {v}"))
+            }
+            "telemetry.metrics_enabled" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for telemetry.metrics_enabled")?;
+                self.telemetry.metrics_enabled = v;
+                Ok(format!("telemetry.metrics_enabled = {v}"))
+            }
+            "telemetry.otlp_endpoint" => {
+                self.telemetry.otlp_endpoint = value.to_string();
+                Ok(format!("telemetry.otlp_endpoint = {value}"))
+            }
+            "telemetry.service_name" => {
+                self.telemetry.service_name = value.to_string();
+                Ok(format!("telemetry.service_name = {value}"))
+            }
+            "telemetry.sampling_ratio" => {
+                let v: f64 = value
+                    .parse()
+                    .with_context(|| "Invalid float for telemetry.sampling_ratio")?;
+                if !(0.0..=1.0).contains(&v) {
+                    anyhow::bail!("telemetry.sampling_ratio must be between 0.0 and 1.0");
+                }
+                self.telemetry.sampling_ratio = v;
+                Ok(format!("telemetry.sampling_ratio = {v}"))
+            }
             _ => anyhow::bail!(
                 "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
                  sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled, \
@@ -678,7 +742,9 @@ impl Config {
                  conversation.max_transcript_chars, security.secret_detection, security.host_audit, \
                  budget.monthly_token_limit, budget.warning_threshold, gateway.max_body_size, \
                  gateway.telegram_poll_timeout_secs, gateway.telegram_circuit_failure_threshold, \
-                 gateway.telegram_circuit_suspension_secs, gateway.telegram_dedup_capacity"
+                 gateway.telegram_circuit_suspension_secs, gateway.telegram_dedup_capacity, \
+                 telemetry.tracing_enabled, telemetry.metrics_enabled, telemetry.otlp_endpoint, \
+                 telemetry.service_name, telemetry.sampling_ratio"
             ),
         }
     }
@@ -1193,6 +1259,57 @@ warning_threshold = 0.9
         let display = cfg.display_settings();
         assert!(display.contains("budget.monthly_token_limit"));
         assert!(display.contains("budget.warning_threshold"));
+    }
+
+    #[test]
+    fn telemetry_config_defaults() {
+        let cfg = TelemetryConfig::default();
+        assert!(!cfg.tracing_enabled);
+        assert!(!cfg.metrics_enabled);
+        assert_eq!(cfg.otlp_endpoint, "http://localhost:4317");
+        assert_eq!(cfg.service_name, "borg");
+        assert!((cfg.sampling_ratio - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn telemetry_config_parsing() {
+        let toml_str = r#"
+[telemetry]
+tracing_enabled = true
+metrics_enabled = true
+otlp_endpoint = "http://otel:4317"
+service_name = "my-borg"
+sampling_ratio = 0.5
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(cfg.telemetry.tracing_enabled);
+        assert!(cfg.telemetry.metrics_enabled);
+        assert_eq!(cfg.telemetry.otlp_endpoint, "http://otel:4317");
+        assert_eq!(cfg.telemetry.service_name, "my-borg");
+        assert!((cfg.telemetry.sampling_ratio - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apply_setting_telemetry() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("telemetry.tracing_enabled", "true")
+            .unwrap();
+        assert!(cfg.telemetry.tracing_enabled);
+        cfg.apply_setting("telemetry.metrics_enabled", "true")
+            .unwrap();
+        assert!(cfg.telemetry.metrics_enabled);
+        cfg.apply_setting("telemetry.otlp_endpoint", "http://custom:4317")
+            .unwrap();
+        assert_eq!(cfg.telemetry.otlp_endpoint, "http://custom:4317");
+        cfg.apply_setting("telemetry.service_name", "test-borg")
+            .unwrap();
+        assert_eq!(cfg.telemetry.service_name, "test-borg");
+        cfg.apply_setting("telemetry.sampling_ratio", "0.25")
+            .unwrap();
+        assert!((cfg.telemetry.sampling_ratio - 0.25).abs() < f64::EPSILON);
+        assert!(cfg
+            .apply_setting("telemetry.sampling_ratio", "1.5")
+            .is_err());
     }
 
     #[test]

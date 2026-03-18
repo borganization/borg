@@ -68,7 +68,11 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
         let gw_config = config.clone();
         let gw_shutdown = shutdown.clone();
         tokio::spawn(async move {
-            match borg_gateway::GatewayServer::new(gw_config, gw_shutdown) {
+            match borg_gateway::GatewayServer::new(
+                gw_config,
+                gw_shutdown,
+                borg_core::telemetry::BorgMetrics::noop(),
+            ) {
                 Ok(gateway) => {
                     if let Err(e) = gateway.run().await {
                         tracing::error!("Gateway server error: {e}");

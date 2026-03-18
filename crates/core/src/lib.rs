@@ -26,6 +26,7 @@ pub mod settings;
 pub mod skills;
 pub mod soul;
 pub mod tasks;
+pub mod telemetry;
 pub mod tokenizer;
 pub mod tool_handlers;
 pub mod truncate;
