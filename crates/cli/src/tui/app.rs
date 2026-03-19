@@ -504,7 +504,7 @@ impl<'a> App<'a> {
                 self.push_system_message(
                     "Commands:\n  \
                      /help      - Show this help\n  \
-                     /settings  - Show/change settings (/settings <key> <value>)\n  \
+                     /settings  - Configure settings (/settings <key> <value>)\n  \
                      /usage     - Show usage stats\n  \
                      /compact   - Compact conversation history\n  \
                      /clear     - Clear conversation\n  \
@@ -813,6 +813,10 @@ impl<'a> App<'a> {
             }
         }
 
+        // Separator between turns
+        if !self.cells.is_empty() {
+            self.cells.push(HistoryCell::Separator);
+        }
         // Prepare to send to agent
         self.cells.push(HistoryCell::User {
             text: input.to_string(),
@@ -951,22 +955,28 @@ impl<'a> App<'a> {
                     name,
                     args,
                     completed: false,
+                    start_time: Some(Instant::now()),
                 });
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
             }
             AgentEvent::ToolResult { name, result } => {
-                // Mark matching ToolStart as completed
+                // Mark matching ToolStart as completed and compute duration
+                let mut duration_ms = None;
                 for cell in self.cells.iter_mut().rev() {
                     if let HistoryCell::ToolStart {
                         name: ref start_name,
                         completed,
+                        start_time,
                         ..
                     } = cell
                     {
                         if start_name == &name && !*completed {
                             *completed = true;
+                            if let Some(t) = start_time {
+                                duration_ms = Some(t.elapsed().as_millis() as u64);
+                            }
                             break;
                         }
                     }
@@ -976,6 +986,7 @@ impl<'a> App<'a> {
                     name,
                     output: result,
                     is_error,
+                    duration_ms,
                 });
                 if self.auto_scroll {
                     self.scroll_offset = 0;
@@ -1167,7 +1178,7 @@ impl<'a> App<'a> {
             all_lines.extend(cell.render(width, throbber_state));
         }
 
-        self.total_lines = all_lines.len();
+        self.total_lines = estimate_wrapped_height(&all_lines, width);
 
         let visible_height = area.height as usize;
         let max_scroll = self.total_lines.saturating_sub(visible_height);
@@ -1197,14 +1208,14 @@ impl<'a> App<'a> {
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         let line = match &self.state {
             AppState::Streaming { start, .. } => {
-                let elapsed_secs = start.elapsed().as_secs();
+                let elapsed = theme::format_elapsed(start.elapsed().as_secs());
                 let throbber = Throbber::default()
                     .throbber_set(BRAILLE_EIGHT)
                     .throbber_style(theme::tool_style());
                 Line::from(vec![
                     Span::raw(" "),
                     throbber.to_symbol_span(&self.throbber_state),
-                    Span::styled(format!("Working ({elapsed_secs}s"), theme::tool_style()),
+                    Span::styled(format!("Working ({elapsed}"), theme::tool_style()),
                     Span::styled(" • esc to interrupt)", theme::dim()),
                 ])
             }
@@ -1312,6 +1323,26 @@ impl<'a> App<'a> {
 
         frame.render_widget(Paragraph::new(lines), area);
     }
+}
+
+/// Estimate the number of screen rows after wrapping.
+fn estimate_wrapped_height(lines: &[Line<'_>], width: u16) -> usize {
+    let w = width.max(1) as usize;
+    lines
+        .iter()
+        .map(|line| {
+            let line_width: usize = line
+                .spans
+                .iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            if line_width == 0 {
+                1
+            } else {
+                line_width.div_ceil(w)
+            }
+        })
+        .sum()
 }
 
 /// Extract the query portion after the last `@` in text, if it looks like a file

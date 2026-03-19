@@ -15,6 +15,7 @@ pub fn render_markdown(input: &str, width: u16) -> Vec<Line<'static>> {
     let mut in_code_block = false;
     let mut list_depth: usize = 0;
     let mut ordered_index: Option<u64> = None;
+    let mut in_blockquote = false;
 
     let wrap_width = width.saturating_sub(2) as usize;
 
@@ -55,6 +56,7 @@ pub fn render_markdown(input: &str, width: u16) -> Vec<Line<'static>> {
                 }
                 Tag::BlockQuote(_) => {
                     flush_line(&mut current_spans, &mut lines);
+                    in_blockquote = true;
                     style_stack.push(theme::success_style());
                 }
                 Tag::List(start) => {
@@ -65,14 +67,14 @@ pub fn render_markdown(input: &str, width: u16) -> Vec<Line<'static>> {
                 Tag::Item => {
                     flush_line(&mut current_spans, &mut lines);
                     let indent = "  ".repeat(list_depth.saturating_sub(1));
-                    let bullet = if let Some(ref mut idx) = ordered_index {
-                        let s = format!("{indent}{idx}. ");
+                    if let Some(ref mut idx) = ordered_index {
+                        let bullet = format!("{indent}{idx}. ");
                         *idx += 1;
-                        s
+                        current_spans.push(Span::styled(bullet, theme::code_style()));
                     } else {
-                        format!("{indent}- ")
+                        let bullet = format!("{indent}- ");
+                        current_spans.push(Span::styled(bullet, current_style(&style_stack)));
                     };
-                    current_spans.push(Span::styled(bullet, current_style(&style_stack)));
                 }
                 Tag::Link { dest_url, .. } => {
                     let base = current_style(&style_stack);
@@ -100,6 +102,7 @@ pub fn render_markdown(input: &str, width: u16) -> Vec<Line<'static>> {
                     style_stack.pop();
                 }
                 TagEnd::BlockQuote(_) => {
+                    in_blockquote = false;
                     style_stack.pop();
                     flush_line(&mut current_spans, &mut lines);
                 }
@@ -117,6 +120,9 @@ pub fn render_markdown(input: &str, width: u16) -> Vec<Line<'static>> {
             },
             Event::Text(text) => {
                 let style = current_style(&style_stack);
+                if in_blockquote && current_spans.is_empty() {
+                    current_spans.push(Span::styled("│ ", theme::success_style()));
+                }
                 if in_code_block {
                     // Code blocks: no wrapping, use code style
                     for line in text.lines() {

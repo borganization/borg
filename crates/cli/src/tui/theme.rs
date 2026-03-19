@@ -14,6 +14,16 @@ pub const TREE_END: &str = "└";
 pub const TOOL_ACTIVE_GREEN: Color = Color::Rgb(0, 200, 0);
 pub const INPUT_PROMPT: &str = "❯ ";
 
+pub const CHECK: &str = "✓";
+pub const CROSS: &str = "✗";
+pub const SEPARATOR: &str = "─";
+pub const BOX_TOP_LEFT: &str = "╭";
+pub const BOX_TOP_RIGHT: &str = "╮";
+pub const BOX_BOTTOM_LEFT: &str = "╰";
+pub const BOX_BOTTOM_RIGHT: &str = "╯";
+pub const BOX_VERTICAL: &str = "│";
+pub const ELLIPSIS: &str = "…";
+
 pub fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
 }
@@ -54,6 +64,42 @@ pub fn popup_selected() -> Style {
 
 pub fn file_mention_style() -> Style {
     Style::default().fg(CYAN).add_modifier(Modifier::UNDERLINED)
+}
+
+pub fn check_style() -> Style {
+    Style::default()
+        .fg(TOOL_ACTIVE_GREEN)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn cross_style() -> Style {
+    Style::default().fg(RED).add_modifier(Modifier::BOLD)
+}
+
+pub fn thinking_border_style() -> Style {
+    Style::default().fg(Color::Rgb(80, 80, 80))
+}
+
+pub fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        if s == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m {s}s")
+        }
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h {m}m")
+        }
+    }
 }
 
 /// Style for user message lines — subtle background tint when terminal bg is known.

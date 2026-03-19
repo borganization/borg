@@ -24,12 +24,13 @@ pub enum HistoryCell {
         name: String,
         args: String,
         completed: bool,
+        start_time: Option<std::time::Instant>,
     },
     ToolResult {
-        #[allow(dead_code)]
         name: String,
         output: String,
         is_error: bool,
+        duration_ms: Option<u64>,
     },
     ShellApproval {
         command: String,
@@ -54,6 +55,7 @@ pub enum HistoryCell {
         name: String,
         lines: Vec<(String, bool)>,
     },
+    Separator,
 }
 
 /// Truncate a string to at most `max_bytes` bytes at a valid UTF-8 boundary.
@@ -76,11 +78,8 @@ impl HistoryCell {
                 let prefix_style =
                     bg.add_modifier(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::DIM);
                 let mention_style = theme::file_mention_style();
-                let w = width as usize;
                 let mut lines = Vec::new();
-                // Top padding (full-width background)
-                lines.push(Line::from(Span::styled(" ".repeat(w), bg)));
-                // Content lines
+                lines.push(Line::from("").style(bg));
                 for (i, line) in text.lines().enumerate() {
                     let prefix = if i == 0 {
                         Span::styled(format!("{} ", theme::CHEVRON), prefix_style)
@@ -88,20 +87,11 @@ impl HistoryCell {
                         Span::styled("  ", bg)
                     };
                     let spans = parse_at_mentions(line, bg, mention_style);
-                    let mut all_spans = vec![prefix.clone()];
-                    all_spans.extend(spans.clone());
-                    // Calculate used width and pad remainder
-                    let used: usize = std::iter::once(&prefix)
-                        .chain(spans.iter())
-                        .map(|s| s.content.len())
-                        .sum();
-                    if used < w {
-                        all_spans.push(Span::styled(" ".repeat(w - used), bg));
-                    }
+                    let mut all_spans = vec![prefix];
+                    all_spans.extend(spans);
                     lines.push(Line::from(all_spans).style(bg));
                 }
-                // Bottom padding (full-width background)
-                lines.push(Line::from(Span::styled(" ".repeat(w), bg)));
+                lines.push(Line::from("").style(bg));
                 lines
             }
             HistoryCell::Assistant { text, streaming } => {
@@ -149,6 +139,7 @@ impl HistoryCell {
                 name,
                 args,
                 completed,
+                ..
             } => {
                 let preview = if name == "apply_patch" || name == "apply_skill_patch" {
                     // Hide verbose patch content; just show a short summary
@@ -178,7 +169,10 @@ impl HistoryCell {
                 ])]
             }
             HistoryCell::ToolResult {
-                output, is_error, ..
+                name,
+                output,
+                is_error,
+                duration_ms,
             } => {
                 let style = if *is_error {
                     theme::error_style()
@@ -186,7 +180,8 @@ impl HistoryCell {
                     theme::dim()
                 };
                 let preview_lines: Vec<&str> = output.lines().take(5).collect();
-                let truncated = output.lines().count() > 5;
+                let total_count = output.lines().count();
+                let truncated = total_count > 5;
                 let mut lines: Vec<Line<'static>> = Vec::new();
                 for (i, pl) in preview_lines.iter().enumerate() {
                     let prefix = if i == 0 {
@@ -205,8 +200,29 @@ impl HistoryCell {
                     ]));
                 }
                 if truncated {
-                    lines.push(Line::from(Span::styled("    ...", theme::dim())));
+                    let extra = total_count - 5;
+                    lines.push(Line::from(Span::styled(
+                        format!("    {} +{extra} more lines", theme::ELLIPSIS),
+                        theme::dim(),
+                    )));
                 }
+                // Status line with check/cross and duration
+                let (indicator, ind_style) = if *is_error {
+                    (theme::CROSS, theme::cross_style())
+                } else {
+                    (theme::CHECK, theme::check_style())
+                };
+                let duration_str = match duration_ms {
+                    Some(ms) => {
+                        let secs_f = *ms as f64 / 1000.0;
+                        format!(" • {secs_f:.1}s")
+                    }
+                    None => String::new(),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {indicator} "), ind_style),
+                    Span::styled(format!("Ran {name}{duration_str}"), theme::dim()),
+                ]));
                 lines
             }
             HistoryCell::ShellApproval { command, status } => {
@@ -275,13 +291,41 @@ impl HistoryCell {
                 lines
             }
             HistoryCell::Thinking { text } => {
-                let style = ratatui::style::Style::default()
+                let border = theme::thinking_border_style();
+                let content_style = ratatui::style::Style::default()
                     .fg(ratatui::style::Color::DarkGray)
                     .add_modifier(ratatui::style::Modifier::ITALIC);
-                let mut lines = vec![Line::from(Span::styled("thinking...", style))];
+                let inner_w = (width as usize).saturating_sub(4);
+                let label = " thinking ";
+                let top_rule_len = inner_w.saturating_sub(label.len());
+                let top = format!(
+                    "{}{}{label}{}{}",
+                    theme::BOX_TOP_LEFT,
+                    theme::SEPARATOR.repeat(2),
+                    theme::SEPARATOR.repeat(top_rule_len),
+                    theme::BOX_TOP_RIGHT,
+                );
+                let mut lines = vec![Line::from(Span::styled(top, border))];
                 for l in text.lines() {
-                    lines.push(Line::from(Span::styled(l.to_string(), style)));
+                    let display = truncate_str(l, inner_w);
+                    let display_len = unicode_width::UnicodeWidthStr::width(display);
+                    let pad = inner_w.saturating_sub(display_len);
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{} ", theme::BOX_VERTICAL), border),
+                        Span::styled(display.to_string(), content_style),
+                        Span::styled(
+                            format!("{}{}", " ".repeat(pad), theme::BOX_VERTICAL),
+                            border,
+                        ),
+                    ]));
                 }
+                let bottom = format!(
+                    "{}{}{}",
+                    theme::BOX_BOTTOM_LEFT,
+                    theme::SEPARATOR.repeat(inner_w + 2),
+                    theme::BOX_BOTTOM_RIGHT,
+                );
+                lines.push(Line::from(Span::styled(bottom, border)));
                 lines
             }
             HistoryCell::ToolStreaming {
@@ -316,6 +360,17 @@ impl HistoryCell {
                     ]));
                 }
                 rendered
+            }
+            HistoryCell::Separator => {
+                let rule_width = ((width as usize) * 2 / 3).min(80);
+                vec![
+                    Line::default(),
+                    Line::from(Span::styled(
+                        theme::SEPARATOR.repeat(rule_width),
+                        theme::dim(),
+                    )),
+                    Line::default(),
+                ]
             }
         }
     }
