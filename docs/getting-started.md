@@ -45,18 +45,18 @@ borg init
 
 This launches an interactive TUI that walks you through setup:
 
-- **Name your agent** — give it a custom identity (appears in SOUL.md)
+- **Name your agent** — give it a custom identity (appears in IDENTITY.md)
 - **Pick a personality style** — Professional, Casual, Snarky, Nurturing, or Minimal
 - **Choose a provider and model** — select from OpenRouter, OpenAI, Anthropic, or Gemini models
 
-The wizard writes your choices to `config.toml` and generates a personalized `SOUL.md`. If you cancel mid-wizard, defaults are used instead.
+The wizard writes your choices to `config.toml` and generates a personalized `IDENTITY.md`. If you cancel mid-wizard, defaults are used instead.
 
 This creates `~/.borg/` with your customized config, personality, and memory files:
 
 ```
 ~/.borg/
 ├── config.toml       # Configuration
-├── SOUL.md           # Personality prompt
+├── IDENTITY.md       # Personality prompt
 ├── MEMORY.md         # Memory index
 ├── memory/           # Topic-specific memories
 ├── tools/            # User-created tools
@@ -110,7 +110,7 @@ borg service status     # check service status
 ## What happens when you chat
 
 1. Your message is added to the conversation history
-2. A system prompt is assembled from: `SOUL.md` + current time + memory context + skills context
+2. A system prompt is assembled from: `IDENTITY.md` + current time + memory context + skills context
 3. The message is streamed to the LLM via the configured provider
 4. If the LLM responds with tool calls, each tool is executed and results are fed back
 5. The loop continues until the LLM responds with text only

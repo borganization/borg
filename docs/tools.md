@@ -107,7 +107,7 @@ These are always available and don't require tool.toml manifests:
 
 | Tool | Description |
 |------|-------------|
-| `write_memory` | Write or append to memory files (SOUL.md, MEMORY.md, or topic files) |
+| `write_memory` | Write or append to memory files (IDENTITY.md, MEMORY.md, or topic files) |
 | `read_memory` | Read a memory file |
 | `list_tools` | List all user-created tools |
 | `apply_patch` | Create/update/delete files in the current working directory via [Patch DSL](patch-dsl.md) |

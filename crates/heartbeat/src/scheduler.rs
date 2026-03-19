@@ -10,7 +10,7 @@ use tracing::{debug, info, instrument, warn};
 use borg_core::config::HeartbeatConfig;
 use borg_core::llm::LlmClient;
 use borg_core::memory::load_memory_context;
-use borg_core::soul::load_soul;
+use borg_core::identity::load_identity;
 use borg_core::types::Message;
 
 #[derive(Debug, Clone)]
@@ -118,12 +118,12 @@ impl HeartbeatScheduler {
     }
 
     async fn fire_heartbeat(&self) -> Result<Option<String>> {
-        let soul = load_soul().unwrap_or_default();
+        let identity = load_identity().unwrap_or_default();
         let memory = load_memory_context(4000).unwrap_or_default();
         let now = Local::now().format("%Y-%m-%d %H:%M:%S %Z");
 
         let system = format!(
-            "{soul}\n\n# Current Time\n{now}\n\n{memory}\n\n\
+            "{identity}\n\n# Current Time\n{now}\n\n{memory}\n\n\
             # Heartbeat Instructions\n\
             You are checking in on your owner proactively. \
             If you have something useful, timely, or caring to say, say it briefly. \

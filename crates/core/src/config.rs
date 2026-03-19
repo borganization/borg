@@ -63,8 +63,8 @@ pub struct Config {
     pub budget: BudgetConfig,
     #[serde(default)]
     pub gateway: GatewayConfig,
-    #[serde(default)]
-    pub customizations: CustomizationsConfig,
+    #[serde(default, alias = "customizations")]
+    pub plugins: PluginsConfig,
     #[serde(default)]
     pub agents: MultiAgentConfig,
     #[serde(default)]
@@ -75,12 +75,12 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct CustomizationsConfig {
+pub struct PluginsConfig {
     pub enabled: bool,
     pub auto_verify: bool,
 }
 
-impl Default for CustomizationsConfig {
+impl Default for PluginsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -449,8 +449,8 @@ impl Config {
         Ok(Self::data_dir()?.join("borg.db"))
     }
 
-    pub fn soul_path() -> Result<PathBuf> {
-        Ok(Self::data_dir()?.join("SOUL.md"))
+    pub fn identity_path() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("IDENTITY.md"))
     }
 
     pub fn memory_index_path() -> Result<PathBuf> {
@@ -1134,8 +1134,8 @@ agent_name = "Buddy"
         let db = Config::db_path().unwrap();
         assert_eq!(db, data.join("borg.db"));
 
-        let soul = Config::soul_path().unwrap();
-        assert_eq!(soul, data.join("SOUL.md"));
+        let identity = Config::identity_path().unwrap();
+        assert_eq!(identity, data.join("IDENTITY.md"));
 
         let mem_index = Config::memory_index_path().unwrap();
         assert_eq!(mem_index, data.join("MEMORY.md"));

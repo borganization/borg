@@ -153,8 +153,8 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
     // Budget checks
     check_budget(config, &mut checks);
 
-    // Customizations checks
-    check_customizations(&mut checks);
+    // Plugins checks
+    check_plugins(&mut checks);
 
     // Agent config checks
     check_agents(config, &mut checks);
@@ -437,20 +437,24 @@ fn check_memory(checks: &mut Vec<DiagnosticCheck>) {
         }
     }
 
-    match Config::soul_path() {
+    match Config::identity_path() {
         Ok(path) => {
             if path.exists() {
-                checks.push(DiagnosticCheck::pass("Memory", "SOUL.md exists"));
+                checks.push(DiagnosticCheck::pass("Memory", "IDENTITY.md exists"));
             } else {
                 checks.push(DiagnosticCheck::warn(
                     "Memory",
-                    "SOUL.md exists",
+                    "IDENTITY.md exists",
                     "not found",
                 ));
             }
         }
         Err(e) => {
-            checks.push(DiagnosticCheck::fail("Memory", "SOUL.md", format!("{e}")));
+            checks.push(DiagnosticCheck::fail(
+                "Memory",
+                "IDENTITY.md",
+                format!("{e}"),
+            ));
         }
     }
 }
@@ -601,36 +605,36 @@ fn check_budget(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
     }
 }
 
-fn check_customizations(checks: &mut Vec<DiagnosticCheck>) {
+fn check_plugins(checks: &mut Vec<DiagnosticCheck>) {
     match Database::open() {
-        Ok(db) => match db.list_customizations() {
-            Ok(customizations) => {
-                if customizations.is_empty() {
+        Ok(db) => match db.list_plugins() {
+            Ok(plugins) => {
+                if plugins.is_empty() {
                     checks.push(DiagnosticCheck::warn(
-                        "Customizations",
+                        "Plugins",
                         "installed integrations",
-                        "none installed (use /customize)",
+                        "none installed (use /plugins)",
                     ));
                 } else {
-                    let verified = customizations
+                    let verified = plugins
                         .iter()
                         .filter(|c| c.verified_at.is_some())
                         .count();
                     checks.push(DiagnosticCheck::pass(
-                        "Customizations",
+                        "Plugins",
                         format!(
                             "{} integration(s) installed, {verified} verified",
-                            customizations.len()
+                            plugins.len()
                         ),
                     ));
 
-                    for c in &customizations {
+                    for c in &plugins {
                         let name = format!("{} ({})", c.name, c.kind);
                         if c.verified_at.is_some() {
-                            checks.push(DiagnosticCheck::pass("Customizations", name));
+                            checks.push(DiagnosticCheck::pass("Plugins", name));
                         } else {
                             checks.push(DiagnosticCheck::warn(
-                                "Customizations",
+                                "Plugins",
                                 name,
                                 "not verified",
                             ));
@@ -643,7 +647,7 @@ fn check_customizations(checks: &mut Vec<DiagnosticCheck>) {
                                 let integrity_name = format!("{} file integrity", c.name);
                                 if result.ok {
                                     checks.push(DiagnosticCheck::pass(
-                                        "Customizations",
+                                        "Plugins",
                                         integrity_name,
                                     ));
                                 } else {
@@ -661,7 +665,7 @@ fn check_customizations(checks: &mut Vec<DiagnosticCheck>) {
                                         ));
                                     }
                                     checks.push(DiagnosticCheck::fail(
-                                        "Customizations",
+                                        "Plugins",
                                         integrity_name,
                                         issues.join("; "),
                                     ));
@@ -673,15 +677,15 @@ fn check_customizations(checks: &mut Vec<DiagnosticCheck>) {
             }
             Err(e) => {
                 checks.push(DiagnosticCheck::warn(
-                    "Customizations",
-                    "customizations table",
+                    "Plugins",
+                    "plugins table",
                     format!("could not query: {e}"),
                 ));
             }
         },
         Err(e) => {
             checks.push(DiagnosticCheck::warn(
-                "Customizations",
+                "Plugins",
                 "database",
                 format!("unavailable: {e}"),
             ));

@@ -9,7 +9,7 @@ Cargo workspace with 8 crates:
 ```
 crates/
   cli/              Binary: REPL, clap args, heartbeat display, onboarding TUI
-  core/             Library: agent loop, multi-provider LLM client, memory, soul, config
+  core/             Library: agent loop, multi-provider LLM client, memory, identity, config
   heartbeat/        Library: proactive scheduler with quiet hours + dedup
   tools/            Library: tool manifest parsing, registry, subprocess executor
   sandbox/          Library: macOS Seatbelt + Linux Bubblewrap policies
@@ -57,13 +57,13 @@ Template marketplace for one-click installation of channel and tool integrations
 - **Message persistence**: Each message is written to SQLite (`messages` table) immediately when added to history, enabling crash recovery
 - **Message timestamps**: All messages carry RFC3339 timestamps for temporal reasoning and compaction summaries
 
-System prompt assembled each turn: `SOUL.md` + current time + memory context + skills context (all token-budgeted).
+System prompt assembled each turn: `IDENTITY.md` + current time + memory context + skills context (all token-budgeted).
 
 ## Built-in Tools
 
 | Tool | Purpose |
 |------|---------|
-| `write_memory` | Write/append to memory files (SOUL.md, MEMORY.md, or topic files). Supports `scope` param (`global`/`local`) |
+| `write_memory` | Write/append to memory files (IDENTITY.md, MEMORY.md, or topic files). Supports `scope` param (`global`/`local`) |
 | `read_memory` | Read a memory file |
 | `list_tools` | List user-created tools |
 | `apply_patch` | Create/update/delete files in the current working directory via patch DSL |
@@ -162,7 +162,7 @@ max_context_tokens = 4000
 secret_detection = true
 blocked_paths = [".ssh", ".aws", ".gnupg", ".config/gh", ".env", "credentials", "private_key"]
 host_audit = true                # enable host security checks in doctor + security_audit tool
-hitl_dangerous_ops = true          # confirm before file deletion, SOUL.md changes
+hitl_dangerous_ops = true          # confirm before file deletion, IDENTITY.md changes
 action_limits.tool_calls_warn = 50
 action_limits.tool_calls_block = 100
 action_limits.shell_commands_warn = 20
@@ -193,11 +193,11 @@ MY_SECRET = { source = "env", var = "MY_SECRET" }    # explicit env SecretRef
 - `write_memory` tool accepts `scope: "local"` to write to project-local memory
 - Token estimation via `tiktoken-rs` (cl100k_base BPE tokenizer)
 
-## Personality (SOUL.md)
+## Identity (IDENTITY.md)
 
-`~/.borg/SOUL.md` is injected into the system prompt. The agent can update it via `write_memory` targeting `SOUL.md`. Changes persist across sessions.
+`~/.borg/IDENTITY.md` is injected into the system prompt. The agent can update it via `write_memory` targeting `IDENTITY.md`. Changes persist across sessions.
 
-During `borg init`, the onboarding wizard generates a personalized SOUL.md based on the user's chosen agent name and personality style (Professional, Casual, Snarky, Nurturing, or Minimal).
+During `borg init`, the onboarding wizard generates a personalized IDENTITY.md based on the user's chosen agent name and personality style (Professional, Casual, Snarky, Nurturing, or Minimal).
 
 ## Skills
 
@@ -337,7 +337,7 @@ Six-layer defense against prompt injection attacks:
 
 3. **Prompt Hardening**: Security policy injected into system prompt instructing the model to treat external data as data, not instructions. Role boundary enforcement.
 
-4. **HITL for Dangerous Ops**: `ToolConfirmation` event for file deletion (apply_patch) and personality modification (SOUL.md). Auto-denied in gateway mode. Configurable via `security.hitl_dangerous_ops`.
+4. **HITL for Dangerous Ops**: `ToolConfirmation` event for file deletion (apply_patch) and identity modification (IDENTITY.md). Auto-denied in gateway mode. Configurable via `security.hitl_dangerous_ops`.
 
 5. **Rate Limiting** (`crates/core/src/rate_guard.rs`): Per-session action caps (tool calls, shell commands, file/memory writes, web requests) with warn and block thresholds. Configurable via `[security]` config.
 
@@ -355,7 +355,7 @@ Six-layer defense against prompt injection attacks:
 | `crates/core/src/provider.rs` | Provider enum, auto-detection, headers |
 | `crates/core/src/llm.rs` | Multi-provider streaming SSE client |
 | `crates/core/src/config.rs` | Config parsing with defaults |
-| `crates/core/src/soul.rs` | SOUL.md load/save |
+| `crates/core/src/identity.rs` | IDENTITY.md load/save |
 | `crates/core/src/memory.rs` | Memory loading with token budget |
 | `crates/core/src/skills.rs` | Skills loading, parsing, progressive token budgeting |
 | `crates/core/src/hooks.rs` | Lifecycle hook system (trait, registry, dispatch) |

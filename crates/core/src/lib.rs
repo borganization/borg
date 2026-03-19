@@ -24,7 +24,7 @@ pub mod secrets_resolve;
 pub mod session;
 pub mod settings;
 pub mod skills;
-pub mod soul;
+pub mod identity;
 pub mod tasks;
 pub mod telemetry;
 pub mod tokenizer;
