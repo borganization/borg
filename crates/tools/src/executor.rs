@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::path::Path;
 use tracing::info;
 
@@ -13,6 +13,30 @@ pub struct ToolExecutor<'a> {
 impl<'a> ToolExecutor<'a> {
     pub fn new(manifest: &'a ToolManifest, tool_dir: &'a Path) -> Self {
         Self { manifest, tool_dir }
+    }
+
+    /// Resolve and validate that the entrypoint stays within tool_dir.
+    fn validated_entrypoint(&self) -> Result<std::path::PathBuf> {
+        let entrypoint = self.tool_dir.join(&self.manifest.entrypoint);
+        if !entrypoint.exists() {
+            // Will be caught later by ScriptRunner, but validate path anyway
+            if self.manifest.entrypoint.contains("..") {
+                bail!(
+                    "Entrypoint '{}' contains path traversal",
+                    self.manifest.entrypoint
+                );
+            }
+            return Ok(entrypoint);
+        }
+        let canonical_entry = entrypoint.canonicalize()?;
+        let canonical_dir = self.tool_dir.canonicalize()?;
+        if !canonical_entry.starts_with(&canonical_dir) {
+            bail!(
+                "Entrypoint '{}' escapes tool directory",
+                self.manifest.entrypoint
+            );
+        }
+        Ok(entrypoint)
     }
 
     pub async fn execute(&self, args_json: &str) -> Result<String> {
@@ -34,7 +58,7 @@ impl<'a> ToolExecutor<'a> {
         extra_env: &[(String, String)],
         blocked_paths: &[String],
     ) -> Result<String> {
-        let entrypoint = self.tool_dir.join(&self.manifest.entrypoint);
+        let entrypoint = self.validated_entrypoint()?;
         let sandbox_policy = self
             .manifest
             .sandbox_policy()
@@ -75,7 +99,7 @@ impl<'a> ToolExecutor<'a> {
     where
         F: FnMut(&str, bool) + Send,
     {
-        let entrypoint = self.tool_dir.join(&self.manifest.entrypoint);
+        let entrypoint = self.validated_entrypoint()?;
         let sandbox_policy = self
             .manifest
             .sandbox_policy()

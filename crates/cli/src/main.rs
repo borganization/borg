@@ -610,7 +610,7 @@ fn run_tasks_create(name: &str, prompt: &str, schedule: &str, schedule_type: &st
         next_run,
     })?;
 
-    println!("Created task {} ({})", &id[..8], name);
+    println!("Created task {} ({})", &id[..8.min(id.len())], name);
     Ok(())
 }
 
@@ -635,11 +635,17 @@ fn run_tasks_update_status(id: &str, status: &str) -> Result<()> {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max - 1])
+    if max == 0 {
+        return String::new();
     }
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max - 1;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 fn run_agents_list() -> Result<()> {
@@ -658,11 +664,7 @@ fn run_agents_list() -> Result<()> {
                 .as_ref()
                 .map(|t| t.join(", "))
                 .unwrap_or_else(|| "all".to_string());
-            let desc = if role.description.len() > 50 {
-                format!("{}...", &role.description[..47])
-            } else {
-                role.description.clone()
-            };
+            let desc = truncate_str(&role.description, 50);
             println!("{:15} {:50} {:6} {}", role.name, desc, temp, tools);
         }
     }

@@ -267,7 +267,8 @@ pub fn add_plugin(name: &str) -> Result<()> {
             } else {
                 filtered + "\n"
             };
-            env_content.push_str(&format!("{}={}\n", cred.key, value.trim()));
+            let clean_value = value.trim().replace(['\n', '\r'], "");
+            env_content.push_str(&format!("{}={}\n", cred.key, clean_value));
             std::fs::write(&env_path, &env_content)?;
             #[cfg(unix)]
             {
