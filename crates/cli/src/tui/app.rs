@@ -669,7 +669,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/settings" => {
-                self.settings_popup.show();
+                self.settings_popup.show(&self.config);
                 return Ok(AppAction::Continue);
             }
             "/plugins" => {

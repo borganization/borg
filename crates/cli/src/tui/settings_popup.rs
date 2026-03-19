@@ -7,6 +7,8 @@ use borg_core::config::Config;
 use borg_core::db::Database;
 use borg_core::settings::SettingSource;
 
+use crate::onboarding::{models_for_provider, PROVIDERS};
+
 use super::app::AppAction;
 use super::theme;
 
@@ -16,6 +18,7 @@ pub enum SettingKind {
     Text,
     Float,
     Uint,
+    Select,
 }
 
 #[derive(Clone, Copy)]
@@ -39,19 +42,21 @@ pub struct SettingsPopup {
     mode: EditMode,
     status_message: Option<(String, bool)>, // (message, is_success)
     db: Option<Database>,
+    provider_index: usize,
+    model_index: usize,
 }
 
 const SETTINGS: &[SettingEntry] = &[
     SettingEntry {
         key: "provider",
         label: "Provider",
-        kind: SettingKind::Text,
+        kind: SettingKind::Select,
         category: "LLM",
     },
     SettingEntry {
         key: "model",
         label: "Model",
-        kind: SettingKind::Text,
+        kind: SettingKind::Select,
         category: "LLM",
     },
     SettingEntry {
@@ -186,6 +191,8 @@ impl SettingsPopup {
             mode: EditMode::Browsing,
             status_message: None,
             db,
+            provider_index: 0,
+            model_index: 0,
         }
     }
 
@@ -193,11 +200,27 @@ impl SettingsPopup {
         self.visible
     }
 
-    pub fn show(&mut self) {
+    pub fn show(&mut self, config: &Config) {
         self.visible = true;
         self.selected = 0;
         self.mode = EditMode::Browsing;
         self.status_message = None;
+        self.sync_select_indices(config);
+    }
+
+    /// Sync provider_index and model_index from the current config values.
+    fn sync_select_indices(&mut self, config: &Config) {
+        let provider_id = config.llm.provider.as_deref().unwrap_or("openrouter");
+        self.provider_index = PROVIDERS
+            .iter()
+            .position(|(id, _, _)| *id == provider_id)
+            .unwrap_or(0);
+
+        let models = models_for_provider(provider_id);
+        self.model_index = models
+            .iter()
+            .position(|(id, _)| *id == config.llm.model.as_str())
+            .unwrap_or(0);
     }
 
     pub fn dismiss(&mut self) {
@@ -208,13 +231,23 @@ impl SettingsPopup {
 
     fn current_value(&self, config: &Config, key: &str) -> String {
         match key {
-            "provider" => config
-                .llm
-                .provider
-                .as_deref()
-                .unwrap_or("(auto-detect)")
-                .to_string(),
-            "model" => config.llm.model.clone(),
+            "provider" => {
+                let (_, display, _) = PROVIDERS
+                    .get(self.provider_index)
+                    .unwrap_or(&PROVIDERS[0]);
+                display.to_string()
+            }
+            "model" => {
+                let provider_id = PROVIDERS
+                    .get(self.provider_index)
+                    .map(|(id, _, _)| *id)
+                    .unwrap_or("openrouter");
+                let models = models_for_provider(provider_id);
+                models
+                    .get(self.model_index)
+                    .map(|(_, display)| display.to_string())
+                    .unwrap_or_else(|| config.llm.model.clone())
+            }
             "temperature" => format!("{}", config.llm.temperature),
             "max_tokens" => format!("{}", config.llm.max_tokens),
             "sandbox.enabled" => format!("{}", config.sandbox.enabled),
@@ -287,14 +320,33 @@ impl SettingsPopup {
                     }
                     Ok(None)
                 }
+                KeyCode::Left => {
+                    let entry = &self.entries[self.selected];
+                    match entry.kind {
+                        SettingKind::Select => self.cycle_select(config, false),
+                        SettingKind::Float => self.step_float(config, false),
+                        _ => Ok(None),
+                    }
+                }
+                KeyCode::Right => {
+                    let entry = &self.entries[self.selected];
+                    match entry.kind {
+                        SettingKind::Select => self.cycle_select(config, true),
+                        SettingKind::Float => self.step_float(config, true),
+                        _ => Ok(None),
+                    }
+                }
                 KeyCode::Enter => {
                     let entry = &self.entries[self.selected];
-                    if entry.kind == SettingKind::Bool {
-                        return self.toggle_bool(config);
+                    match entry.kind {
+                        SettingKind::Bool => return self.toggle_bool(config),
+                        SettingKind::Select => return self.cycle_select(config, true),
+                        _ => {
+                            let current = self.current_value(config, entry.key);
+                            self.mode = EditMode::Editing { buffer: current };
+                            self.status_message = None;
+                        }
                     }
-                    let current = self.current_value(config, entry.key);
-                    self.mode = EditMode::Editing { buffer: current };
-                    self.status_message = None;
                     Ok(None)
                 }
                 _ => Ok(None),
@@ -340,6 +392,125 @@ impl SettingsPopup {
                 }
                 _ => Ok(None),
             },
+        }
+    }
+
+    fn cycle_select(
+        &mut self,
+        config: &mut Config,
+        forward: bool,
+    ) -> anyhow::Result<Option<AppAction>> {
+        let entry = &self.entries[self.selected];
+        let mut actions: Vec<AppAction> = Vec::new();
+
+        match entry.key {
+            "provider" => {
+                let count = PROVIDERS.len();
+                self.provider_index = if forward {
+                    (self.provider_index + 1) % count
+                } else {
+                    (self.provider_index + count - 1) % count
+                };
+                let (id, _, _) = PROVIDERS[self.provider_index];
+                match config.apply_setting("provider", id) {
+                    Ok(confirmation) => {
+                        let _ = self.save_setting("provider", id);
+                        self.status_message = Some((format!("Updated: {confirmation}"), true));
+                        actions.push(AppAction::UpdateSetting {
+                            key: "provider".to_string(),
+                            value: id.to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        self.status_message = Some((format!("Error: {e}"), false));
+                        return Ok(None);
+                    }
+                }
+                // Reset model to first option for new provider
+                self.model_index = 0;
+                let models = models_for_provider(id);
+                if let Some((model_id, _)) = models.first() {
+                    if config.apply_setting("model", model_id).is_ok() {
+                        let _ = self.save_setting("model", model_id);
+                        actions.push(AppAction::UpdateSetting {
+                            key: "model".to_string(),
+                            value: model_id.to_string(),
+                        });
+                    }
+                }
+            }
+            "model" => {
+                let provider_id = PROVIDERS
+                    .get(self.provider_index)
+                    .map(|(id, _, _)| *id)
+                    .unwrap_or("openrouter");
+                let models = models_for_provider(provider_id);
+                let count = models.len();
+                self.model_index = if forward {
+                    (self.model_index + 1) % count
+                } else {
+                    (self.model_index + count - 1) % count
+                };
+                let (model_id, _) = models[self.model_index];
+                match config.apply_setting("model", model_id) {
+                    Ok(confirmation) => {
+                        let _ = self.save_setting("model", model_id);
+                        self.status_message = Some((format!("Updated: {confirmation}"), true));
+                        actions.push(AppAction::UpdateSetting {
+                            key: "model".to_string(),
+                            value: model_id.to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        self.status_message = Some((format!("Error: {e}"), false));
+                        return Ok(None);
+                    }
+                }
+            }
+            _ => return Ok(None),
+        }
+
+        // Return the first action (provider change is the primary one)
+        Ok(actions.into_iter().next())
+    }
+
+    fn step_float(
+        &mut self,
+        config: &mut Config,
+        increase: bool,
+    ) -> anyhow::Result<Option<AppAction>> {
+        let entry = &self.entries[self.selected];
+        let current = self.current_value(config, entry.key);
+        let val: f64 = current.parse().unwrap_or(0.0);
+
+        let (step, min, max) = match entry.key {
+            "budget.warning_threshold" => (0.01, 0.0, 1.0),
+            _ => (0.1, 0.0, 2.0), // temperature
+        };
+
+        let new_val = if increase {
+            (val + step).min(max)
+        } else {
+            (val - step).max(min)
+        };
+
+        // Round to avoid floating point drift
+        let decimals = if step < 0.1 { 2 } else { 1 };
+        let formatted = format!("{new_val:.decimals$}");
+
+        match config.apply_setting(entry.key, &formatted) {
+            Ok(confirmation) => {
+                let _ = self.save_setting(entry.key, &formatted);
+                self.status_message = Some((format!("Updated: {confirmation}"), true));
+                Ok(Some(AppAction::UpdateSetting {
+                    key: entry.key.to_string(),
+                    value: formatted,
+                }))
+            }
+            Err(e) => {
+                self.status_message = Some((format!("Error: {e}"), false));
+                Ok(None)
+            }
         }
     }
 
@@ -448,6 +619,8 @@ impl SettingsPopup {
                 } else if entry.kind == SettingKind::Bool {
                     let check = if value == "true" { "x" } else { " " };
                     format!("[{check}]{source_tag}")
+                } else if entry.kind == SettingKind::Select {
+                    format!("< {value} >{source_tag}")
                 } else {
                     format!("{value}{source_tag}")
                 }
@@ -506,9 +679,19 @@ impl SettingsPopup {
             );
         }
 
-        // Footer hint
+        // Footer hint (context-sensitive)
         let hint = match self.mode {
-            EditMode::Browsing => " Enter: edit  Space: toggle  Esc: close",
+            EditMode::Browsing => {
+                let entry = &self.entries[self.selected];
+                match entry.kind {
+                    SettingKind::Select => " \u{25C0}\u{25B6}: cycle  Enter: next  Esc: close",
+                    SettingKind::Bool => " Space: toggle  Esc: close",
+                    SettingKind::Float => {
+                        " Enter: edit  \u{25C0}\u{25B6}: \u{00B1}0.1  Esc: close"
+                    }
+                    _ => " Enter: edit  Esc: close",
+                }
+            }
             EditMode::Editing { .. } => " Enter: apply  Esc: cancel",
         };
         let footer_y = inner.y + inner.height - 1;
@@ -527,8 +710,9 @@ mod tests {
     #[test]
     fn show_and_dismiss() {
         let mut popup = SettingsPopup::new();
+        let cfg = Config::default();
         assert!(!popup.is_visible());
-        popup.show();
+        popup.show(&cfg);
         assert!(popup.is_visible());
         popup.dismiss();
         assert!(!popup.is_visible());
@@ -537,7 +721,8 @@ mod tests {
     #[test]
     fn navigation_wraps() {
         let mut popup = SettingsPopup::new();
-        popup.show();
+        let cfg = Config::default();
+        popup.show(&cfg);
         let count = popup.entries.len();
 
         assert_eq!(popup.selected, 0);
@@ -558,7 +743,8 @@ mod tests {
     #[test]
     fn bool_toggle() {
         let mut popup = SettingsPopup::new();
-        popup.show();
+        let cfg = Config::default();
+        popup.show(&cfg);
 
         // Find sandbox.enabled (index 4)
         popup.selected = 4;
@@ -577,7 +763,8 @@ mod tests {
     #[test]
     fn valid_edit_applies() {
         let mut popup = SettingsPopup::new();
-        popup.show();
+        let cfg = Config::default();
+        popup.show(&cfg);
 
         // Select temperature (index 2)
         popup.selected = 2;
@@ -608,7 +795,8 @@ mod tests {
     #[test]
     fn invalid_edit_shows_error() {
         let mut popup = SettingsPopup::new();
-        popup.show();
+        let cfg = Config::default();
+        popup.show(&cfg);
 
         // Select temperature (index 2)
         popup.selected = 2;
@@ -649,10 +837,11 @@ mod tests {
     #[test]
     fn esc_during_edit_cancels() {
         let mut popup = SettingsPopup::new();
-        popup.show();
-        popup.selected = 1; // model
-
         let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        // Select temperature (index 2) — model is now Select, not editable via Enter
+        popup.selected = 2;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -664,5 +853,206 @@ mod tests {
         popup.handle_key(esc, &mut cfg).unwrap();
         assert!(matches!(popup.mode, EditMode::Browsing));
         assert!(popup.is_visible());
+    }
+
+    #[test]
+    fn provider_cycle_forward() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        // Provider is entry 0
+        popup.selected = 0;
+        assert_eq!(popup.entries[0].key, "provider");
+        let initial_provider_index = popup.provider_index;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let result = popup.handle_key(right, &mut cfg).unwrap();
+        assert!(result.is_some());
+        assert_eq!(popup.provider_index, (initial_provider_index + 1) % PROVIDERS.len());
+        // Model index should reset to 0
+        assert_eq!(popup.model_index, 0);
+    }
+
+    #[test]
+    fn provider_cycle_backward() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        popup.selected = 0;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        let result = popup.handle_key(left, &mut cfg).unwrap();
+        assert!(result.is_some());
+        // From 0, should wrap to last
+        assert_eq!(popup.provider_index, PROVIDERS.len() - 1);
+    }
+
+    #[test]
+    fn model_cycle_forward() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        // Model is entry 1
+        popup.selected = 1;
+        assert_eq!(popup.entries[1].key, "model");
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let result = popup.handle_key(right, &mut cfg).unwrap();
+        assert!(result.is_some());
+        assert_eq!(popup.model_index, 1);
+    }
+
+    #[test]
+    fn float_step_right_increases() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        // Temperature is entry 2
+        popup.selected = 2;
+        let original = cfg.llm.temperature;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let result = popup.handle_key(right, &mut cfg).unwrap();
+        assert!(result.is_some());
+        assert!((cfg.llm.temperature - (original + 0.1)).abs() < 0.01);
+    }
+
+    #[test]
+    fn float_step_left_decreases() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        popup.selected = 2;
+        let original = cfg.llm.temperature;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        let result = popup.handle_key(left, &mut cfg).unwrap();
+        assert!(result.is_some());
+        assert!((cfg.llm.temperature - (original - 0.1)).abs() < 0.01);
+    }
+
+    #[test]
+    fn select_enter_cycles_forward() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        // Provider is entry 0 — Enter should cycle forward, not open edit mode
+        popup.selected = 0;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        popup.handle_key(enter, &mut cfg).unwrap();
+        // Should NOT enter editing mode
+        assert!(matches!(popup.mode, EditMode::Browsing));
+        // Should have cycled
+        assert_eq!(popup.provider_index, 1);
+    }
+
+    #[test]
+    fn sync_indices_from_config() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        cfg.llm.provider = Some("anthropic".to_string());
+        cfg.llm.model = "claude-haiku-4".to_string();
+        popup.show(&cfg);
+
+        assert_eq!(popup.provider_index, 2); // anthropic is index 2
+        assert_eq!(popup.model_index, 1); // claude-haiku-4 is index 1 in ANTHROPIC_MODELS
+    }
+
+    #[test]
+    fn float_clamps_at_max() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        cfg.llm.temperature = 2.0;
+        popup.show(&cfg);
+
+        popup.selected = 2; // temperature
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        popup.handle_key(right, &mut cfg).unwrap();
+        // Should stay at 2.0
+        assert!((cfg.llm.temperature - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn float_clamps_at_min() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        cfg.llm.temperature = 0.0;
+        popup.show(&cfg);
+
+        popup.selected = 2; // temperature
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        popup.handle_key(left, &mut cfg).unwrap();
+        assert!((cfg.llm.temperature - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn provider_change_updates_model_config() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        // Start at openrouter (index 0), cycle to openai (index 1)
+        popup.selected = 0;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        popup.handle_key(right, &mut cfg).unwrap();
+
+        // Config should now have openai provider and first openai model
+        assert_eq!(cfg.llm.provider.as_deref(), Some("openai"));
+        assert_eq!(cfg.llm.model, "gpt-4.1");
+    }
+
+    #[test]
+    fn model_cycle_wraps() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        // Set to anthropic with last model
+        cfg.llm.provider = Some("anthropic".to_string());
+        cfg.llm.model = "claude-opus-4".to_string();
+        popup.show(&cfg);
+
+        popup.selected = 1; // model
+        assert_eq!(popup.model_index, 2); // last model in ANTHROPIC_MODELS
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        popup.handle_key(right, &mut cfg).unwrap();
+        // Should wrap to 0
+        assert_eq!(popup.model_index, 0);
+        assert_eq!(cfg.llm.model, "claude-sonnet-4");
+    }
+
+    #[test]
+    fn left_right_noop_on_text_fields() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        // sandbox.mode is a Text field (index 5)
+        popup.selected = 5;
+        assert_eq!(popup.entries[5].key, "sandbox.mode");
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let result = popup.handle_key(right, &mut cfg).unwrap();
+        assert!(result.is_none());
     }
 }
