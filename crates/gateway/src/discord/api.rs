@@ -44,7 +44,13 @@ impl DiscordClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("Failed to read Discord error response body: {e}");
+                    String::new()
+                }
+            };
             bail!("GET /users/@me failed ({status}): {body}");
         }
 
@@ -177,7 +183,13 @@ impl DiscordClient {
             }
 
             if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let body = match resp.text().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!("Failed to read Discord error response body: {e}");
+                        String::new()
+                    }
+                };
                 bail!("Discord API error ({status}): {body}");
             }
 

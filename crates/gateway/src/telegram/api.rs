@@ -23,16 +23,16 @@ pub struct TelegramClient {
 }
 
 impl TelegramClient {
-    pub fn new(token: &str) -> Self {
-        Self {
+    pub fn new(token: &str) -> Result<Self> {
+        Ok(Self {
             client: Client::builder()
                 .connect_timeout(HTTP_CONNECT_TIMEOUT)
                 .timeout(HTTP_TIMEOUT)
                 .build()
-                .unwrap_or_default(),
+                .context("Failed to build Telegram HTTP client")?,
             token: token.to_string(),
             circuit_breaker: Arc::new(CircuitBreaker::new()),
-        }
+        })
     }
 
     fn api_url(&self, method: &str) -> String {
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn api_url_construction() {
-        let client = TelegramClient::new("123:ABC");
+        let client = TelegramClient::new("123:ABC").unwrap();
         assert_eq!(
             client.api_url("getMe"),
             "https://api.telegram.org/bot123:ABC/getMe"
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn file_url_construction() {
-        let client = TelegramClient::new("123:ABC");
+        let client = TelegramClient::new("123:ABC").unwrap();
         assert_eq!(
             client.file_url("photos/file_1.jpg"),
             "https://api.telegram.org/file/bot123:ABC/photos/file_1.jpg"

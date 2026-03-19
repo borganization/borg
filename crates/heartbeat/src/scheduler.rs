@@ -5,6 +5,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
 use borg_core::config::HeartbeatConfig;
@@ -12,6 +13,12 @@ use borg_core::identity::load_identity;
 use borg_core::llm::LlmClient;
 use borg_core::memory::load_memory_context;
 use borg_core::types::Message;
+
+/// Minimum allowed heartbeat interval (60 seconds) to prevent API waste.
+const MIN_INTERVAL_SECS: u64 = 60;
+
+/// Timeout for LLM calls during heartbeat (30 seconds).
+const LLM_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone)]
 pub enum HeartbeatEvent {
@@ -33,34 +40,57 @@ impl HeartbeatScheduler {
         }
     }
 
-    pub async fn run(mut self, tx: mpsc::Sender<HeartbeatEvent>) {
+    pub async fn run(mut self, tx: mpsc::Sender<HeartbeatEvent>, cancel: CancellationToken) {
         if let Some(ref cron_expr) = self.config.cron {
-            self.run_cron(cron_expr.clone(), tx).await;
+            self.run_cron(cron_expr.clone(), tx, cancel).await;
         } else {
-            self.run_interval(tx).await;
+            self.run_interval(tx, cancel).await;
         }
     }
 
-    async fn run_interval(&mut self, tx: mpsc::Sender<HeartbeatEvent>) {
-        let interval =
+    async fn run_interval(&mut self, tx: mpsc::Sender<HeartbeatEvent>, cancel: CancellationToken) {
+        let mut interval =
             parse_interval(&self.config.interval).unwrap_or(std::time::Duration::from_secs(1800));
+
+        // Clamp to minimum interval
+        if interval.as_secs() < MIN_INTERVAL_SECS {
+            warn!(
+                "Heartbeat interval {}s is below minimum {}s, clamping",
+                interval.as_secs(),
+                MIN_INTERVAL_SECS
+            );
+            interval = std::time::Duration::from_secs(MIN_INTERVAL_SECS);
+        }
+
         info!("Heartbeat scheduler started (interval: {interval:?})");
 
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await; // Skip immediate first tick
 
         loop {
-            ticker.tick().await;
-            self.tick(&tx).await;
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("Heartbeat scheduler shutting down");
+                    return;
+                }
+                _ = ticker.tick() => {
+                    self.tick(&tx).await;
+                }
+            }
         }
     }
 
-    async fn run_cron(&mut self, cron_expr: String, tx: mpsc::Sender<HeartbeatEvent>) {
+    async fn run_cron(
+        &mut self,
+        cron_expr: String,
+        tx: mpsc::Sender<HeartbeatEvent>,
+        cancel: CancellationToken,
+    ) {
         let schedule = match Schedule::from_str(&cron_expr) {
             Ok(s) => s,
             Err(e) => {
                 warn!("Invalid cron expression '{cron_expr}': {e}. Falling back to interval.");
-                self.run_interval(tx).await;
+                self.run_interval(tx, cancel).await;
                 return;
             }
         };
@@ -80,8 +110,16 @@ impl HeartbeatScheduler {
             let wait = (next - now)
                 .to_std()
                 .unwrap_or(std::time::Duration::from_secs(60));
-            tokio::time::sleep(wait).await;
-            self.tick(&tx).await;
+
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("Heartbeat scheduler shutting down");
+                    return;
+                }
+                _ = tokio::time::sleep(wait) => {
+                    self.tick(&tx).await;
+                }
+            }
         }
     }
 
@@ -118,8 +156,20 @@ impl HeartbeatScheduler {
     }
 
     async fn fire_heartbeat(&self) -> Result<Option<String>> {
-        let identity = load_identity().unwrap_or_default();
-        let memory = load_memory_context(4000).unwrap_or_default();
+        let identity = match load_identity() {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("Heartbeat: failed to load identity, using default: {e}");
+                String::new()
+            }
+        };
+        let memory = match load_memory_context(4000) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("Heartbeat: failed to load memory context, using default: {e}");
+                String::new()
+            }
+        };
         let now = Local::now().format("%Y-%m-%d %H:%M:%S %Z");
 
         let system = format!(
@@ -133,8 +183,17 @@ impl HeartbeatScheduler {
 
         let messages = vec![Message::system(system), Message::user("*heartbeat tick*")];
 
-        let response = self.llm.chat(&messages, None).await?;
-        Ok(response.text_content().map(String::from))
+        let timeout = std::time::Duration::from_secs(LLM_TIMEOUT_SECS);
+        match tokio::time::timeout(timeout, self.llm.chat(&messages, None)).await {
+            Ok(result) => {
+                let response = result?;
+                Ok(response.text_content().map(String::from))
+            }
+            Err(_) => {
+                warn!("Heartbeat: LLM call timed out after {LLM_TIMEOUT_SECS}s");
+                Ok(None)
+            }
+        }
     }
 
     fn is_quiet_hours(&self) -> bool {
@@ -145,9 +204,11 @@ impl HeartbeatScheduler {
         };
 
         let Ok(start) = NaiveTime::parse_from_str(start_str, "%H:%M") else {
+            warn!("Invalid quiet_hours_start format '{start_str}', expected HH:MM — quiet hours disabled");
             return false;
         };
         let Ok(end) = NaiveTime::parse_from_str(end_str, "%H:%M") else {
+            warn!("Invalid quiet_hours_end format '{end_str}', expected HH:MM — quiet hours disabled");
             return false;
         };
 

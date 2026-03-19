@@ -1,8 +1,13 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tokio::sync::{mpsc, RwLock};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
+/// Maximum response size to accumulate from the agent (256 KB).
+const MAX_RESPONSE_SIZE: usize = 256 * 1024;
 
 use borg_core::agent::{Agent, AgentEvent};
 use borg_core::config::Config;
@@ -164,7 +169,7 @@ pub async fn invoke_agent(
     }
 
     // Resolve session — include thread_id and binding_id in the key for isolation
-    let db = Database::open().context("Failed to open database")?;
+    // Wrap blocking SQLite calls in spawn_blocking to avoid blocking the tokio worker
     let base_key = match &inbound.thread_id {
         Some(tid) => format!("{}:{}", inbound.sender_id, tid),
         None => inbound.sender_id.clone(),
@@ -174,9 +179,17 @@ pub async fn invoke_agent(
     } else {
         base_key
     };
-    let session_id = db
-        .resolve_channel_session(channel_name, &session_key)
-        .context("Failed to resolve channel session")?;
+    let channel_name_owned = channel_name.to_string();
+    let session_key_clone = session_key.clone();
+    let (db, session_id) = tokio::task::spawn_blocking(move || {
+        let db = Database::open().context("Failed to open database")?;
+        let session_id = db
+            .resolve_channel_session(&channel_name_owned, &session_key_clone)
+            .context("Failed to resolve channel session")?;
+        Ok::<_, anyhow::Error>((db, session_id))
+    })
+    .await
+    .context("DB task panicked")??;
 
     // Log inbound message
     if let Err(e) = db.log_channel_message(
@@ -225,13 +238,33 @@ pub async fn invoke_agent(
 
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
 
+    // Truncate inbound text to prevent excessive LLM token consumption
+    const MAX_INBOUND_TEXT_BYTES: usize = 32 * 1024; // 32 KB
+    let text = if inbound.text.len() > MAX_INBOUND_TEXT_BYTES {
+        let mut truncated = inbound.text.clone();
+        truncated.truncate(MAX_INBOUND_TEXT_BYTES);
+        // Ensure we don't split a multi-byte char
+        while !truncated.is_char_boundary(truncated.len()) {
+            truncated.pop();
+        }
+        warn!(
+            "Truncated inbound message from {} bytes to {} bytes for channel '{}'",
+            inbound.text.len(),
+            truncated.len(),
+            channel_name
+        );
+        truncated
+    } else {
+        inbound.text.clone()
+    };
+
     // Apply injection scanning and source attribution
     let message_text = {
         let base = format!(
             "[Channel: {}, Sender: {}]\n{}",
-            channel_name, inbound.sender_id, inbound.text
+            channel_name, inbound.sender_id, text
         );
-        match scan_for_injection(&inbound.text) {
+        match scan_for_injection(&text) {
             ThreatLevel::HighRisk { .. } => wrap_with_injection_warning(channel_name, &base),
             ThreatLevel::Flagged { .. } => wrap_untrusted(channel_name, &base),
             ThreatLevel::Clean => base,
@@ -244,6 +277,7 @@ pub async fn invoke_agent(
         .iter()
         .any(|a| a.mime_type.starts_with("image/"));
 
+    let agent_cancel = CancellationToken::new();
     let agent_handle = if has_image_attachments {
         let mut parts = vec![borg_core::types::ContentPart::Text(message_text)];
         for att in &inbound.attachments {
@@ -262,57 +296,79 @@ pub async fn invoke_agent(
             borg_core::media::compress_content_parts(&mut parts, config.media.max_image_bytes);
         }
         let msg = borg_core::types::Message::user_multimodal(parts);
-        tokio::spawn(async move {
-            agent
-                .send_message_raw(msg, event_tx, tokio_util::sync::CancellationToken::new())
-                .await
-        })
+        let cancel = agent_cancel.clone();
+        tokio::spawn(async move { agent.send_message_raw(msg, event_tx, cancel).await })
     } else {
+        let cancel = agent_cancel.clone();
         tokio::spawn(async move {
             agent
-                .send_message_with_cancel(
-                    &message_text,
-                    event_tx,
-                    tokio_util::sync::CancellationToken::new(),
-                )
+                .send_message_with_cancel(&message_text, event_tx, cancel)
                 .await
         })
     };
 
-    // Collect the full response text
+    // Collect the full response text, with timeout to prevent indefinite hangs
+    let request_timeout = Duration::from_millis(config.gateway.request_timeout_ms);
     let mut response_text = String::new();
-    while let Some(event) = event_rx.recv().await {
-        match event {
-            AgentEvent::TextDelta(delta) => response_text.push_str(&delta),
-            AgentEvent::Error(e) => {
-                warn!("Agent error on channel '{}': {e}", channel_name)
+    let mut response_capped = false;
+    let collect_result = tokio::time::timeout(request_timeout, async {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                AgentEvent::TextDelta(delta) => {
+                    if !response_capped {
+                        if response_text.len() + delta.len() > MAX_RESPONSE_SIZE {
+                            let remaining = MAX_RESPONSE_SIZE.saturating_sub(response_text.len());
+                            response_text.push_str(&delta[..remaining]);
+                            response_text
+                                .push_str("\n\n[Response truncated: exceeded maximum size]");
+                            response_capped = true;
+                            warn!(
+                                "Agent response for channel '{}' exceeded {}KB cap, truncating",
+                                channel_name,
+                                MAX_RESPONSE_SIZE / 1024
+                            );
+                            agent_cancel.cancel();
+                        } else {
+                            response_text.push_str(&delta);
+                        }
+                    }
+                }
+                AgentEvent::Error(e) => {
+                    warn!("Agent error on channel '{}': {e}", channel_name)
+                }
+                AgentEvent::ToolConfirmation {
+                    respond,
+                    tool_name,
+                    reason,
+                } => {
+                    warn!("Auto-denying tool confirmation in gateway mode: {tool_name} ({reason})");
+                    response_text.push_str(&format!(
+                        "\n[Operation denied: {tool_name} requires confirmation — {reason}]"
+                    ));
+                    let _ = respond.send(false);
+                }
+                AgentEvent::ShellConfirmation { respond, command } => {
+                    warn!("Auto-denying shell confirmation in gateway mode: {command}");
+                    response_text
+                        .push_str("\n[Operation denied: shell command requires confirmation]");
+                    let _ = respond.send(false);
+                }
+                _ => {}
             }
-            AgentEvent::ToolConfirmation {
-                respond,
-                tool_name,
-                reason,
-            } => {
-                warn!("Auto-denying tool confirmation in gateway mode: {tool_name} ({reason})");
-                response_text.push_str(&format!(
-                    "\n[Operation denied: {tool_name} requires confirmation — {reason}]"
-                ));
-                let _ = respond.send(false);
-            }
-            AgentEvent::ShellConfirmation { respond, command } => {
-                warn!("Auto-denying shell confirmation in gateway mode: {command}");
-                response_text.push_str("\n[Operation denied: shell command requires confirmation]");
-                let _ = respond.send(false);
-            }
-            _ => {}
+        }
+    })
+    .await;
+
+    if collect_result.is_err() {
+        warn!("Agent timed out after {request_timeout:?} on channel '{channel_name}'");
+        agent_cancel.cancel();
+        if response_text.is_empty() {
+            response_text = "(request timed out)".to_string();
         }
     }
 
-    // Wait for agent to finish
-    match agent_handle.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => warn!("Agent error: {e}"),
-        Err(e) => warn!("Agent task panicked: {e}"),
-    }
+    // Wait for agent to finish (with a short grace period after cancellation)
+    let _ = tokio::time::timeout(Duration::from_secs(5), agent_handle).await;
 
     if response_text.is_empty() {
         response_text = "(no response)".to_string();
