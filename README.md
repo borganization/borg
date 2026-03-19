@@ -21,53 +21,35 @@ Borg is an AI assistant that runs locally on your machine, remembers you across 
 
 ## Quick Start
 
-1. **Clone and build:**
-   ```sh
-   git clone https://github.com/borganization/borg.git
-   cd borg
-   cargo build --release
-   ```
+1. **Download the binary** from [Releases](https://github.com/borganization/borg/releases)
 
-2. **Set your API key** (pick one):
-   ```sh
-   export OPENROUTER_API_KEY="sk-or-..."
-   # or OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY
-   ```
-
-3. **Run the setup wizard:**
-   ```sh
-   ./target/release/borg init
-   ```
-
-4. **Start chatting:**
-   ```sh
-   ./target/release/borg
-   ```
+2. **Run it:**
+    ```sh
+    borg
+    ```
 
 ## Commands
 
-| Command | What it does |
-|---------|-------------|
-| `borg` | Start an interactive conversation |
-| `borg ask "..."` | Ask a quick question and get a one-shot answer |
-| `borg init` | Run the setup wizard (name, personality, provider) |
-| `borg add <name>` | Set up an integration (e.g. `borg add telegram`) |
-| `borg remove <name>` | Remove an integration's credentials |
-| `borg plugins` | See all available integrations and their status |
-| `borg gateway` | Start the webhook server for messaging integrations |
-| `borg doctor` | Check that everything is configured correctly |
+| Command              | What it does                                   |
+| -------------------- | ---------------------------------------------- |
+| `borg`               | Start an interactive conversation              |
+| `borg ask "..."`     | Ask a quick question and get a one-shot answer |
+| `borg add <name>`    | Set up a plugin (e.g. `borg add telegram`)     |
+| `borg remove <name>` | Remove a plugin's credentials                  |
+| `borg plugins`       | See all available plugins and their status     |
+| `borg doctor`        | Check that everything is configured correctly  |
 
-## Integrations
+## Plugins
 
-Everything is compiled into one binary. Set up integrations by configuring credentials:
+Everything is compiled into one binary. Set up plugins by configuring credentials:
 
 ```sh
 borg add telegram        # configure Telegram bot token
 borg add gmail           # configure Gmail API key
-borg plugins             # see all available integrations
+borg plugins             # see all available plugins
 ```
 
-**Available integrations:** Telegram, Slack, Twilio (WhatsApp + SMS), Gmail, Outlook, Google Calendar, Notion, Linear. iMessage is built-in on macOS (no credentials needed).
+**Available plugins:** Telegram, Slack, Twilio (WhatsApp + SMS), Gmail, Outlook, Google Calendar, Notion, Linear. iMessage is built-in on macOS (no credentials needed).
 
 Skills and channels can also be added at runtime — Borg creates its own tools and skills on the fly without recompiling.
 
