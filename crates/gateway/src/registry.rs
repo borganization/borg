@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{debug, warn};
 
 use crate::manifest::ChannelManifest;
 
@@ -44,59 +43,19 @@ impl ChannelRegistry {
     pub fn scan(&mut self) -> Result<()> {
         self.channels.clear();
 
-        if !self.channels_dir.exists() {
-            debug!(
-                "Channels directory does not exist: {}",
-                self.channels_dir.display()
-            );
-            return Ok(());
+        let scanned = borg_tools::scan::scan_manifest_dir(
+            &self.channels_dir,
+            "channel.toml",
+            ChannelManifest::load,
+            |m| m.name.clone(),
+            "channel",
+        )?;
+
+        for (name, (manifest, dir)) in scanned {
+            self.channels
+                .insert(name, RegisteredChannel { manifest, dir });
         }
 
-        let entries = std::fs::read_dir(&self.channels_dir)?;
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.is_symlink() {
-                warn!("Skipping symlinked channel directory: {}", path.display());
-                continue;
-            }
-
-            if !path.is_dir() {
-                continue;
-            }
-
-            let manifest_path = path.join("channel.toml");
-            if !manifest_path.exists() {
-                continue;
-            }
-
-            match ChannelManifest::load(&manifest_path) {
-                Ok(manifest) => {
-                    debug!(
-                        "Registered channel: {} from {}",
-                        manifest.name,
-                        path.display()
-                    );
-                    let name = manifest.name.clone();
-                    self.channels.insert(
-                        name,
-                        RegisteredChannel {
-                            manifest,
-                            dir: path,
-                        },
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to load channel manifest {}: {e}",
-                        manifest_path.display()
-                    );
-                }
-            }
-        }
-
-        debug!("Loaded {} channels", self.channels.len());
         Ok(())
     }
 

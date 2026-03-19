@@ -1,6 +1,7 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use super::http::send_json;
 use super::validate_resource_id;
 use crate::config::Config;
 use crate::types::ToolDefinition;
@@ -54,20 +55,14 @@ async fn graphql_request(
     query: &str,
     variables: Value,
 ) -> Result<Value, String> {
-    let resp = client
-        .post(GRAPHQL_URL)
-        .bearer_auth(token)
-        .json(&json!({ "query": query, "variables": variables }))
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Linear API error: {text}"));
-    }
-
-    let result: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
+    let result: Value = send_json(
+        client
+            .post(GRAPHQL_URL)
+            .bearer_auth(token)
+            .json(&json!({ "query": query, "variables": variables })),
+        "Linear",
+    )
+    .await?;
 
     if let Some(errors) = result["errors"].as_array() {
         if !errors.is_empty() {

@@ -18,7 +18,7 @@ const COMMANDS: &[SlashCommandDef] = &[
     },
     SlashCommandDef {
         name: "/settings",
-        description: "Show/change settings",
+        description: "Configure settings",
     },
     SlashCommandDef {
         name: "/usage",

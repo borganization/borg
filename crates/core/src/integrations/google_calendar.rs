@@ -1,6 +1,7 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use super::http::{send_and_check, send_json};
 use super::validate_resource_id;
 use crate::config::Config;
 use crate::types::ToolDefinition;
@@ -56,26 +57,21 @@ async fn list_events(client: &Client, token: &str, args: &Value) -> Result<Strin
     let time_min = now.to_rfc3339();
     let time_max = (now + chrono::TimeDelta::days(days as i64)).to_rfc3339();
 
-    let resp = client
-        .get(format!("{API_BASE}/calendars/primary/events"))
-        .bearer_auth(token)
-        .query(&[
-            ("timeMin", &time_min),
-            ("timeMax", &time_max),
-            ("singleEvents", &"true".to_string()),
-            ("orderBy", &"startTime".to_string()),
-            ("maxResults", &"50".to_string()),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
+    let result: Value = send_json(
+        client
+            .get(format!("{API_BASE}/calendars/primary/events"))
+            .bearer_auth(token)
+            .query(&[
+                ("timeMin", &time_min),
+                ("timeMax", &time_max),
+                ("singleEvents", &"true".to_string()),
+                ("orderBy", &"startTime".to_string()),
+                ("maxResults", &"50".to_string()),
+            ]),
+        "Calendar",
+    )
+    .await?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Calendar API error: {text}"));
-    }
-
-    let result: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
     let events = result["items"].as_array();
 
     match events {
@@ -118,20 +114,15 @@ async fn create_event(client: &Client, token: &str, args: &Value) -> Result<Stri
         "end": { "dateTime": end }
     });
 
-    let resp = client
-        .post(format!("{API_BASE}/calendars/primary/events"))
-        .bearer_auth(token)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
+    let result: Value = send_json(
+        client
+            .post(format!("{API_BASE}/calendars/primary/events"))
+            .bearer_auth(token)
+            .json(&payload),
+        "Calendar",
+    )
+    .await?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Calendar API error: {text}"));
-    }
-
-    let result: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
     let id = result["id"].as_str().unwrap_or("unknown");
     Ok(format!("Event created: {summary} (id: {id})"))
 }
@@ -140,17 +131,13 @@ async fn delete_event(client: &Client, token: &str, args: &Value) -> Result<Stri
     let event_id = args["event_id"].as_str().ok_or("Missing 'event_id'")?;
     let event_id = validate_resource_id(event_id, "event_id")?;
 
-    let resp = client
-        .delete(format!("{API_BASE}/calendars/primary/events/{event_id}"))
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Calendar API error: {text}"));
-    }
+    send_and_check(
+        client
+            .delete(format!("{API_BASE}/calendars/primary/events/{event_id}"))
+            .bearer_auth(token),
+        "Calendar",
+    )
+    .await?;
 
     Ok(format!("Event {event_id} deleted."))
 }

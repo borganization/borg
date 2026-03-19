@@ -7,7 +7,7 @@ use tracing::warn;
 
 use super::types::{CreateMessageRequest, CurrentUser, InteractionResponse};
 use crate::chunker;
-use crate::http_retry::RateLimitPolicy;
+use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const MESSAGE_CHUNK_SIZE: usize = 2000;
@@ -71,9 +71,24 @@ impl DiscordClient {
         let url = format!(
             "{DISCORD_API_BASE}/interactions/{interaction_id}/{interaction_token}/callback"
         );
-        let request = self.client.post(&url).json(response);
+        let client = self.client.clone();
+        let response = response.clone();
 
-        self.send_with_retry(request).await?;
+        self.send_with_retry(move || {
+            let client = client.clone();
+            let url = url.clone();
+            let response = response.clone();
+            async move {
+                client
+                    .post(&url)
+                    .json(&response)
+                    .send()
+                    .await
+                    .context("Discord API request failed")
+            }
+        })
+        .await?;
+
         Ok(())
     }
 
@@ -94,21 +109,43 @@ impl DiscordClient {
         let url = format!(
             "{DISCORD_API_BASE}/webhooks/{application_id}/{interaction_token}/messages/@original"
         );
-        let request = self
-            .client
-            .patch(&url)
-            .json(&json!({ "content": chunks[0] }));
-        self.send_with_retry(request).await?;
+        let chunk0 = chunks[0].clone();
+        let client = self.client.clone();
+        self.send_with_retry(move || {
+            let client = client.clone();
+            let url = url.clone();
+            let chunk0 = chunk0.clone();
+            async move {
+                client
+                    .patch(&url)
+                    .json(&json!({ "content": chunk0 }))
+                    .send()
+                    .await
+                    .context("Discord API request failed")
+            }
+        })
+        .await?;
 
         // Send remaining chunks as follow-up messages
         for chunk in &chunks[1..] {
             let followup_url =
                 format!("{DISCORD_API_BASE}/webhooks/{application_id}/{interaction_token}");
-            let request = self
-                .client
-                .post(&followup_url)
-                .json(&json!({ "content": chunk }));
-            self.send_with_retry(request).await?;
+            let chunk = chunk.clone();
+            let client = self.client.clone();
+            self.send_with_retry(move || {
+                let client = client.clone();
+                let url = followup_url.clone();
+                let chunk = chunk.clone();
+                async move {
+                    client
+                        .post(&url)
+                        .json(&json!({ "content": chunk }))
+                        .send()
+                        .await
+                        .context("Discord API request failed")
+                }
+            })
+            .await?;
         }
 
         Ok(())
@@ -123,70 +160,49 @@ impl DiscordClient {
             let body = CreateMessageRequest {
                 content: chunk.clone(),
             };
-            let request = self
-                .client
-                .post(&url)
-                .header("Authorization", format!("Bot {}", self.token))
-                .json(&body);
-            self.send_with_retry(request).await?;
+            let token = self.token.clone();
+            let client = self.client.clone();
+            self.send_with_retry(move || {
+                let client = client.clone();
+                let url = url.clone();
+                let body = body.clone();
+                let token = token.clone();
+                async move {
+                    client
+                        .post(&url)
+                        .header("Authorization", format!("Bot {token}"))
+                        .json(&body)
+                        .send()
+                        .await
+                        .context("Discord API request failed")
+                }
+            })
+            .await?;
         }
 
         Ok(())
     }
 
-    /// Send a request with 429 rate-limit retry logic.
-    async fn send_with_retry(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-        // We need to clone the request for retries. reqwest::RequestBuilder
-        // supports try_clone() for requests with cloneable bodies.
-        let mut current_request = request;
-
+    /// Send a request with 429 rate-limit retry logic using the shared retry helper.
+    async fn send_with_retry<F, Fut>(&self, make_request: F) -> Result<reqwest::Response>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<reqwest::Response>>,
+    {
         let policy = RateLimitPolicy {
             service_name: "Discord",
             ..RateLimitPolicy::default()
         };
 
-        // Discord needs special handling because we must clone the RequestBuilder
-        // before sending, since it's consumed on send.
-        let mut attempts = 0u32;
-        loop {
-            let cloned = current_request
-                .try_clone()
-                .ok_or_else(|| anyhow::anyhow!("Request body is not cloneable for retry"))?;
+        let resp = send_with_rate_limit_retry(&policy, make_request).await?;
 
-            let resp = current_request
-                .send()
-                .await
-                .context("Discord API request failed")?;
-
-            let status = resp.status();
-            if status.as_u16() == 429 {
-                attempts += 1;
-                if attempts > policy.max_retries {
-                    bail!("Discord rate limited after {} retries", policy.max_retries);
-                }
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(1);
-                let capped = retry_after.min(policy.max_retry_after_secs);
-                warn!(
-                    "Discord rate limited, retry after {capped}s (attempt {attempts}/{})",
-                    policy.max_retries
-                );
-                tokio::time::sleep(Duration::from_secs(capped)).await;
-                current_request = cloned;
-                continue;
-            }
-
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                bail!("Discord API error ({status}): {body}");
-            }
-
-            return Ok(resp);
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            bail!("Discord API error ({status}): {body}");
         }
+
+        Ok(resp)
     }
 }
 

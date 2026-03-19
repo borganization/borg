@@ -35,17 +35,13 @@ pub fn load_memory_context_scoped(max_tokens: usize, scope: Option<&str>) -> Res
 
     // Load MEMORY.md first (always global)
     let index_path = memory_index_path()?;
-    if index_path.exists() {
-        let content = std::fs::read_to_string(&index_path)?;
-        let tokens = estimate_tokens(&content);
-        if tokens < max_tokens {
-            parts.push(format!(
-                "<memory_file name=\"MEMORY.md\">\n{content}\n</memory_file>"
-            ));
-            estimated_tokens += tokens;
-            debug!("Loaded MEMORY.md ({tokens} estimated tokens)");
-        }
-    }
+    try_load_index_file(
+        &index_path,
+        "MEMORY.md",
+        max_tokens,
+        &mut estimated_tokens,
+        &mut parts,
+    )?;
 
     // Load memory files — from scoped dir if scope is set, otherwise from default memory dir
     let mem_dir = if let Some(scope_name) = scope {
@@ -78,37 +74,74 @@ pub fn load_memory_context_scoped(max_tokens: usize, scope: Option<&str>) -> Res
     )?;
 
     // Load local project memory from CWD/.borg/memory/ if it exists
-    if let Ok(cwd) = std::env::current_dir() {
-        let local_mem_dir = cwd.join(".borg").join("memory");
-        if local_mem_dir.exists() {
-            // Also load local MEMORY.md if present
-            let local_index = cwd.join(".borg").join("MEMORY.md");
-            if local_index.exists() {
-                let content = std::fs::read_to_string(&local_index)?;
-                let tokens = estimate_tokens(&content);
-                if estimated_tokens + tokens <= max_tokens {
-                    parts.push(format!(
-                        "<memory_file name=\"Local MEMORY.md\">\n{content}\n</memory_file>"
-                    ));
-                    estimated_tokens += tokens;
-                    debug!("Loaded local MEMORY.md ({tokens} estimated tokens)");
-                }
-            }
-            load_memory_files_from_dir(
-                &local_mem_dir,
-                "Local Memory",
-                max_tokens,
-                &mut estimated_tokens,
-                &mut parts,
-            )?;
-        }
-    }
+    load_local_memory(
+        max_tokens,
+        &mut estimated_tokens,
+        &mut parts,
+        load_memory_files_from_dir,
+    )?;
 
     if parts.is_empty() {
         Ok(String::new())
     } else {
         Ok(parts.join("\n\n"))
     }
+}
+
+/// Try to load a MEMORY.md index file within the token budget.
+fn try_load_index_file(
+    path: &std::path::Path,
+    label: &str,
+    max_tokens: usize,
+    estimated_tokens: &mut usize,
+    parts: &mut Vec<String>,
+) -> Result<()> {
+    if path.exists() {
+        let content = std::fs::read_to_string(path)?;
+        let tokens = estimate_tokens(&content);
+        if *estimated_tokens + tokens <= max_tokens {
+            parts.push(format!(
+                "<memory_file name=\"{label}\">\n{content}\n</memory_file>"
+            ));
+            *estimated_tokens += tokens;
+            debug!("Loaded {label} ({tokens} estimated tokens)");
+        }
+    }
+    Ok(())
+}
+
+/// Load local project memory from CWD/.borg/memory/ if it exists.
+/// The `load_files` callback loads memory files from the local memory directory.
+fn load_local_memory<F>(
+    max_tokens: usize,
+    estimated_tokens: &mut usize,
+    parts: &mut Vec<String>,
+    load_files: F,
+) -> Result<()>
+where
+    F: FnOnce(&std::path::Path, &str, usize, &mut usize, &mut Vec<String>) -> Result<()>,
+{
+    if let Ok(cwd) = std::env::current_dir() {
+        let local_mem_dir = cwd.join(".borg").join("memory");
+        if local_mem_dir.exists() {
+            let local_index = cwd.join(".borg").join("MEMORY.md");
+            try_load_index_file(
+                &local_index,
+                "Local MEMORY.md",
+                max_tokens,
+                estimated_tokens,
+                parts,
+            )?;
+            load_files(
+                &local_mem_dir,
+                "Local Memory",
+                max_tokens,
+                estimated_tokens,
+                parts,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn load_memory_files_from_dir(
@@ -180,17 +213,13 @@ pub fn load_memory_context_ranked(
 
     // Always load MEMORY.md first (global)
     let index_path = memory_index_path()?;
-    if index_path.exists() {
-        let content = std::fs::read_to_string(&index_path)?;
-        let tokens = estimate_tokens(&content);
-        if tokens < max_tokens {
-            parts.push(format!(
-                "<memory_file name=\"MEMORY.md\">\n{content}\n</memory_file>"
-            ));
-            estimated_tokens += tokens;
-            debug!("Loaded MEMORY.md ({tokens} estimated tokens)");
-        }
-    }
+    try_load_index_file(
+        &index_path,
+        "MEMORY.md",
+        max_tokens,
+        &mut estimated_tokens,
+        &mut parts,
+    )?;
 
     // Load global memory/*.md in ranked order
     let mem_dir = memory_dir()?;
@@ -204,32 +233,14 @@ pub fn load_memory_context_ranked(
     )?;
 
     // Load local project memory
-    if let Ok(cwd) = std::env::current_dir() {
-        let local_mem_dir = cwd.join(".borg").join("memory");
-        if local_mem_dir.exists() {
-            // Also load local MEMORY.md if present
-            let local_index = cwd.join(".borg").join("MEMORY.md");
-            if local_index.exists() {
-                let content = std::fs::read_to_string(&local_index)?;
-                let tokens = estimate_tokens(&content);
-                if estimated_tokens + tokens <= max_tokens {
-                    parts.push(format!(
-                        "<memory_file name=\"Local MEMORY.md\">\n{content}\n</memory_file>"
-                    ));
-                    estimated_tokens += tokens;
-                    debug!("Loaded local MEMORY.md ({tokens} estimated tokens)");
-                }
-            }
-            load_memory_files_ranked(
-                &local_mem_dir,
-                "Local Memory",
-                ranked_local,
-                max_tokens,
-                &mut estimated_tokens,
-                &mut parts,
-            )?;
-        }
-    }
+    load_local_memory(
+        max_tokens,
+        &mut estimated_tokens,
+        &mut parts,
+        |dir, label, max, tokens, parts| {
+            load_memory_files_ranked(dir, label, ranked_local, max, tokens, parts)
+        },
+    )?;
 
     if parts.is_empty() {
         Ok(String::new())
