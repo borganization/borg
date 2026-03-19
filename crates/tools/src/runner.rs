@@ -189,6 +189,20 @@ impl ScriptOutput {
     pub fn success(&self) -> bool {
         self.exit_code == Some(0)
     }
+
+    pub fn into_result_string(self) -> (bool, String) {
+        if self.success() {
+            (true, self.stdout)
+        } else {
+            let code = self.exit_code.unwrap_or(-1);
+            let detail = if !self.stderr.is_empty() {
+                self.stderr
+            } else {
+                self.stdout
+            };
+            (false, format!("Error (exit {code}): {detail}"))
+        }
+    }
 }
 
 /// Validate that a script path stays within its base directory.

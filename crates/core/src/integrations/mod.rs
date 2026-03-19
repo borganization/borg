@@ -1,3 +1,54 @@
+#[cfg(test)]
+macro_rules! integration_handle_tests {
+    ($module:ident, $credential:expr) => {
+        #[tokio::test]
+        async fn handle_missing_credential() {
+            let config = crate::config::Config::default();
+            let args = serde_json::json!({"action": "test"});
+            let result = super::handle(&args, &config).await;
+            assert_eq!(
+                result.unwrap_err(),
+                format!("{} not configured", $credential)
+            );
+        }
+
+        #[tokio::test]
+        async fn handle_unknown_action() {
+            let mut config = crate::config::Config::default();
+            let env_var = format!("__BORG_TEST_{}__", stringify!($module).to_uppercase());
+            config.credentials.insert(
+                $credential.to_string(),
+                crate::config::CredentialValue::EnvVar(env_var.clone()),
+            );
+            unsafe {
+                std::env::set_var(&env_var, "fake-token");
+            }
+            let args = serde_json::json!({"action": "nonexistent_action"});
+            let result = super::handle(&args, &config).await;
+            assert_eq!(
+                result.unwrap_err(),
+                "Unknown action: nonexistent_action"
+            );
+        }
+
+        #[tokio::test]
+        async fn handle_missing_action_param() {
+            let mut config = crate::config::Config::default();
+            let env_var = format!("__BORG_TEST_{}__", stringify!($module).to_uppercase());
+            config.credentials.insert(
+                $credential.to_string(),
+                crate::config::CredentialValue::EnvVar(env_var.clone()),
+            );
+            unsafe {
+                std::env::set_var(&env_var, "fake-token");
+            }
+            let args = serde_json::json!({});
+            let result = super::handle(&args, &config).await;
+            assert_eq!(result.unwrap_err(), "Missing 'action' parameter");
+        }
+    };
+}
+
 pub mod gmail;
 pub mod google_calendar;
 pub(crate) mod http;
@@ -6,6 +57,20 @@ pub mod notion;
 pub mod outlook;
 
 use serde_json::Value;
+
+pub fn resolve_credential_and_action<'a>(
+    arguments: &'a Value,
+    config: &crate::config::Config,
+    credential_name: &str,
+) -> Result<(reqwest::Client, String, &'a str), String> {
+    let token = config
+        .resolve_credential_or_env(credential_name)
+        .ok_or_else(|| format!("{credential_name} not configured"))?;
+    let action = arguments["action"]
+        .as_str()
+        .ok_or_else(|| "Missing 'action' parameter".to_string())?;
+    Ok((reqwest::Client::new(), token, action))
+}
 
 /// Validate that an API resource ID contains only safe characters
 /// (alphanumeric, hyphens, underscores, dots). Prevents path traversal
