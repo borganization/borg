@@ -71,6 +71,7 @@ pub enum AppAction {
     RunScheduleActions {
         actions: Vec<ScheduleAction>,
     },
+    ToggleMouseCapture,
 }
 
 pub struct App<'a> {
@@ -101,6 +102,7 @@ pub struct App<'a> {
     pub schedule_popup: SchedulePopup,
     pub file_popup: FileSearchPopup,
     pub throbber_state: ThrobberState,
+    pub mouse_capture: bool,
 }
 
 impl<'a> App<'a> {
@@ -129,6 +131,7 @@ impl<'a> App<'a> {
             schedule_popup: SchedulePopup::new(),
             file_popup: FileSearchPopup::new(),
             throbber_state: ThrobberState::default(),
+            mouse_capture: true,
         }
     }
 
@@ -139,6 +142,9 @@ impl<'a> App<'a> {
     }
 
     pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> AppAction {
+        if !self.mouse_capture {
+            return AppAction::Continue;
+        }
         use crossterm::event::MouseEventKind;
         if self.command_popup.is_visible()
             || self.file_popup.is_visible()
@@ -330,6 +336,11 @@ impl<'a> App<'a> {
                 // Ctrl+G — launch external editor
                 if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(AppAction::LaunchExternalEditor);
+                }
+
+                // Alt+M — toggle mouse capture (enables native text selection)
+                if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::ALT) {
+                    return Ok(AppAction::ToggleMouseCapture);
                 }
 
                 // Shift+Tab — toggle plan mode
@@ -1239,7 +1250,10 @@ impl<'a> App<'a> {
             AppState::Idle if self.plan_mode => {
                 "[plan]  •  shift+tab to toggle off  •  ? for shortcuts".to_string()
             }
-            AppState::Idle => "? for shortcuts  •  quit to exit".to_string(),
+            AppState::Idle => {
+                let mouse_hint = if self.mouse_capture { "alt+m: select text" } else { "alt+m: mouse scroll" };
+                format!("? for shortcuts  •  {mouse_hint}  •  quit to exit")
+            }
             AppState::Streaming { .. } => {
                 let count = self.queued_messages.len();
                 if count > 0 {
