@@ -364,6 +364,9 @@ async fn run_event_loop(
                                 "Budget: {used}/{budget_limit} tokens ({pct}%) used this month\n"
                             ));
                         }
+                        if let Ok(Some(cost)) = db.monthly_total_cost() {
+                            text.push_str(&format!("Estimated cost: ${cost:.4}\n"));
+                        }
                     }
                 }
 

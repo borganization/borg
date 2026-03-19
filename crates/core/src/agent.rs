@@ -781,6 +781,21 @@ impl Agent {
                                 let total = usage.prompt_tokens + usage.completion_tokens;
                                 if total > 0 {
                                     self.metrics.llm_tokens.add(total, &[]);
+                                    if let Ok(db) = Database::open() {
+                                        let cost = crate::pricing::estimate_cost(
+                                            &usage.model,
+                                            usage.prompt_tokens,
+                                            usage.completion_tokens,
+                                        );
+                                        let _ = db.log_token_usage(
+                                            usage.prompt_tokens,
+                                            usage.completion_tokens,
+                                            total,
+                                            &usage.provider,
+                                            &usage.model,
+                                            cost,
+                                        );
+                                    }
                                 }
                                 let _ = event_tx.send(AgentEvent::Usage(usage)).await;
                             }

@@ -92,6 +92,8 @@ pub struct UsageData {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(Debug)]
@@ -464,6 +466,8 @@ impl LlmClient {
                                         prompt_tokens: usage.prompt_tokens.unwrap_or(0),
                                         completion_tokens: usage.completion_tokens.unwrap_or(0),
                                         total_tokens: usage.total_tokens.unwrap_or(0),
+                                        provider: self.provider.as_str().to_string(),
+                                        model: self.config.llm.model.clone(),
                                     }))
                                     .await;
                             }
@@ -762,6 +766,8 @@ impl LlmClient {
                                                 .and_then(serde_json::Value::as_u64)
                                                 .unwrap_or(0),
                                             total_tokens: 0,
+                                            provider: self.provider.as_str().to_string(),
+                                            model: self.config.llm.model.clone(),
                                         }))
                                         .await;
                                 }
