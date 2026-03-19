@@ -1026,11 +1026,9 @@ impl<'a> App<'a> {
                 self.session_completion_tokens += usage.completion_tokens;
             }
             AgentEvent::TurnComplete => {
-                // Clean up any leftover empty thinking placeholder
-                if matches!(self.cells.last(), Some(HistoryCell::Thinking { text }) if text.is_empty())
-                {
-                    self.cells.pop();
-                }
+                // Clean up any leftover empty thinking placeholders
+                self.cells
+                    .retain(|c| !matches!(c, HistoryCell::Thinking { text } if text.is_empty()));
                 for cell in self.cells.iter_mut().rev() {
                     if let HistoryCell::Assistant { streaming, .. } = cell {
                         *streaming = false;

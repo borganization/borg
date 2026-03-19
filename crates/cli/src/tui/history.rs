@@ -291,6 +291,10 @@ impl HistoryCell {
                 lines
             }
             HistoryCell::Thinking { text } => {
+                // Don't render an empty thinking box
+                if text.is_empty() {
+                    return vec![];
+                }
                 let border = theme::thinking_border_style();
                 let content_style = ratatui::style::Style::default()
                     .fg(ratatui::style::Color::DarkGray)
