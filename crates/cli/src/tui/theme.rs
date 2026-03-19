@@ -8,11 +8,11 @@ pub const DIM_WHITE: Color = Color::DarkGray;
 pub const BORDER: Color = Color::Rgb(3, 113, 113);
 
 pub const BULLET: &str = "●";
-pub const CHEVRON: &str = "›";
+pub const CHEVRON: &str = "❯";
 pub const TREE_END: &str = "└";
 
 pub const TOOL_ACTIVE_GREEN: Color = Color::Rgb(0, 200, 0);
-pub const INPUT_PROMPT: &str = "› ";
+pub const INPUT_PROMPT: &str = "❯ ";
 
 pub fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
