@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -114,6 +114,7 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
     }
@@ -164,6 +165,7 @@ pub async fn run() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(EnableMouseCapture)?;
 
     // Guard ensures terminal is restored on any exit path (error or normal)
     let _guard = TerminalGuard;
@@ -171,6 +173,7 @@ pub async fn run() -> Result<()> {
     // Install panic hook that restores terminal before printing panic
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
+        let _ = stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
         original_hook(info);
@@ -271,6 +274,7 @@ async fn run_event_loop(
             maybe_event = event_stream.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => app.handle_key(key)?,
+                    Some(Ok(Event::Mouse(mouse))) => app.handle_mouse(mouse),
                     Some(Ok(Event::Resize(_, _))) => AppAction::Continue,
                     Some(Err(_)) | None => AppAction::Quit,
                     _ => AppAction::Continue,
@@ -433,6 +437,7 @@ async fn run_event_loop(
             AppAction::LaunchExternalEditor => {
                 let current_text = app.composer.text();
                 // Leave alternate screen and disable raw mode for editor
+                let _ = stdout().execute(DisableMouseCapture);
                 let _ = disable_raw_mode();
                 let _ = stdout().execute(LeaveAlternateScreen);
 
@@ -441,6 +446,7 @@ async fn run_event_loop(
                 // Restore terminal
                 let _ = enable_raw_mode();
                 let _ = stdout().execute(EnterAlternateScreen);
+                let _ = stdout().execute(EnableMouseCapture);
                 terminal.clear()?;
 
                 match result {
