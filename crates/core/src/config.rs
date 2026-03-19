@@ -70,6 +70,8 @@ pub struct Config {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     #[serde(default)]
+    pub browser: BrowserConfig,
+    #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
 }
 
@@ -233,6 +235,32 @@ impl Default for TelemetryConfig {
             otlp_endpoint: "http://localhost:4317".to_string(),
             service_name: "borg".to_string(),
             sampling_ratio: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    pub enabled: bool,
+    pub headless: bool,
+    pub executable: Option<String>,
+    pub cdp_port: u16,
+    pub no_sandbox: bool,
+    pub timeout_ms: u64,
+    pub startup_timeout_ms: u64,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            headless: true,
+            executable: None,
+            cdp_port: 9222,
+            no_sandbox: false,
+            timeout_ms: 30000,
+            startup_timeout_ms: 15000,
         }
     }
 }
@@ -531,7 +559,11 @@ impl Config {
              telemetry.metrics_enabled = {}\n  \
              telemetry.otlp_endpoint = {}\n  \
              telemetry.service_name = {}\n  \
-             telemetry.sampling_ratio = {}",
+             telemetry.sampling_ratio = {}\n  \
+             browser.enabled = {}\n  \
+             browser.headless = {}\n  \
+             browser.cdp_port = {}\n  \
+             browser.timeout_ms = {}",
             self.llm.model,
             self.llm.temperature,
             self.llm.max_tokens,
@@ -551,6 +583,10 @@ impl Config {
             self.telemetry.otlp_endpoint,
             self.telemetry.service_name,
             self.telemetry.sampling_ratio,
+            self.browser.enabled,
+            self.browser.headless,
+            self.browser.cdp_port,
+            self.browser.timeout_ms,
         )
     }
 
@@ -728,6 +764,48 @@ impl Config {
                 self.telemetry.sampling_ratio = v;
                 Ok(format!("telemetry.sampling_ratio = {v}"))
             }
+            "browser.enabled" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for browser.enabled")?;
+                self.browser.enabled = v;
+                Ok(format!("browser.enabled = {v}"))
+            }
+            "browser.headless" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for browser.headless")?;
+                self.browser.headless = v;
+                Ok(format!("browser.headless = {v}"))
+            }
+            "browser.cdp_port" => {
+                let v: u16 = value
+                    .parse()
+                    .with_context(|| "Invalid integer for browser.cdp_port")?;
+                self.browser.cdp_port = v;
+                Ok(format!("browser.cdp_port = {v}"))
+            }
+            "browser.timeout_ms" => {
+                let v: u64 = value
+                    .parse()
+                    .with_context(|| "Invalid integer for browser.timeout_ms")?;
+                self.browser.timeout_ms = v;
+                Ok(format!("browser.timeout_ms = {v}"))
+            }
+            "browser.startup_timeout_ms" => {
+                let v: u64 = value
+                    .parse()
+                    .with_context(|| "Invalid integer for browser.startup_timeout_ms")?;
+                self.browser.startup_timeout_ms = v;
+                Ok(format!("browser.startup_timeout_ms = {v}"))
+            }
+            "browser.no_sandbox" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for browser.no_sandbox")?;
+                self.browser.no_sandbox = v;
+                Ok(format!("browser.no_sandbox = {v}"))
+            }
             _ => anyhow::bail!(
                 "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
                  sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled, \
@@ -738,7 +816,9 @@ impl Config {
                  gateway.telegram_poll_timeout_secs, gateway.telegram_circuit_failure_threshold, \
                  gateway.telegram_circuit_suspension_secs, gateway.telegram_dedup_capacity, \
                  telemetry.tracing_enabled, telemetry.metrics_enabled, telemetry.otlp_endpoint, \
-                 telemetry.service_name, telemetry.sampling_ratio"
+                 telemetry.service_name, telemetry.sampling_ratio, \
+                 browser.enabled, browser.headless, browser.cdp_port, browser.timeout_ms, \
+                 browser.startup_timeout_ms, browser.no_sandbox"
             ),
         }
     }
@@ -1765,5 +1845,70 @@ MY_KEY = { source = "env", var = "MY_KEY_VAR" }
             }
             other => panic!("expected Ref(Env), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn default_browser_config_values() {
+        let cfg = BrowserConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.headless);
+        assert!(cfg.executable.is_none());
+        assert_eq!(cfg.cdp_port, 9222);
+        assert!(!cfg.no_sandbox);
+        assert_eq!(cfg.timeout_ms, 30000);
+        assert_eq!(cfg.startup_timeout_ms, 15000);
+    }
+
+    #[test]
+    fn parse_browser_config_toml() {
+        let toml_str = r#"
+[browser]
+enabled = false
+headless = false
+executable = "/usr/bin/chromium"
+cdp_port = 9333
+no_sandbox = true
+timeout_ms = 60000
+startup_timeout_ms = 20000
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert!(!cfg.browser.enabled);
+        assert!(!cfg.browser.headless);
+        assert_eq!(cfg.browser.executable.as_deref(), Some("/usr/bin/chromium"));
+        assert_eq!(cfg.browser.cdp_port, 9333);
+        assert!(cfg.browser.no_sandbox);
+        assert_eq!(cfg.browser.timeout_ms, 60000);
+        assert_eq!(cfg.browser.startup_timeout_ms, 20000);
+    }
+
+    #[test]
+    fn parse_empty_toml_yields_browser_defaults() {
+        let cfg: Config = toml::from_str("").expect("should parse");
+        assert!(cfg.browser.enabled);
+        assert!(cfg.browser.headless);
+        assert_eq!(cfg.browser.cdp_port, 9222);
+    }
+
+    #[test]
+    fn apply_setting_browser_headless() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("browser.headless", "false").unwrap();
+        assert!(!cfg.browser.headless);
+    }
+
+    #[test]
+    fn apply_setting_browser_cdp_port() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("browser.cdp_port", "9333").unwrap();
+        assert_eq!(cfg.browser.cdp_port, 9333);
+    }
+
+    #[test]
+    fn display_settings_contains_browser() {
+        let cfg = Config::default();
+        let display = cfg.display_settings();
+        assert!(display.contains("browser.enabled"));
+        assert!(display.contains("browser.headless"));
+        assert!(display.contains("browser.cdp_port"));
     }
 }

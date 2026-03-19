@@ -178,6 +178,15 @@ action_limits.web_requests_block = 50
 monthly_token_limit = 1000000    # 0 = unlimited
 warning_threshold = 0.8          # warn at 80% usage
 
+[browser]
+enabled = true                   # enable/disable browser automation
+headless = true                  # run headless (no visible window)
+# executable = "/path/to/chrome" # optional: override auto-detected Chrome path
+cdp_port = 9222                  # Chrome DevTools Protocol port
+no_sandbox = false               # disable Chrome sandboxing (containers)
+timeout_ms = 30000               # default command timeout
+startup_timeout_ms = 15000       # browser launch timeout
+
 [credentials]
 JIRA_API_TOKEN = "JIRA_API_TOKEN"                    # legacy: bare string = env var name
 SLACK_BOT_TOKEN = { source = "exec", command = "security", args = ["find-generic-password", "-s", "slack", "-w"] }
@@ -360,6 +369,7 @@ Six-layer defense against prompt injection attacks:
 | `crates/core/src/skills.rs` | Skills loading, parsing, progressive token budgeting |
 | `crates/core/src/hooks.rs` | Lifecycle hook system (trait, registry, dispatch) |
 | `crates/core/src/doctor.rs` | Diagnostic checks and report formatting |
+| `crates/core/src/browser.rs` | Chrome detection, agent-browser CLI check |
 | `crates/core/src/host_audit.rs` | Host security audit checks (firewall, ports, SSH, permissions, encryption, updates, services) |
 | `crates/core/src/sanitize.rs` | Prompt injection detection (scoring-based, regex patterns, untrusted content wrapping) |
 | `crates/core/src/rate_guard.rs` | Per-session rate limiting for tool calls, shell commands, file/memory writes, web requests |
