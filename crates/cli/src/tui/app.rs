@@ -71,7 +71,6 @@ pub enum AppAction {
     RunScheduleActions {
         actions: Vec<ScheduleAction>,
     },
-    ToggleMouseCapture,
 }
 
 pub struct App<'a> {
@@ -102,7 +101,6 @@ pub struct App<'a> {
     pub schedule_popup: SchedulePopup,
     pub file_popup: FileSearchPopup,
     pub throbber_state: ThrobberState,
-    pub mouse_capture: bool,
 }
 
 impl<'a> App<'a> {
@@ -131,7 +129,6 @@ impl<'a> App<'a> {
             schedule_popup: SchedulePopup::new(),
             file_popup: FileSearchPopup::new(),
             throbber_state: ThrobberState::default(),
-            mouse_capture: true,
         }
     }
 
@@ -141,33 +138,9 @@ impl<'a> App<'a> {
         }
     }
 
-    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> AppAction {
-        if !self.mouse_capture {
-            return AppAction::Continue;
-        }
-        use crossterm::event::MouseEventKind;
-        if self.command_popup.is_visible()
-            || self.file_popup.is_visible()
-            || self.plugins_popup.is_visible()
-            || self.settings_popup.is_visible()
-            || self.schedule_popup.is_visible()
-            || self.plan_overlay.visible
-        {
-            return AppAction::Continue;
-        }
-        match event.kind {
-            MouseEventKind::ScrollUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(5);
-                self.auto_scroll = false;
-            }
-            MouseEventKind::ScrollDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(5);
-                if self.scroll_offset == 0 {
-                    self.auto_scroll = true;
-                }
-            }
-            _ => {}
-        }
+    pub fn handle_mouse(&mut self, _event: crossterm::event::MouseEvent) -> AppAction {
+        // Mouse capture is disabled so the terminal handles native text selection.
+        // Scrolling is handled via PageUp/PageDown keys.
         AppAction::Continue
     }
 
@@ -336,11 +309,6 @@ impl<'a> App<'a> {
                 // Ctrl+G — launch external editor
                 if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(AppAction::LaunchExternalEditor);
-                }
-
-                // Alt+M — toggle mouse capture (enables native text selection)
-                if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::ALT) {
-                    return Ok(AppAction::ToggleMouseCapture);
                 }
 
                 // Shift+Tab — toggle plan mode
@@ -1251,8 +1219,7 @@ impl<'a> App<'a> {
                 "[plan]  •  shift+tab to toggle off  •  ? for shortcuts".to_string()
             }
             AppState::Idle => {
-                let mouse_hint = if self.mouse_capture { "alt+m: select text" } else { "alt+m: mouse scroll" };
-                format!("? for shortcuts  •  {mouse_hint}  •  quit to exit")
+                "? for shortcuts  •  pgup/pgdn to scroll  •  quit to exit".to_string()
             }
             AppState::Streaming { .. } => {
                 let count = self.queued_messages.len();
@@ -1455,10 +1422,10 @@ mod tests {
         assert_eq!(app.scroll_offset, 0);
     }
 
-    // --- Mouse scroll ---
+    // --- Mouse events are ignored (native text selection) ---
 
     #[test]
-    fn mouse_scroll_up_increases_offset() {
+    fn mouse_events_are_ignored() {
         use crossterm::event::{MouseEvent, MouseEventKind};
         let mut app = make_app();
 
@@ -1470,46 +1437,8 @@ mod tests {
         };
         let action = app.handle_mouse(event);
         assert!(matches!(action, AppAction::Continue));
-        assert_eq!(app.scroll_offset, 5);
-        assert!(!app.auto_scroll);
-    }
-
-    #[test]
-    fn mouse_scroll_down_decreases_offset() {
-        use crossterm::event::{MouseEvent, MouseEventKind};
-        let mut app = make_app();
-        app.scroll_offset = 10;
-        app.auto_scroll = false;
-
-        let event = MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        };
-        let action = app.handle_mouse(event);
-        assert!(matches!(action, AppAction::Continue));
-        assert_eq!(app.scroll_offset, 5);
-        assert!(!app.auto_scroll);
-    }
-
-    #[test]
-    fn mouse_scroll_down_to_zero_enables_auto_scroll() {
-        use crossterm::event::{MouseEvent, MouseEventKind};
-        let mut app = make_app();
-        app.scroll_offset = 3;
-        app.auto_scroll = false;
-
-        let event = MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        };
-        let action = app.handle_mouse(event);
-        assert!(matches!(action, AppAction::Continue));
+        // Mouse capture is disabled — scroll offset unchanged
         assert_eq!(app.scroll_offset, 0);
-        assert!(app.auto_scroll);
     }
 
     // --- PageUp / PageDown ---
