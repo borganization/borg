@@ -564,7 +564,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/history" => {
-                match borg_core::logging::read_history_formatted(50) {
+                match borg_core::logging::read_history_formatted(50, false) {
                     Ok(lines) => {
                         let text = if lines.is_empty() {
                             "No conversation history for today.".to_string()
@@ -799,7 +799,20 @@ impl<'a> App<'a> {
 
     pub fn process_agent_event(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::Preparing => {
+                self.cells.push(HistoryCell::Thinking {
+                    text: String::new(),
+                });
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
             AgentEvent::TextDelta(delta) => {
+                // Remove empty Thinking placeholder (from Preparing event)
+                if matches!(self.cells.last(), Some(HistoryCell::Thinking { text }) if text.is_empty())
+                {
+                    self.cells.pop();
+                }
                 if let Some(HistoryCell::Assistant { text, .. }) = self.cells.last_mut() {
                     text.push_str(&delta);
                 } else {
@@ -1494,5 +1507,61 @@ mod tests {
 
         let text = last_system_text(&app).expect("should have system message");
         assert!(text.contains("security_audit"));
+    }
+
+    #[test]
+    fn preparing_event_adds_thinking_cell() {
+        let mut app = make_app();
+        app.process_agent_event(AgentEvent::Preparing);
+        assert!(matches!(
+            app.cells.last(),
+            Some(HistoryCell::Thinking { text }) if text.is_empty()
+        ));
+    }
+
+    #[test]
+    fn text_delta_removes_preparing_placeholder() {
+        let mut app = make_app();
+        app.process_agent_event(AgentEvent::Preparing);
+        app.process_agent_event(AgentEvent::TextDelta("Hello".into()));
+        // The empty Thinking cell should be gone, replaced with Assistant
+        assert!(!matches!(
+            app.cells.first(),
+            Some(HistoryCell::Thinking { text }) if text.is_empty()
+        ));
+        assert!(matches!(
+            app.cells.last(),
+            Some(HistoryCell::Assistant { text, .. }) if text == "Hello"
+        ));
+    }
+
+    #[test]
+    fn text_delta_preserves_nonempty_thinking() {
+        let mut app = make_app();
+        app.cells.push(HistoryCell::Thinking {
+            text: "some thought".into(),
+        });
+        app.process_agent_event(AgentEvent::TextDelta("Hello".into()));
+        // Thinking cell should still be there (non-empty, not a placeholder)
+        assert!(matches!(
+            &app.cells[0],
+            HistoryCell::Thinking { text } if text == "some thought"
+        ));
+        assert!(matches!(
+            app.cells.last(),
+            Some(HistoryCell::Assistant { text, .. }) if text == "Hello"
+        ));
+    }
+
+    #[test]
+    fn preparing_then_thinking_delta_appends() {
+        let mut app = make_app();
+        app.process_agent_event(AgentEvent::Preparing);
+        app.process_agent_event(AgentEvent::ThinkingDelta("reasoning...".into()));
+        assert_eq!(app.cells.len(), 1);
+        assert!(matches!(
+            app.cells.last(),
+            Some(HistoryCell::Thinking { text }) if text == "reasoning..."
+        ));
     }
 }
