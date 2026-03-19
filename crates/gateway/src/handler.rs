@@ -179,6 +179,28 @@ pub async fn invoke_agent(
         warn!("Failed to log inbound message for channel '{channel_name}': {e}");
     }
 
+    // Check for slash commands before creating agent
+    if let Some(response) = crate::commands::try_handle_command(
+        &inbound.text,
+        &db,
+        config,
+        channel_name,
+        &session_key,
+        &session_id,
+    ) {
+        if let Err(e) = db.log_channel_message(
+            channel_name,
+            &inbound.sender_id,
+            "outbound",
+            Some(&response),
+            None,
+            Some(&session_id),
+        ) {
+            warn!("Failed to log command response: {e}");
+        }
+        return Ok((response, session_id));
+    }
+
     // Create Agent, load session, send message
     let mut agent = Agent::new(config.clone(), borg_core::telemetry::BorgMetrics::noop())
         .context("Failed to create agent")?;

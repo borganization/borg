@@ -137,6 +137,15 @@ pub struct SubAgentRunRow {
     pub completed_at: Option<i64>,
 }
 
+pub struct ModelUsageRow {
+    pub provider: String,
+    pub model: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub total_cost_usd: Option<f64>,
+}
+
 /// Parameters for creating a new scheduled task.
 pub struct NewTask<'a> {
     pub id: &'a str,
@@ -198,7 +207,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 10;
+    const CURRENT_VERSION: u32 = 11;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -240,6 +249,9 @@ impl Database {
         }
         if current < 10 {
             self.migrate_v10()?;
+        }
+        if current < 11 {
+            self.migrate_v11()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -555,6 +567,28 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_memory_embeddings_scope ON memory_embeddings(scope);
             ",
+        )?;
+        Ok(())
+    }
+
+    fn migrate_v11(&self) -> Result<()> {
+        // Add provider, model, cost_usd columns to token_usage.
+        // Use try-execute to handle "duplicate column" gracefully on re-runs.
+        let alters = [
+            "ALTER TABLE token_usage ADD COLUMN provider TEXT",
+            "ALTER TABLE token_usage ADD COLUMN model TEXT",
+            "ALTER TABLE token_usage ADD COLUMN cost_usd REAL",
+        ];
+        for sql in &alters {
+            if let Err(e) = self.conn.execute_batch(sql) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") {
+                    return Err(e.into());
+                }
+            }
+        }
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_token_usage_model ON token_usage(model);",
         )?;
         Ok(())
     }
@@ -1442,31 +1476,101 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Update session_id for a channel session (used by /new command).
+    pub fn update_channel_session_id(
+        &self,
+        channel_name: &str,
+        sender_id: &str,
+        new_session_id: &str,
+    ) -> Result<bool> {
+        let now = chrono::Utc::now().timestamp();
+        let updated = self.conn.execute(
+            "UPDATE channel_sessions SET session_id = ?1, last_active = ?2 WHERE channel_name = ?3 AND sender_id = ?4",
+            params![new_session_id, now, channel_name, sender_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Count messages in a session.
+    pub fn count_session_messages(&self, session_id: &str) -> Result<usize> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM messages WHERE session_id = ?1")?;
+        let count: i64 = stmt.query_row(params![session_id], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
     // ── Token usage ──
 
-    pub fn log_token_usage(&self, prompt: u64, completion: u64, total: u64) -> Result<()> {
+    fn month_start_ts() -> Result<i64> {
+        let now = chrono::Utc::now();
+        let first_of_month = now.date_naive().with_day(1).unwrap_or(now.date_naive());
+        let midnight = first_of_month
+            .and_hms_opt(0, 0, 0)
+            .context("failed to construct midnight timestamp")?;
+        Ok(midnight.and_utc().timestamp())
+    }
+
+    pub fn log_token_usage(
+        &self,
+        prompt: u64,
+        completion: u64,
+        total: u64,
+        provider: &str,
+        model: &str,
+        cost_usd: Option<f64>,
+    ) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(
-            "INSERT INTO token_usage (timestamp, prompt_tokens, completion_tokens, total_tokens)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![now, prompt as i64, completion as i64, total as i64],
+            "INSERT INTO token_usage (timestamp, prompt_tokens, completion_tokens, total_tokens, provider, model, cost_usd)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![now, prompt as i64, completion as i64, total as i64, provider, model, cost_usd],
         )?;
         Ok(())
     }
 
     #[instrument(skip_all)]
     pub fn monthly_token_total(&self) -> Result<u64> {
-        let now = chrono::Utc::now();
-        let first_of_month = now.date_naive().with_day(1).unwrap_or(now.date_naive());
-        let midnight = first_of_month
-            .and_hms_opt(0, 0, 0)
-            .context("failed to construct midnight timestamp")?;
-        let start_ts = midnight.and_utc().timestamp();
+        let start_ts = Self::month_start_ts()?;
         let mut stmt = self.conn.prepare(
             "SELECT COALESCE(SUM(total_tokens), 0) FROM token_usage WHERE timestamp >= ?1",
         )?;
         let total: i64 = stmt.query_row(params![start_ts], |row| row.get(0))?;
         Ok(total as u64)
+    }
+
+    pub fn monthly_total_cost(&self) -> Result<Option<f64>> {
+        let start_ts = Self::month_start_ts()?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT SUM(cost_usd) FROM token_usage WHERE timestamp >= ?1")?;
+        let cost: Option<f64> = stmt.query_row(params![start_ts], |row| row.get(0))?;
+        Ok(cost)
+    }
+
+    pub fn monthly_usage_by_model(&self) -> Result<Vec<ModelUsageRow>> {
+        let start_ts = Self::month_start_ts()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(provider, '') as provider, COALESCE(model, '') as model,
+                    COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(total_tokens), 0), SUM(cost_usd)
+             FROM token_usage WHERE timestamp >= ?1
+             GROUP BY provider, model
+             ORDER BY SUM(total_tokens) DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![start_ts], |row| {
+                Ok(ModelUsageRow {
+                    provider: row.get(0)?,
+                    model: row.get(1)?,
+                    prompt_tokens: row.get::<_, i64>(2)? as u64,
+                    completion_tokens: row.get::<_, i64>(3)? as u64,
+                    total_tokens: row.get::<_, i64>(4)? as u64,
+                    total_cost_usd: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // ── Meta key-value ──
@@ -1777,8 +1881,10 @@ mod tests {
     #[test]
     fn log_and_query_token_usage() {
         let db = test_db();
-        db.log_token_usage(100, 50, 150).expect("log usage");
-        db.log_token_usage(200, 100, 300).expect("log usage 2");
+        db.log_token_usage(100, 50, 150, "openai", "gpt-4", None)
+            .expect("log usage");
+        db.log_token_usage(200, 100, 300, "openai", "gpt-4", None)
+            .expect("log usage 2");
         let total = db.monthly_token_total().expect("query");
         assert_eq!(total, 450);
     }
@@ -1802,7 +1908,8 @@ mod tests {
             )
             .expect("insert old");
         // Insert a current row
-        db.log_token_usage(100, 50, 150).expect("log current");
+        db.log_token_usage(100, 50, 150, "openai", "gpt-4", None)
+            .expect("log current");
         let total = db.monthly_token_total().expect("query");
         // Old entry should be excluded, only current entry counts
         assert_eq!(total, 150);
@@ -1900,6 +2007,40 @@ mod tests {
         let s1 = db.resolve_channel_session("slack", "alice").expect("alice");
         let s2 = db.resolve_channel_session("slack", "bob").expect("bob");
         assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn update_channel_session_id_works() {
+        let db = test_db();
+        let old_id = db.resolve_channel_session("tg", "u1").expect("resolve");
+        let updated = db
+            .update_channel_session_id("tg", "u1", "new-session-id")
+            .expect("update");
+        assert!(updated);
+        let current = db.resolve_channel_session("tg", "u1").expect("resolve2");
+        assert_eq!(current, "new-session-id");
+        assert_ne!(current, old_id);
+    }
+
+    #[test]
+    fn update_channel_session_id_no_row() {
+        let db = test_db();
+        let updated = db
+            .update_channel_session_id("tg", "nobody", "new-id")
+            .expect("update");
+        assert!(!updated);
+    }
+
+    #[test]
+    fn count_session_messages_works() {
+        let db = test_db();
+        assert_eq!(db.count_session_messages("s1").expect("count"), 0);
+        db.insert_message("s1", "user", Some("hi"), None, None, None, None)
+            .expect("insert");
+        db.insert_message("s1", "assistant", Some("hello"), None, None, None, None)
+            .expect("insert");
+        assert_eq!(db.count_session_messages("s1").expect("count"), 2);
+        assert_eq!(db.count_session_messages("s2").expect("count"), 0);
     }
 
     #[test]
@@ -2449,5 +2590,74 @@ mod tests {
     fn count_embeddings_empty() {
         let db = test_db();
         assert_eq!(db.count_embeddings("global").unwrap(), 0);
+    }
+
+    #[test]
+    fn monthly_usage_by_model_groups_correctly() {
+        let db = test_db();
+        db.log_token_usage(
+            100,
+            50,
+            150,
+            "openrouter",
+            "anthropic/claude-sonnet-4",
+            Some(0.00105),
+        )
+        .expect("log");
+        db.log_token_usage(
+            200,
+            100,
+            300,
+            "openrouter",
+            "anthropic/claude-sonnet-4",
+            Some(0.0021),
+        )
+        .expect("log");
+        db.log_token_usage(500, 200, 700, "openai", "gpt-4o", Some(0.00325))
+            .expect("log");
+
+        let rows = db.monthly_usage_by_model().expect("query");
+        assert_eq!(rows.len(), 2);
+        // Ordered by total_tokens DESC
+        assert_eq!(rows[0].model, "gpt-4o");
+        assert_eq!(rows[0].total_tokens, 700);
+        assert_eq!(rows[1].model, "anthropic/claude-sonnet-4");
+        assert_eq!(rows[1].total_tokens, 450);
+        assert_eq!(rows[1].prompt_tokens, 300);
+        assert_eq!(rows[1].completion_tokens, 150);
+    }
+
+    #[test]
+    fn monthly_total_cost_sums_correctly() {
+        let db = test_db();
+        db.log_token_usage(100, 50, 150, "openai", "gpt-4o", Some(0.001))
+            .expect("log");
+        db.log_token_usage(200, 100, 300, "openai", "gpt-4o", Some(0.002))
+            .expect("log");
+
+        let cost = db.monthly_total_cost().expect("query");
+        assert!((cost.unwrap() - 0.003).abs() < 1e-9);
+    }
+
+    #[test]
+    fn old_rows_without_provider_handled() {
+        let db = test_db();
+        // Simulate pre-V11 row with no provider/model/cost
+        db.conn
+            .execute(
+                "INSERT INTO token_usage (timestamp, prompt_tokens, completion_tokens, total_tokens)
+                 VALUES (?1, 100, 50, 150)",
+                params![chrono::Utc::now().timestamp()],
+            )
+            .expect("insert old-style");
+        db.log_token_usage(200, 100, 300, "openai", "gpt-4o", Some(0.002))
+            .expect("log new");
+
+        let rows = db.monthly_usage_by_model().expect("query");
+        assert_eq!(rows.len(), 2);
+        // One row with empty provider/model (old), one with real values
+        let old_row = rows.iter().find(|r| r.model.is_empty());
+        assert!(old_row.is_some());
+        assert_eq!(old_row.unwrap().total_tokens, 150);
     }
 }

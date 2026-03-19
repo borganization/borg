@@ -1,4 +1,5 @@
 pub mod chunker;
+pub mod commands;
 pub mod discord;
 pub mod executor;
 pub mod google_chat;
