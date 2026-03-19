@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::path::Path;
 use tracing::info;
 
 use crate::manifest::ToolManifest;
-use crate::runner::ScriptRunner;
+use crate::runner::{validate_script_path, ScriptRunner};
 
 pub struct ToolExecutor<'a> {
     manifest: &'a ToolManifest,
@@ -17,26 +17,7 @@ impl<'a> ToolExecutor<'a> {
 
     /// Resolve and validate that the entrypoint stays within tool_dir.
     fn validated_entrypoint(&self) -> Result<std::path::PathBuf> {
-        let entrypoint = self.tool_dir.join(&self.manifest.entrypoint);
-        if !entrypoint.exists() {
-            // Will be caught later by ScriptRunner, but validate path anyway
-            if self.manifest.entrypoint.contains("..") {
-                bail!(
-                    "Entrypoint '{}' contains path traversal",
-                    self.manifest.entrypoint
-                );
-            }
-            return Ok(entrypoint);
-        }
-        let canonical_entry = entrypoint.canonicalize()?;
-        let canonical_dir = self.tool_dir.canonicalize()?;
-        if !canonical_entry.starts_with(&canonical_dir) {
-            bail!(
-                "Entrypoint '{}' escapes tool directory",
-                self.manifest.entrypoint
-            );
-        }
-        Ok(entrypoint)
+        validate_script_path(self.tool_dir, &self.manifest.entrypoint)
     }
 
     pub async fn execute(&self, args_json: &str) -> Result<String> {

@@ -40,18 +40,11 @@ pub fn verify_slack_signature(headers: &HeaderMap, body: &str, signing_secret: &
     let result = mac.finalize();
     let computed = format!("v0={}", hex::encode(result.into_bytes()));
 
-    if !constant_time_eq(computed.as_bytes(), expected_sig.as_bytes()) {
+    if !crate::crypto::constant_time_eq(computed.as_bytes(), expected_sig.as_bytes()) {
         bail!("Slack signature verification failed");
     }
 
     Ok(())
-}
-
-/// Constant-time byte comparison to prevent timing attacks.
-/// Uses the `subtle` crate which handles differing lengths safely.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    use subtle::ConstantTimeEq;
-    a.ct_eq(b).into()
 }
 
 #[cfg(test)]
@@ -161,20 +154,5 @@ mod tests {
         let result = verify_slack_signature(&headers, "body", "secret");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not an integer"));
-    }
-
-    #[test]
-    fn constant_time_eq_same() {
-        assert!(constant_time_eq(b"hello", b"hello"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_len() {
-        assert!(!constant_time_eq(b"hello", b"hi"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_content() {
-        assert!(!constant_time_eq(b"hello", b"world"));
     }
 }

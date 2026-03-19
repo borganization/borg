@@ -7,12 +7,11 @@ use tracing::warn;
 
 use super::types::{ReplyActivity, TokenResponse};
 use crate::chunker;
+use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
 
 const TOKEN_ENDPOINT: &str = "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
 const MESSAGE_CHUNK_SIZE: usize = 4000;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_RETRIES: u32 = 5;
-const MAX_RETRY_AFTER_SECS: u64 = 300;
 /// Buffer in seconds before token expiry to trigger refresh.
 const TOKEN_EXPIRY_BUFFER_SECS: u64 = 60;
 
@@ -127,12 +126,7 @@ impl TeamsClient {
         validate_service_url(service_url)?;
         let base = ensure_trailing_slash(service_url);
 
-        let chunks = chunker::chunk_text(text, MESSAGE_CHUNK_SIZE);
-        let chunks = if chunks.is_empty() {
-            vec![text.to_string()]
-        } else {
-            chunks
-        };
+        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
 
         for chunk in &chunks {
             let url = format!("{base}v3/conversations/{conversation_id}/activities/{activity_id}");
@@ -154,12 +148,7 @@ impl TeamsClient {
         validate_service_url(service_url)?;
         let base = ensure_trailing_slash(service_url);
 
-        let chunks = chunker::chunk_text(text, MESSAGE_CHUNK_SIZE);
-        let chunks = if chunks.is_empty() {
-            vec![text.to_string()]
-        } else {
-            chunks
-        };
+        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
 
         for chunk in &chunks {
             let url = format!("{base}v3/conversations/{conversation_id}/activities");
@@ -172,55 +161,30 @@ impl TeamsClient {
 
     /// Send a single request with 429 retry logic.
     async fn send_with_retry(&self, url: &str, body: &ReplyActivity) -> Result<()> {
-        let mut attempts = 0u32;
+        let policy = RateLimitPolicy {
+            service_name: "Teams",
+            ..RateLimitPolicy::default()
+        };
 
-        loop {
+        let resp = send_with_rate_limit_retry(&policy, || async {
             let token = self.get_token().await?;
-
-            let resp = self
-                .client
+            self.client
                 .post(url)
                 .bearer_auth(&token)
                 .json(body)
                 .send()
                 .await
-                .context("Failed to send Teams message")?;
+                .context("Failed to send Teams message")
+        })
+        .await?;
 
-            let status = resp.status();
-
-            if status.is_success() {
-                return Ok(());
-            }
-
-            // Handle 429 rate limiting
-            if status.as_u16() == 429 {
-                attempts += 1;
-                if attempts > MAX_RETRIES {
-                    bail!("Teams API rate limited after {MAX_RETRIES} retries");
-                }
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(1);
-                let capped = retry_after.min(MAX_RETRY_AFTER_SECS);
-                warn!(
-                    "Teams rate limited, retry after {capped}s (attempt {attempts}/{MAX_RETRIES})"
-                );
-                tokio::time::sleep(Duration::from_secs(capped)).await;
-                continue;
-            }
-
-            let error_body = match resp.text().await {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!("Failed to read Teams error response body: {e}");
-                    String::new()
-                }
-            };
-            bail!("Teams API request failed ({status}): {error_body}");
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
         }
+
+        let error_body = resp.text().await.unwrap_or_default();
+        bail!("Teams API request failed ({status}): {error_body}");
     }
 }
 

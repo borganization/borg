@@ -1129,10 +1129,7 @@ impl Agent {
             self.metrics.tool_duration.record(tool_elapsed, &[]);
 
             // Sanitize tool name for XML embedding to prevent injection
-            let safe_name = name
-                .replace('"', "&quot;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;");
+            let safe_name = crate::xml_util::escape_xml_attr(name);
 
             let msg = match tool_output {
                 ToolOutput::Text(raw_result) => {

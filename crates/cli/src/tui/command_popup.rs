@@ -82,7 +82,7 @@ const COMMANDS: &[SlashCommandDef] = &[
     },
     SlashCommandDef {
         name: "/restart",
-        description: "Restart gateway and services",
+        description: "Restart services",
     },
     SlashCommandDef {
         name: "/logs",

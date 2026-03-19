@@ -7,12 +7,11 @@ use tracing::warn;
 
 use super::types::{CreateMessageRequest, CurrentUser, InteractionResponse};
 use crate::chunker;
+use crate::http_retry::RateLimitPolicy;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const MESSAGE_CHUNK_SIZE: usize = 2000;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_RETRIES: u32 = 5;
-const MAX_RETRY_AFTER_SECS: u64 = 300;
 
 /// A client for the Discord REST API.
 #[derive(Clone)]
@@ -89,12 +88,7 @@ impl DiscordClient {
         interaction_token: &str,
         text: &str,
     ) -> Result<()> {
-        let chunks = chunker::chunk_text(text, MESSAGE_CHUNK_SIZE);
-        let chunks = if chunks.is_empty() {
-            vec![text.to_string()]
-        } else {
-            chunks
-        };
+        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
 
         // Edit the original response with the first chunk
         let url = format!(
@@ -122,12 +116,7 @@ impl DiscordClient {
 
     /// Send a message to a channel, chunking at 2000 characters.
     pub async fn send_message(&self, channel_id: &str, text: &str) -> Result<()> {
-        let chunks = chunker::chunk_text(text, MESSAGE_CHUNK_SIZE);
-        let chunks = if chunks.is_empty() {
-            vec![text.to_string()]
-        } else {
-            chunks
-        };
+        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
 
         for chunk in &chunks {
             let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
@@ -147,12 +136,18 @@ impl DiscordClient {
 
     /// Send a request with 429 rate-limit retry logic.
     async fn send_with_retry(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-        let mut attempts = 0u32;
-
         // We need to clone the request for retries. reqwest::RequestBuilder
         // supports try_clone() for requests with cloneable bodies.
         let mut current_request = request;
 
+        let policy = RateLimitPolicy {
+            service_name: "Discord",
+            ..RateLimitPolicy::default()
+        };
+
+        // Discord needs special handling because we must clone the RequestBuilder
+        // before sending, since it's consumed on send.
+        let mut attempts = 0u32;
         loop {
             let cloned = current_request
                 .try_clone()
@@ -166,8 +161,8 @@ impl DiscordClient {
             let status = resp.status();
             if status.as_u16() == 429 {
                 attempts += 1;
-                if attempts > MAX_RETRIES {
-                    bail!("Discord rate limited after {MAX_RETRIES} retries");
+                if attempts > policy.max_retries {
+                    bail!("Discord rate limited after {} retries", policy.max_retries);
                 }
                 let retry_after = resp
                     .headers()
@@ -175,21 +170,18 @@ impl DiscordClient {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(1);
-                let capped = retry_after.min(MAX_RETRY_AFTER_SECS);
-                warn!("Discord rate limited, retry after {capped}s (attempt {attempts}/{MAX_RETRIES})");
+                let capped = retry_after.min(policy.max_retry_after_secs);
+                warn!(
+                    "Discord rate limited, retry after {capped}s (attempt {attempts}/{})",
+                    policy.max_retries
+                );
                 tokio::time::sleep(Duration::from_secs(capped)).await;
                 current_request = cloned;
                 continue;
             }
 
             if !status.is_success() {
-                let body = match resp.text().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        warn!("Failed to read Discord error response body: {e}");
-                        String::new()
-                    }
-                };
+                let body = resp.text().await.unwrap_or_default();
                 bail!("Discord API error ({status}): {body}");
             }
 
