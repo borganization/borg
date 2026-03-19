@@ -947,12 +947,30 @@ impl<'a> App<'a> {
                 }
             }
             AgentEvent::ToolExecuting { name, args } => {
-                self.cells.push(HistoryCell::ToolStart { name, args });
+                self.cells.push(HistoryCell::ToolStart {
+                    name,
+                    args,
+                    completed: false,
+                });
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
             }
             AgentEvent::ToolResult { name, result } => {
+                // Mark matching ToolStart as completed
+                for cell in self.cells.iter_mut().rev() {
+                    if let HistoryCell::ToolStart {
+                        name: ref start_name,
+                        completed,
+                        ..
+                    } = cell
+                    {
+                        if start_name == &name && !*completed {
+                            *completed = true;
+                            break;
+                        }
+                    }
+                }
                 let is_error = result.starts_with("Error:");
                 self.cells.push(HistoryCell::ToolResult {
                     name,
