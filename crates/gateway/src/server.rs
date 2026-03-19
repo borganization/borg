@@ -194,7 +194,7 @@ impl GatewayServer {
 
         let discord_client = match discord_token {
             Some(token) => {
-                let client = DiscordClient::new(&token);
+                let client = DiscordClient::new(&token)?;
                 match client.get_current_user().await {
                     Ok(user) => {
                         info!("Discord native integration active (bot: {})", user.username);
@@ -219,7 +219,7 @@ impl GatewayServer {
                     "Teams native integration active (app: {}...)",
                     &app_id[..app_id.len().min(8)]
                 );
-                Some(Arc::new(TeamsClient::new(app_id, app_secret)))
+                Some(Arc::new(TeamsClient::new(app_id, app_secret)?))
             }
             _ => None,
         };
@@ -232,10 +232,13 @@ impl GatewayServer {
             .config
             .resolve_credential_or_env("GOOGLE_CHAT_WEBHOOK_TOKEN");
 
-        let google_chat_client = google_chat_service_token.map(|token| {
-            info!("Google Chat native integration active");
-            Arc::new(GoogleChatClient::new(&token))
-        });
+        let google_chat_client = match google_chat_service_token {
+            Some(token) => {
+                info!("Google Chat native integration active");
+                Some(Arc::new(GoogleChatClient::new(&token)?))
+            }
+            None => None,
+        };
 
         let state = Arc::new(AppState {
             config: self.config.clone(),

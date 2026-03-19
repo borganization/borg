@@ -22,14 +22,14 @@ pub struct DiscordClient {
 }
 
 impl DiscordClient {
-    pub fn new(token: &str) -> Self {
-        Self {
+    pub fn new(token: &str) -> Result<Self> {
+        Ok(Self {
             client: Client::builder()
                 .timeout(HTTP_TIMEOUT)
                 .build()
-                .unwrap_or_default(),
+                .context("Failed to build Discord HTTP client")?,
             token: token.to_string(),
-        }
+        })
     }
 
     /// Get the current bot user via GET /users/@me.
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn client_construction() {
-        let client = DiscordClient::new("test-token");
+        let client = DiscordClient::new("test-token").unwrap();
         assert_eq!(client.token, "test-token");
     }
 }
