@@ -47,7 +47,7 @@ All integrations are compiled unconditionally into a single binary. iMessage is 
 
 ## Plugins
 
-Plugin marketplace for one-click installation of channel and tool integrations. Plugin files are embedded in the binary via `include_str!` and installed to `~/.borg/channels/` or `~/.borg/tools/`. Categories: Messaging (Telegram, Slack, Discord, Teams, Google Chat, WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). Native integrations (Telegram, Slack, Discord, Teams, Google Chat) are marked `is_native: true` in the catalog — they require only credentials (no template files) and appear in the TUI `/plugins` popup with a "(native)" label.
+Plugin marketplace for one-click installation of channel and tool integrations. Categories: Messaging (Telegram, Slack, Discord, Teams, Google Chat, WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). Native integrations (Telegram, Slack, Discord, Teams, Google Chat) are marked `is_native: true` in the catalog and require only credentials. Non-native plugins use embedded template files installed to `~/.borg/channels/` or `~/.borg/tools/`.
 
 ## Agent Loop
 
