@@ -457,6 +457,16 @@ async fn run_event_loop(
                     }
                 }
             }
+            AppAction::ToggleMouseCapture => {
+                app.mouse_capture = !app.mouse_capture;
+                if app.mouse_capture {
+                    let _ = stdout().execute(EnableMouseCapture);
+                    app.push_system_message("Mouse capture enabled (scroll active).".to_string());
+                } else {
+                    let _ = stdout().execute(DisableMouseCapture);
+                    app.push_system_message("Mouse capture disabled (text selection active).".to_string());
+                }
+            }
             AppAction::LaunchExternalEditor => {
                 let current_text = app.composer.text();
                 // Leave alternate screen and disable raw mode for editor
@@ -469,7 +479,9 @@ async fn run_event_loop(
                 // Restore terminal
                 let _ = enable_raw_mode();
                 let _ = stdout().execute(EnterAlternateScreen);
-                let _ = stdout().execute(EnableMouseCapture);
+                if app.mouse_capture {
+                    let _ = stdout().execute(EnableMouseCapture);
+                }
                 terminal.clear()?;
 
                 match result {
@@ -528,9 +540,20 @@ async fn run_event_loop(
                                             }
 
                                             // Register installed tool/channel
-                                            if let Some(first_tmpl) = def.templates.first() {
-                                                if let Some(item_name) =
-                                                    first_tmpl.relative_path.split('/').next()
+                                            let item_name = if def.is_native {
+                                                def.id.rsplit('/').next().unwrap_or(def.id)
+                                            } else if let Some(first_tmpl) = def.templates.first() {
+                                                first_tmpl
+                                                    .relative_path
+                                                    .split('/')
+                                                    .next()
+                                                    .unwrap_or(def.id)
+                                            } else {
+                                                def.id
+                                            };
+                                            let runtime =
+                                                if def.is_native { "native" } else { "python" };
+                                            {
                                                 {
                                                     match def.kind {
                                                         borg_plugins::PluginKind::Tool => {
@@ -538,7 +561,7 @@ async fn run_event_loop(
                                                                 .insert_installed_tool(
                                                                     item_name,
                                                                     def.description,
-                                                                    "python",
+                                                                    runtime,
                                                                     def.id,
                                                                 )
                                                             {
@@ -554,7 +577,7 @@ async fn run_event_loop(
                                                                 .insert_installed_channel(
                                                                     item_name,
                                                                     def.description,
-                                                                    "python",
+                                                                    runtime,
                                                                     def.id,
                                                                     &webhook,
                                                                 )

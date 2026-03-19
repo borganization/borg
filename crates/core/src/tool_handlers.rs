@@ -629,12 +629,27 @@ pub async fn handle_browser(
             let selector = args.get("selector").and_then(|v| v.as_str());
             match browser.screenshot(selector, timeout).await {
                 Ok((desc, png_bytes)) => {
+                    // Save to disk
+                    let saved_path = Config::data_dir().ok().and_then(|data_dir| {
+                        let dir = data_dir.join("screenshots");
+                        std::fs::create_dir_all(&dir).ok()?;
+                        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%3f");
+                        let path = dir.join(format!("screenshot_{ts}.png"));
+                        std::fs::write(&path, &png_bytes).ok()?;
+                        Some(path)
+                    });
+
+                    let text = match &saved_path {
+                        Some(p) => format!("{desc}\nSaved to: {}", p.display()),
+                        None => desc.clone(),
+                    };
+
                     let b64 = base64::Engine::encode(
                         &base64::engine::general_purpose::STANDARD,
                         &png_bytes,
                     );
                     Ok(ToolOutput::Multimodal {
-                        text: desc.clone(),
+                        text,
                         parts: vec![
                             ContentPart::Text(desc),
                             ContentPart::ImageBase64 {
