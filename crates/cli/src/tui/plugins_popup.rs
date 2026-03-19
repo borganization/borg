@@ -339,11 +339,7 @@ impl PluginsPopup {
             row_indices.push(lines.len());
 
             let check = if item.is_selected { "x" } else { " " };
-            let status = if item.is_installed && !item.is_selected {
-                " (remove)"
-            } else {
-                ""
-            };
+            let status = "";
 
             let platform_note = if let Some(label) = item.def.platform.label() {
                 if !item.def.platform.is_available() {
