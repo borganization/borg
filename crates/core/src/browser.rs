@@ -92,6 +92,10 @@ impl BrowserSession {
         }
 
         if config.no_sandbox {
+            tracing::warn!(
+                "Browser sandbox is disabled (browser.no_sandbox = true). \
+                 This weakens Chrome's process isolation. Only use in container environments."
+            );
             builder = builder.no_sandbox();
         }
 

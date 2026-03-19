@@ -72,7 +72,14 @@ pub struct Config {
     #[serde(default)]
     pub browser: BrowserConfig,
     #[serde(default)]
+    pub audio: AudioConfig,
+    #[serde(default)]
+    pub media: MediaConfig,
+    #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
+    /// Transient identity override (not serialized). Set by gateway routing.
+    #[serde(skip)]
+    pub identity_override: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +135,26 @@ pub struct LlmConfig {
     pub max_retries: u32,
     pub initial_retry_delay_ms: u64,
     pub request_timeout_ms: u64,
+    /// Provider-level failover chain (tried in order when primary provider fails).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback: Vec<LlmFallback>,
+}
+
+/// A fallback provider configuration for provider-level failover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmFallback {
+    pub provider: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<SecretRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<SecretRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +186,9 @@ pub struct MemoryConfig {
     pub max_context_tokens: usize,
     #[serde(default)]
     pub embeddings: EmbeddingsConfig,
+    /// When set, load memory from ~/.borg/memory/scopes/{scope}/ instead of ~/.borg/memory/.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +324,46 @@ pub struct GatewayConfig {
     pub telegram_circuit_failure_threshold: u32,
     pub telegram_circuit_suspension_secs: u64,
     pub telegram_dedup_capacity: usize,
+    /// Per-channel agent routing bindings (first match wins).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<GatewayBinding>,
+}
+
+/// Route a gateway channel to specific agent configuration overrides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayBinding {
+    /// Channel name or glob pattern.
+    pub channel: String,
+    /// Optional sender ID filter (glob pattern).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
+    /// Optional peer kind filter: "direct" or "group".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_kind: Option<String>,
+    /// Override LLM provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Override LLM model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Override API key env var.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Override temperature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Override max tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Custom identity file (relative to ~/.borg/).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    /// Scoped memory directory name (~/.borg/memory/scopes/{name}/).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_scope: Option<String>,
+    /// Per-binding fallback providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback: Vec<LlmFallback>,
 }
 
 fn default_rate_limit() -> u32 {
@@ -314,6 +384,7 @@ impl Default for GatewayConfig {
             telegram_circuit_failure_threshold: constants::TELEGRAM_CIRCUIT_FAILURE_THRESHOLD,
             telegram_circuit_suspension_secs: constants::TELEGRAM_CIRCUIT_SUSPENSION_SECS,
             telegram_dedup_capacity: constants::TELEGRAM_DEDUP_CAPACITY,
+            bindings: Vec::new(),
         }
     }
 }
@@ -341,6 +412,82 @@ fn default_hitl_dangerous_ops() -> bool {
     true
 }
 
+/// Single transcription provider entry (cloud API or local CLI).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioModelConfig {
+    /// Provider name: "openai", "groq", "deepgram".
+    pub provider: String,
+    /// Model name (e.g. "whisper-1", "nova-3").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Override API key env var for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Language hint (BCP-47, e.g. "en").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Per-provider timeout override in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Audio transcription configuration with multi-provider fallback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioConfig {
+    pub enabled: bool,
+    /// Ordered fallback chain of transcription providers.
+    #[serde(default)]
+    pub models: Vec<AudioModelConfig>,
+    /// Maximum audio file size in bytes (default: 20 MB).
+    pub max_file_size: u64,
+    /// Minimum audio file size in bytes (default: 1024).
+    pub min_file_size: u64,
+    /// Global language hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Default timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Echo transcript back to the sender.
+    pub echo_transcript: bool,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            models: Vec::new(),
+            max_file_size: 20 * 1024 * 1024,
+            min_file_size: 1024,
+            language: None,
+            timeout_ms: 60_000,
+            echo_transcript: false,
+        }
+    }
+}
+
+/// Image compression and media processing configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaConfig {
+    /// Max image size in bytes after compression. Default: 6MB (matches OpenClaw).
+    pub max_image_bytes: usize,
+    /// Enable/disable image compression. Default: true.
+    pub compression_enabled: bool,
+    /// Max image dimension in pixels (longest side). Default: 2048.
+    pub max_dimension_px: u32,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            max_image_bytes: 6 * 1024 * 1024,
+            compression_enabled: true,
+            max_dimension_px: 2048,
+        }
+    }
+}
+
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
@@ -354,6 +501,7 @@ impl Default for LlmConfig {
             max_retries: 3,
             initial_retry_delay_ms: 200,
             request_timeout_ms: 60000,
+            fallback: Vec::new(),
         }
     }
 }
@@ -392,6 +540,7 @@ impl Default for MemoryConfig {
         Self {
             max_context_tokens: 8000,
             embeddings: EmbeddingsConfig::default(),
+            memory_scope: None,
         }
     }
 }
@@ -1992,5 +2141,151 @@ max_context_tokens = 6000
         assert_eq!(cfg.memory.max_context_tokens, 6000);
         assert!(cfg.memory.embeddings.enabled);
         assert!(cfg.memory.embeddings.provider.is_none());
+    }
+
+    // ── Feature #11: Provider Failover config tests ──
+
+    #[test]
+    fn parse_llm_fallback_config() {
+        let toml_str = r#"
+[llm]
+provider = "openrouter"
+model = "anthropic/claude-sonnet-4"
+
+[[llm.fallback]]
+provider = "anthropic"
+model = "claude-sonnet-4"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[[llm.fallback]]
+provider = "openai"
+model = "gpt-4.1"
+temperature = 0.5
+max_tokens = 8192
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.llm.fallback.len(), 2);
+        assert_eq!(cfg.llm.fallback[0].provider, "anthropic");
+        assert_eq!(cfg.llm.fallback[0].model, "claude-sonnet-4");
+        assert_eq!(
+            cfg.llm.fallback[0].api_key_env.as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
+        assert_eq!(cfg.llm.fallback[1].provider, "openai");
+        assert_eq!(cfg.llm.fallback[1].model, "gpt-4.1");
+        assert!((cfg.llm.fallback[1].temperature.unwrap() - 0.5).abs() < f32::EPSILON);
+        assert_eq!(cfg.llm.fallback[1].max_tokens, Some(8192));
+    }
+
+    #[test]
+    fn parse_no_fallback_config() {
+        let toml_str = r#"
+[llm]
+model = "test-model"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.llm.fallback.is_empty());
+    }
+
+    // ── Feature #10: Audio config tests ──
+
+    #[test]
+    fn parse_audio_config() {
+        let toml_str = r#"
+[audio]
+enabled = true
+max_file_size = 20971520
+min_file_size = 1024
+language = "en"
+timeout_ms = 60000
+
+[[audio.models]]
+provider = "openai"
+model = "whisper-1"
+
+[[audio.models]]
+provider = "groq"
+model = "whisper-large-v3-turbo"
+api_key_env = "GROQ_API_KEY"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.audio.enabled);
+        assert_eq!(cfg.audio.max_file_size, 20_971_520);
+        assert_eq!(cfg.audio.min_file_size, 1024);
+        assert_eq!(cfg.audio.language.as_deref(), Some("en"));
+        assert_eq!(cfg.audio.timeout_ms, 60_000);
+        assert_eq!(cfg.audio.models.len(), 2);
+        assert_eq!(cfg.audio.models[0].provider, "openai");
+        assert_eq!(cfg.audio.models[0].model.as_deref(), Some("whisper-1"));
+        assert_eq!(cfg.audio.models[1].provider, "groq");
+        assert_eq!(
+            cfg.audio.models[1].api_key_env.as_deref(),
+            Some("GROQ_API_KEY")
+        );
+    }
+
+    #[test]
+    fn audio_config_defaults() {
+        let cfg = AudioConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.models.is_empty());
+        assert_eq!(cfg.max_file_size, 20 * 1024 * 1024);
+        assert_eq!(cfg.min_file_size, 1024);
+        assert!(!cfg.echo_transcript);
+    }
+
+    // ── Feature #12: Gateway bindings config tests ──
+
+    #[test]
+    fn parse_gateway_bindings_config() {
+        let toml_str = r#"
+[[gateway.bindings]]
+channel = "telegram"
+provider = "anthropic"
+model = "claude-sonnet-4"
+identity = "work-identity.md"
+memory_scope = "work"
+
+[[gateway.bindings]]
+channel = "slack"
+sender = "U12345*"
+provider = "openai"
+model = "gpt-4.1"
+temperature = 0.3
+
+[[gateway.bindings]]
+channel = "discord"
+peer_kind = "group"
+memory_scope = "team"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.gateway.bindings.len(), 3);
+
+        assert_eq!(cfg.gateway.bindings[0].channel, "telegram");
+        assert_eq!(
+            cfg.gateway.bindings[0].provider.as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            cfg.gateway.bindings[0].identity.as_deref(),
+            Some("work-identity.md")
+        );
+        assert_eq!(
+            cfg.gateway.bindings[0].memory_scope.as_deref(),
+            Some("work")
+        );
+
+        assert_eq!(cfg.gateway.bindings[1].channel, "slack");
+        assert_eq!(cfg.gateway.bindings[1].sender.as_deref(), Some("U12345*"));
+        assert!((cfg.gateway.bindings[1].temperature.unwrap() - 0.3).abs() < f32::EPSILON);
+
+        assert_eq!(cfg.gateway.bindings[2].channel, "discord");
+        assert_eq!(cfg.gateway.bindings[2].peer_kind.as_deref(), Some("group"));
+    }
+
+    #[test]
+    fn gateway_bindings_empty_by_default() {
+        let cfg = Config::default();
+        assert!(cfg.gateway.bindings.is_empty());
     }
 }

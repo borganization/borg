@@ -103,8 +103,8 @@ pub async fn run_polling(
                     // Extract chat_id for the callback
                     let chat_id = extract_chat_id(&update);
 
-                    // Parse
-                    if let Some(inbound) = parse_update(&update) {
+                    // Parse (parse_update returns (InboundMessage, Option<AudioRef>))
+                    if let Some((inbound, _audio_ref)) = parse_update(&update) {
                         if let Some(cid) = chat_id {
                             callback(inbound, cid).await;
                         }

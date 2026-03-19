@@ -1,12 +1,22 @@
 use super::types::Update;
 use crate::handler::InboundMessage;
 
-/// Extract an `InboundMessage` from a Telegram update.
+/// Reference to an audio file in a Telegram message (for transcription).
+#[derive(Debug, Clone)]
+pub struct TelegramAudioRef {
+    pub file_id: String,
+    pub mime_type: String,
+    pub duration: i32,
+}
+
+/// Extract an `InboundMessage` and optional audio reference from a Telegram update.
 ///
 /// Handles text messages, media messages (photo, document, video, audio, voice, sticker),
 /// edited messages, callback queries, and forum topic routing.
 /// Returns `None` for service messages (forum_topic_created, etc.) and empty updates.
-pub fn parse_update(update: &Update) -> Option<InboundMessage> {
+///
+/// When voice or audio is present, returns a `TelegramAudioRef` for downstream transcription.
+pub fn parse_update(update: &Update) -> Option<(InboundMessage, Option<TelegramAudioRef>)> {
     // Try regular message first, then edited message
     if let Some(msg) = update.message.as_ref().or(update.edited_message.as_ref()) {
         // Skip service messages
@@ -15,6 +25,8 @@ pub fn parse_update(update: &Update) -> Option<InboundMessage> {
         }
 
         // Try text first, then caption, then generate placeholder for media
+        let mut audio_ref = None;
+
         let text = if let Some(ref t) = msg.text {
             if t.is_empty() {
                 return None;
@@ -31,9 +43,19 @@ pub fn parse_update(update: &Update) -> Option<InboundMessage> {
             }
         } else if msg.video.is_some() {
             "[Video]".to_string()
-        } else if msg.audio.is_some() {
+        } else if let Some(ref audio) = msg.audio {
+            audio_ref = Some(TelegramAudioRef {
+                file_id: audio.file_id.clone(),
+                mime_type: "audio/mpeg".to_string(),
+                duration: audio.duration,
+            });
             "[Audio]".to_string()
-        } else if msg.voice.is_some() {
+        } else if let Some(ref voice) = msg.voice {
+            audio_ref = Some(TelegramAudioRef {
+                file_id: voice.file_id.clone(),
+                mime_type: "audio/ogg".to_string(),
+                duration: voice.duration,
+            });
             "[Voice message]".to_string()
         } else if let Some(ref sticker) = msg.sticker {
             match &sticker.emoji {
@@ -53,15 +75,18 @@ pub fn parse_update(update: &Update) -> Option<InboundMessage> {
         let thread_id = msg.message_thread_id.map(|t| t.to_string());
         let message_id = Some(msg.message_id.to_string());
 
-        return Some(InboundMessage {
-            sender_id,
-            text,
-            channel_id: Some(msg.chat.id.to_string()),
-            thread_id,
-            message_id,
-            thread_ts: None,
-            attachments: Vec::new(),
-        });
+        return Some((
+            InboundMessage {
+                sender_id,
+                text,
+                channel_id: Some(msg.chat.id.to_string()),
+                thread_id,
+                message_id,
+                thread_ts: None,
+                attachments: Vec::new(),
+            },
+            audio_ref,
+        ));
     }
 
     // Try callback query
@@ -79,15 +104,18 @@ pub fn parse_update(update: &Update) -> Option<InboundMessage> {
             .map(|t| t.to_string());
         let message_id = cb.message.as_ref().map(|m| m.message_id.to_string());
 
-        return Some(InboundMessage {
-            sender_id: cb.from.id.to_string(),
-            text: data.to_string(),
-            channel_id: chat_id,
-            thread_id,
-            message_id,
-            thread_ts: None,
-            attachments: Vec::new(),
-        });
+        return Some((
+            InboundMessage {
+                sender_id: cb.from.id.to_string(),
+                text: data.to_string(),
+                channel_id: chat_id,
+                thread_id,
+                message_id,
+                thread_ts: None,
+                attachments: Vec::new(),
+            },
+            None,
+        ));
     }
 
     None
@@ -117,11 +145,12 @@ mod tests {
     #[test]
     fn parse_text_message() {
         let update = text_update("Hello bot");
-        let msg = parse_update(&update).unwrap();
+        let (msg, audio) = parse_update(&update).unwrap();
         assert_eq!(msg.sender_id, "42");
         assert_eq!(msg.text, "Hello bot");
         assert_eq!(msg.channel_id.as_deref(), Some("42"));
         assert_eq!(msg.message_id.as_deref(), Some("1"));
+        assert!(audio.is_none());
     }
 
     #[test]
@@ -141,7 +170,7 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, _) = parse_update(&update).unwrap();
         assert_eq!(msg.text, "edited text");
     }
 
@@ -164,10 +193,11 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, audio) = parse_update(&update).unwrap();
         assert_eq!(msg.sender_id, "99");
         assert_eq!(msg.text, "btn_click");
         assert_eq!(msg.channel_id.as_deref(), Some("42"));
+        assert!(audio.is_none());
     }
 
     #[test]
@@ -187,7 +217,7 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, _) = parse_update(&update).unwrap();
         assert_eq!(msg.text, "Look at this!");
     }
 
@@ -207,7 +237,7 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, _) = parse_update(&update).unwrap();
         assert_eq!(msg.text, "[Photo]");
     }
 
@@ -227,12 +257,12 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, _) = parse_update(&update).unwrap();
         assert_eq!(msg.text, "[Document: report.pdf]");
     }
 
     #[test]
-    fn voice_message_placeholder() {
+    fn voice_message_returns_audio_ref() {
         let update: Update = serde_json::from_str(
             r#"{
                 "update_id": 7,
@@ -247,8 +277,12 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, audio) = parse_update(&update).unwrap();
         assert_eq!(msg.text, "[Voice message]");
+        let audio = audio.unwrap();
+        assert_eq!(audio.file_id, "abc");
+        assert_eq!(audio.mime_type, "audio/ogg");
+        assert_eq!(audio.duration, 5);
     }
 
     #[test]
@@ -267,8 +301,32 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, _) = parse_update(&update).unwrap();
         assert!(msg.text.starts_with("[Sticker:"));
+    }
+
+    #[test]
+    fn audio_message_returns_audio_ref() {
+        let update: Update = serde_json::from_str(
+            r#"{
+                "update_id": 12,
+                "message": {
+                    "message_id": 1,
+                    "from": { "id": 42, "first_name": "Alice", "is_bot": false },
+                    "chat": { "id": 42, "type": "private" },
+                    "date": 1700000000,
+                    "audio": { "file_id": "audio123", "file_unique_id": "u1", "duration": 180 }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (msg, audio) = parse_update(&update).unwrap();
+        assert_eq!(msg.text, "[Audio]");
+        let audio = audio.unwrap();
+        assert_eq!(audio.file_id, "audio123");
+        assert_eq!(audio.mime_type, "audio/mpeg");
+        assert_eq!(audio.duration, 180);
     }
 
     #[test]
@@ -307,7 +365,7 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, _) = parse_update(&update).unwrap();
         assert_eq!(msg.thread_id.as_deref(), Some("99"));
         assert_eq!(msg.text, "forum message");
     }
@@ -354,7 +412,7 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, _) = parse_update(&update).unwrap();
         assert_eq!(msg.sender_id, "99");
         assert_eq!(msg.text, "inline_click");
         assert!(msg.channel_id.is_none());
@@ -376,7 +434,7 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, _) = parse_update(&update).unwrap();
         assert_eq!(msg.sender_id, "42");
         assert_eq!(msg.channel_id.as_deref(), Some("-100123"));
     }
@@ -397,27 +455,7 @@ mod tests {
         )
         .unwrap();
 
-        let msg = parse_update(&update).unwrap();
+        let (msg, _) = parse_update(&update).unwrap();
         assert_eq!(msg.text, "[Video]");
-    }
-
-    #[test]
-    fn audio_placeholder() {
-        let update: Update = serde_json::from_str(
-            r#"{
-                "update_id": 12,
-                "message": {
-                    "message_id": 1,
-                    "from": { "id": 42, "first_name": "Alice", "is_bot": false },
-                    "chat": { "id": 42, "type": "private" },
-                    "date": 1700000000,
-                    "audio": { "file_id": "abc", "file_unique_id": "u1", "duration": 180 }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        let msg = parse_update(&update).unwrap();
-        assert_eq!(msg.text, "[Audio]");
     }
 }

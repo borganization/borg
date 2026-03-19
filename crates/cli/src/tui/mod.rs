@@ -125,6 +125,20 @@ pub async fn run() -> Result<()> {
     let metrics = BorgMetrics::from_config(&config);
     let mut agent = Agent::new(config.clone(), metrics.clone())?;
 
+    // Start config hot reload watcher
+    let config_path = Config::data_dir()?.join("config.toml");
+    let _config_watcher =
+        match borg_core::config_watcher::ConfigWatcher::start(config_path, config.clone()) {
+            Ok(watcher) => {
+                agent.set_config_watcher(watcher.subscribe());
+                Some(watcher)
+            }
+            Err(e) => {
+                tracing::warn!("Config watcher failed to start: {e}");
+                None
+            }
+        };
+
     // Try to resume the last session
     let mut resumed_info: Option<(String, usize)> = None;
     if let Ok(Some(session)) = borg_core::session::load_last_session() {

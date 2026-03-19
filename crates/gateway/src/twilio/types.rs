@@ -41,6 +41,12 @@ pub struct TwilioWebhook {
     /// Number of media items attached (SMS/MMS).
     #[serde(default)]
     pub num_media: Option<String>,
+    /// First media URL (for voice/image/video attachments).
+    #[serde(rename = "MediaUrl0", default)]
+    pub media_url_0: Option<String>,
+    /// Content type of the first media attachment.
+    #[serde(rename = "MediaContentType0", default)]
+    pub media_content_type_0: Option<String>,
 }
 
 impl TwilioWebhook {
@@ -67,6 +73,22 @@ impl TwilioWebhook {
     pub fn recipient_number(&self) -> &str {
         self.to.strip_prefix("whatsapp:").unwrap_or(&self.to)
     }
+
+    /// Returns the first media (URL, content-type) if present.
+    pub fn first_media(&self) -> Option<(&str, &str)> {
+        match (&self.media_url_0, &self.media_content_type_0) {
+            (Some(url), Some(ct)) => Some((url, ct)),
+            _ => None,
+        }
+    }
+
+    /// Returns true if the first media attachment is an audio type.
+    pub fn has_audio_media(&self) -> bool {
+        self.media_content_type_0
+            .as_deref()
+            .map(|ct| ct.starts_with("audio/"))
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +104,8 @@ mod tests {
             to: "whatsapp:+14155555678".into(),
             body: "hello".into(),
             num_media: None,
+            media_url_0: None,
+            media_content_type_0: None,
         };
         assert!(wh.is_whatsapp());
         assert_eq!(wh.sender_number(), "+14155551234");
@@ -97,6 +121,8 @@ mod tests {
             to: "+14155555678".into(),
             body: "hello sms".into(),
             num_media: None,
+            media_url_0: None,
+            media_content_type_0: None,
         };
         assert!(!wh.is_whatsapp());
         assert_eq!(wh.sender_number(), "+14155551234");
@@ -112,5 +138,54 @@ mod tests {
     fn channel_type_display() {
         assert_eq!(format!("{}", TwilioChannelType::Sms), "sms");
         assert_eq!(format!("{}", TwilioChannelType::WhatsApp), "whatsapp");
+    }
+
+    #[test]
+    fn has_audio_media_detection() {
+        let wh = TwilioWebhook {
+            message_sid: "SM123".into(),
+            account_sid: "AC123".into(),
+            from: "whatsapp:+14155551234".into(),
+            to: "whatsapp:+14155555678".into(),
+            body: String::new(),
+            num_media: Some("1".into()),
+            media_url_0: Some("https://api.twilio.com/media/123".into()),
+            media_content_type_0: Some("audio/ogg".into()),
+        };
+        assert!(wh.has_audio_media());
+        let (url, ct) = wh.first_media().unwrap();
+        assert!(url.contains("twilio.com"));
+        assert_eq!(ct, "audio/ogg");
+    }
+
+    #[test]
+    fn no_audio_media_for_image() {
+        let wh = TwilioWebhook {
+            message_sid: "SM123".into(),
+            account_sid: "AC123".into(),
+            from: "+14155551234".into(),
+            to: "+14155555678".into(),
+            body: String::new(),
+            num_media: Some("1".into()),
+            media_url_0: Some("https://api.twilio.com/media/456".into()),
+            media_content_type_0: Some("image/jpeg".into()),
+        };
+        assert!(!wh.has_audio_media());
+    }
+
+    #[test]
+    fn no_media_returns_none() {
+        let wh = TwilioWebhook {
+            message_sid: "SM123".into(),
+            account_sid: "AC123".into(),
+            from: "+14155551234".into(),
+            to: "+14155555678".into(),
+            body: "hello".into(),
+            num_media: None,
+            media_url_0: None,
+            media_content_type_0: None,
+        };
+        assert!(!wh.has_audio_media());
+        assert!(wh.first_media().is_none());
     }
 }

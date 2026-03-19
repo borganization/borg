@@ -750,7 +750,7 @@ async fn handle_telegram_webhook(
     body: &str,
 ) -> WebhookResponse {
     let result = tokio::time::timeout(state.request_timeout, async {
-        let inbound = crate::telegram::handle_telegram_webhook(
+        let parsed = crate::telegram::handle_telegram_webhook(
             headers,
             body,
             state.telegram_secret.as_deref(),
@@ -758,10 +758,57 @@ async fn handle_telegram_webhook(
         )
         .await?;
 
-        let inbound = match inbound {
-            Some(msg) => msg,
+        let (mut inbound, audio_ref) = match parsed {
+            Some(pair) => pair,
             None => return Ok::<_, anyhow::Error>("(skipped)".to_string()),
         };
+
+        // Audio transcription: download and transcribe voice/audio messages
+        if let Some(ref audio) = audio_ref {
+            if let Some(transcriber) =
+                borg_core::media_understanding::AudioTranscriber::from_config(&state.config)
+            {
+                match async {
+                    let file_info = tg_client.get_file(&audio.file_id).await?;
+                    let file_path = file_info
+                        .file_path
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("No file_path in getFile response"))?;
+                    let bytes = tg_client.download_file(file_path).await?;
+                    let filename = file_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("audio.ogg")
+                        .to_string();
+                    let lang = state.config.audio.language.as_deref();
+                    transcriber
+                        .transcribe(&bytes, &audio.mime_type, &filename, lang)
+                        .await
+                }
+                .await
+                {
+                    Ok((transcript, _attempts)) => {
+                        inbound.text = format!("[Voice transcript]: {transcript}");
+                        if state.config.audio.echo_transcript {
+                            let echo_chat_id: i64 = inbound
+                                .channel_id
+                                .as_deref()
+                                .and_then(|id| id.parse().ok())
+                                .unwrap_or(0);
+                            if echo_chat_id != 0 {
+                                let _ = tg_client
+                                    .send_message(echo_chat_id, &transcript, None, None, None)
+                                    .await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Audio transcription failed: {e}");
+                        // Keep original placeholder text — graceful degradation
+                    }
+                }
+            }
+        }
 
         let chat_id: i64 = inbound
             .channel_id
@@ -853,8 +900,19 @@ async fn handle_slack_webhook(
         let channel_id = inbound.channel_id.clone().unwrap_or_default();
         let thread_ts = inbound.thread_ts.clone();
 
+        // Start typing indicator with keepalive (non-fatal, background task)
+        let typing = crate::slack::typing::TypingIndicator::start(
+            slack_client.clone(),
+            channel_id.clone(),
+            thread_ts.clone(),
+            inbound.message_id.clone(),
+        );
+
         let (response_text, _session_id) =
             handler::invoke_agent("slack", &inbound, &state.config, Some(&state.health)).await?;
+
+        // Stop keepalive, clear thread status, remove reaction
+        typing.stop().await;
 
         if let Err(e) = slack_client
             .post_message(&channel_id, &response_text, thread_ts.as_deref())
@@ -919,8 +977,14 @@ async fn handle_twilio_webhook(
             }
         } else {
             // Without public_url, we cannot verify Twilio signatures since
-            // the full URL is part of the HMAC input. Log and proceed.
-            warn!("Twilio webhook received without gateway.public_url — signature not verified");
+            // the full URL is part of the HMAC input. Reject the request.
+            warn!("Twilio webhook rejected: gateway.public_url not configured, cannot verify signature");
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({
+                    "error": "Twilio signature verification unavailable: gateway.public_url not configured"
+                })),
+            );
         }
     }
 

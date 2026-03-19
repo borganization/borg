@@ -1,5 +1,6 @@
 use regex::Regex;
 use std::sync::LazyLock;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::constants;
 
@@ -101,7 +102,9 @@ pub fn scan_for_injection(text: &str) -> ThreatLevel {
         return ThreatLevel::Clean;
     }
 
-    let scannable = extract_non_code_regions(text);
+    // Normalize Unicode (NFKC) to defeat homoglyph-based bypass attempts
+    let raw_scannable = extract_non_code_regions(text);
+    let scannable: String = raw_scannable.nfkc().collect();
     let mut total_score: u16 = 0;
     let mut matched_labels: Vec<&'static str> = Vec::new();
 

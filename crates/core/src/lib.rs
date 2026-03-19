@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod browser;
 pub mod config;
+pub mod config_watcher;
 pub mod constants;
 pub mod conversation;
 pub mod db;

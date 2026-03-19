@@ -142,26 +142,37 @@ fn build_retry_policy(channel: &RegisteredChannel) -> RetryPolicy {
 ///
 /// This is the shared core: session resolution, agent creation, message dispatch, response collection.
 /// Used by both script-based channels and native integrations (e.g. Telegram).
+///
+/// Applies gateway routing to select per-channel/sender agent configuration overrides.
 pub async fn invoke_agent(
     channel_name: &str,
     inbound: &InboundMessage,
     config: &Config,
     health: Option<&Arc<RwLock<ChannelHealthRegistry>>>,
 ) -> Result<(String, String)> {
+    // Resolve gateway routing (per-channel/sender config overrides)
+    let route = crate::routing::resolve_route(config, channel_name, &inbound.sender_id, None);
+    let config = &route.config;
+
     info!(
-        "Channel '{}' received message from '{}'",
-        channel_name, inbound.sender_id
+        "Channel '{}' received message from '{}' (route: {})",
+        channel_name, inbound.sender_id, route.matched_by
     );
 
     if let Some(h) = health {
         h.write().await.record_inbound(channel_name);
     }
 
-    // Resolve session — include thread_id in the key for forum topic isolation
+    // Resolve session — include thread_id and binding_id in the key for isolation
     let db = Database::open().context("Failed to open database")?;
-    let session_key = match &inbound.thread_id {
+    let base_key = match &inbound.thread_id {
         Some(tid) => format!("{}:{}", inbound.sender_id, tid),
         None => inbound.sender_id.clone(),
+    };
+    let session_key = if route.binding_id != "default" {
+        format!("{}:{}", route.binding_id, base_key)
+    } else {
+        base_key
     };
     let session_id = db
         .resolve_channel_session(channel_name, &session_key)
@@ -227,15 +238,46 @@ pub async fn invoke_agent(
         }
     };
 
-    let agent_handle = tokio::spawn(async move {
-        agent
-            .send_message_with_cancel(
-                &message_text,
-                event_tx,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await
-    });
+    // Check for image attachments and build multimodal message if present
+    let has_image_attachments = inbound
+        .attachments
+        .iter()
+        .any(|a| a.mime_type.starts_with("image/"));
+
+    let agent_handle = if has_image_attachments {
+        let mut parts = vec![borg_core::types::ContentPart::Text(message_text)];
+        for att in &inbound.attachments {
+            if att.mime_type.starts_with("image/") {
+                parts.push(borg_core::types::ContentPart::ImageBase64 {
+                    media: borg_core::types::MediaData {
+                        mime_type: att.mime_type.clone(),
+                        data: att.data.clone(),
+                        filename: att.filename.clone(),
+                    },
+                });
+            }
+        }
+        // Compress images before sending to agent
+        if config.media.compression_enabled {
+            borg_core::media::compress_content_parts(&mut parts, config.media.max_image_bytes);
+        }
+        let msg = borg_core::types::Message::user_multimodal(parts);
+        tokio::spawn(async move {
+            agent
+                .send_message_raw(msg, event_tx, tokio_util::sync::CancellationToken::new())
+                .await
+        })
+    } else {
+        tokio::spawn(async move {
+            agent
+                .send_message_with_cancel(
+                    &message_text,
+                    event_tx,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+        })
+    };
 
     // Collect the full response text
     let mut response_text = String::new();
@@ -251,10 +293,14 @@ pub async fn invoke_agent(
                 reason,
             } => {
                 warn!("Auto-denying tool confirmation in gateway mode: {tool_name} ({reason})");
+                response_text.push_str(&format!(
+                    "\n[Operation denied: {tool_name} requires confirmation — {reason}]"
+                ));
                 let _ = respond.send(false);
             }
             AgentEvent::ShellConfirmation { respond, command } => {
                 warn!("Auto-denying shell confirmation in gateway mode: {command}");
+                response_text.push_str("\n[Operation denied: shell command requires confirmation]");
                 let _ = respond.send(false);
             }
             _ => {}
