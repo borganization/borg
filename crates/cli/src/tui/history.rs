@@ -23,6 +23,7 @@ pub enum HistoryCell {
     ToolStart {
         name: String,
         args: String,
+        completed: bool,
     },
     ToolResult {
         #[allow(dead_code)]
@@ -75,9 +76,10 @@ impl HistoryCell {
                 let prefix_style =
                     bg.add_modifier(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::DIM);
                 let mention_style = theme::file_mention_style();
+                let w = width as usize;
                 let mut lines = Vec::new();
-                // Top padding
-                lines.push(Line::from("").style(bg));
+                // Top padding (full-width background)
+                lines.push(Line::from(Span::styled(" ".repeat(w), bg)));
                 // Content lines
                 for (i, line) in text.lines().enumerate() {
                     let prefix = if i == 0 {
@@ -86,12 +88,20 @@ impl HistoryCell {
                         Span::styled("  ", bg)
                     };
                     let spans = parse_at_mentions(line, bg, mention_style);
-                    let mut all_spans = vec![prefix];
-                    all_spans.extend(spans);
+                    let mut all_spans = vec![prefix.clone()];
+                    all_spans.extend(spans.clone());
+                    // Calculate used width and pad remainder
+                    let used: usize = std::iter::once(&prefix)
+                        .chain(spans.iter())
+                        .map(|s| s.content.len())
+                        .sum();
+                    if used < w {
+                        all_spans.push(Span::styled(" ".repeat(w - used), bg));
+                    }
                     lines.push(Line::from(all_spans).style(bg));
                 }
-                // Bottom padding
-                lines.push(Line::from("").style(bg));
+                // Bottom padding (full-width background)
+                lines.push(Line::from(Span::styled(" ".repeat(w), bg)));
                 lines
             }
             HistoryCell::Assistant { text, streaming } => {
@@ -135,7 +145,11 @@ impl HistoryCell {
                 }
                 lines
             }
-            HistoryCell::ToolStart { name, args } => {
+            HistoryCell::ToolStart {
+                name,
+                args,
+                completed,
+            } => {
                 let preview = if name == "apply_patch" || name == "apply_skill_patch" {
                     // Hide verbose patch content; just show a short summary
                     let file_count = args.matches("*** Add File:").count()
@@ -151,9 +165,15 @@ impl HistoryCell {
                 } else {
                     args.clone()
                 };
+                let bullet_style = if *completed {
+                    theme::tool_bullet_done()
+                } else {
+                    theme::tool_bullet_active()
+                };
+                let name_style = theme::code_style().add_modifier(ratatui::style::Modifier::BOLD);
                 vec![Line::from(vec![
-                    Span::styled(format!("  {} Running ", theme::BULLET), theme::tool_style()),
-                    Span::styled(name.clone(), theme::tool_style()),
+                    Span::styled(format!("{} ", theme::BULLET), bullet_style),
+                    Span::styled(name.clone(), name_style),
                     Span::styled(format!(" {preview}"), theme::dim()),
                 ])]
             }
@@ -163,7 +183,7 @@ impl HistoryCell {
                 let style = if *is_error {
                     theme::error_style()
                 } else {
-                    theme::success_style()
+                    theme::dim()
                 };
                 let preview_lines: Vec<&str> = output.lines().take(5).collect();
                 let truncated = output.lines().count() > 5;
