@@ -21,7 +21,7 @@ use crate::skills::load_skills_context;
 use crate::telemetry::BorgMetrics;
 use crate::tool_handlers;
 use crate::truncate::truncate_output;
-use crate::types::{FunctionCall, Message, ToolCall, ToolDefinition};
+use crate::types::{ContentPart, FunctionCall, Message, ToolCall, ToolDefinition, ToolOutput};
 use borg_tools::registry::ToolRegistry;
 
 use crate::constants;
@@ -217,6 +217,7 @@ pub struct Agent {
     agent_control: Option<crate::multi_agent::AgentControl>,
     spawn_depth: u32,
     metrics: BorgMetrics,
+    browser_session: Option<crate::browser::BrowserSession>,
 }
 
 impl Agent {
@@ -247,6 +248,7 @@ impl Agent {
             agent_control,
             spawn_depth: 0,
             metrics,
+            browser_session: None,
         })
     }
 
@@ -283,6 +285,7 @@ impl Agent {
             agent_control,
             spawn_depth,
             metrics,
+            browser_session: None,
         })
     }
 
@@ -846,8 +849,9 @@ impl Agent {
             log_message(&assistant_msg);
             self.persist_message(assistant_msg);
 
-            let (sequential, parallel): (Vec<_>, Vec<_>) =
-                tc.iter().partition(|t| t.function.name == "run_shell");
+            let (sequential, parallel): (Vec<_>, Vec<_>) = tc
+                .iter()
+                .partition(|t| t.function.name == "run_shell" || t.function.name == "browser");
 
             self.run_tool_calls(&parallel, &event_tx, &cancel).await;
             self.run_tool_calls(&sequential, &event_tx, &cancel).await;
@@ -947,44 +951,74 @@ impl Agent {
                 .await;
 
             let tool_start = Instant::now();
-            let raw_result = self
+            let tool_output = self
                 .execute_tool(name, args, event_tx)
                 .instrument(info_span!("tool.execute", tool.name = %name))
                 .await
-                .unwrap_or_else(|e| format!("Error: {e}"));
+                .unwrap_or_else(|e| ToolOutput::Text(format!("Error: {e}")));
             let tool_elapsed = tool_start.elapsed().as_secs_f64();
             self.metrics.tool_executions.add(1, &[]);
             self.metrics.tool_duration.record(tool_elapsed, &[]);
-            let truncated = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
-            let redacted = if self.config.security.secret_detection {
-                redact_secrets(&truncated)
-            } else {
-                truncated
-            };
-            let result = format!(
-                "<tool_output name=\"{name}\" trust=\"external\">\n{redacted}\n</tool_output>"
-            );
 
-            // Fire AfterToolCall hook
-            let hook_ctx = HookContext {
-                point: HookPoint::AfterToolCall,
-                session_id: self.session.meta.id.clone(),
-                turn_count: self.turn_count,
-                data: HookData::ToolResult {
-                    name: name.clone(),
-                    result: result.clone(),
-                    is_error: result.starts_with("Error:"),
-                },
+            let msg = match tool_output {
+                ToolOutput::Text(raw_result) => {
+                    let truncated = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
+                    let redacted = if self.config.security.secret_detection {
+                        redact_secrets(&truncated)
+                    } else {
+                        truncated
+                    };
+                    let result = format!(
+                        "<tool_output name=\"{name}\" trust=\"external\">\n{redacted}\n</tool_output>"
+                    );
+                    Self::fire_after_tool_hook(
+                        &mut self.hook_registry,
+                        &self.session.meta.id,
+                        self.turn_count,
+                        name,
+                        &result,
+                    );
+                    let _ = event_tx
+                        .send(AgentEvent::ToolResult {
+                            name: name.clone(),
+                            result: redacted,
+                        })
+                        .await;
+                    Message::tool_result(&tool_call.id, &result)
+                }
+                ToolOutput::Multimodal { text, parts } => {
+                    let truncated = truncate_output(&text, TOOL_OUTPUT_MAX_TOKENS);
+                    let redacted = if self.config.security.secret_detection {
+                        redact_secrets(&truncated)
+                    } else {
+                        truncated
+                    };
+                    let xml_text = format!(
+                        "<tool_output name=\"{name}\" trust=\"external\">\n{redacted}\n</tool_output>"
+                    );
+                    Self::fire_after_tool_hook(
+                        &mut self.hook_registry,
+                        &self.session.meta.id,
+                        self.turn_count,
+                        name,
+                        &xml_text,
+                    );
+                    let _ = event_tx
+                        .send(AgentEvent::ToolResult {
+                            name: name.clone(),
+                            result: redacted,
+                        })
+                        .await;
+                    // Build multimodal message: XML-wrapped text + image parts
+                    let mut msg_parts = vec![ContentPart::Text(xml_text)];
+                    for part in parts {
+                        if !matches!(&part, ContentPart::Text(_)) {
+                            msg_parts.push(part);
+                        }
+                    }
+                    Message::tool_result_multimodal(&tool_call.id, msg_parts)
+                }
             };
-            self.hook_registry.dispatch(&hook_ctx);
-
-            let _ = event_tx
-                .send(AgentEvent::ToolResult {
-                    name: name.clone(),
-                    result: redacted.clone(),
-                })
-                .await;
-            let msg = Message::tool_result(&tool_call.id, &result);
             log_message(&msg);
             self.persist_message(msg);
         }
@@ -995,17 +1029,17 @@ impl Agent {
         name: &str,
         args_json: &str,
         event_tx: &mpsc::Sender<AgentEvent>,
-    ) -> Result<String> {
+    ) -> Result<ToolOutput> {
         let args: serde_json::Value = match serde_json::from_str(args_json) {
             Ok(v) => v,
             Err(e) => {
-                return Ok(format!(
+                return Ok(ToolOutput::Text(format!(
                     "Error: Invalid JSON arguments: {e}. Please provide valid JSON."
-                ));
+                )));
             }
         };
 
-        match name {
+        let text_result: Result<String> = match name {
             "write_memory" => tool_handlers::handle_write_memory(&args),
             "read_memory" => tool_handlers::handle_read_memory(&args),
             "list_tools" => tool_handlers::handle_list_tools(&self.tool_registry),
@@ -1023,6 +1057,14 @@ impl Agent {
             "manage_tasks" => tool_handlers::handle_manage_tasks(&args, &self.config),
             "read_pdf" => tool_handlers::handle_read_pdf(&args),
             "security_audit" => tool_handlers::handle_security_audit(&args, &self.config),
+            "browser" => {
+                return tool_handlers::handle_browser(
+                    &args,
+                    &self.config,
+                    &mut self.browser_session,
+                )
+                .await;
+            }
             "spawn_agent" => {
                 if let Some(ref mut ctrl) = self.agent_control {
                     let history = if args["fork_context"].as_bool().unwrap_or(false) {
@@ -1075,11 +1117,11 @@ impl Agent {
                 if let Some(result) =
                     crate::integrations::dispatch_tool_call(name, &args, &self.config).await
                 {
-                    return result.map_err(|e| anyhow::anyhow!(e));
+                    return result.map(ToolOutput::Text).map_err(|e| anyhow::anyhow!(e));
                 }
 
                 if let Some(block_msg) = check_tool_integrity(name) {
-                    return Ok(block_msg);
+                    return Ok(ToolOutput::Text(block_msg));
                 }
                 tool_handlers::handle_user_tool(
                     name,
@@ -1090,6 +1132,34 @@ impl Agent {
                 )
                 .await
             }
+        };
+        text_result.map(ToolOutput::Text)
+    }
+
+    fn fire_after_tool_hook(
+        hook_registry: &mut HookRegistry,
+        session_id: &str,
+        turn_count: u32,
+        name: &str,
+        result: &str,
+    ) {
+        let hook_ctx = HookContext {
+            point: HookPoint::AfterToolCall,
+            session_id: session_id.to_string(),
+            turn_count,
+            data: HookData::ToolResult {
+                name: name.to_string(),
+                result: result.to_string(),
+                is_error: result.starts_with("Error:"),
+            },
+        };
+        hook_registry.dispatch(&hook_ctx);
+    }
+
+    /// Close the browser session if active.
+    pub async fn close_browser(&mut self) {
+        if let Some(session) = self.browser_session.take() {
+            let _ = session.close().await;
         }
     }
 }
@@ -1331,6 +1401,14 @@ fn requires_confirmation(tool_name: &str, args: Option<&serde_json::Value>) -> O
             }
             None
         }
+        "browser" => {
+            if let Some(args) = args {
+                if args.get("action").and_then(|v| v.as_str()) == Some("evaluate_js") {
+                    return Some("Will execute JavaScript in browser".to_string());
+                }
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -1343,7 +1421,7 @@ fn classify_action(tool_name: &str) -> ActionType {
             ActionType::FileWrite
         }
         "write_memory" => ActionType::MemoryWrite,
-        "web_fetch" | "web_search" => ActionType::WebRequest,
+        "web_fetch" | "web_search" | "browser" => ActionType::WebRequest,
         _ => ActionType::ToolCall,
     }
 }

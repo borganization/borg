@@ -27,7 +27,11 @@ pub(super) fn query_terminal_bg() {
                 if let Some(bg_str) = val.rsplit(';').next() {
                     if let Ok(bg_idx) = bg_str.trim().parse::<u8>() {
                         let is_light = bg_idx == 7 || bg_idx >= 9;
-                        return Some(if is_light { (240, 240, 240) } else { (30, 30, 30) });
+                        return Some(if is_light {
+                            (240, 240, 240)
+                        } else {
+                            (30, 30, 30)
+                        });
                     }
                 }
             }
@@ -88,9 +92,7 @@ fn query_osc11_bg() -> Option<(u8, u8, u8)> {
         }
         total += n;
         // Check for terminator: BEL (\x07) or ST (\x1b\\)
-        if buf[..total].contains(&0x07)
-            || buf[..total].windows(2).any(|w| w == b"\x1b\\")
-        {
+        if buf[..total].contains(&0x07) || buf[..total].windows(2).any(|w| w == b"\x1b\\") {
             break;
         }
     }
@@ -132,10 +134,10 @@ fn parse_osc11_response(data: &[u8]) -> Option<(u8, u8, u8)> {
 fn parse_color_component(s: &str) -> Option<u8> {
     let val = u16::from_str_radix(s, 16).ok()?;
     match s.len() {
-        1 => Some((val * 17) as u8),  // 0xF -> 0xFF
-        2 => Some(val as u8),         // 0xFF -> 0xFF
-        3 => Some((val >> 4) as u8),  // 0xFFF -> 0xFF
-        4 => Some((val >> 8) as u8),  // 0xFFFF -> 0xFF
+        1 => Some((val * 17) as u8), // 0xF -> 0xFF
+        2 => Some(val as u8),        // 0xFF -> 0xFF
+        3 => Some((val >> 4) as u8), // 0xFFF -> 0xFF
+        4 => Some((val >> 8) as u8), // 0xFFFF -> 0xFF
         _ => None,
     }
 }

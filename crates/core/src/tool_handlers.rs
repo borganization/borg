@@ -5,13 +5,14 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::AgentEvent;
+use crate::browser::{validate_browser_args, BrowserSession};
 use crate::config::Config;
 use crate::db::Database;
 use crate::memory::{read_memory, write_memory_scoped, WriteMode};
 use crate::policy::ExecutionPolicy;
 use crate::skills::{load_all_skills, Skill};
 use crate::tasks;
-use crate::types::ToolDefinition;
+use crate::types::{ContentPart, MediaData, ToolDefinition, ToolOutput};
 use crate::web;
 use borg_apply_patch::apply_patch_to_dir;
 use borg_tools::registry::ToolRegistry;
@@ -563,6 +564,112 @@ pub fn update_task_status(task_id: &str, status: &str, verb: &str) -> Result<Str
     }
 }
 
+pub async fn handle_browser(
+    args: &serde_json::Value,
+    config: &Config,
+    session: &mut Option<BrowserSession>,
+) -> Result<ToolOutput> {
+    if !config.browser.enabled {
+        return Ok(ToolOutput::Text(
+            "Browser automation is disabled. Enable it in config: [browser] enabled = true"
+                .to_string(),
+        ));
+    }
+
+    let action = require_str_param(args, "action")?;
+
+    if let Some(err_msg) = validate_browser_args(action, args) {
+        return Ok(ToolOutput::Text(format!("Error: {err_msg}")));
+    }
+
+    // Handle close without needing a session
+    if action == "close" {
+        if let Some(s) = session.take() {
+            s.close().await.ok();
+            return Ok(ToolOutput::Text("Browser closed.".to_string()));
+        }
+        return Ok(ToolOutput::Text("No browser session to close.".to_string()));
+    }
+
+    // Lazy-launch browser session
+    if session.is_none() {
+        match BrowserSession::launch(&config.browser).await {
+            Ok(s) => *session = Some(s),
+            Err(e) => return Ok(ToolOutput::Text(format!("Error launching browser: {e}"))),
+        }
+    }
+
+    let browser = session.as_ref().context("Browser session not available")?;
+    let timeout = Duration::from_millis(config.browser.timeout_ms);
+
+    match action {
+        "navigate" => {
+            let url = require_str_param(args, "url")?;
+            match browser.navigate(url, timeout).await {
+                Ok(msg) => Ok(ToolOutput::Text(msg)),
+                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
+            }
+        }
+        "click" => {
+            let selector = require_str_param(args, "selector")?;
+            match browser.click(selector, timeout).await {
+                Ok(msg) => Ok(ToolOutput::Text(msg)),
+                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
+            }
+        }
+        "type" => {
+            let selector = require_str_param(args, "selector")?;
+            let text = require_str_param(args, "text")?;
+            match browser.type_text(selector, text, timeout).await {
+                Ok(msg) => Ok(ToolOutput::Text(msg)),
+                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
+            }
+        }
+        "screenshot" => {
+            let selector = args.get("selector").and_then(|v| v.as_str());
+            match browser.screenshot(selector, timeout).await {
+                Ok((desc, png_bytes)) => {
+                    let b64 = base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &png_bytes,
+                    );
+                    Ok(ToolOutput::Multimodal {
+                        text: desc.clone(),
+                        parts: vec![
+                            ContentPart::Text(desc),
+                            ContentPart::ImageBase64 {
+                                media: MediaData {
+                                    mime_type: "image/png".to_string(),
+                                    data: b64,
+                                    filename: Some("screenshot.png".to_string()),
+                                },
+                            },
+                        ],
+                    })
+                }
+                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
+            }
+        }
+        "get_text" => {
+            let selector = args.get("selector").and_then(|v| v.as_str());
+            match browser.get_text(selector, timeout).await {
+                Ok(text) => Ok(ToolOutput::Text(text)),
+                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
+            }
+        }
+        "evaluate_js" => {
+            let expression = require_str_param(args, "expression")?;
+            match browser.evaluate_js(expression, timeout).await {
+                Ok(result) => Ok(ToolOutput::Text(result)),
+                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
+            }
+        }
+        _ => Ok(ToolOutput::Text(format!(
+            "Unknown browser action: {action}"
+        ))),
+    }
+}
+
 pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     let mut defs = vec![
         ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'IDENTITY.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories. Use scope='local' to write to project-local memory (.borg/ in CWD).", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false},"scope":{"type":"string","enum":["global","local"],"description":"Memory scope: 'global' (default, ~/.borg/) or 'local' (CWD/.borg/)","default":"global"}},"required":["filename","content"]})),
@@ -584,6 +691,28 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     }
 
     defs.push(ToolDefinition::new("manage_tasks", "Manage scheduled tasks. Actions: create, list, get, update, pause, resume, cancel, delete.", serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["create","list","get","update","pause","resume","cancel","delete"],"description":"Action to perform"},"task_id":{"type":"string","description":"Task ID (required for get/update/pause/resume/cancel/delete)"},"name":{"type":"string","description":"Task name (required for create, optional for update)"},"prompt":{"type":"string","description":"Prompt to execute (required for create, optional for update)"},"schedule_type":{"type":"string","enum":["cron","interval","once"],"description":"Schedule type (required for create, optional for update)"},"schedule_expr":{"type":"string","description":"Cron expression or interval (required for create, optional for update)"},"timezone":{"type":"string","description":"Timezone (default: local)"}},"required":["action"]})));
+
+    if config.browser.enabled {
+        defs.push(ToolDefinition::new(
+            "browser",
+            "Control a headless Chrome browser. Actions: navigate (go to URL), click (CSS selector), type (type text into element), screenshot (capture page or element), get_text (extract text), evaluate_js (run JavaScript), close (shut down browser).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["navigate", "click", "type", "screenshot", "get_text", "evaluate_js", "close"],
+                        "description": "Browser action to perform"
+                    },
+                    "url": { "type": "string", "description": "URL to navigate to (for navigate)" },
+                    "selector": { "type": "string", "description": "CSS selector (for click, type, get_text, screenshot)" },
+                    "text": { "type": "string", "description": "Text to type (for type action)" },
+                    "expression": { "type": "string", "description": "JavaScript expression (for evaluate_js)" }
+                },
+                "required": ["action"]
+            }),
+        ));
+    }
 
     if config.security.host_audit {
         defs.push(ToolDefinition::new(

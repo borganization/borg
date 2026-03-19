@@ -710,16 +710,17 @@ fn check_browser(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
         ));
     }
 
+    if detection.executable.is_some() {
+        checks.push(DiagnosticCheck::pass(
+            "Browser",
+            "native CDP browser tool available",
+        ));
+    }
+
     if crate::browser::detect_agent_browser() {
         checks.push(DiagnosticCheck::pass(
             "Browser",
-            "agent-browser CLI available",
-        ));
-    } else {
-        checks.push(DiagnosticCheck::warn(
-            "Browser",
-            "agent-browser CLI",
-            "not found — install with: npm i -g agent-browser",
+            "agent-browser CLI also available (legacy)",
         ));
     }
 
