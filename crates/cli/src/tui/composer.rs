@@ -234,12 +234,7 @@ impl<'a> Composer<'a> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.is_single_line()
-            && self
-                .textarea
-                .lines()
-                .first()
-                .map_or(true, |l| l.is_empty())
+        self.is_single_line() && self.textarea.lines().first().is_none_or(String::is_empty)
     }
 
     #[cfg(test)]

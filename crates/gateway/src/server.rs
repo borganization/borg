@@ -149,28 +149,26 @@ impl GatewayServer {
 
         // Initialize native Slack client if token is available
         let slack_client = match slack_token {
-            Some(token) => {
-                match SlackClient::new(&token) {
-                    Ok(client) => match client.auth_test().await {
-                        Ok(resp) => {
-                            info!(
-                                "Slack native integration active (bot: {}, team: {})",
-                                resp.user.as_deref().unwrap_or("unknown"),
-                                resp.team.as_deref().unwrap_or("unknown"),
-                            );
-                            Some(Arc::new(client))
-                        }
-                        Err(e) => {
-                            warn!("SLACK_BOT_TOKEN set but auth.test failed: {e}");
-                            None
-                        }
-                    },
+            Some(token) => match SlackClient::new(&token) {
+                Ok(client) => match client.auth_test().await {
+                    Ok(resp) => {
+                        info!(
+                            "Slack native integration active (bot: {}, team: {})",
+                            resp.user.as_deref().unwrap_or("unknown"),
+                            resp.team.as_deref().unwrap_or("unknown"),
+                        );
+                        Some(Arc::new(client))
+                    }
                     Err(e) => {
-                        warn!("Failed to create Slack HTTP client: {e}");
+                        warn!("SLACK_BOT_TOKEN set but auth.test failed: {e}");
                         None
                     }
+                },
+                Err(e) => {
+                    warn!("Failed to create Slack HTTP client: {e}");
+                    None
                 }
-            }
+            },
             None => None,
         };
 

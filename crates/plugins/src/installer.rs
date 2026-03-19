@@ -31,9 +31,11 @@ pub async fn install(
     // 1. Check prerequisites
     check_prerequisites(def)?;
 
-    // 2. Write template files
-    send_event(progress_tx, InstallEvent::WritingFiles { id: id.clone() }).await;
-    write_templates(def, data_dir)?;
+    // 2. Write template files (skip for native integrations)
+    if !def.is_native {
+        send_event(progress_tx, InstallEvent::WritingFiles { id: id.clone() }).await;
+        write_templates(def, data_dir)?;
+    }
 
     // 3. Store credentials in keychain
     let service = format!("borg-{}", def.id.replace('/', "-"));
@@ -94,23 +96,25 @@ pub async fn install(
 
 /// Uninstall a plugin: delete files and keychain entries.
 pub fn uninstall(def: &PluginDef, data_dir: &std::path::Path) -> Result<()> {
-    // Determine the directory name from the first template
-    let first_tmpl = def.templates.first().context("no templates")?;
-    let dir_name = first_tmpl
-        .relative_path
-        .split('/')
-        .next()
-        .context("empty relative path")?;
+    // Remove template files (skip for native integrations)
+    if !def.is_native {
+        let first_tmpl = def.templates.first().context("no templates")?;
+        let dir_name = first_tmpl
+            .relative_path
+            .split('/')
+            .next()
+            .context("empty relative path")?;
 
-    let target_dir = match first_tmpl.target {
-        TemplateTarget::Channels => data_dir.join("channels").join(dir_name),
-        TemplateTarget::Tools => data_dir.join("tools").join(dir_name),
-    };
+        let target_dir = match first_tmpl.target {
+            TemplateTarget::Channels => data_dir.join("channels").join(dir_name),
+            TemplateTarget::Tools => data_dir.join("tools").join(dir_name),
+        };
 
-    if target_dir.exists() {
-        std::fs::remove_dir_all(&target_dir)
-            .with_context(|| format!("Failed to remove {}", target_dir.display()))?;
-        info!("Removed {}", target_dir.display());
+        if target_dir.exists() {
+            std::fs::remove_dir_all(&target_dir)
+                .with_context(|| format!("Failed to remove {}", target_dir.display()))?;
+            info!("Removed {}", target_dir.display());
+        }
     }
 
     // Remove keychain entries
@@ -123,7 +127,24 @@ pub fn uninstall(def: &PluginDef, data_dir: &std::path::Path) -> Result<()> {
 }
 
 /// Check if an integration is already installed on the filesystem.
-pub fn is_installed(def: &PluginDef, data_dir: &std::path::Path) -> bool {
+///
+/// For native integrations, checks that all required (non-optional) credentials
+/// are available via environment variable or OS keychain.
+pub fn is_installed(def: &PluginDef, _data_dir: &std::path::Path) -> bool {
+    if def.is_native {
+        return def.required_credentials.iter().all(|cred| {
+            if cred.is_optional {
+                return true;
+            }
+            let has_env = std::env::var(cred.key)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            let service = format!("borg-{}", def.id.replace('/', "-"));
+            let account = format!("borg-{}", cred.key);
+            has_env || crate::keychain::check(&service, &account)
+        });
+    }
+
     let first_tmpl = match def.templates.first() {
         Some(t) => t,
         None => return false,
@@ -135,11 +156,11 @@ pub fn is_installed(def: &PluginDef, data_dir: &std::path::Path) -> bool {
     };
 
     let manifest = match first_tmpl.target {
-        TemplateTarget::Channels => data_dir
+        TemplateTarget::Channels => _data_dir
             .join("channels")
             .join(dir_name)
             .join("channel.toml"),
-        TemplateTarget::Tools => data_dir.join("tools").join(dir_name).join("tool.toml"),
+        TemplateTarget::Tools => _data_dir.join("tools").join(dir_name).join("tool.toml"),
     };
 
     manifest.exists()
@@ -341,7 +362,10 @@ mod tests {
 
     #[test]
     fn is_installed_returns_false_for_missing() {
-        let def = &CATALOG[0];
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/whatsapp")
+            .expect("whatsapp in catalog");
         let tmp = std::env::temp_dir().join("borg-test-nonexistent");
         assert!(!is_installed(def, &tmp));
     }
@@ -351,9 +375,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let data_dir = tmp.path();
 
-        // Use the first catalog entry (WhatsApp)
-        let def = &CATALOG[0];
-        assert_eq!(def.id, "messaging/whatsapp");
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/whatsapp")
+            .expect("whatsapp in catalog");
 
         // Write templates
         write_templates(def, data_dir).expect("write");
@@ -377,7 +402,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let data_dir = tmp.path();
 
-        let def = &CATALOG[0];
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/whatsapp")
+            .expect("whatsapp in catalog");
         write_templates(def, data_dir).expect("write");
 
         let hashes = compute_file_hashes(def, data_dir);
@@ -389,7 +417,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let data_dir = tmp.path();
 
-        let def = &CATALOG[0]; // Telegram
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/whatsapp")
+            .expect("whatsapp in catalog");
         let result = install(def, data_dir, &[], None).await.expect("install");
 
         assert!(!result.file_hashes.is_empty());
@@ -404,10 +435,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let data_dir = tmp.path();
 
-        // Use a def that doesn't actually need keychain (we'll pass fake creds that won't be stored)
-        // Actually, we can't easily test store_credential without OS keychain.
-        // So let's just test with empty credentials and verify empty entries
-        let def = &CATALOG[0]; // Telegram
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/whatsapp")
+            .expect("whatsapp in catalog");
         let result = install(def, data_dir, &[], None).await.expect("install");
 
         // No credentials passed = no credential entries
@@ -420,5 +451,64 @@ mod tests {
         assert!(result.notes.is_empty());
         assert!(result.credential_entries.is_empty());
         assert!(result.file_hashes.is_empty());
+    }
+
+    #[test]
+    fn is_installed_native_without_creds() {
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/teams")
+            .expect("teams in catalog");
+        let tmp = std::env::temp_dir().join("borg-test-native-nocreds");
+        unsafe {
+            std::env::remove_var("TEAMS_APP_ID");
+            std::env::remove_var("TEAMS_APP_SECRET");
+        }
+        assert!(!is_installed(def, &tmp));
+    }
+
+    #[test]
+    fn is_installed_native_with_env() {
+        // Use google-chat (single cred) to avoid race with other tests that touch TELEGRAM_BOT_TOKEN
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/google-chat")
+            .expect("google-chat in catalog");
+        let tmp = std::env::temp_dir().join("borg-test-native-env");
+        unsafe {
+            std::env::set_var("GOOGLE_CHAT_WEBHOOK_TOKEN", "test-token-12345");
+        }
+        let result = is_installed(def, &tmp);
+        unsafe {
+            std::env::remove_var("GOOGLE_CHAT_WEBHOOK_TOKEN");
+        }
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn install_native_skips_template_write() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let data_dir = tmp.path();
+
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/telegram")
+            .expect("telegram in catalog");
+        let result = install(def, data_dir, &[], None).await.expect("install");
+
+        assert!(result.file_hashes.is_empty());
+        // No template directories should have been created
+        assert!(!data_dir.join("channels").join("telegram").exists());
+    }
+
+    #[test]
+    fn uninstall_native_succeeds_without_files() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/telegram")
+            .expect("telegram in catalog");
+        let result = uninstall(def, tmp.path());
+        assert!(result.is_ok());
     }
 }
