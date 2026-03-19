@@ -7,7 +7,7 @@ Borg is a Cargo workspace with six crates. Each crate has a focused responsibili
 ```
 crates/
 ├── cli/          # Binary: REPL, TUI, clap args, heartbeat display, daemon/service
-├── core/         # Library: agent loop, multi-provider LLM client, memory, soul, config
+├── core/         # Library: agent loop, multi-provider LLM client, memory, identity, config
 ├── heartbeat/    # Library: proactive scheduler with quiet hours + dedup
 ├── tools/        # Library: tool manifest parsing, registry, subprocess executor
 ├── sandbox/      # Library: macOS Seatbelt + Linux Bubblewrap policies
@@ -29,7 +29,7 @@ The heart of the project. Contains:
 - **Provider** (`provider.rs`) — provider enum, auto-detection from available API keys, and request/header configuration.
 - **Config** (`config.rs`) — TOML configuration with serde defaults for every field. 13 config sections.
 - **Memory** (`memory.rs`) — loads `MEMORY.md` and `memory/*.md` files into the system prompt, respecting a token budget.
-- **Soul** (`soul.rs`) — loads and saves `SOUL.md`, the agent's personality prompt.
+- **Identity** (`identity.rs`) — loads and saves `IDENTITY.md`, the agent's personality prompt.
 - **Skills** (`skills.rs`) — loads built-in and user skills, checks requirements, and formats them for the system prompt.
 - **Types** (`types.rs`) — shared types: `Message`, `ToolCall`, `ToolDefinition`, `Role`.
 - **Session** (`session.rs`) — session persistence with JSON serialization, auto-save, and auto-titling.
@@ -103,7 +103,7 @@ User input
 
 Each turn, the agent builds a system prompt by concatenating:
 
-1. **SOUL.md** — personality and behavioral instructions
+1. **IDENTITY.md** — personality and behavioral instructions
 2. **Current time** — `YYYY-MM-DD HH:MM:SS TZ`
 3. **Memory context** — `MEMORY.md` + `memory/*.md` (sorted by recency, within token budget)
 4. **Skills context** — available skills formatted for the LLM (within token budget)

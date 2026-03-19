@@ -362,9 +362,6 @@ fn init_data_dir() -> Result<()> {
     // Run interactive onboarding wizard
     match onboarding::run_onboarding()? {
         Some(result) => {
-            let has_api_key = result.api_key.is_some();
-            let provider: borg_core::provider::Provider = result.provider.parse()?;
-            let env_var = provider.default_env_var();
             onboarding::apply_onboarding(&result)?;
 
             // Auto-start daemon service after successful onboarding (non-fatal)
@@ -375,14 +372,7 @@ fn init_data_dir() -> Result<()> {
             println!();
             println!("Initialized {}", data_dir.display());
             println!();
-            if has_api_key {
-                println!("You're all set! Run `borg` to start chatting.");
-            } else {
-                println!("You're all set! Run `borg` to start chatting.");
-                println!();
-                println!("Note: You'll need to set {env_var} before chatting.");
-                println!("  Add it to {}", data_dir.join(".env").display());
-            }
+            println!("You're all set! Run `borg` to start chatting.");
         }
         None => {
             // User cancelled — fall back to defaults so the directory is still usable
@@ -395,7 +385,7 @@ fn init_data_dir() -> Result<()> {
 }
 
 /// Set `~/.borg/` to mode 0700 so only the owner can access it.
-/// This protects SOUL.md, memory, config, conversation logs, and API key env files.
+/// This protects IDENTITY.md, memory, config, conversation logs, and API key env files.
 #[cfg(unix)]
 fn harden_data_dir(data_dir: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -709,11 +699,18 @@ fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
         println!("  Created {}", config_path.display());
     }
 
-    let soul_path = data_dir.join("SOUL.md");
-    if !soul_path.exists() {
-        let soul = borg_core::soul::load_soul()?;
-        borg_core::soul::save_soul(&soul)?;
-        println!("  Created {}", soul_path.display());
+    // Migrate SOUL.md → IDENTITY.md for existing users
+    let old_identity = data_dir.join("SOUL.md");
+    let new_identity = data_dir.join("IDENTITY.md");
+    if old_identity.exists() && !new_identity.exists() {
+        std::fs::rename(&old_identity, &new_identity)?;
+    }
+
+    let identity_path = data_dir.join("IDENTITY.md");
+    if !identity_path.exists() {
+        let identity = borg_core::identity::load_identity()?;
+        borg_core::identity::save_identity(&identity)?;
+        println!("  Created {}", identity_path.display());
     }
 
     let memory_path = data_dir.join("MEMORY.md");

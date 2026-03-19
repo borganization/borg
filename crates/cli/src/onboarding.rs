@@ -54,14 +54,14 @@ pub(crate) const GEMINI_MODELS: &[(&str, &str)] = &[
 pub(crate) struct PersonalityStyle {
     pub(crate) name: &'static str,
     pub(crate) description: &'static str,
-    pub(crate) soul_snippet: &'static str,
+    pub(crate) identity_snippet: &'static str,
 }
 
 pub(crate) const STYLES: &[PersonalityStyle] = &[
     PersonalityStyle {
         name: "Professional",
         description: "Clear, direct, business-appropriate tone",
-        soul_snippet: r#"## Communication Style
+        identity_snippet: r#"## Communication Style
 - Professional and direct — no fluff, no filler
 - Use structured responses with headers and bullet points when helpful
 - Maintain a polished, business-appropriate tone
@@ -71,7 +71,7 @@ pub(crate) const STYLES: &[PersonalityStyle] = &[
     PersonalityStyle {
         name: "Casual",
         description: "Friendly, relaxed, conversational",
-        soul_snippet: r#"## Communication Style
+        identity_snippet: r#"## Communication Style
 - Casual and conversational — talk like a helpful friend
 - Use natural language, contractions, and a relaxed tone
 - Keep things light and approachable
@@ -81,7 +81,7 @@ pub(crate) const STYLES: &[PersonalityStyle] = &[
     PersonalityStyle {
         name: "Snarky",
         description: "Witty, dry humor, still helpful",
-        soul_snippet: r#"## Communication Style
+        identity_snippet: r#"## Communication Style
 - Witty and dry — deliver help with a side of personality
 - Use sarcasm sparingly but effectively (never mean-spirited)
 - Keep a slightly irreverent tone while still being genuinely useful
@@ -91,7 +91,7 @@ pub(crate) const STYLES: &[PersonalityStyle] = &[
     PersonalityStyle {
         name: "Nurturing",
         description: "Encouraging, patient, supportive mentor",
-        soul_snippet: r#"## Communication Style
+        identity_snippet: r#"## Communication Style
 - Warm, patient, and encouraging — like a great mentor
 - Celebrate progress and acknowledge effort
 - Break down complex topics gently, never condescend
@@ -101,7 +101,7 @@ pub(crate) const STYLES: &[PersonalityStyle] = &[
     PersonalityStyle {
         name: "Minimal",
         description: "Terse, to the point, no frills",
-        soul_snippet: r#"## Communication Style
+        identity_snippet: r#"## Communication Style
 - Maximum brevity — say it in as few words as possible
 - Skip pleasantries, greetings, and filler
 - Use code and commands over prose when possible
@@ -164,8 +164,8 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
     crate::onboarding_tui::run()
 }
 
-/// Generate SOUL.md content from onboarding choices.
-pub fn generate_soul(name: &str, style_index: usize, owner_name: &str) -> Result<String> {
+/// Generate IDENTITY.md content from onboarding choices.
+pub fn generate_identity(name: &str, style_index: usize, owner_name: &str) -> Result<String> {
     let style = STYLES
         .get(style_index)
         .ok_or_else(|| anyhow::anyhow!("invalid style index {style_index}"))?;
@@ -194,7 +194,7 @@ You are {name}, a helpful AI personal assistant. You belong to {owner_name} and 
 - Respect the user's time and attention
 "#,
         name = name,
-        style_snippet = style.soul_snippet,
+        style_snippet = style.identity_snippet,
     ))
 }
 
@@ -213,13 +213,13 @@ pub(crate) fn format_number(n: u64) -> String {
 
 /// Check if a system keychain is available for secret storage.
 pub(crate) fn keychain_available() -> bool {
-    borg_customizations::keychain::available()
+    borg_plugins::keychain::available()
 }
 
 /// Store an API key in the OS keychain.
 fn store_in_keychain(provider_id: &str, api_key: &str) -> Result<()> {
     let service_name = format!("borg-{provider_id}");
-    borg_customizations::keychain::store(&service_name, "borg", api_key)
+    borg_plugins::keychain::store(&service_name, "borg", api_key)
 }
 
 /// Validate that a model ID is safe for TOML interpolation (alphanumeric, slashes, hyphens, dots).
@@ -308,7 +308,7 @@ warning_threshold = 0.8
     ))
 }
 
-/// Apply onboarding results: create directories, write config and soul files.
+/// Apply onboarding results: create directories, write config and identity files.
 pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     let data_dir = Config::data_dir()?;
 
@@ -341,15 +341,15 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
         println!("  Created {}", config_path.display());
     }
 
-    // Write SOUL.md (skip if already exists)
-    let soul_path = data_dir.join("SOUL.md");
-    if soul_path.exists() {
-        println!("  Skipped {} (already exists)", soul_path.display());
+    // Write IDENTITY.md (skip if already exists)
+    let identity_path = data_dir.join("IDENTITY.md");
+    if identity_path.exists() {
+        println!("  Skipped {} (already exists)", identity_path.display());
     } else {
-        let soul_content =
-            generate_soul(&result.agent_name, result.style_index, &result.user_name)?;
-        std::fs::write(&soul_path, &soul_content)?;
-        println!("  Created {}", soul_path.display());
+        let identity_content =
+            generate_identity(&result.agent_name, result.style_index, &result.user_name)?;
+        std::fs::write(&identity_path, &identity_content)?;
+        println!("  Created {}", identity_path.display());
     }
 
     // Write MEMORY.md (skip if already exists)
@@ -418,26 +418,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generate_soul_contains_name_and_style() {
-        let soul = generate_soul("Buddy", 0, "Mike").expect("valid style index");
-        assert!(soul.contains("# Buddy — Your AI Personal Assistant"));
-        assert!(soul.contains("You are Buddy"));
-        assert!(soul.contains("You belong to Mike"));
-        assert!(soul.contains("## Communication Style"));
-        assert!(soul.contains("Professional and direct"));
+    fn generate_identity_contains_name_and_style() {
+        let identity = generate_identity("Buddy", 0, "Mike").expect("valid style index");
+        assert!(identity.contains("# Buddy — Your AI Personal Assistant"));
+        assert!(identity.contains("You are Buddy"));
+        assert!(identity.contains("You belong to Mike"));
+        assert!(identity.contains("## Communication Style"));
+        assert!(identity.contains("Professional and direct"));
     }
 
     #[test]
-    fn generate_soul_all_styles_valid() {
+    fn generate_identity_all_styles_valid() {
         for i in 0..STYLES.len() {
-            let soul = generate_soul("Test", i, "Owner").expect("valid style index");
-            assert!(soul.contains(STYLES[i].name) || soul.contains("Communication Style"));
+            let identity = generate_identity("Test", i, "Owner").expect("valid style index");
+            assert!(identity.contains(STYLES[i].name) || identity.contains("Communication Style"));
         }
     }
 
     #[test]
-    fn generate_soul_invalid_index_errors() {
-        assert!(generate_soul("Test", 999, "Owner").is_err());
+    fn generate_identity_invalid_index_errors() {
+        assert!(generate_identity("Test", 999, "Owner").is_err());
     }
 
     #[test]

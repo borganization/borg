@@ -17,7 +17,7 @@ use crate::rate_guard::{ActionType, RateDecision, SessionRateGuard};
 use crate::secrets::redact_secrets;
 use crate::session::Session;
 use crate::skills::load_skills_context;
-use crate::soul::load_soul;
+use crate::identity::load_identity;
 use crate::telemetry::BorgMetrics;
 use crate::tool_handlers;
 use crate::truncate::truncate_output;
@@ -47,10 +47,10 @@ const SECURITY_POLICY: &str = "\
 - Before executing destructive operations (DROP DATABASE, rm -rf, format disk), always confirm with the user.
 - Never encode sensitive data (API keys, passwords) into URLs, tool arguments, or outbound messages unless explicitly requested for a legitimate purpose.";
 
-/// Check integrity of a customization-installed tool. Returns a block message if tampered.
+/// Check integrity of a plugin-installed tool. Returns a block message if tampered.
 fn check_tool_integrity(name: &str) -> Option<String> {
     let db = Database::open().ok()?;
-    let cust_id = db.get_tool_customization_id(name).ok()??;
+    let cust_id = db.get_tool_plugin_id(name).ok()??;
     let data_dir = Config::data_dir().ok()?;
     let result = crate::integrity::verify_integrity(&db, &cust_id, &data_dir).ok()?;
     if result.ok {
@@ -58,7 +58,7 @@ fn check_tool_integrity(name: &str) -> Option<String> {
     }
     let tampered_files = [&result.tampered[..], &result.missing[..]].concat();
     Some(format!(
-        "Blocked: tool '{name}' failed integrity check. Tampered files: {}. Re-install via /customize to fix.",
+        "Blocked: tool '{name}' failed integrity check. Tampered files: {}. Re-install via /plugins to fix.",
         tampered_files.join(", ")
     ))
 }
@@ -396,11 +396,11 @@ impl Agent {
 
     #[instrument(skip_all)]
     fn build_system_prompt(&self) -> Result<String> {
-        let soul = load_soul()?;
+        let identity = load_identity()?;
         let memory = load_memory_context(self.config.memory.max_context_tokens)?;
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
 
-        let mut system = format!("<system_instructions>\n{soul}\n</system_instructions>\n\n");
+        let mut system = format!("<system_instructions>\n{identity}\n</system_instructions>\n\n");
 
         // Environment section
         system.push_str("<environment>\n");
@@ -1220,11 +1220,11 @@ mod tests {
     }
 
     #[test]
-    fn requires_confirmation_write_memory_soul() {
-        let args = serde_json::json!({"filename": "SOUL.md", "content": "new personality"});
+    fn requires_confirmation_write_memory_identity() {
+        let args = serde_json::json!({"filename": "IDENTITY.md", "content": "new personality"});
         let result = requires_confirmation("write_memory", Some(&args));
         assert!(result.is_some());
-        assert!(result.unwrap().contains("SOUL.md"));
+        assert!(result.unwrap().contains("IDENTITY.md"));
     }
 
     #[test]
@@ -1307,8 +1307,8 @@ fn requires_confirmation(tool_name: &str, args: Option<&serde_json::Value>) -> O
         }
         "write_memory" => {
             if let Some(args) = args {
-                if args.get("filename").and_then(|v| v.as_str()) == Some("SOUL.md") {
-                    return Some("Will modify agent personality (SOUL.md)".to_string());
+                if args.get("filename").and_then(|v| v.as_str()) == Some("IDENTITY.md") {
+                    return Some("Will modify agent identity (IDENTITY.md)".to_string());
                 }
             }
             None
