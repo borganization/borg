@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use borg_core::agent::AgentEvent;
 use borg_core::config::Config;
 use borg_heartbeat::scheduler::HeartbeatEvent;
+use throbber_widgets_tui::{Throbber, ThrobberState, BRAILLE_EIGHT};
 
 use super::command_popup::CommandPopup;
 use super::composer::Composer;
@@ -22,7 +23,6 @@ use super::plan_overlay::{PlanOption, PlanOverlay};
 use super::plugins_popup::{PluginAction, PluginsPopup};
 use super::schedule_popup::{ScheduleAction, SchedulePopup};
 use super::settings_popup::SettingsPopup;
-use super::spinner;
 use super::theme;
 
 pub enum AppState {
@@ -98,6 +98,7 @@ pub struct App<'a> {
     pub plan_overlay: PlanOverlay,
     pub plan_mode: bool,
     pub schedule_popup: SchedulePopup,
+    pub throbber_state: ThrobberState,
 }
 
 impl<'a> App<'a> {
@@ -124,6 +125,13 @@ impl<'a> App<'a> {
             plan_overlay: PlanOverlay::new(),
             plan_mode: false,
             schedule_popup: SchedulePopup::new(),
+            throbber_state: ThrobberState::default(),
+        }
+    }
+
+    pub fn tick_throbber(&mut self) {
+        if !matches!(self.state, AppState::Idle) {
+            self.throbber_state.calc_next();
         }
     }
 
@@ -1024,8 +1032,8 @@ impl<'a> App<'a> {
         let width = area.width;
         let mut all_lines: Vec<Line<'static>> = Vec::new();
 
-        let stream_elapsed = match &self.state {
-            AppState::Streaming { start, .. } => Some(start.elapsed()),
+        let throbber_state = match &self.state {
+            AppState::Streaming { .. } => Some(&self.throbber_state),
             _ => None,
         };
 
@@ -1044,7 +1052,7 @@ impl<'a> App<'a> {
         }
 
         for cell in &self.cells {
-            all_lines.extend(cell.render(width, stream_elapsed));
+            all_lines.extend(cell.render(width, throbber_state));
         }
 
         self.total_lines = all_lines.len();
@@ -1077,12 +1085,14 @@ impl<'a> App<'a> {
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         let line = match &self.state {
             AppState::Streaming { start, .. } => {
-                let elapsed_dur = start.elapsed();
-                let elapsed_secs = elapsed_dur.as_secs();
+                let elapsed_secs = start.elapsed().as_secs();
+                let throbber = Throbber::default()
+                    .throbber_set(BRAILLE_EIGHT)
+                    .throbber_style(theme::tool_style());
                 Line::from(vec![
                     Span::raw(" "),
-                    spinner::status_spinner_frame(elapsed_dur),
-                    Span::styled(format!(" Working ({elapsed_secs}s"), theme::tool_style()),
+                    throbber.to_symbol_span(&self.throbber_state),
+                    Span::styled(format!("Working ({elapsed_secs}s"), theme::tool_style()),
                     Span::styled(" • esc to interrupt)", theme::dim()),
                 ])
             }

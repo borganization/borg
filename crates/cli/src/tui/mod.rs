@@ -1,4 +1,5 @@
 mod app;
+mod colors;
 mod command_popup;
 mod composer;
 mod external_editor;
@@ -9,7 +10,6 @@ mod plan_overlay;
 mod plugins_popup;
 mod schedule_popup;
 mod settings_popup;
-mod spinner;
 pub(crate) mod theme;
 
 use std::io::stdout;
@@ -156,6 +156,10 @@ pub async fn run() -> Result<()> {
     spawn_gateway(&config, gateway_shutdown_token.clone(), metrics.clone());
     let gateway_shutdown = Arc::new(Mutex::new(gateway_shutdown_token));
 
+    // Query terminal background before entering alt screen (some terminals
+    // don't respond to the query inside alternate screen).
+    colors::query_terminal_bg();
+
     // Setup terminal
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -272,8 +276,9 @@ async fn run_event_loop(
                 }
             }
 
-            // Tick for status bar elapsed time
+            // Tick for status bar elapsed time + throbber animation
             _ = tick_interval.tick() => {
+                app.tick_throbber();
                 AppAction::Continue
             }
         };
