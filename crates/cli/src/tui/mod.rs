@@ -154,12 +154,15 @@ pub async fn run() -> Result<()> {
     let agent = Arc::new(Mutex::new(agent));
 
     // Start heartbeat if enabled
+    let heartbeat_cancel = CancellationToken::new();
+    let _heartbeat_guard = heartbeat_cancel.clone().drop_guard();
     let heartbeat_rx = if config.heartbeat.enabled {
         let (hb_tx, hb_rx) = mpsc::channel::<HeartbeatEvent>(32);
         let llm = borg_core::llm::LlmClient::new(config.clone())?;
         let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), llm);
+        let hb_cancel = heartbeat_cancel.clone();
         tokio::spawn(async move {
-            scheduler.run(hb_tx).await;
+            scheduler.run(hb_tx, hb_cancel).await;
         });
         Some(hb_rx)
     } else {

@@ -261,7 +261,13 @@ impl Database {
 
     fn schema_version(&self) -> Result<u32> {
         match self.get_meta("schema_version")? {
-            Some(v) => Ok(v.parse().unwrap_or(0)),
+            Some(v) => match v.parse() {
+                Ok(n) => Ok(n),
+                Err(_) => {
+                    tracing::warn!("Corrupted schema_version '{v}', treating as 0");
+                    Ok(0)
+                }
+            },
             None => {
                 // Check if tables already exist (pre-versioning database)
                 let mut stmt = self.conn.prepare(
@@ -917,9 +923,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn claim_pending_deliveries(&self, limit: u32) -> Result<Vec<DeliveryRow>> {
+    pub fn claim_pending_deliveries(&mut self, limit: u32) -> Result<Vec<DeliveryRow>> {
         let now = chrono::Utc::now().timestamp();
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.conn.transaction()?;
 
         let mut stmt = tx.prepare(
             "SELECT id, channel_name, sender_id, channel_id, session_id, payload_json, status, retry_count, max_retries, next_retry_at, created_at, updated_at, error
@@ -2329,7 +2335,7 @@ mod tests {
 
     #[test]
     fn delivery_queue_enqueue_and_claim() {
-        let db = test_db();
+        let mut db = test_db();
         db.enqueue_delivery(&new_delivery(
             "d1",
             "slack",
@@ -2357,7 +2363,7 @@ mod tests {
 
     #[test]
     fn delivery_queue_mark_delivered() {
-        let db = test_db();
+        let mut db = test_db();
         db.enqueue_delivery(&new_delivery("d1", "slack", "user1", None, "{}", 3))
             .unwrap();
         let claimed = db.claim_pending_deliveries(10).unwrap();
@@ -2372,7 +2378,7 @@ mod tests {
 
     #[test]
     fn delivery_queue_mark_failed_with_retry() {
-        let db = test_db();
+        let mut db = test_db();
         db.enqueue_delivery(&new_delivery("d1", "slack", "user1", None, "{}", 3))
             .unwrap();
         let _ = db.claim_pending_deliveries(10).unwrap();
@@ -2387,7 +2393,7 @@ mod tests {
 
     #[test]
     fn mark_failed_no_next_retry_immediately_reclaimable() {
-        let db = test_db();
+        let mut db = test_db();
         db.enqueue_delivery(&new_delivery("d1", "slack", "user1", None, "{}", 3))
             .unwrap();
         let _ = db.claim_pending_deliveries(10).unwrap();
@@ -2402,7 +2408,7 @@ mod tests {
 
     #[test]
     fn claim_pending_deliveries_respects_limit() {
-        let db = test_db();
+        let mut db = test_db();
         db.enqueue_delivery(&new_delivery("d1", "slack", "u1", None, "{}", 3))
             .unwrap();
         db.enqueue_delivery(&new_delivery("d2", "slack", "u2", None, "{}", 3))
@@ -2468,7 +2474,7 @@ mod tests {
 
     #[test]
     fn delivery_queue_replay_unfinished() {
-        let db = test_db();
+        let mut db = test_db();
         db.enqueue_delivery(&new_delivery("d1", "slack", "user1", None, "{}", 3))
             .unwrap();
         let _ = db.claim_pending_deliveries(10).unwrap();

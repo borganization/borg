@@ -7,6 +7,7 @@ use tracing::{info, warn};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 const QUEUE_CAPACITY: usize = 64;
+const MAX_ACTIVE_CHATS: usize = 10_000;
 
 /// A message queued for sequential processing within a chat.
 pub struct QueuedMessage {
@@ -56,6 +57,14 @@ impl ChatQueue {
         } else {
             msg
         };
+
+        // Reject if at max capacity to prevent memory exhaustion
+        if senders.len() >= MAX_ACTIVE_CHATS {
+            warn!(
+                "Chat queue at capacity ({MAX_ACTIVE_CHATS}), rejecting message for chat {chat_id}"
+            );
+            return;
+        }
 
         // Spawn a new consumer for this chat
         let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
