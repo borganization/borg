@@ -318,7 +318,12 @@ pub async fn invoke_agent(
                     if !response_capped {
                         if response_text.len() + delta.len() > MAX_RESPONSE_SIZE {
                             let remaining = MAX_RESPONSE_SIZE.saturating_sub(response_text.len());
-                            response_text.push_str(&delta[..remaining]);
+                            // Find a safe UTF-8 boundary to avoid panicking on multi-byte chars
+                            let safe_end = (0..=remaining)
+                                .rev()
+                                .find(|&i| delta.is_char_boundary(i))
+                                .unwrap_or(0);
+                            response_text.push_str(&delta[..safe_end]);
                             response_text
                                 .push_str("\n\n[Response truncated: exceeded maximum size]");
                             response_capped = true;
@@ -368,7 +373,12 @@ pub async fn invoke_agent(
     }
 
     // Wait for agent to finish (with a short grace period after cancellation)
-    let _ = tokio::time::timeout(Duration::from_secs(5), agent_handle).await;
+    match tokio::time::timeout(Duration::from_secs(5), agent_handle).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => warn!("Agent error: {e}"),
+        Ok(Err(e)) => warn!("Agent task panicked: {e}"),
+        Err(_) => warn!("Agent did not finish within grace period for channel '{channel_name}'"),
+    }
 
     if response_text.is_empty() {
         response_text = "(no response)".to_string();
