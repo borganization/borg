@@ -17,6 +17,7 @@ use throbber_widgets_tui::{Throbber, ThrobberState, BRAILLE_EIGHT};
 
 use super::command_popup::CommandPopup;
 use super::composer::Composer;
+use super::file_popup::FileSearchPopup;
 use super::history::{ApprovalStatus, HistoryCell};
 use super::layout;
 use super::plan_overlay::{PlanOption, PlanOverlay};
@@ -98,6 +99,7 @@ pub struct App<'a> {
     pub plan_overlay: PlanOverlay,
     pub plan_mode: bool,
     pub schedule_popup: SchedulePopup,
+    pub file_popup: FileSearchPopup,
     pub throbber_state: ThrobberState,
 }
 
@@ -125,6 +127,7 @@ impl<'a> App<'a> {
             plan_overlay: PlanOverlay::new(),
             plan_mode: false,
             schedule_popup: SchedulePopup::new(),
+            file_popup: FileSearchPopup::new(),
             throbber_state: ThrobberState::default(),
         }
     }
@@ -379,6 +382,42 @@ impl<'a> App<'a> {
                     }
                 }
 
+                if self.file_popup.is_visible() {
+                    match key.code {
+                        KeyCode::Up => {
+                            self.file_popup.move_up();
+                            return Ok(AppAction::Continue);
+                        }
+                        KeyCode::Down => {
+                            self.file_popup.move_down();
+                            return Ok(AppAction::Continue);
+                        }
+                        KeyCode::Tab | KeyCode::Enter => {
+                            if let Some(file) = self.file_popup.selected_file() {
+                                let display = file.display.clone();
+                                let path = file.full_path.clone();
+                                self.composer.add_file_ref(display, path);
+                                self.file_popup.dismiss();
+                            }
+                            return Ok(AppAction::Continue);
+                        }
+                        KeyCode::Esc => {
+                            self.file_popup.dismiss();
+                            return Ok(AppAction::Continue);
+                        }
+                        _ => {
+                            self.composer.handle_key(key);
+                            let text = self.composer.text();
+                            if let Some(q) = extract_at_query(&text) {
+                                self.file_popup.update_query(&q);
+                            } else {
+                                self.file_popup.dismiss();
+                            }
+                            return Ok(AppAction::Continue);
+                        }
+                    }
+                }
+
                 // ? — show keyboard shortcuts when composer is empty
                 if key.code == KeyCode::Char('?')
                     && key.modifiers == KeyModifiers::NONE
@@ -438,9 +477,16 @@ impl<'a> App<'a> {
                 if let Some(text) = self.composer.handle_key(key) {
                     return self.handle_submit(&text);
                 }
-                // Update popup filter after normal key input
+                // Update popup filters after normal key input
                 let text = self.composer.text();
                 self.command_popup.update_filter(&text);
+                if !self.command_popup.is_visible() {
+                    if let Some(q) = extract_at_query(&text) {
+                        self.file_popup.update_query(&q);
+                    } else {
+                        self.file_popup.dismiss();
+                    }
+                }
             }
         }
 
@@ -779,6 +825,45 @@ impl<'a> App<'a> {
             streaming: true,
         });
 
+        // Inject file contents from @mentions
+        let file_refs = self.composer.take_file_refs();
+        let final_input = if file_refs.is_empty() {
+            input.to_string()
+        } else {
+            let mut buf = input.to_string();
+            for fref in &file_refs {
+                match std::fs::read_to_string(&fref.path) {
+                    Ok(contents) => {
+                        const MAX_FILE_BYTES: usize = 100 * 1024;
+                        let truncated = if contents.len() > MAX_FILE_BYTES {
+                            format!(
+                                "{}\n[truncated — file exceeds 100KB]",
+                                &contents[..contents
+                                    .char_indices()
+                                    .take_while(|(i, _)| *i < MAX_FILE_BYTES)
+                                    .last()
+                                    .map(|(i, c)| i + c.len_utf8())
+                                    .unwrap_or(0)]
+                            )
+                        } else {
+                            contents
+                        };
+                        buf.push_str(&format!(
+                            "\n\n<file path=\"{}\">\n{truncated}\n</file>",
+                            fref.display
+                        ));
+                    }
+                    Err(e) => {
+                        buf.push_str(&format!(
+                            "\n\n<file path=\"{}\">\n[error reading file: {e}]\n</file>",
+                            fref.display
+                        ));
+                    }
+                }
+            }
+            buf
+        };
+
         let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
         self.event_rx = Some(event_rx);
 
@@ -791,7 +876,7 @@ impl<'a> App<'a> {
         self.auto_scroll = true;
 
         Ok(AppAction::SendMessage {
-            input: input.to_string(),
+            input: final_input,
             event_tx,
             cancel,
         })
@@ -922,6 +1007,11 @@ impl<'a> App<'a> {
                 }
             }
             AgentEvent::TurnComplete => {
+                // Clean up any leftover empty thinking placeholder
+                if matches!(self.cells.last(), Some(HistoryCell::Thinking { text }) if text.is_empty())
+                {
+                    self.cells.pop();
+                }
                 for cell in self.cells.iter_mut().rev() {
                     if let HistoryCell::Assistant { streaming, .. } = cell {
                         *streaming = false;
@@ -1027,6 +1117,7 @@ impl<'a> App<'a> {
         self.render_footer(frame, app_layout.footer);
         self.plan_overlay.render(frame, app_layout.composer);
         self.command_popup.render(frame, app_layout.composer);
+        self.file_popup.render(frame, app_layout.composer);
         self.settings_popup.render(frame, &self.config);
         self.plugins_popup.render(frame);
         self.schedule_popup.render(frame);
@@ -1211,6 +1302,25 @@ impl<'a> App<'a> {
 
         frame.render_widget(Paragraph::new(lines), area);
     }
+}
+
+/// Extract the query portion after the last `@` in text, if it looks like a file
+/// mention in progress (preceded by whitespace or at position 0, and no space after it).
+fn extract_at_query(text: &str) -> Option<String> {
+    let at_pos = text.rfind('@')?;
+    // Must be at start or preceded by whitespace
+    if at_pos > 0 {
+        let prev = text.as_bytes()[at_pos - 1];
+        if prev != b' ' && prev != b'\t' && prev != b'\n' {
+            return None;
+        }
+    }
+    let after = &text[at_pos + 1..];
+    // If there's a space, the mention is already completed
+    if after.contains(' ') {
+        return None;
+    }
+    Some(after.to_string())
 }
 
 #[cfg(test)]
