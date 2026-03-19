@@ -7,6 +7,7 @@ use tracing::debug;
 use borg_sandbox::policy::SandboxPolicy;
 
 /// Output from a script execution.
+#[derive(Debug)]
 pub struct ScriptOutput {
     pub stdout: String,
     pub stderr: String,
@@ -239,10 +240,319 @@ pub fn resolve_runtime(runtime: &str, work_dir: &Path) -> Result<(String, Vec<St
             ))
         }
         "bash" => {
-            let bash = which::which("bash")
-                .context("Bash not found. Install bash to use Bash tools.")?;
+            let bash =
+                which::which("bash").context("Bash not found. Install bash to use Bash tools.")?;
             Ok((bash.to_string_lossy().to_string(), vec![]))
         }
         other => bail!("Unsupported runtime: {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // -- ScriptOutput --
+
+    #[test]
+    fn script_output_success_with_zero_exit() {
+        let output = ScriptOutput {
+            stdout: "ok".into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        };
+        assert!(output.success());
+    }
+
+    #[test]
+    fn script_output_failure_with_nonzero_exit() {
+        let output = ScriptOutput {
+            stdout: String::new(),
+            stderr: "err".into(),
+            exit_code: Some(1),
+        };
+        assert!(!output.success());
+    }
+
+    #[test]
+    fn script_output_failure_with_none_exit() {
+        let output = ScriptOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+        };
+        assert!(!output.success());
+    }
+
+    #[test]
+    fn script_output_failure_with_signal_exit() {
+        let output = ScriptOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(-1),
+        };
+        assert!(!output.success());
+    }
+
+    // -- resolve_runtime --
+
+    #[test]
+    fn resolve_bash_returns_absolute_path() {
+        let (program, args) = resolve_runtime("bash", Path::new("/tmp")).unwrap();
+        assert!(
+            program.starts_with('/'),
+            "bash should resolve to absolute path: {program}"
+        );
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn resolve_python_returns_absolute_path() {
+        // python3 should be available in most test environments
+        if let Ok((program, args)) = resolve_runtime("python", Path::new("/tmp")) {
+            assert!(
+                program.starts_with('/'),
+                "python should resolve to absolute path: {program}"
+            );
+            assert!(args.is_empty());
+        }
+    }
+
+    #[test]
+    fn resolve_unsupported_runtime_errors() {
+        let result = resolve_runtime("cobol", Path::new("/tmp"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported runtime"));
+    }
+
+    #[test]
+    fn resolve_empty_runtime_errors() {
+        let result = resolve_runtime("", Path::new("/tmp"));
+        assert!(result.is_err());
+    }
+
+    // -- ScriptRunner::run --
+
+    #[tokio::test]
+    async fn run_missing_script_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nonexistent.sh");
+        let runner = ScriptRunner {
+            runtime: "bash",
+            script_path: &missing,
+            work_dir: dir.path(),
+            sandbox_policy: SandboxPolicy::default(),
+            timeout_ms: 5000,
+            extra_env: &[],
+            name: "test",
+        };
+        let result = runner.run("{}").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn run_captures_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hello.sh");
+        std::fs::write(&script, "#!/bin/bash\necho 'hello world'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let runner = ScriptRunner {
+            runtime: "bash",
+            script_path: &script,
+            work_dir: dir.path(),
+            sandbox_policy: SandboxPolicy::default(),
+            timeout_ms: 5000,
+            extra_env: &[],
+            name: "test",
+        };
+        let output = runner.run("{}").await.unwrap();
+        assert!(output.success());
+        assert_eq!(output.stdout.trim(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn run_captures_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("stderr.sh");
+        std::fs::write(&script, "#!/bin/bash\necho 'error msg' >&2\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let runner = ScriptRunner {
+            runtime: "bash",
+            script_path: &script,
+            work_dir: dir.path(),
+            sandbox_policy: SandboxPolicy::default(),
+            timeout_ms: 5000,
+            extra_env: &[],
+            name: "test",
+        };
+        let output = runner.run("{}").await.unwrap();
+        assert!(!output.success());
+        assert!(output.stderr.contains("error msg"));
+    }
+
+    #[tokio::test]
+    async fn run_passes_stdin_to_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("cat.sh");
+        std::fs::write(&script, "#!/bin/bash\ncat\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let runner = ScriptRunner {
+            runtime: "bash",
+            script_path: &script,
+            work_dir: dir.path(),
+            sandbox_policy: SandboxPolicy::default(),
+            timeout_ms: 5000,
+            extra_env: &[],
+            name: "test",
+        };
+        let output = runner.run(r#"{"key":"value"}"#).await.unwrap();
+        assert!(output.success());
+        assert_eq!(output.stdout.trim(), r#"{"key":"value"}"#);
+    }
+
+    #[tokio::test]
+    async fn run_injects_extra_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("env.sh");
+        std::fs::write(&script, "#!/bin/bash\necho \"$TEST_VAR\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let env = vec![("TEST_VAR".to_string(), "injected_value".to_string())];
+        let runner = ScriptRunner {
+            runtime: "bash",
+            script_path: &script,
+            work_dir: dir.path(),
+            sandbox_policy: SandboxPolicy::default(),
+            timeout_ms: 5000,
+            extra_env: &env,
+            name: "test",
+        };
+        let output = runner.run("{}").await.unwrap();
+        assert!(output.success());
+        assert_eq!(output.stdout.trim(), "injected_value");
+    }
+
+    #[tokio::test]
+    async fn run_timeout_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("slow.sh");
+        std::fs::write(&script, "#!/bin/bash\nsleep 60\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let runner = ScriptRunner {
+            runtime: "bash",
+            script_path: &script,
+            work_dir: dir.path(),
+            sandbox_policy: SandboxPolicy::default(),
+            timeout_ms: 100, // very short timeout
+            extra_env: &[],
+            name: "slow-test",
+        };
+        let result = runner.run("{}").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
+    }
+
+    // -- ScriptRunner::run_streaming --
+
+    #[tokio::test]
+    async fn run_streaming_captures_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("multi.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/bash\necho 'line1'\necho 'line2'\necho 'line3'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut lines = Vec::new();
+        let runner = ScriptRunner {
+            runtime: "bash",
+            script_path: &script,
+            work_dir: dir.path(),
+            sandbox_policy: SandboxPolicy::default(),
+            timeout_ms: 5000,
+            extra_env: &[],
+            name: "test",
+        };
+        let output = runner
+            .run_streaming("{}", |line, is_stderr| {
+                lines.push((line.to_string(), is_stderr));
+            })
+            .await
+            .unwrap();
+        assert!(output.success());
+        assert!(output.stdout.contains("line1"));
+        assert!(output.stdout.contains("line2"));
+        assert!(output.stdout.contains("line3"));
+        assert!(lines.iter().any(|(l, s)| l == "line1" && !s));
+    }
+
+    #[tokio::test]
+    async fn run_streaming_captures_stderr_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("mixed.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/bash\necho 'stdout_line'\necho 'stderr_line' >&2\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut stderr_seen = false;
+        let runner = ScriptRunner {
+            runtime: "bash",
+            script_path: &script,
+            work_dir: dir.path(),
+            sandbox_policy: SandboxPolicy::default(),
+            timeout_ms: 5000,
+            extra_env: &[],
+            name: "test",
+        };
+        let output = runner
+            .run_streaming("{}", |_line, is_stderr| {
+                if is_stderr {
+                    stderr_seen = true;
+                }
+            })
+            .await
+            .unwrap();
+        assert!(output.success());
+        assert!(stderr_seen, "should have received stderr callback");
+        assert!(output.stderr.contains("stderr_line"));
     }
 }
