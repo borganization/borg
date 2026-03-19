@@ -120,6 +120,11 @@ impl SessionRateGuard {
         }
     }
 
+    /// Update the action limits in place (used by config hot reload).
+    pub fn update_limits(&mut self, new_limits: ActionLimits) {
+        self.limits = new_limits;
+    }
+
     /// Record an action and return the rate decision.
     pub fn record(&mut self, action: ActionType) -> RateDecision {
         let count = self.counters.entry(action).or_insert(0);

@@ -1,4 +1,5 @@
 pub mod chunker;
+pub mod circuit_breaker;
 pub mod commands;
 pub mod discord;
 pub mod executor;
@@ -11,6 +12,7 @@ pub mod manifest;
 pub mod rate_limit;
 pub mod registry;
 pub mod retry;
+pub mod routing;
 pub mod server;
 pub mod slack;
 pub mod teams;

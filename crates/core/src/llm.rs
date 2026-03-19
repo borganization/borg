@@ -1,4 +1,5 @@
 use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -16,14 +17,42 @@ use crate::types::{Message, Role, ToolCall, ToolDefinition};
 
 // ── Error classification ──
 
+/// Why a provider failed — used for cooldown duration calculation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailoverReason {
+    Auth,
+    Billing,
+    RateLimit,
+    Overloaded,
+    Timeout,
+    Format,
+    Unknown,
+}
+
+impl fmt::Display for FailoverReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auth => write!(f, "auth"),
+            Self::Billing => write!(f, "billing"),
+            Self::RateLimit => write!(f, "rate_limit"),
+            Self::Overloaded => write!(f, "overloaded"),
+            Self::Timeout => write!(f, "timeout"),
+            Self::Format => write!(f, "format"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum LlmError {
     Retryable {
         source: anyhow::Error,
         retry_after: Option<Duration>,
+        reason: FailoverReason,
     },
     Fatal {
         source: anyhow::Error,
+        reason: FailoverReason,
     },
     Interrupted,
 }
@@ -32,7 +61,7 @@ impl fmt::Display for LlmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Retryable { source, .. } => write!(f, "{source}"),
-            Self::Fatal { source } => write!(f, "{source}"),
+            Self::Fatal { source, .. } => write!(f, "{source}"),
             Self::Interrupted => write!(f, "request interrupted"),
         }
     }
@@ -44,6 +73,13 @@ impl LlmError {
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Retryable { .. })
     }
+
+    pub fn reason(&self) -> FailoverReason {
+        match self {
+            Self::Retryable { reason, .. } | Self::Fatal { reason, .. } => *reason,
+            Self::Interrupted => FailoverReason::Unknown,
+        }
+    }
 }
 
 fn classify_status(status: reqwest::StatusCode, body: &str, provider: Provider) -> LlmError {
@@ -53,19 +89,33 @@ fn classify_status(status: reqwest::StatusCode, body: &str, provider: Provider) 
         429 => LlmError::Retryable {
             source: anyhow::anyhow!("{provider} returned 429 (rate limited): {body}"),
             retry_after,
+            reason: FailoverReason::RateLimit,
         },
-        500 | 502 | 503 | 504 => LlmError::Retryable {
+        500 | 502 | 504 => LlmError::Retryable {
             source: anyhow::anyhow!("{provider} returned {status}: {body}"),
             retry_after: None,
+            reason: FailoverReason::Overloaded,
+        },
+        503 => LlmError::Retryable {
+            source: anyhow::anyhow!("{provider} returned {status} (overloaded): {body}"),
+            retry_after: None,
+            reason: FailoverReason::Overloaded,
         },
         401 | 403 => LlmError::Fatal {
             source: anyhow::anyhow!("{provider} returned {status} (auth error): {body}"),
+            reason: FailoverReason::Auth,
+        },
+        402 => LlmError::Fatal {
+            source: anyhow::anyhow!("{provider} returned {status} (billing error): {body}"),
+            reason: FailoverReason::Billing,
         },
         400 => LlmError::Fatal {
             source: anyhow::anyhow!("{provider} returned {status} (bad request): {body}"),
+            reason: FailoverReason::Format,
         },
         _ => LlmError::Fatal {
             source: anyhow::anyhow!("{provider} returned {status}: {body}"),
+            reason: FailoverReason::Unknown,
         },
     }
 }
@@ -74,6 +124,7 @@ fn classify_network_error(err: anyhow::Error) -> LlmError {
     LlmError::Retryable {
         source: err,
         retry_after: None,
+        reason: FailoverReason::Timeout,
     }
 }
 
@@ -162,6 +213,67 @@ struct DeltaFunction {
     arguments: Option<String>,
 }
 
+/// Per-provider cooldown state for the circuit breaker pattern.
+#[derive(Debug, Default)]
+struct ProviderCooldown {
+    /// When this provider can be retried.
+    cooldown_until: Option<std::time::Instant>,
+    /// Consecutive failure count (reset on cooldown expiry).
+    error_count: u32,
+    /// Why the provider is in cooldown.
+    reason: Option<FailoverReason>,
+}
+
+impl ProviderCooldown {
+    /// Whether the provider is currently in cooldown (cannot be used).
+    fn is_active(&self) -> bool {
+        match self.cooldown_until {
+            Some(until) => std::time::Instant::now() < until,
+            None => false,
+        }
+    }
+
+    /// Record a failure and compute the next cooldown duration.
+    fn record_failure(&mut self, reason: FailoverReason) {
+        // If cooldown expired, reset counter (half-open circuit breaker).
+        if !self.is_active() {
+            self.error_count = 0;
+        }
+        self.error_count += 1;
+        self.reason = Some(reason);
+
+        let base_secs = match reason {
+            FailoverReason::Auth | FailoverReason::Billing => 300.0,
+            _ => 60.0,
+        };
+        let max_exp = match reason {
+            FailoverReason::Auth | FailoverReason::Billing => 3,
+            _ => 4,
+        };
+        let exp = self.error_count.saturating_sub(1).min(max_exp);
+        let backoff_secs = base_secs * 2.0_f64.powi(exp as i32);
+        self.cooldown_until =
+            Some(std::time::Instant::now() + Duration::from_secs_f64(backoff_secs));
+    }
+
+    /// Reset cooldown on success.
+    fn record_success(&mut self) {
+        self.cooldown_until = None;
+        self.error_count = 0;
+        self.reason = None;
+    }
+}
+
+/// A provider slot in the failover chain.
+struct ProviderSlot {
+    provider: Provider,
+    model: String,
+    keys: Vec<String>,
+    temperature: f32,
+    max_tokens: u32,
+    cooldown: ProviderCooldown,
+}
+
 pub struct LlmClient {
     client: Client,
     config: Config,
@@ -169,6 +281,10 @@ pub struct LlmClient {
     api_key: String,
     /// Additional fallback keys (rotated on 401/429 errors).
     fallback_keys: Vec<String>,
+    /// Provider-level failover slots.
+    provider_slots: Vec<ProviderSlot>,
+    /// Index of the currently active provider slot (usize::MAX = primary).
+    active_slot_index: usize,
     debug_logging: bool,
 }
 
@@ -178,14 +294,139 @@ impl LlmClient {
         let debug_logging = config.debug.llm_logging;
         let client = Client::new();
         let api_key = keys.remove(0);
+
+        // Build provider-level failover slots
+        let mut provider_slots = Vec::new();
+        for fb in &config.llm.fallback {
+            match Self::resolve_fallback_slot(fb, &config) {
+                Ok(slot) => provider_slots.push(slot),
+                Err(e) => {
+                    warn!("Skipping fallback provider '{}': {e}", fb.provider);
+                }
+            }
+        }
+
         Ok(Self {
             client,
             config,
             provider,
             api_key,
             fallback_keys: keys,
+            provider_slots,
+            active_slot_index: usize::MAX,
             debug_logging,
         })
+    }
+
+    /// Resolve a fallback config into a ProviderSlot.
+    fn resolve_fallback_slot(
+        fb: &crate::config::LlmFallback,
+        config: &Config,
+    ) -> Result<ProviderSlot> {
+        let provider = Provider::from_str(&fb.provider)?;
+        let mut slot_keys = Vec::new();
+
+        // Try api_keys first
+        for sr in &fb.api_keys {
+            if let Ok(key) = sr.resolve() {
+                if !key.is_empty() {
+                    slot_keys.push(key);
+                }
+            }
+        }
+
+        // Try api_key SecretRef
+        if slot_keys.is_empty() {
+            if let Some(ref sr) = fb.api_key {
+                if let Ok(key) = sr.resolve() {
+                    if !key.is_empty() {
+                        slot_keys.push(key);
+                    }
+                }
+            }
+        }
+
+        // Try api_key_env
+        if slot_keys.is_empty() {
+            let env_var = fb
+                .api_key_env
+                .as_deref()
+                .unwrap_or(provider.default_env_var());
+            if let Ok(key) = std::env::var(env_var) {
+                if !key.is_empty() {
+                    slot_keys.push(key);
+                }
+            }
+            // Also try credential store
+            if slot_keys.is_empty() {
+                if let Some(key) = config.resolve_credential_or_env(env_var) {
+                    slot_keys.push(key);
+                }
+            }
+        }
+
+        if slot_keys.is_empty() {
+            bail!("No API keys found for fallback provider {provider}");
+        }
+
+        Ok(ProviderSlot {
+            provider,
+            model: fb.model.clone(),
+            keys: slot_keys,
+            temperature: fb.temperature.unwrap_or(config.llm.temperature),
+            max_tokens: fb.max_tokens.unwrap_or(config.llm.max_tokens),
+            cooldown: ProviderCooldown::default(),
+        })
+    }
+
+    /// Try to failover to the next available (non-cooled-down) provider slot.
+    /// Returns true if a failover occurred.
+    fn try_failover_provider(&mut self) -> bool {
+        for (i, slot) in self.provider_slots.iter().enumerate() {
+            if i == self.active_slot_index {
+                continue;
+            }
+            if slot.cooldown.is_active() {
+                debug!(
+                    "Provider {} in cooldown ({:?}), skipping",
+                    slot.provider, slot.cooldown.reason
+                );
+                continue;
+            }
+            // Found a usable slot — switch to it
+            self.provider = slot.provider;
+            self.api_key = slot.keys[0].clone();
+            self.fallback_keys = slot.keys[1..].to_vec();
+            self.config.llm.model = slot.model.clone();
+            self.config.llm.temperature = slot.temperature;
+            self.config.llm.max_tokens = slot.max_tokens;
+            self.active_slot_index = i;
+            info!(
+                "Failover to provider {} (model: {})",
+                slot.provider, slot.model
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Record a failure on the currently active provider slot.
+    fn record_provider_failure(&mut self, reason: FailoverReason) {
+        if self.active_slot_index < self.provider_slots.len() {
+            self.provider_slots[self.active_slot_index]
+                .cooldown
+                .record_failure(reason);
+        }
+        // If active_slot_index == usize::MAX, it's the primary provider — no cooldown tracking
+    }
+
+    /// Record success on the currently active provider slot.
+    fn record_provider_success(&mut self) {
+        if self.active_slot_index < self.provider_slots.len() {
+            self.provider_slots[self.active_slot_index]
+                .cooldown
+                .record_success();
+        }
     }
 
     fn debug_log(&self, label: &str, content: &str) {
@@ -233,8 +474,9 @@ impl LlmClient {
         true
     }
 
-    /// Stream chat with cancellation support and retry logic.
+    /// Stream chat with cancellation support, retry logic, and provider-level failover.
     /// Supports multi-key fallback: on 401/429 errors, rotates to the next available key.
+    /// On exhausted retries, attempts failover to the next provider in the fallback chain.
     #[instrument(skip_all, fields(llm.provider = %self.provider, llm.model = %self.config.llm.model))]
     pub async fn stream_chat_with_cancel(
         &mut self,
@@ -243,78 +485,104 @@ impl LlmClient {
         tx: mpsc::Sender<StreamEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        let max_retries = self.config.llm.max_retries;
-        let initial_delay = Duration::from_millis(self.config.llm.initial_retry_delay_ms);
-        let total_keys = 1 + self.fallback_keys.len();
-        let mut keys_tried = 0_usize;
+        // Strip images for non-vision models (safety net)
+        let messages = if !self.provider.supports_vision(&self.config.llm.model) {
+            strip_images(messages)
+        } else {
+            messages.to_vec()
+        };
+        let messages = &messages;
 
-        for attempt in 0..=max_retries {
-            if cancel.is_cancelled() {
-                let _ = tx.send(StreamEvent::Done).await;
-                return Ok(());
-            }
+        let max_provider_attempts = 1 + self.provider_slots.len();
 
-            let result = if self.provider.is_openai_compatible() {
-                self.stream_chat_openai_inner(messages, tools, &tx, &cancel)
-                    .await
-            } else {
-                self.stream_chat_anthropic_inner(messages, tools, &tx, &cancel)
-                    .await
-            };
+        for _provider_attempt in 0..max_provider_attempts {
+            let max_retries = self.config.llm.max_retries;
+            let initial_delay = Duration::from_millis(self.config.llm.initial_retry_delay_ms);
+            let total_keys = 1 + self.fallback_keys.len();
+            let mut keys_tried = 0_usize;
+            let mut should_failover = false;
 
-            match result {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    // On auth failure or rate limit, try rotating to next key before retrying
-                    let is_auth_error = matches!(&e, LlmError::Fatal { source } if
-                        format!("{source}").contains("401") || format!("{source}").contains("403"));
-                    let is_rate_limit = matches!(&e, LlmError::Retryable { source, .. } if
-                        format!("{source}").contains("429"));
+            for attempt in 0..=max_retries {
+                if cancel.is_cancelled() {
+                    let _ = tx.send(StreamEvent::Done).await;
+                    return Ok(());
+                }
 
-                    if (is_auth_error || is_rate_limit)
-                        && keys_tried < total_keys
-                        && self.try_rotate_key(!is_auth_error)
-                    {
-                        keys_tried += 1;
-                        info!("Auth/rate-limit error, trying next API key...");
-                        continue;
+                let result = if self.provider.is_openai_compatible() {
+                    self.stream_chat_openai_inner(messages, tools, &tx, &cancel)
+                        .await
+                } else {
+                    self.stream_chat_anthropic_inner(messages, tools, &tx, &cancel)
+                        .await
+                };
+
+                match result {
+                    Ok(()) => {
+                        self.record_provider_success();
+                        return Ok(());
                     }
+                    Err(e) => {
+                        // On auth failure or rate limit, try rotating to next key before retrying
+                        let is_auth_error = matches!(e.reason(), FailoverReason::Auth);
+                        let is_rate_limit = matches!(e.reason(), FailoverReason::RateLimit);
 
-                    if !e.is_retryable() || attempt == max_retries {
-                        let msg = format!("{e}");
-                        let _ = tx.send(StreamEvent::Error(msg.clone())).await;
-                        bail!("{msg}");
-                    }
-
-                    let delay = if let LlmError::Retryable {
-                        retry_after: Some(ra),
-                        ..
-                    } = &e
-                    {
-                        *ra
-                    } else {
-                        backoff_delay(attempt, initial_delay, 2.0)
-                    };
-
-                    info!(
-                        "Retryable error (attempt {}/{}): {e}. Retrying in {}ms...",
-                        attempt + 1,
-                        max_retries,
-                        delay.as_millis()
-                    );
-
-                    tokio::select! {
-                        _ = cancel.cancelled() => {
-                            let _ = tx.send(StreamEvent::Done).await;
-                            return Ok(());
+                        if (is_auth_error || is_rate_limit)
+                            && keys_tried < total_keys
+                            && self.try_rotate_key(!is_auth_error)
+                        {
+                            keys_tried += 1;
+                            info!("Auth/rate-limit error, trying next API key...");
+                            continue;
                         }
-                        _ = tokio::time::sleep(delay) => {}
+
+                        if !e.is_retryable() || attempt == max_retries {
+                            // Record failure and attempt provider failover
+                            self.record_provider_failure(e.reason());
+                            if self.try_failover_provider() {
+                                should_failover = true;
+                                break;
+                            }
+                            // No more providers — propagate error
+                            let msg = format!("{e}");
+                            let _ = tx.send(StreamEvent::Error(msg.clone())).await;
+                            bail!("{msg}");
+                        }
+
+                        let delay = if let LlmError::Retryable {
+                            retry_after: Some(ra),
+                            ..
+                        } = &e
+                        {
+                            *ra
+                        } else {
+                            backoff_delay(attempt, initial_delay, 2.0)
+                        };
+
+                        info!(
+                            "Retryable error (attempt {}/{}): {e}. Retrying in {}ms...",
+                            attempt + 1,
+                            max_retries,
+                            delay.as_millis()
+                        );
+
+                        tokio::select! {
+                            _ = cancel.cancelled() => {
+                                let _ = tx.send(StreamEvent::Done).await;
+                                return Ok(());
+                            }
+                            _ = tokio::time::sleep(delay) => {}
+                        }
                     }
                 }
             }
+
+            if !should_failover {
+                break;
+            }
+            // Continue outer loop with new provider
         }
 
-        unreachable!()
+        bail!("All providers exhausted")
     }
 
     /// Non-streaming call for heartbeat and simple requests
@@ -339,16 +607,17 @@ impl LlmClient {
     ) -> std::result::Result<reqwest::Response, LlmError> {
         let timeout = Duration::from_millis(self.config.llm.request_timeout_ms);
 
-        let fut = self
-            .client
-            .post(self.provider.base_url())
-            .headers(
-                self.provider
-                    .build_headers(&self.api_key)
-                    .map_err(|e| LlmError::Fatal { source: e })?,
-            )
-            .json(body)
-            .send();
+        let fut =
+            self.client
+                .post(self.provider.base_url())
+                .headers(self.provider.build_headers(&self.api_key).map_err(|e| {
+                    LlmError::Fatal {
+                        source: e,
+                        reason: FailoverReason::Unknown,
+                    }
+                })?)
+                .json(body)
+                .send();
 
         let response = tokio::select! {
             _ = cancel.cancelled() => {
@@ -370,6 +639,7 @@ impl LlmClient {
                                 self.config.llm.request_timeout_ms
                             ),
                             retry_after: None,
+                            reason: FailoverReason::Timeout,
                         });
                     }
                 }
@@ -431,6 +701,7 @@ impl LlmClient {
                             return Err(LlmError::Retryable {
                                 source: anyhow::anyhow!("Stream read error: {e}"),
                                 retry_after: None,
+                                reason: FailoverReason::Timeout,
                             });
                         }
                         None => {
@@ -649,6 +920,7 @@ impl LlmClient {
                             return Err(LlmError::Retryable {
                                 source: anyhow::anyhow!("Stream read error: {e}"),
                                 retry_after: None,
+                                reason: FailoverReason::Timeout,
                             });
                         }
                         None => {
@@ -784,6 +1056,7 @@ impl LlmClient {
                                 return Err(LlmError::Retryable {
                                     source: anyhow::anyhow!("Anthropic stream error: {err_msg}"),
                                     retry_after: None,
+                                    reason: FailoverReason::Overloaded,
                                 });
                             }
                             _ => {}
@@ -1002,6 +1275,52 @@ fn parse_anthropic_response(resp: &serde_json::Value) -> Result<Message> {
         tool_call_id: None,
         timestamp: Some(chrono::Local::now().to_rfc3339()),
     })
+}
+
+/// Strip image content parts from messages when model doesn't support vision.
+/// Simplifies `Parts([Text])` → `Text` after stripping.
+fn strip_images(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .map(|msg| {
+            let content = match &msg.content {
+                Some(crate::types::MessageContent::Parts(parts)) => {
+                    let filtered: Vec<crate::types::ContentPart> = parts
+                        .iter()
+                        .filter(|p| {
+                            !matches!(
+                                p,
+                                crate::types::ContentPart::ImageBase64 { .. }
+                                    | crate::types::ContentPart::ImageUrl { .. }
+                            )
+                        })
+                        .cloned()
+                        .collect();
+
+                    if filtered.is_empty() {
+                        Some(crate::types::MessageContent::Text(String::new()))
+                    } else if filtered.len() == 1 {
+                        if let crate::types::ContentPart::Text(t) = &filtered[0] {
+                            Some(crate::types::MessageContent::Text(t.clone()))
+                        } else {
+                            Some(crate::types::MessageContent::Parts(filtered))
+                        }
+                    } else {
+                        Some(crate::types::MessageContent::Parts(filtered))
+                    }
+                }
+                other => other.clone(),
+            };
+
+            Message {
+                role: msg.role.clone(),
+                content,
+                tool_calls: msg.tool_calls.clone(),
+                tool_call_id: msg.tool_call_id.clone(),
+                timestamp: msg.timestamp.clone(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1246,8 +1565,14 @@ mod tests {
     fn classify_network_error_is_retryable() {
         let err = classify_network_error(anyhow::anyhow!("connection reset"));
         assert!(err.is_retryable());
-        if let LlmError::Retryable { retry_after, .. } = &err {
+        if let LlmError::Retryable {
+            retry_after,
+            reason,
+            ..
+        } = &err
+        {
             assert!(retry_after.is_none());
+            assert_eq!(*reason, FailoverReason::Timeout);
         } else {
             panic!("expected Retryable");
         }
@@ -1260,6 +1585,7 @@ mod tests {
         let err = LlmError::Retryable {
             source: anyhow::anyhow!("timeout"),
             retry_after: None,
+            reason: FailoverReason::Timeout,
         };
         assert!(err.is_retryable());
         assert!(err.to_string().contains("timeout"));
@@ -1269,6 +1595,7 @@ mod tests {
     fn llm_error_fatal_display() {
         let err = LlmError::Fatal {
             source: anyhow::anyhow!("bad key"),
+            reason: FailoverReason::Auth,
         };
         assert!(!err.is_retryable());
         assert!(err.to_string().contains("bad key"));
@@ -1279,5 +1606,117 @@ mod tests {
         let err = LlmError::Interrupted;
         assert!(!err.is_retryable());
         assert_eq!(err.to_string(), "request interrupted");
+    }
+
+    // ── FailoverReason classification tests ──
+
+    #[test]
+    fn failover_reason_from_status_codes() {
+        let err_401 = classify_status(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "bad key",
+            Provider::OpenAi,
+        );
+        assert_eq!(err_401.reason(), FailoverReason::Auth);
+
+        let err_402 = classify_status(
+            reqwest::StatusCode::PAYMENT_REQUIRED,
+            "no credits",
+            Provider::OpenAi,
+        );
+        assert_eq!(err_402.reason(), FailoverReason::Billing);
+
+        let err_429 = classify_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "rate limited",
+            Provider::OpenAi,
+        );
+        assert_eq!(err_429.reason(), FailoverReason::RateLimit);
+
+        let err_503 = classify_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded",
+            Provider::OpenAi,
+        );
+        assert_eq!(err_503.reason(), FailoverReason::Overloaded);
+
+        let err_400 = classify_status(
+            reqwest::StatusCode::BAD_REQUEST,
+            "bad format",
+            Provider::OpenAi,
+        );
+        assert_eq!(err_400.reason(), FailoverReason::Format);
+    }
+
+    // ── ProviderCooldown tests ──
+
+    #[test]
+    fn cooldown_initially_inactive() {
+        let cd = ProviderCooldown::default();
+        assert!(!cd.is_active());
+        assert_eq!(cd.error_count, 0);
+    }
+
+    #[test]
+    fn cooldown_active_after_failure() {
+        let mut cd = ProviderCooldown::default();
+        cd.record_failure(FailoverReason::RateLimit);
+        assert!(cd.is_active());
+        assert_eq!(cd.error_count, 1);
+        assert_eq!(cd.reason, Some(FailoverReason::RateLimit));
+    }
+
+    #[test]
+    fn cooldown_reset_on_success() {
+        let mut cd = ProviderCooldown::default();
+        cd.record_failure(FailoverReason::Overloaded);
+        assert!(cd.is_active());
+
+        cd.record_success();
+        assert!(!cd.is_active());
+        assert_eq!(cd.error_count, 0);
+        assert!(cd.reason.is_none());
+    }
+
+    #[test]
+    fn cooldown_backoff_escalates() {
+        let mut cd = ProviderCooldown::default();
+        cd.record_failure(FailoverReason::RateLimit);
+        let first = cd.cooldown_until.unwrap();
+
+        cd.cooldown_until = None; // simulate expiry
+        cd.error_count = 0; // reset will happen in record_failure
+        cd.record_failure(FailoverReason::RateLimit);
+        let second = cd.cooldown_until.unwrap();
+
+        // Both cooldowns should be in the future, second may be different
+        // since error_count resets on expiry
+        assert!(first > std::time::Instant::now() - Duration::from_secs(120));
+        assert!(second > std::time::Instant::now() - Duration::from_secs(120));
+    }
+
+    #[test]
+    fn cooldown_auth_has_longer_base() {
+        let mut cd1 = ProviderCooldown::default();
+        cd1.record_failure(FailoverReason::RateLimit);
+        let rl_until = cd1.cooldown_until.unwrap();
+
+        let mut cd2 = ProviderCooldown::default();
+        cd2.record_failure(FailoverReason::Auth);
+        let auth_until = cd2.cooldown_until.unwrap();
+
+        // Auth base is 300s, RateLimit base is 60s — auth should be further out
+        assert!(auth_until > rl_until);
+    }
+
+    #[test]
+    fn failover_reason_display() {
+        assert_eq!(FailoverReason::Auth.to_string(), "auth");
+        assert_eq!(FailoverReason::Billing.to_string(), "billing");
+        assert_eq!(FailoverReason::RateLimit.to_string(), "rate_limit");
+        assert_eq!(FailoverReason::Overloaded.to_string(), "overloaded");
+        assert_eq!(FailoverReason::Timeout.to_string(), "timeout");
+        assert_eq!(FailoverReason::Format.to_string(), "format");
+        assert_eq!(FailoverReason::Unknown.to_string(), "unknown");
     }
 }

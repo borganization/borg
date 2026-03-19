@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 /// Execution policy for shell commands — controls auto-approval and denial.
 ///
 /// This is a convenience feature to reduce approval fatigue for known-safe commands,
-/// **not** a security boundary. Commands can be trivially obfuscated to bypass
-/// glob patterns (e.g., extra spaces, absolute paths, shell wrappers).
+/// **not** a security boundary. Commands can be obfuscated to bypass glob patterns.
+/// Commands are normalized before matching (whitespace collapsed, common path prefixes
+/// stripped) but this is best-effort. In gateway mode, all unknown shell commands are
+/// auto-denied, which is the actual security boundary.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionPolicy {
     /// Commands matching these glob patterns are auto-approved (no user prompt).
@@ -32,26 +34,65 @@ const HARDCODED_DENY: &[&str] = &[
     "curl * | bash",
 ];
 
+/// Normalize a command for more robust pattern matching:
+/// - Collapse multiple whitespace into single spaces
+/// - Strip common absolute path prefixes from the first token (e.g., `/bin/rm` → `rm`)
+fn normalize_command(command: &str) -> String {
+    let collapsed: String = command.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Strip well-known path prefixes from the first token
+    if let Some((first, rest)) = collapsed.split_once(' ') {
+        let base = strip_path_prefix(first);
+        if rest.is_empty() {
+            base.to_string()
+        } else {
+            format!("{base} {rest}")
+        }
+    } else {
+        strip_path_prefix(&collapsed).to_string()
+    }
+}
+
+/// Strip common bin path prefixes, returning the basename.
+fn strip_path_prefix(token: &str) -> &str {
+    const PREFIXES: &[&str] = &[
+        "/usr/local/bin/",
+        "/usr/bin/",
+        "/bin/",
+        "/usr/sbin/",
+        "/sbin/",
+    ];
+    for prefix in PREFIXES {
+        if let Some(rest) = token.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    token
+}
+
 impl ExecutionPolicy {
     /// Check whether a command should be auto-approved, denied, or needs prompting.
+    /// Commands are normalized (whitespace collapsed, path prefixes stripped) before matching.
     pub fn check(&self, command: &str) -> PolicyDecision {
+        let normalized = normalize_command(command);
+
         // Check hardcoded deny list first (cannot be overridden)
         for pattern in HARDCODED_DENY {
-            if glob_match(pattern, command) {
+            if glob_match(pattern, &normalized) {
                 return PolicyDecision::Deny;
             }
         }
 
         // Check user deny patterns (deny takes priority over approve)
         for pattern in &self.deny {
-            if glob_match(pattern, command) {
+            if glob_match(pattern, &normalized) {
                 return PolicyDecision::Deny;
             }
         }
 
         // Check auto-approve patterns
         for pattern in &self.auto_approve {
-            if glob_match(pattern, command) {
+            if glob_match(pattern, &normalized) {
                 return PolicyDecision::AutoApprove;
             }
         }
@@ -212,5 +253,32 @@ mod tests {
         };
         assert_eq!(policy.check("rm -rf /"), PolicyDecision::Deny);
         assert_eq!(policy.check("mkfs /dev/sda"), PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn normalize_collapses_whitespace() {
+        assert_eq!(normalize_command("rm  -rf  /"), "rm -rf /");
+        assert_eq!(normalize_command("ls   -la"), "ls -la");
+    }
+
+    #[test]
+    fn normalize_strips_path_prefix() {
+        assert_eq!(normalize_command("/bin/rm -rf /"), "rm -rf /");
+        assert_eq!(normalize_command("/usr/bin/curl http://x"), "curl http://x");
+        assert_eq!(normalize_command("/usr/local/bin/node"), "node");
+    }
+
+    #[test]
+    fn deny_absolute_path_bypass() {
+        let policy = ExecutionPolicy::default();
+        // /bin/rm -rf / should be denied after normalization
+        assert_eq!(policy.check("/bin/rm -rf /"), PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn deny_double_space_bypass() {
+        let policy = ExecutionPolicy::default();
+        // Double-space should be collapsed and denied
+        assert_eq!(policy.check("rm  -rf /"), PolicyDecision::Deny);
     }
 }

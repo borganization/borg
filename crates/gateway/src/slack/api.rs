@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -6,16 +7,23 @@ use tracing::warn;
 
 use super::types::{AuthTestResponse, PostMessageRequest};
 use crate::chunker;
+use crate::circuit_breaker::CircuitBreaker;
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
 const MESSAGE_CHUNK_SIZE: usize = 4000;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Circuit breaker thresholds for Slack typing indicators.
+/// Trips after 2 consecutive failures (matching OpenClaw's maxConsecutiveFailures).
+const TYPING_CB_FAILURE_THRESHOLD: u32 = 2;
+const TYPING_CB_SUSPENSION_SECS: u64 = 60;
 
 /// A client for the Slack Web API.
 #[derive(Clone)]
 pub struct SlackClient {
     client: Client,
     token: String,
+    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl SlackClient {
@@ -26,6 +34,10 @@ impl SlackClient {
                 .build()
                 .unwrap_or_default(),
             token: token.to_string(),
+            circuit_breaker: Arc::new(CircuitBreaker::new(
+                TYPING_CB_FAILURE_THRESHOLD,
+                TYPING_CB_SUSPENSION_SECS,
+            )),
         }
     }
 
@@ -142,6 +154,109 @@ impl SlackClient {
             bail!("chat.postMessage failed ({}): {}", status.as_u16(), error);
         }
     }
+
+    /// Set thread typing status via `assistant.threads.setStatus` API.
+    /// Non-fatal: logs warning on failure. Requires `thread_ts`.
+    pub async fn set_thread_status(
+        &self,
+        channel: &str,
+        thread_ts: Option<&str>,
+        status: &str,
+    ) -> Result<()> {
+        let Some(ts) = thread_ts else {
+            return Ok(());
+        };
+
+        if self.circuit_breaker.is_open() {
+            return Ok(());
+        }
+
+        let body = serde_json::json!({
+            "channel_id": channel,
+            "thread_ts": ts,
+            "status": status,
+        });
+
+        let result = self
+            .client
+            .post(format!("{SLACK_API_BASE}/assistant.threads.setStatus"))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) => {
+                let resp_body: serde_json::Value = resp
+                    .json()
+                    .await
+                    .unwrap_or_else(|_| serde_json::json!({"ok": false}));
+
+                if resp_body
+                    .get("ok")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    self.circuit_breaker.record_success();
+                } else {
+                    self.circuit_breaker.record_failure();
+                    let error = resp_body
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    warn!("assistant.threads.setStatus failed: {error}");
+                }
+            }
+            Err(e) => {
+                // Network errors don't trip circuit breaker
+                warn!("assistant.threads.setStatus network error: {e}");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add a reaction emoji to a message. Non-fatal on failure.
+    pub async fn add_reaction(&self, channel: &str, message_ts: &str, emoji: &str) {
+        let body = serde_json::json!({
+            "channel": channel,
+            "timestamp": message_ts,
+            "name": emoji,
+        });
+
+        let result = self
+            .client
+            .post(format!("{SLACK_API_BASE}/reactions.add"))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await;
+
+        if let Err(e) = result {
+            warn!("reactions.add failed: {e}");
+        }
+    }
+
+    /// Remove a reaction emoji from a message. Non-fatal on failure.
+    pub async fn remove_reaction(&self, channel: &str, message_ts: &str, emoji: &str) {
+        let body = serde_json::json!({
+            "channel": channel,
+            "timestamp": message_ts,
+            "name": emoji,
+        });
+
+        let result = self
+            .client
+            .post(format!("{SLACK_API_BASE}/reactions.remove"))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await;
+
+        if let Err(e) = result {
+            warn!("reactions.remove failed: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +307,35 @@ mod tests {
         assert_eq!(chunks[0].len(), 4000);
         assert_eq!(chunks[1].len(), 4000);
         assert_eq!(chunks[2].len(), 500);
+    }
+
+    #[test]
+    fn set_thread_status_serializes_correct_json() {
+        let body = serde_json::json!({
+            "channel_id": "C123",
+            "thread_ts": "1234567890.123456",
+            "status": "is typing...",
+        });
+        assert_eq!(body["channel_id"], "C123");
+        assert_eq!(body["thread_ts"], "1234567890.123456");
+        assert_eq!(body["status"], "is typing...");
+    }
+
+    #[test]
+    fn reaction_serializes_correct_json() {
+        let body = serde_json::json!({
+            "channel": "C123",
+            "timestamp": "1234567890.123456",
+            "name": "thinking_face",
+        });
+        assert_eq!(body["channel"], "C123");
+        assert_eq!(body["timestamp"], "1234567890.123456");
+        assert_eq!(body["name"], "thinking_face");
+    }
+
+    #[test]
+    fn circuit_breaker_initialized() {
+        let client = SlackClient::new("xoxb-test");
+        assert!(!client.circuit_breaker.is_open());
     }
 }
