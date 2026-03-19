@@ -237,6 +237,14 @@ fn validate_model_id(model_id: &str) -> Result<()> {
     }
 }
 
+/// Escape a string value for safe embedding in TOML double-quoted strings.
+fn escape_toml_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', " ")
+        .replace('\r', "")
+}
+
 /// Generate config.toml content from onboarding choices.
 pub fn generate_config(
     model_id: &str,
@@ -247,6 +255,8 @@ pub fn generate_config(
     key_storage: &KeyStorage,
 ) -> Result<String> {
     validate_model_id(model_id)?;
+    let user_name = escape_toml_string(user_name);
+    let agent_name = escape_toml_string(agent_name);
 
     let provider = Provider::from_str(provider_id)?;
     let env_var = provider.default_env_var();
@@ -388,7 +398,8 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
                     let provider = Provider::from_str(&result.provider)?;
                     let env_var = provider.default_env_var();
                     let env_path = data_dir.join(".env");
-                    std::fs::write(&env_path, format!("{env_var}={api_key}\n"))?;
+                    let clean_key = api_key.trim().replace(['\n', '\r'], "");
+                    std::fs::write(&env_path, format!("{env_var}={clean_key}\n"))?;
                     println!("  Updated config to use .env file");
                     println!("  Created {}", env_path.display());
                 }
@@ -397,7 +408,8 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
                 let provider = Provider::from_str(&result.provider)?;
                 let env_var = provider.default_env_var();
                 let env_path = data_dir.join(".env");
-                std::fs::write(&env_path, format!("{env_var}={api_key}\n"))?;
+                let clean_key = api_key.trim().replace(['\n', '\r'], "");
+                std::fs::write(&env_path, format!("{env_var}={clean_key}\n"))?;
                 // Restrict permissions on .env file
                 #[cfg(unix)]
                 {

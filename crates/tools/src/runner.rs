@@ -140,6 +140,7 @@ impl<'a> ScriptRunner<'a> {
         let mut stderr_buf = String::new();
         let mut callback_bytes: usize = 0;
         const STREAM_CALLBACK_LIMIT: usize = 120 * 1024;
+        const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024; // 10 MB cap per stream
 
         let streaming_future = async {
             let mut stdout_lines = stdout_pipe.map(|p| BufReader::new(p).lines());
@@ -161,8 +162,10 @@ impl<'a> ScriptRunner<'a> {
                                     on_output(&l, false);
                                     callback_bytes += l.len();
                                 }
-                                stdout_buf.push_str(&l);
-                                stdout_buf.push('\n');
+                                if stdout_buf.len() + l.len() < MAX_OUTPUT_BYTES {
+                                    stdout_buf.push_str(&l);
+                                    stdout_buf.push('\n');
+                                }
                             }
                             _ => { stdout_done = true; }
                         }
@@ -179,8 +182,10 @@ impl<'a> ScriptRunner<'a> {
                                     on_output(&l, true);
                                     callback_bytes += l.len();
                                 }
-                                stderr_buf.push_str(&l);
-                                stderr_buf.push('\n');
+                                if stderr_buf.len() + l.len() < MAX_OUTPUT_BYTES {
+                                    stderr_buf.push_str(&l);
+                                    stderr_buf.push('\n');
+                                }
                             }
                             _ => { stderr_done = true; }
                         }
@@ -233,7 +238,11 @@ pub fn resolve_runtime(runtime: &str, work_dir: &Path) -> Result<(String, Vec<St
                 vec!["run".to_string(), allow_read],
             ))
         }
-        "bash" => Ok(("bash".to_string(), vec![])),
+        "bash" => {
+            let bash = which::which("bash")
+                .context("Bash not found. Install bash to use Bash tools.")?;
+            Ok((bash.to_string_lossy().to_string(), vec![]))
+        }
         other => bail!("Unsupported runtime: {other}"),
     }
 }

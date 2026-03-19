@@ -17,7 +17,7 @@ pub struct SandboxCommand {
 /// Blocked patterns are matched against individual path components (split by `/`)
 /// to avoid false positives from substring matching (e.g., `.aws_backup` matching `.aws`).
 fn is_path_blocked(path: &str, blocked_paths: &[String]) -> bool {
-    // Canonicalize by resolving `..` and `.` segments
+    // Extract normal path components (skips `.`, `..`, root, and prefix components)
     let normalized = std::path::Path::new(path);
     let components: Vec<&str> = normalized
         .components()
@@ -115,10 +115,14 @@ impl SandboxPolicy {
         let profile = match generate_profile(self, tool_dir, Some(program)) {
             Ok(p) => p,
             Err(e) => {
-                tracing::error!("Failed to generate sandbox profile: {e}. Running unsandboxed.");
+                tracing::error!("Failed to generate sandbox profile: {e}. Refusing to run unsandboxed.");
+                // Fail closed: return a command that immediately exits with error
                 return SandboxCommand {
-                    program: program.to_string(),
-                    args: args.to_vec(),
+                    program: "/bin/sh".to_string(),
+                    args: vec![
+                        "-c".to_string(),
+                        format!("echo 'Sandbox profile generation failed: {e}' >&2; exit 1"),
+                    ],
                 };
             }
         };

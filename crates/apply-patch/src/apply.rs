@@ -35,8 +35,12 @@ impl AffectedPaths {
 }
 
 fn validate_patch_path(path: &str, base_dir: &Path) -> Result<()> {
+    if path.is_empty() {
+        bail!("Empty file path in patch operation");
+    }
     let full = base_dir.join(path);
-    let canonical_base = std::fs::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
+    let canonical_base = std::fs::canonicalize(base_dir)
+        .with_context(|| format!("Failed to canonicalize base directory: {}", base_dir.display()))?;
     // For new files, canonicalize as far as possible then check prefix
     let resolved = if full.exists() {
         std::fs::canonicalize(&full)?

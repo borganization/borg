@@ -532,12 +532,15 @@ fn restart_systemd() -> Result<()> {
 }
 
 fn find_binary_path() -> Result<String> {
-    // Try to find the borg binary
+    // Prefer current executable to avoid finding a different `borg` binary (e.g., BorgBackup)
+    if let Ok(exe) = std::env::current_exe() {
+        return Ok(exe.to_string_lossy().to_string());
+    }
+
+    // Fall back to PATH lookup
     if let Ok(path) = which::which("borg") {
         return Ok(path.to_string_lossy().to_string());
     }
 
-    // Fall back to current executable
-    let exe = std::env::current_exe().context("Could not determine binary path")?;
-    Ok(exe.to_string_lossy().to_string())
+    anyhow::bail!("Could not determine binary path")
 }
