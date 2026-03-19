@@ -653,7 +653,7 @@ fn render(
         }
 
         let chunks = Layout::vertical([
-            Constraint::Length(LOGO_HEIGHT),
+            Constraint::Length(LOGO_HEIGHT + 1), // logo + 1 line padding below
             Constraint::Length(1), // tab bar
             Constraint::Min(8),    // content
             Constraint::Length(1), // footer
@@ -761,14 +761,14 @@ fn render_welcome(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingStat
         "  What's your name?",
         user_label_style,
     )));
-    let user_cursor = if user_name_focused { "_" } else { "" };
+    let user_cursor = if user_name_focused { "▊" } else { "" };
     let user_border_style = if user_name_focused {
         theme::CYAN
     } else {
         theme::DIM_WHITE
     };
     lines.push(Line::from(vec![
-        Span::styled("  ┃ ", Style::default().fg(user_border_style)),
+        Span::styled("  › ", Style::default().fg(user_border_style)),
         Span::raw(&state.user_name),
         Span::styled(user_cursor, Style::default().fg(theme::CYAN)),
     ]));
@@ -789,14 +789,14 @@ fn render_welcome(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingStat
         "  What's your agent's name?",
         agent_label_style,
     )));
-    let agent_cursor = if agent_name_focused { "_" } else { "" };
+    let agent_cursor = if agent_name_focused { "▊" } else { "" };
     let agent_border_style = if agent_name_focused {
         theme::CYAN
     } else {
         theme::DIM_WHITE
     };
     lines.push(Line::from(vec![
-        Span::styled("  ┃ ", Style::default().fg(agent_border_style)),
+        Span::styled("  › ", Style::default().fg(agent_border_style)),
         Span::raw(&state.agent_name),
         Span::styled(agent_cursor, Style::default().fg(theme::CYAN)),
     ]));
@@ -949,9 +949,9 @@ fn render_api_key(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingStat
 
         let masked: String = "*".repeat(state.api_key_input.len());
         lines.push(Line::from(vec![
-            Span::styled("  ┃ ", Style::default().fg(theme::CYAN)),
+            Span::styled("  › ", Style::default().fg(theme::CYAN)),
             Span::raw(masked),
-            Span::styled("_", Style::default().fg(theme::CYAN)),
+            Span::styled("▊", Style::default().fg(theme::CYAN)),
         ]));
 
         if state.api_key_required_hint {
@@ -1008,9 +1008,9 @@ fn render_budget(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState
             Style::default().fg(theme::CYAN),
         )));
         lines.push(Line::from(vec![
-            Span::styled("  ┃ ", Style::default().fg(theme::CYAN)),
+            Span::styled("  › ", Style::default().fg(theme::CYAN)),
             Span::raw(&state.custom_budget_input),
-            Span::styled("_", Style::default().fg(theme::CYAN)),
+            Span::styled("▊", Style::default().fg(theme::CYAN)),
         ]));
     }
 
