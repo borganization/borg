@@ -1,11 +1,11 @@
 use ratatui::style::{Color, Modifier, Style};
 
-pub const CYAN: Color = Color::Cyan;
-pub const YELLOW: Color = Color::Yellow;
-pub const GREEN: Color = Color::Green;
+pub const CYAN: Color = Color::Rgb(0, 185, 174);
+pub const YELLOW: Color = Color::Rgb(2, 195, 189);
+pub const GREEN: Color = Color::Rgb(0, 159, 147);
 pub const RED: Color = Color::Red;
 pub const DIM_WHITE: Color = Color::DarkGray;
-pub const BORDER: Color = Color::DarkGray;
+pub const BORDER: Color = Color::Rgb(3, 113, 113);
 
 pub const BULLET: &str = "•";
 pub const TREE_END: &str = "└";
@@ -36,5 +36,5 @@ pub fn error_style() -> Style {
 }
 
 pub fn popup_selected() -> Style {
-    Style::default().bg(Color::DarkGray).fg(Color::White)
+    Style::default().bg(Color::Rgb(3, 49, 46)).fg(Color::White)
 }
