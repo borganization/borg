@@ -74,6 +74,7 @@ impl HistoryCell {
                 let bg = theme::user_message_style();
                 let prefix_style =
                     bg.add_modifier(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::DIM);
+                let mention_style = theme::file_mention_style();
                 let mut lines = Vec::new();
                 // Top padding
                 lines.push(Line::from("").style(bg));
@@ -84,9 +85,10 @@ impl HistoryCell {
                     } else {
                         Span::styled("  ", bg)
                     };
-                    lines.push(
-                        Line::from(vec![prefix, Span::styled(line.to_string(), bg)]).style(bg),
-                    );
+                    let spans = parse_at_mentions(line, bg, mention_style);
+                    let mut all_spans = vec![prefix];
+                    all_spans.extend(spans);
+                    lines.push(Line::from(all_spans).style(bg));
                 }
                 // Bottom padding
                 lines.push(Line::from("").style(bg));
@@ -297,4 +299,50 @@ impl HistoryCell {
             }
         }
     }
+}
+
+/// Split a line into spans, highlighting `@path` tokens with the mention style.
+fn parse_at_mentions(
+    line: &str,
+    normal: ratatui::style::Style,
+    mention: ratatui::style::Style,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut rest = line;
+
+    while let Some(at_pos) = rest.find('@') {
+        // Check word boundary: must be at start or preceded by whitespace
+        let at_word_boundary = at_pos == 0 || rest.as_bytes()[at_pos - 1] == b' ';
+        if !at_word_boundary {
+            // Not a mention, consume up to and including the '@'
+            spans.push(Span::styled(rest[..at_pos + 1].to_string(), normal));
+            rest = &rest[at_pos + 1..];
+            continue;
+        }
+
+        // Push text before the @
+        if at_pos > 0 {
+            spans.push(Span::styled(rest[..at_pos].to_string(), normal));
+        }
+
+        // Find end of mention (next space or end of string)
+        let after_at = &rest[at_pos + 1..];
+        let end = after_at.find(' ').unwrap_or(after_at.len());
+        if end == 0 {
+            // Bare '@' with no path
+            spans.push(Span::styled("@".to_string(), normal));
+            rest = after_at;
+            continue;
+        }
+
+        let mention_text = format!("@{}", &after_at[..end]);
+        spans.push(Span::styled(mention_text, mention));
+        rest = &after_at[end..];
+    }
+
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_string(), normal));
+    }
+
+    spans
 }

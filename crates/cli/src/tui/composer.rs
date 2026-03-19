@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -6,6 +8,11 @@ use ratatui::Frame;
 use tui_textarea::TextArea;
 
 use super::theme;
+
+pub struct FileRef {
+    pub display: String,
+    pub path: PathBuf,
+}
 
 struct InputHistory {
     entries: Vec<String>,
@@ -83,6 +90,7 @@ impl InputHistory {
 pub struct Composer<'a> {
     textarea: TextArea<'a>,
     history: InputHistory,
+    file_refs: Vec<FileRef>,
 }
 
 impl<'a> Composer<'a> {
@@ -90,20 +98,15 @@ impl<'a> Composer<'a> {
         let mut textarea = TextArea::default();
         textarea.set_placeholder_text("Type a message...");
         textarea.set_cursor_line_style(Style::default());
-        let user_style = theme::user_message_style();
-        textarea.set_style(user_style);
-        let mut border_style = Style::default().fg(theme::BORDER);
-        if let Some(bg_color) = user_style.bg {
-            border_style = border_style.bg(bg_color);
-        }
         textarea.set_block(
             Block::bordered()
                 .title(format!("{} ", theme::INPUT_PROMPT))
-                .border_style(border_style),
+                .border_style(Style::default().fg(theme::BORDER)),
         );
         Self {
             textarea,
             history: InputHistory::new(),
+            file_refs: Vec::new(),
         }
     }
 
@@ -184,6 +187,7 @@ impl<'a> Composer<'a> {
                 self.textarea.select_all();
                 self.textarea.cut();
                 self.history.reset();
+                self.file_refs.clear();
                 None
             }
             _ => {
@@ -202,6 +206,25 @@ impl<'a> Composer<'a> {
         self.textarea.select_all();
         self.textarea.cut();
         self.textarea.insert_str(text);
+    }
+
+    pub fn add_file_ref(&mut self, display: String, path: PathBuf) {
+        self.file_refs.push(FileRef {
+            display: display.clone(),
+            path,
+        });
+        let current = self.text();
+        // Replace the partial @query with the completed @mention
+        let new_text = if let Some(at_pos) = current.rfind('@') {
+            format!("{}@{display} ", &current[..at_pos])
+        } else {
+            format!("{current}@{display} ")
+        };
+        self.set_text(&new_text);
+    }
+
+    pub fn take_file_refs(&mut self) -> Vec<FileRef> {
+        std::mem::take(&mut self.file_refs)
     }
 
     pub fn height(&self) -> u16 {
