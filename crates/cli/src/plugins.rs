@@ -277,14 +277,6 @@ pub fn add_plugin(name: &str) -> Result<()> {
         }
     }
 
-    // Enable gateway if this is a channel integration
-    if def.is_channel
-        && !config_str.contains("gateway.enabled")
-        && !config_str.contains("[gateway]")
-    {
-        config_str.push_str("\n[gateway]\nenabled = true\n");
-    }
-
     std::fs::write(&config_path, &config_str)?;
 
     println!();

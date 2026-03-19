@@ -63,8 +63,8 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
     let max_concurrent = config.tasks.max_concurrent;
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
-    // Start gateway server if enabled
-    if config.gateway.enabled {
+    // Start gateway server
+    {
         let gw_config = config.clone();
         let gw_shutdown = shutdown.clone();
         tokio::spawn(async move {
@@ -118,10 +118,6 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
             _ = interval.tick() => {}
         }
 
-        // Check for due tasks (skip if tasks.enabled is false)
-        if !config.tasks.enabled {
-            continue;
-        }
         let now = chrono::Utc::now().timestamp();
         match db.get_due_tasks(now) {
             Ok(tasks) => {
@@ -224,6 +220,43 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
             }
         }
     }
+}
+
+/// Ensure the daemon service is installed and running.
+pub fn ensure_service_running() -> Result<()> {
+    ensure_service_installed()?;
+
+    let is_running = if cfg!(target_os = "macos") {
+        std::process::Command::new("launchctl")
+            .args(["list", LAUNCHD_LABEL])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    } else if cfg!(target_os = "linux") {
+        std::process::Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", "borg.service"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        return Ok(());
+    };
+
+    if !is_running {
+        if cfg!(target_os = "macos") {
+            if let Ok(plist) = launchd_plist_path() {
+                let _ = std::process::Command::new("launchctl")
+                    .args(["load", &plist.to_string_lossy()])
+                    .status();
+            }
+        } else if cfg!(target_os = "linux") {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "start", "borg.service"])
+                .status();
+        }
+    }
+
+    Ok(())
 }
 
 /// Ensure the daemon service is installed, installing silently if needed.

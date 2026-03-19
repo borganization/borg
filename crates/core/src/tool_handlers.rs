@@ -315,12 +315,7 @@ pub async fn handle_web_search(args: &serde_json::Value, config: &Config) -> Res
     }
 }
 
-pub fn handle_manage_tasks(args: &serde_json::Value, config: &Config) -> Result<String> {
-    if !config.tasks.enabled {
-        return Ok(
-            "Task scheduling is disabled. Enable it in config: tasks.enabled = true".to_string(),
-        );
-    }
+pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result<String> {
     let action = require_str_param(args, "action")?;
     match action {
         "create" => {

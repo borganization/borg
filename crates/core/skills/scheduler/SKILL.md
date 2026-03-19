@@ -12,8 +12,7 @@ Use the `manage_tasks` tool to create and manage scheduled tasks. Tasks run auto
 
 ## Prerequisites
 
-- `tasks.enabled = true` in config (default: true)
-- Daemon must be running to execute tasks
+- Daemon must be running to execute tasks (starts automatically)
 
 ## Tool: manage_tasks
 

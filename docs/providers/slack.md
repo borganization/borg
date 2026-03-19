@@ -70,7 +70,7 @@ In your Slack app settings, go to **Event Subscriptions**:
 borg gateway
 ```
 
-Or enable it as part of the daemon by setting `gateway.enabled = true`.
+The gateway also runs automatically as part of the daemon.
 
 ## 7. Verify
 
