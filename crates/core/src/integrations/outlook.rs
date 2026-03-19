@@ -1,6 +1,7 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use super::http::{send_and_check, send_json};
 use super::validate_resource_id;
 use crate::config::Config;
 use crate::types::ToolDefinition;
@@ -65,18 +66,14 @@ async fn send_email(client: &Client, token: &str, args: &Value) -> Result<String
         }
     });
 
-    let resp = client
-        .post(format!("{GRAPH_API}/sendMail"))
-        .bearer_auth(token)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Graph API error: {text}"));
-    }
+    send_and_check(
+        client
+            .post(format!("{GRAPH_API}/sendMail"))
+            .bearer_auth(token)
+            .json(&payload),
+        "Graph",
+    )
+    .await?;
 
     Ok(format!("Email sent to {to}"))
 }
@@ -85,24 +82,19 @@ async fn search_emails(client: &Client, token: &str, args: &Value) -> Result<Str
     let query = args["query"].as_str().ok_or("Missing 'query'")?;
     let limit = args["limit"].as_u64().unwrap_or(10);
 
-    let resp = client
-        .get(format!("{GRAPH_API}/messages"))
-        .bearer_auth(token)
-        .query(&[
-            ("$search", &format!("\"{}\"", query.replace('"', ""))),
-            ("$top", &limit.to_string()),
-            ("$select", &"id,subject,from,receivedDateTime".to_string()),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
+    let result: Value = send_json(
+        client
+            .get(format!("{GRAPH_API}/messages"))
+            .bearer_auth(token)
+            .query(&[
+                ("$search", &format!("\"{}\"", query.replace('"', ""))),
+                ("$top", &limit.to_string()),
+                ("$select", &"id,subject,from,receivedDateTime".to_string()),
+            ]),
+        "Graph",
+    )
+    .await?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Graph API error: {text}"));
-    }
-
-    let result: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
     let messages = result["value"].as_array();
 
     match messages {
@@ -131,19 +123,14 @@ async fn read_email(client: &Client, token: &str, args: &Value) -> Result<String
     let message_id = args["message_id"].as_str().ok_or("Missing 'message_id'")?;
     let message_id = validate_resource_id(message_id, "message_id")?;
 
-    let resp = client
-        .get(format!("{GRAPH_API}/messages/{message_id}"))
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
+    let msg: Value = send_json(
+        client
+            .get(format!("{GRAPH_API}/messages/{message_id}"))
+            .bearer_auth(token),
+        "Graph",
+    )
+    .await?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Graph API error: {text}"));
-    }
-
-    let msg: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
     let subject = msg["subject"].as_str().unwrap_or("(no subject)");
     let from = msg["from"]["emailAddress"]["address"]
         .as_str()

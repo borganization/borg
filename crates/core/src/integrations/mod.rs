@@ -1,5 +1,6 @@
 pub mod gmail;
 pub mod google_calendar;
+pub(crate) mod http;
 pub mod linear;
 pub mod notion;
 pub mod outlook;
