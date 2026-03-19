@@ -16,10 +16,10 @@ use borg_heartbeat::scheduler::HeartbeatEvent;
 
 use super::command_popup::CommandPopup;
 use super::composer::Composer;
-use super::customize_popup::{CustomizeAction, CustomizePopup};
 use super::history::{ApprovalStatus, HistoryCell};
 use super::layout;
 use super::plan_overlay::{PlanOption, PlanOverlay};
+use super::plugins_popup::{PluginAction, PluginsPopup};
 use super::schedule_popup::{ScheduleAction, SchedulePopup};
 use super::settings_popup::SettingsPopup;
 use super::spinner;
@@ -61,8 +61,8 @@ pub enum AppAction {
     },
     ListSessions,
     RestartGateway,
-    RunCustomize {
-        actions: Vec<CustomizeAction>,
+    RunPlugins {
+        actions: Vec<PluginAction>,
     },
     PlanProceed {
         clear_context: bool,
@@ -78,7 +78,7 @@ pub struct App<'a> {
     pub composer: Composer<'a>,
     pub command_popup: CommandPopup,
     pub settings_popup: SettingsPopup,
-    pub customize_popup: CustomizePopup,
+    pub plugins_popup: PluginsPopup,
     pub scroll_offset: usize,
     pub total_lines: usize,
     pub config: Config,
@@ -108,7 +108,7 @@ impl<'a> App<'a> {
             composer: Composer::new(),
             command_popup: CommandPopup::new(),
             settings_popup: SettingsPopup::new(),
-            customize_popup: CustomizePopup::new(),
+            plugins_popup: PluginsPopup::new(),
             scroll_offset: 0,
             total_lines: 0,
             config,
@@ -312,9 +312,9 @@ impl<'a> App<'a> {
                     return Ok(AppAction::Continue);
                 }
 
-                if self.customize_popup.is_visible() {
-                    if let Some(actions) = self.customize_popup.handle_key(key) {
-                        return Ok(AppAction::RunCustomize { actions });
+                if self.plugins_popup.is_visible() {
+                    if let Some(actions) = self.plugins_popup.handle_key(key) {
+                        return Ok(AppAction::RunPlugins { actions });
                     }
                     return Ok(AppAction::Continue);
                 }
@@ -467,7 +467,7 @@ impl<'a> App<'a> {
                      /save      - Save current session\n  \
                      /load <id> - Load a saved session\n  \
                      /new       - Start new session\n  \
-                     /customize - Integration marketplace\n  \
+                     /plugins   - Integration marketplace\n  \
                      /schedule-tasks - Manage scheduled tasks\n  \
                      /restart   - Restart gateway and services\n  \
                      /logs      - Show recent logs\n  \
@@ -621,9 +621,9 @@ impl<'a> App<'a> {
                 self.settings_popup.show();
                 return Ok(AppAction::Continue);
             }
-            "/customize" => {
+            "/plugins" => {
                 if let Ok(data_dir) = borg_core::config::Config::data_dir() {
-                    self.customize_popup.show(&data_dir);
+                    self.plugins_popup.show(&data_dir);
                 } else {
                     self.push_system_message(
                         "Error: could not determine data directory".to_string(),
@@ -1007,7 +1007,7 @@ impl<'a> App<'a> {
         self.plan_overlay.render(frame, app_layout.composer);
         self.command_popup.render(frame, app_layout.composer);
         self.settings_popup.render(frame, &self.config);
-        self.customize_popup.render(frame);
+        self.plugins_popup.render(frame);
         self.schedule_popup.render(frame);
     }
 

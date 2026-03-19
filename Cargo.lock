@@ -311,9 +311,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "borg-core",
- "borg-customizations",
  "borg-gateway",
  "borg-heartbeat",
+ "borg-plugins",
  "borg-tools",
  "chrono",
  "clap",
@@ -386,22 +386,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "borg-customizations"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tracing",
- "which",
-]
-
-[[package]]
 name = "borg-gateway"
 version = "0.1.0"
 dependencies = [
@@ -447,6 +431,22 @@ dependencies = [
  "cron",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "borg-plugins"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "which",
 ]
 
 [[package]]

@@ -408,9 +408,7 @@ impl Default for WebConfig {
 
 impl Default for TasksConfig {
     fn default() -> Self {
-        Self {
-            max_concurrent: 3,
-        }
+        Self { max_concurrent: 3 }
     }
 }
 
@@ -1615,7 +1613,7 @@ GH_TOKEN = { source = "file", path = "/tmp/token" }
 
     #[test]
     fn save_round_trip_no_duplicate_credentials() {
-        // Simulate the customization install flow: load config, add a keychain credential, save.
+        // Simulate the plugin install flow: load config, add a keychain credential, save.
         // Verify the serialized output is valid TOML (no duplicate [credentials] section).
         let mut cfg = Config::default();
         cfg.llm.model = "test-model".to_string();

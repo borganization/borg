@@ -8,9 +8,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
 
 use borg_core::config::HeartbeatConfig;
+use borg_core::identity::load_identity;
 use borg_core::llm::LlmClient;
 use borg_core::memory::load_memory_context;
-use borg_core::identity::load_identity;
 use borg_core::types::Message;
 
 #[derive(Debug, Clone)]

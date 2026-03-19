@@ -1,12 +1,12 @@
-use crate::{Category, CredentialSpec, CustomizationKind, Platform, TemplateFile, TemplateTarget};
+use crate::{Category, CredentialSpec, Platform, PluginKind, TemplateFile, TemplateTarget};
 
-/// A static customization definition — embedded in the binary.
+/// A static plugin definition — embedded in the binary.
 #[derive(Debug, Clone)]
-pub struct CustomizationDef {
+pub struct PluginDef {
     pub id: &'static str,
     pub name: &'static str,
     pub category: Category,
-    pub kind: CustomizationKind,
+    pub kind: PluginKind,
     pub description: &'static str,
     pub required_credentials: &'static [CredentialSpec],
     pub required_bins: &'static [&'static str],
@@ -59,14 +59,14 @@ const LINEAR_MAIN: &str = include_str!("../templates/productivity/linear/main.py
 
 // ── Catalog entries ──
 
-pub static CATALOG: &[CustomizationDef] = &[
+pub static CATALOG: &[PluginDef] = &[
     // ── Messaging ──
     // Note: Telegram is now a native integration in the gateway crate (no template needed).
-    CustomizationDef {
+    PluginDef {
         id: "messaging/whatsapp",
         name: "WhatsApp",
         category: Category::Messaging,
-        kind: CustomizationKind::Channel,
+        kind: PluginKind::Channel,
         description: "WhatsApp Business API via Twilio",
         required_credentials: &[
             CredentialSpec {
@@ -107,11 +107,11 @@ pub static CATALOG: &[CustomizationDef] = &[
         ],
         platform: Platform::All,
     },
-    CustomizationDef {
+    PluginDef {
         id: "messaging/imessage",
         name: "iMessage",
         category: Category::Messaging,
-        kind: CustomizationKind::Channel,
+        kind: PluginKind::Channel,
         description: "Bidirectional iMessage via macOS Messages (macOS only)",
         required_credentials: &[],
         required_bins: &["osascript", "python3"],
@@ -144,11 +144,11 @@ pub static CATALOG: &[CustomizationDef] = &[
         ],
         platform: Platform::MacOS,
     },
-    CustomizationDef {
+    PluginDef {
         id: "messaging/sms",
         name: "SMS",
         category: Category::Messaging,
-        kind: CustomizationKind::Channel,
+        kind: PluginKind::Channel,
         description: "SMS messaging via Twilio",
         required_credentials: &[
             CredentialSpec {
@@ -190,11 +190,11 @@ pub static CATALOG: &[CustomizationDef] = &[
         platform: Platform::All,
     },
     // ── Email ──
-    CustomizationDef {
+    PluginDef {
         id: "email/gmail",
         name: "Gmail",
         category: Category::Email,
-        kind: CustomizationKind::Tool,
+        kind: PluginKind::Tool,
         description: "Send and search emails via Gmail API",
         required_credentials: &[CredentialSpec {
             key: "GMAIL_API_KEY",
@@ -217,11 +217,11 @@ pub static CATALOG: &[CustomizationDef] = &[
         ],
         platform: Platform::All,
     },
-    CustomizationDef {
+    PluginDef {
         id: "email/outlook",
         name: "Outlook",
         category: Category::Email,
-        kind: CustomizationKind::Tool,
+        kind: PluginKind::Tool,
         description: "Send and search emails via Microsoft Graph API",
         required_credentials: &[CredentialSpec {
             key: "MS_GRAPH_TOKEN",
@@ -245,11 +245,11 @@ pub static CATALOG: &[CustomizationDef] = &[
         platform: Platform::All,
     },
     // ── Productivity ──
-    CustomizationDef {
+    PluginDef {
         id: "productivity/google-calendar",
         name: "Google Calendar",
         category: Category::Productivity,
-        kind: CustomizationKind::Tool,
+        kind: PluginKind::Tool,
         description: "Manage Google Calendar events",
         required_credentials: &[CredentialSpec {
             key: "GOOGLE_CALENDAR_TOKEN",
@@ -272,11 +272,11 @@ pub static CATALOG: &[CustomizationDef] = &[
         ],
         platform: Platform::All,
     },
-    CustomizationDef {
+    PluginDef {
         id: "productivity/notion",
         name: "Notion",
         category: Category::Productivity,
-        kind: CustomizationKind::Tool,
+        kind: PluginKind::Tool,
         description: "Query and create Notion pages and databases",
         required_credentials: &[CredentialSpec {
             key: "NOTION_API_KEY",
@@ -299,11 +299,11 @@ pub static CATALOG: &[CustomizationDef] = &[
         ],
         platform: Platform::All,
     },
-    CustomizationDef {
+    PluginDef {
         id: "productivity/linear",
         name: "Linear",
         category: Category::Productivity,
-        kind: CustomizationKind::Tool,
+        kind: PluginKind::Tool,
         description: "Manage Linear issues and projects",
         required_credentials: &[CredentialSpec {
             key: "LINEAR_API_KEY",
@@ -328,13 +328,13 @@ pub static CATALOG: &[CustomizationDef] = &[
     },
 ];
 
-/// Look up a customization by ID.
-pub fn find_by_id(id: &str) -> Option<&'static CustomizationDef> {
+/// Look up a plugin by ID.
+pub fn find_by_id(id: &str) -> Option<&'static PluginDef> {
     CATALOG.iter().find(|c| c.id == id)
 }
 
 /// Get all entries for a given category.
-pub fn by_category(category: Category) -> Vec<&'static CustomizationDef> {
+pub fn by_category(category: Category) -> Vec<&'static PluginDef> {
     CATALOG.iter().filter(|c| c.category == category).collect()
 }
 

@@ -3,24 +3,24 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use borg_customizations::catalog::{CustomizationDef, CATALOG};
-use borg_customizations::Category;
+use borg_plugins::catalog::{PluginDef, CATALOG};
+use borg_plugins::Category;
 
 use super::theme;
 
-/// State for a single item in the customize list.
-struct CustomizeItem {
-    def: &'static CustomizationDef,
+/// State for a single item in the plugins list.
+struct PluginItem {
+    def: &'static PluginDef,
     is_installed: bool,
     is_selected: bool,
 }
 
-/// Phase of the customize popup.
+/// Phase of the plugins popup.
 #[derive(Clone)]
-enum CustomizePhase {
+enum PluginPhase {
     Browsing,
     CredentialInput {
-        action_queue: Vec<(String, &'static [borg_customizations::CredentialSpec])>,
+        action_queue: Vec<(String, &'static [borg_plugins::CredentialSpec])>,
         current_def_idx: usize,
         current_cred_idx: usize,
         buffer: String,
@@ -29,16 +29,16 @@ enum CustomizePhase {
     },
 }
 
-pub struct CustomizePopup {
+pub struct PluginsPopup {
     visible: bool,
-    items: Vec<CustomizeItem>,
+    items: Vec<PluginItem>,
     cursor: usize,
-    phase: CustomizePhase,
+    phase: PluginPhase,
     status_message: Option<(String, bool)>,
 }
 
-/// Actions that the customize popup can request from the event loop.
-pub enum CustomizeAction {
+/// Actions that the plugins popup can request from the event loop.
+pub enum PluginAction {
     Install {
         id: String,
         credentials: Vec<(String, String)>,
@@ -48,13 +48,13 @@ pub enum CustomizeAction {
     },
 }
 
-impl CustomizePopup {
+impl PluginsPopup {
     pub fn new() -> Self {
         Self {
             visible: false,
             items: Vec::new(),
             cursor: 0,
-            phase: CustomizePhase::Browsing,
+            phase: PluginPhase::Browsing,
             status_message: None,
         }
     }
@@ -67,14 +67,14 @@ impl CustomizePopup {
     pub fn show(&mut self, data_dir: &std::path::Path) {
         self.visible = true;
         self.cursor = 0;
-        self.phase = CustomizePhase::Browsing;
+        self.phase = PluginPhase::Browsing;
         self.status_message = None;
 
         self.items = CATALOG
             .iter()
             .map(|def| {
-                let installed = borg_customizations::installer::is_installed(def, data_dir);
-                CustomizeItem {
+                let installed = borg_plugins::installer::is_installed(def, data_dir);
+                PluginItem {
                     def,
                     is_installed: installed,
                     is_selected: installed,
@@ -85,12 +85,12 @@ impl CustomizePopup {
 
     pub fn dismiss(&mut self) {
         self.visible = false;
-        self.phase = CustomizePhase::Browsing;
+        self.phase = PluginPhase::Browsing;
         self.status_message = None;
     }
 
     /// Handle a key event. Returns actions to execute if Enter is pressed.
-    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Vec<CustomizeAction>> {
+    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Vec<PluginAction>> {
         use crossterm::event::KeyCode;
 
         if !self.visible {
@@ -98,7 +98,7 @@ impl CustomizePopup {
         }
 
         match &mut self.phase {
-            CustomizePhase::Browsing => match key.code {
+            PluginPhase::Browsing => match key.code {
                 KeyCode::Esc => {
                     self.dismiss();
                     None
@@ -149,19 +149,17 @@ impl CustomizePopup {
                     }
 
                     // Check if any install actions need credentials
-                    let mut needs_creds: Vec<(
-                        String,
-                        &'static [borg_customizations::CredentialSpec],
-                    )> = Vec::new();
-                    let mut immediate_actions: Vec<CustomizeAction> = Vec::new();
+                    let mut needs_creds: Vec<(String, &'static [borg_plugins::CredentialSpec])> =
+                        Vec::new();
+                    let mut immediate_actions: Vec<PluginAction> = Vec::new();
 
                     for (id, is_install) in &actions {
                         if *is_install {
-                            if let Some(def) = borg_customizations::catalog::find_by_id(id) {
+                            if let Some(def) = borg_plugins::catalog::find_by_id(id) {
                                 let has_required =
                                     def.required_credentials.iter().any(|c| !c.is_optional);
                                 if !has_required {
-                                    immediate_actions.push(CustomizeAction::Install {
+                                    immediate_actions.push(PluginAction::Install {
                                         id: id.clone(),
                                         credentials: Vec::new(),
                                     });
@@ -170,7 +168,7 @@ impl CustomizePopup {
                                 }
                             }
                         } else {
-                            immediate_actions.push(CustomizeAction::Uninstall { id: id.clone() });
+                            immediate_actions.push(PluginAction::Uninstall { id: id.clone() });
                         }
                     }
 
@@ -183,12 +181,12 @@ impl CustomizePopup {
                     let mut all_credentials: Vec<(String, Vec<(String, String)>)> = Vec::new();
                     // Pre-populate with immediate actions' empty credential lists
                     for action in &immediate_actions {
-                        if let CustomizeAction::Install { id, credentials } = action {
+                        if let PluginAction::Install { id, credentials } = action {
                             all_credentials.push((id.clone(), credentials.clone()));
                         }
                     }
 
-                    self.phase = CustomizePhase::CredentialInput {
+                    self.phase = PluginPhase::CredentialInput {
                         action_queue: needs_creds,
                         current_def_idx: 0,
                         current_cred_idx: 0,
@@ -201,7 +199,7 @@ impl CustomizePopup {
                 }
                 _ => None,
             },
-            CustomizePhase::CredentialInput {
+            PluginPhase::CredentialInput {
                 ref mut action_queue,
                 ref mut current_def_idx,
                 ref mut current_cred_idx,
@@ -210,7 +208,7 @@ impl CustomizePopup {
                 ref mut all_credentials,
             } => match key.code {
                 KeyCode::Esc => {
-                    self.phase = CustomizePhase::Browsing;
+                    self.phase = PluginPhase::Browsing;
                     self.status_message = None;
                     None
                 }
@@ -237,7 +235,7 @@ impl CustomizePopup {
 
                     *current_cred_idx += 1;
 
-                    // Check if we've collected all creds for this customization
+                    // Check if we've collected all creds for this plugin
                     if *current_cred_idx >= cred_specs.len() {
                         let id = action_queue[*current_def_idx].0.clone();
                         all_credentials.push((id, collected.clone()));
@@ -246,14 +244,14 @@ impl CustomizePopup {
                         *current_cred_idx = 0;
                     }
 
-                    // Check if we've finished all customizations
+                    // Check if we've finished all plugins
                     if *current_def_idx >= action_queue.len() {
-                        let mut final_actions: Vec<CustomizeAction> = Vec::new();
+                        let mut final_actions: Vec<PluginAction> = Vec::new();
 
                         // Add uninstall actions from original pending
                         for item in &self.items {
                             if !item.is_selected && item.is_installed {
-                                final_actions.push(CustomizeAction::Uninstall {
+                                final_actions.push(PluginAction::Uninstall {
                                     id: item.def.id.to_string(),
                                 });
                             }
@@ -261,7 +259,7 @@ impl CustomizePopup {
 
                         // Add install actions with collected credentials
                         for (id, creds) in all_credentials.drain(..) {
-                            final_actions.push(CustomizeAction::Install {
+                            final_actions.push(PluginAction::Install {
                                 id,
                                 credentials: creds,
                             });
@@ -312,7 +310,7 @@ impl CustomizePopup {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme::dim())
-            .title(" Customize ");
+            .title(" Plugins ");
 
         let inner = block.inner(popup_area);
         frame.render_widget(block, popup_area);
@@ -417,7 +415,7 @@ impl CustomizePopup {
         }
 
         // Credential input overlay
-        if let CustomizePhase::CredentialInput {
+        if let PluginPhase::CredentialInput {
             ref action_queue,
             current_def_idx,
             current_cred_idx,
@@ -454,7 +452,7 @@ impl CustomizePopup {
         }
 
         // Footer hint
-        let hint = if matches!(self.phase, CustomizePhase::CredentialInput { .. }) {
+        let hint = if matches!(self.phase, PluginPhase::CredentialInput { .. }) {
             " Enter: submit  Esc: cancel"
         } else {
             " Enter: toggle  Tab: apply  Esc: close"
@@ -474,14 +472,14 @@ mod tests {
 
     #[test]
     fn new_popup_not_visible() {
-        let popup = CustomizePopup::new();
+        let popup = PluginsPopup::new();
         assert!(!popup.is_visible());
     }
 
     #[test]
     fn show_and_dismiss() {
-        let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("borg-customize-test");
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test");
         popup.show(&tmp);
         assert!(popup.is_visible());
         assert!(!popup.items.is_empty());
@@ -491,8 +489,8 @@ mod tests {
 
     #[test]
     fn navigation_wraps() {
-        let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("borg-customize-test-nav");
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-nav");
         popup.show(&tmp);
 
         let count = popup.items.len();
@@ -510,8 +508,8 @@ mod tests {
 
     #[test]
     fn toggle_and_compute_actions() {
-        let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("borg-customize-test-toggle");
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-toggle");
         popup.show(&tmp);
 
         // All items start unselected (since nothing is installed in temp dir)
@@ -540,8 +538,8 @@ mod tests {
 
     #[test]
     fn no_credential_input_for_zero_cred_defs() {
-        let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("borg-customize-test-nocred");
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-nocred");
         popup.show(&tmp);
 
         // Find iMessage (no required credentials) and select it
@@ -565,7 +563,7 @@ mod tests {
         assert!(!actions.is_empty());
         assert!(matches!(
             &actions[0],
-            CustomizeAction::Install {
+            PluginAction::Install {
                 credentials,
                 ..
             } if credentials.is_empty()
@@ -574,8 +572,8 @@ mod tests {
 
     #[test]
     fn credential_input_phase_transitions() {
-        let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("borg-customize-test-cred-phase");
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-cred-phase");
         popup.show(&tmp);
 
         // Gmail requires credentials — select it
@@ -594,16 +592,13 @@ mod tests {
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         let result = popup.handle_key(tab);
         assert!(result.is_none()); // No actions yet
-        assert!(matches!(
-            popup.phase,
-            CustomizePhase::CredentialInput { .. }
-        ));
+        assert!(matches!(popup.phase, PluginPhase::CredentialInput { .. }));
     }
 
     #[test]
     fn credential_input_esc_cancels() {
-        let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("borg-customize-test-cred-esc");
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-cred-esc");
         popup.show(&tmp);
 
         let gmail_idx = popup
@@ -616,19 +611,16 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(matches!(
-            popup.phase,
-            CustomizePhase::CredentialInput { .. }
-        ));
+        assert!(matches!(popup.phase, PluginPhase::CredentialInput { .. }));
 
         popup.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(popup.phase, CustomizePhase::Browsing));
+        assert!(matches!(popup.phase, PluginPhase::Browsing));
     }
 
     #[test]
     fn credential_input_backspace() {
-        let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("borg-customize-test-cred-bs");
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-cred-bs");
         popup.show(&tmp);
 
         let gmail_idx = popup
@@ -647,7 +639,7 @@ mod tests {
         popup.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
         popup.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
 
-        if let CustomizePhase::CredentialInput { ref buffer, .. } = popup.phase {
+        if let PluginPhase::CredentialInput { ref buffer, .. } = popup.phase {
             assert_eq!(buffer, "abc");
         } else {
             panic!("expected CredentialInput phase");
@@ -655,7 +647,7 @@ mod tests {
 
         popup.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
 
-        if let CustomizePhase::CredentialInput { ref buffer, .. } = popup.phase {
+        if let PluginPhase::CredentialInput { ref buffer, .. } = popup.phase {
             assert_eq!(buffer, "ab");
         } else {
             panic!("expected CredentialInput phase");
@@ -664,8 +656,8 @@ mod tests {
 
     #[test]
     fn credential_input_enter_produces_install_action() {
-        let mut popup = CustomizePopup::new();
-        let tmp = std::env::temp_dir().join("borg-customize-test-cred-enter");
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-cred-enter");
         popup.show(&tmp);
 
         // Gmail has 1 required credential
@@ -693,9 +685,9 @@ mod tests {
         let actions = result.expect("should have actions");
         let install_action = actions
             .iter()
-            .find(|a| matches!(a, CustomizeAction::Install { .. }))
+            .find(|a| matches!(a, PluginAction::Install { .. }))
             .expect("should have install action");
-        if let CustomizeAction::Install { credentials, .. } = install_action {
+        if let PluginAction::Install { credentials, .. } = install_action {
             assert_eq!(credentials.len(), 1);
             assert_eq!(credentials[0].0, "GMAIL_API_KEY");
             assert_eq!(credentials[0].1, "my-bot-token");

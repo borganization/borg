@@ -185,7 +185,7 @@ fn is_configured(def: &PluginDef, config: &Config) -> bool {
     }
     def.credentials.iter().all(|cred| {
         config.resolve_credential_or_env(cred.key).is_some()
-            || borg_customizations::keychain::check(&format!("borg-{}", def.name), cred.key)
+            || borg_plugins::keychain::check(&format!("borg-{}", def.name), cred.key)
     })
 }
 
@@ -206,7 +206,7 @@ pub fn add_plugin(name: &str) -> Result<()> {
         return Ok(());
     }
 
-    let use_keychain = borg_customizations::keychain::available();
+    let use_keychain = borg_plugins::keychain::available();
     let data_dir = Config::data_dir()?;
     let config_path = data_dir.join("config.toml");
 
@@ -228,7 +228,7 @@ pub fn add_plugin(name: &str) -> Result<()> {
         }
 
         if use_keychain {
-            borg_customizations::keychain::store(&service_name, cred.key, value.trim())
+            borg_plugins::keychain::store(&service_name, cred.key, value.trim())
                 .with_context(|| format!("Failed to store {} in keychain", cred.key))?;
 
             // Add SecretRef to config
@@ -295,7 +295,7 @@ pub fn remove_plugin(name: &str) -> Result<()> {
     let service_name = format!("borg-{name}");
 
     for cred in def.credentials {
-        borg_customizations::keychain::remove(&service_name, cred.key);
+        borg_plugins::keychain::remove(&service_name, cred.key);
     }
 
     // Also clean up .env file if it exists
