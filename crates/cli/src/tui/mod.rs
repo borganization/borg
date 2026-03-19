@@ -153,9 +153,7 @@ pub async fn run() -> Result<()> {
     // Auto-start gateway if enabled and any channels are installed
     let gateway_shutdown_token = CancellationToken::new();
     let _gateway_guard = gateway_shutdown_token.clone().drop_guard();
-    if config.gateway.enabled {
-        spawn_gateway(&config, gateway_shutdown_token.clone(), metrics.clone());
-    }
+    spawn_gateway(&config, gateway_shutdown_token.clone(), metrics.clone());
     let gateway_shutdown = Arc::new(Mutex::new(gateway_shutdown_token));
 
     // Setup terminal
@@ -545,11 +543,6 @@ async fn run_event_loop(
                                                             },
                                                         ),
                                                     );
-                                                }
-                                                if def.kind == borg_customizations::CustomizationKind::Channel
-                                                    && !cfg.gateway.enabled
-                                                {
-                                                    cfg.gateway.enabled = true;
                                                 }
                                                 let _ = cfg.save();
                                             }

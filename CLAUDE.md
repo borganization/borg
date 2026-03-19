@@ -266,14 +266,13 @@ max_concurrent = 5
 **Config:**
 ```toml
 [gateway]
-enabled = false
 host = "127.0.0.1"
 port = 7842
 max_concurrent = 10
 request_timeout_ms = 120000
 ```
 
-**CLI:** `borg gateway` starts the gateway server standalone. Also spawns in the daemon when `gateway.enabled = true`.
+**CLI:** `borg gateway` starts the gateway server standalone. The gateway also runs automatically as part of the daemon.
 
 **Built-in tools:** `create_channel` (patch DSL to `~/.borg/channels/`), `list_channels`
 

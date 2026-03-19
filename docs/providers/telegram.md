@@ -71,7 +71,7 @@ The secret is passed to Telegram during webhook registration and verified on eac
 borg gateway
 ```
 
-Or enable it as part of the daemon by setting `gateway.enabled = true`.
+The gateway also runs automatically as part of the daemon.
 
 ## 7. Verify
 

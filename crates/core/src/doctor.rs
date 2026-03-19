@@ -498,15 +498,6 @@ fn check_data_dir(checks: &mut Vec<DiagnosticCheck>) {
 }
 
 fn check_gateway(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
-    if !config.gateway.enabled {
-        checks.push(DiagnosticCheck::warn(
-            "Gateway",
-            "gateway enabled",
-            "disabled",
-        ));
-        return;
-    }
-
     checks.push(DiagnosticCheck::pass(
         "Gateway",
         format!(
