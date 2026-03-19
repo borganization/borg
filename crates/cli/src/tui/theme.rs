@@ -7,9 +7,11 @@ pub const RED: Color = Color::Red;
 pub const DIM_WHITE: Color = Color::DarkGray;
 pub const BORDER: Color = Color::Rgb(3, 113, 113);
 
-pub const BULLET: &str = "•";
+pub const BULLET: &str = "●";
 pub const CHEVRON: &str = "›";
 pub const TREE_END: &str = "└";
+
+pub const TOOL_ACTIVE_GREEN: Color = Color::Rgb(0, 200, 0);
 pub const INPUT_PROMPT: &str = "› ";
 
 pub fn bold() -> Style {
@@ -34,6 +36,16 @@ pub fn success_style() -> Style {
 
 pub fn error_style() -> Style {
     Style::default().fg(RED)
+}
+
+pub fn tool_bullet_active() -> Style {
+    Style::default()
+        .fg(TOOL_ACTIVE_GREEN)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn tool_bullet_done() -> Style {
+    dim()
 }
 
 pub fn popup_selected() -> Style {
