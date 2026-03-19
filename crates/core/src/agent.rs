@@ -12,7 +12,7 @@ use crate::hooks::{HookAction, HookContext, HookData, HookPoint, HookRegistry};
 use crate::identity::load_identity;
 use crate::llm::{LlmClient, StreamEvent, UsageData};
 use crate::logging::log_message;
-use crate::memory::load_memory_context;
+use crate::memory::{load_memory_context, load_memory_context_ranked};
 use crate::policy::ExecutionPolicy;
 use crate::rate_guard::{ActionType, RateDecision, SessionRateGuard};
 use crate::secrets::redact_secrets;
@@ -411,9 +411,9 @@ impl Agent {
     }
 
     #[instrument(skip_all)]
-    fn build_system_prompt(&self) -> Result<String> {
+    async fn build_system_prompt(&self) -> Result<String> {
         let identity = load_identity()?;
-        let memory = load_memory_context(self.config.memory.max_context_tokens)?;
+        let memory = self.load_memory_with_ranking().await?;
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
 
         let mut system = format!("<system_instructions>\n{identity}\n</system_instructions>\n\n");
@@ -464,6 +464,63 @@ impl Agent {
         ));
 
         Ok(system)
+    }
+
+    /// Load memory context, using semantic ranking if embeddings are available.
+    async fn load_memory_with_ranking(&self) -> Result<String> {
+        let max_tokens = self.config.memory.max_context_tokens;
+
+        if !self.config.memory.embeddings.enabled {
+            return load_memory_context(max_tokens);
+        }
+
+        // Extract the last user message as the query
+        let query = self
+            .history
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::types::Role::User)
+            .and_then(|m| m.text_content())
+            .unwrap_or("")
+            .to_string();
+
+        if query.is_empty() {
+            return load_memory_context(max_tokens);
+        }
+
+        // Generate query embedding once, reuse for both scopes
+        let (_provider, query_embedding) =
+            match crate::embeddings::generate_query_embedding(&self.config, &query).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::debug!("Semantic ranking failed, falling back to recency: {e}");
+                    return load_memory_context(max_tokens);
+                }
+            };
+
+        let recency_weight = self.config.memory.embeddings.recency_weight;
+
+        let global_rankings = match crate::embeddings::rank_embeddings_by_similarity(
+            &query_embedding,
+            "global",
+            recency_weight,
+        ) {
+            Ok(r) if !r.is_empty() => r,
+            Ok(_) => return load_memory_context(max_tokens),
+            Err(e) => {
+                tracing::debug!("Semantic ranking failed, falling back to recency: {e}");
+                return load_memory_context(max_tokens);
+            }
+        };
+
+        let local_rankings: Vec<(String, f32)> = crate::embeddings::rank_embeddings_by_similarity(
+            &query_embedding,
+            "local",
+            recency_weight,
+        )
+        .unwrap_or_default();
+
+        load_memory_context_ranked(max_tokens, &global_rankings, &local_rankings)
     }
 
     fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -613,7 +670,7 @@ impl Agent {
                 .await;
             }
 
-            let mut system_prompt = self.build_system_prompt()?;
+            let mut system_prompt = self.build_system_prompt().await?;
             let tool_defs = self.build_tool_definitions();
 
             // Fire BeforeAgentStart (first iteration) or BeforeLlmCall
@@ -1040,7 +1097,29 @@ impl Agent {
         };
 
         let text_result: Result<String> = match name {
-            "write_memory" => tool_handlers::handle_write_memory(&args),
+            "write_memory" => {
+                let result = tool_handlers::handle_write_memory(&args);
+                if result.is_ok() && self.config.memory.embeddings.enabled {
+                    let config = self.config.clone();
+                    let filename = args["filename"].as_str().unwrap_or_default().to_string();
+                    let scope = args["scope"].as_str().unwrap_or("global").to_string();
+                    // Read the full file content after write (handles append mode correctly)
+                    let full_content = crate::memory::read_memory(&filename).unwrap_or_default();
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::embeddings::embed_memory_file(
+                            &config,
+                            &filename,
+                            &full_content,
+                            &scope,
+                        )
+                        .await
+                        {
+                            tracing::debug!("Failed to embed memory {filename}: {e}");
+                        }
+                    });
+                }
+                result
+            }
             "read_memory" => tool_handlers::handle_read_memory(&args),
             "list_tools" => tool_handlers::handle_list_tools(&self.tool_registry),
             "list_skills" => tool_handlers::handle_list_skills(&self.config),

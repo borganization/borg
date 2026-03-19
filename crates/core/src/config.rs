@@ -157,6 +157,19 @@ pub struct SandboxConfig {
 #[serde(default)]
 pub struct MemoryConfig {
     pub max_context_tokens: usize,
+    #[serde(default)]
+    pub embeddings: EmbeddingsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmbeddingsConfig {
+    pub enabled: bool,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub dimension: Option<usize>,
+    pub api_key_env: Option<String>,
+    pub recency_weight: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +391,20 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             max_context_tokens: 8000,
+            embeddings: EmbeddingsConfig::default(),
+        }
+    }
+}
+
+impl Default for EmbeddingsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: None,
+            model: None,
+            dimension: None,
+            api_key_env: None,
+            recency_weight: 0.2,
         }
     }
 }
@@ -1910,5 +1937,60 @@ startup_timeout_ms = 20000
         assert!(display.contains("browser.enabled"));
         assert!(display.contains("browser.headless"));
         assert!(display.contains("browser.cdp_port"));
+    }
+
+    #[test]
+    fn embeddings_config_defaults() {
+        let cfg = EmbeddingsConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.provider.is_none());
+        assert!(cfg.model.is_none());
+        assert!(cfg.dimension.is_none());
+        assert!(cfg.api_key_env.is_none());
+        assert!((cfg.recency_weight - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn memory_config_includes_embeddings() {
+        let cfg = MemoryConfig::default();
+        assert_eq!(cfg.max_context_tokens, 8000);
+        assert!(cfg.embeddings.enabled);
+    }
+
+    #[test]
+    fn embeddings_config_toml_deserialization() {
+        let toml_str = r#"
+[memory]
+max_context_tokens = 4000
+
+[memory.embeddings]
+enabled = false
+provider = "gemini"
+model = "text-embedding-004"
+dimension = 768
+recency_weight = 0.5
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.memory.max_context_tokens, 4000);
+        assert!(!cfg.memory.embeddings.enabled);
+        assert_eq!(cfg.memory.embeddings.provider.as_deref(), Some("gemini"));
+        assert_eq!(
+            cfg.memory.embeddings.model.as_deref(),
+            Some("text-embedding-004")
+        );
+        assert_eq!(cfg.memory.embeddings.dimension, Some(768));
+        assert!((cfg.memory.embeddings.recency_weight - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn embeddings_config_absent_uses_defaults() {
+        let toml_str = r#"
+[memory]
+max_context_tokens = 6000
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.memory.max_context_tokens, 6000);
+        assert!(cfg.memory.embeddings.enabled);
+        assert!(cfg.memory.embeddings.provider.is_none());
     }
 }
