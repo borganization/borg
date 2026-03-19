@@ -57,17 +57,11 @@ impl<'a> ToolExecutor<'a> {
         };
 
         let output = runner.run(args_json).await?;
-
-        if !output.success() {
-            let code = output.exit_code.unwrap_or(-1);
-            info!("Tool '{}' exited with code {code}", self.manifest.name);
-            if !output.stderr.is_empty() {
-                return Ok(format!("Error (exit {code}): {}", output.stderr));
-            }
-            return Ok(format!("Error (exit {code}): {}", output.stdout));
+        let (ok, text) = output.into_result_string();
+        if !ok {
+            info!("Tool '{}' failed", self.manifest.name);
         }
-
-        Ok(output.stdout)
+        Ok(text)
     }
 
     pub async fn execute_streaming<F>(
@@ -98,17 +92,11 @@ impl<'a> ToolExecutor<'a> {
         };
 
         let output = runner.run_streaming(args_json, on_output).await?;
-
-        if !output.success() {
-            let code = output.exit_code.unwrap_or(-1);
-            info!("Tool '{}' exited with code {code}", self.manifest.name);
-            if !output.stderr.is_empty() {
-                return Ok(format!("Error (exit {code}): {}", output.stderr));
-            }
-            return Ok(format!("Error (exit {code}): {}", output.stdout));
+        let (ok, text) = output.into_result_string();
+        if !ok {
+            info!("Tool '{}' failed", self.manifest.name);
         }
-
-        Ok(output.stdout)
+        Ok(text)
     }
 }
 

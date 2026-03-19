@@ -33,15 +33,8 @@ pub fn tool_definition() -> ToolDefinition {
 }
 
 pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String> {
-    let token = config
-        .resolve_credential_or_env("GOOGLE_CALENDAR_TOKEN")
-        .ok_or_else(|| "GOOGLE_CALENDAR_TOKEN not configured".to_string())?;
-
-    let action = arguments["action"]
-        .as_str()
-        .ok_or_else(|| "Missing 'action' parameter".to_string())?;
-
-    let client = Client::new();
+    let (client, token, action) =
+        super::resolve_credential_and_action(arguments, config, "GOOGLE_CALENDAR_TOKEN")?;
 
     match action {
         "list" => list_events(&client, &token, arguments).await,
@@ -154,41 +147,5 @@ mod tests {
         assert!(def.function.parameters["properties"]["start"].is_object());
     }
 
-    #[tokio::test]
-    async fn handle_missing_credential() {
-        let config = Config::default();
-        let args = json!({"action": "list"});
-        let result = handle(&args, &config).await;
-        assert_eq!(result.unwrap_err(), "GOOGLE_CALENDAR_TOKEN not configured");
-    }
-
-    #[tokio::test]
-    async fn handle_unknown_action() {
-        let mut config = Config::default();
-        config.credentials.insert(
-            "GOOGLE_CALENDAR_TOKEN".to_string(),
-            crate::config::CredentialValue::EnvVar("__BORG_TEST_GCAL_TOKEN__".to_string()),
-        );
-        unsafe {
-            std::env::set_var("__BORG_TEST_GCAL_TOKEN__", "fake-token");
-        }
-        let args = json!({"action": "update"});
-        let result = handle(&args, &config).await;
-        assert_eq!(result.unwrap_err(), "Unknown action: update");
-    }
-
-    #[tokio::test]
-    async fn handle_missing_action_param() {
-        let mut config = Config::default();
-        config.credentials.insert(
-            "GOOGLE_CALENDAR_TOKEN".to_string(),
-            crate::config::CredentialValue::EnvVar("__BORG_TEST_GCAL_TOKEN__".to_string()),
-        );
-        unsafe {
-            std::env::set_var("__BORG_TEST_GCAL_TOKEN__", "fake-token");
-        }
-        let args = json!({});
-        let result = handle(&args, &config).await;
-        assert_eq!(result.unwrap_err(), "Missing 'action' parameter");
-    }
+    integration_handle_tests!(google_calendar, "GOOGLE_CALENDAR_TOKEN");
 }

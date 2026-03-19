@@ -34,15 +34,8 @@ pub fn tool_definition() -> ToolDefinition {
 }
 
 pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String> {
-    let token = config
-        .resolve_credential_or_env("NOTION_API_KEY")
-        .ok_or_else(|| "NOTION_API_KEY not configured".to_string())?;
-
-    let action = arguments["action"]
-        .as_str()
-        .ok_or_else(|| "Missing 'action' parameter".to_string())?;
-
-    let client = Client::new();
+    let (client, token, action) =
+        super::resolve_credential_and_action(arguments, config, "NOTION_API_KEY")?;
 
     match action {
         "search" => search(&client, &token, arguments).await,
@@ -321,41 +314,5 @@ mod tests {
         assert_eq!(extract_block_text(&block), None);
     }
 
-    #[tokio::test]
-    async fn handle_missing_credential() {
-        let config = Config::default();
-        let args = json!({"action": "search", "query": "test"});
-        let result = handle(&args, &config).await;
-        assert_eq!(result.unwrap_err(), "NOTION_API_KEY not configured");
-    }
-
-    #[tokio::test]
-    async fn handle_unknown_action() {
-        let mut config = Config::default();
-        config.credentials.insert(
-            "NOTION_API_KEY".to_string(),
-            crate::config::CredentialValue::EnvVar("__BORG_TEST_NOTION_API_KEY__".to_string()),
-        );
-        unsafe {
-            std::env::set_var("__BORG_TEST_NOTION_API_KEY__", "fake-token");
-        }
-        let args = json!({"action": "delete"});
-        let result = handle(&args, &config).await;
-        assert_eq!(result.unwrap_err(), "Unknown action: delete");
-    }
-
-    #[tokio::test]
-    async fn handle_missing_action_param() {
-        let mut config = Config::default();
-        config.credentials.insert(
-            "NOTION_API_KEY".to_string(),
-            crate::config::CredentialValue::EnvVar("__BORG_TEST_NOTION_API_KEY__".to_string()),
-        );
-        unsafe {
-            std::env::set_var("__BORG_TEST_NOTION_API_KEY__", "fake-token");
-        }
-        let args = json!({});
-        let result = handle(&args, &config).await;
-        assert_eq!(result.unwrap_err(), "Missing 'action' parameter");
-    }
+    integration_handle_tests!(notion, "NOTION_API_KEY");
 }

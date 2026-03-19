@@ -118,22 +118,11 @@ impl<'a> ChannelExecutor<'a> {
         };
 
         let output = runner.run(input_json).await?;
-
-        if !output.success() {
-            let code = output.exit_code.unwrap_or(-1);
-            if !output.stderr.is_empty() {
-                bail!(
-                    "Channel script '{script_name}' exited {code}: {}",
-                    output.stderr
-                );
-            }
-            bail!(
-                "Channel script '{script_name}' exited {code}: {}",
-                output.stdout
-            );
+        let (ok, text) = output.into_result_string();
+        if !ok {
+            bail!("Channel script '{script_name}': {text}");
         }
-
-        Ok(output.stdout)
+        Ok(text)
     }
 }
 
