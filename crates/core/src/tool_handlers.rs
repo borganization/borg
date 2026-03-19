@@ -724,3 +724,191 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
 
     defs
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -- require_str_param --
+
+    #[test]
+    fn require_str_param_extracts_string() {
+        let args = json!({"name": "hello"});
+        assert_eq!(require_str_param(&args, "name").unwrap(), "hello");
+    }
+
+    #[test]
+    fn require_str_param_missing_key_errors() {
+        let args = json!({"other": "value"});
+        let result = require_str_param(&args, "name");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing required"));
+    }
+
+    #[test]
+    fn require_str_param_wrong_type_errors() {
+        let args = json!({"name": 42});
+        let result = require_str_param(&args, "name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_str_param_null_value_errors() {
+        let args = json!({"name": null});
+        let result = require_str_param(&args, "name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_str_param_empty_string_ok() {
+        let args = json!({"name": ""});
+        assert_eq!(require_str_param(&args, "name").unwrap(), "");
+    }
+
+    // -- core_tool_definitions --
+
+    #[test]
+    fn core_tool_definitions_includes_base_tools() {
+        let config = Config::default();
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"write_memory"));
+        assert!(names.contains(&"read_memory"));
+        assert!(names.contains(&"list_tools"));
+        assert!(names.contains(&"apply_patch"));
+        assert!(names.contains(&"create_tool"));
+        assert!(names.contains(&"run_shell"));
+        assert!(names.contains(&"list_skills"));
+        assert!(names.contains(&"read_pdf"));
+        assert!(names.contains(&"manage_tasks"));
+    }
+
+    #[test]
+    fn core_tool_definitions_excludes_browser_when_disabled() {
+        let mut config = Config::default();
+        config.browser.enabled = false;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(!names.contains(&"browser"));
+    }
+
+    #[test]
+    fn core_tool_definitions_includes_browser_when_enabled() {
+        let mut config = Config::default();
+        config.browser.enabled = true;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"browser"));
+    }
+
+    #[test]
+    fn core_tool_definitions_excludes_security_audit_when_disabled() {
+        let mut config = Config::default();
+        config.security.host_audit = false;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(!names.contains(&"security_audit"));
+    }
+
+    #[test]
+    fn core_tool_definitions_includes_security_audit_when_enabled() {
+        let mut config = Config::default();
+        config.security.host_audit = true;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"security_audit"));
+    }
+
+    #[test]
+    fn core_tool_definitions_excludes_web_when_disabled() {
+        let mut config = Config::default();
+        config.web.enabled = false;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(!names.contains(&"web_fetch"));
+        assert!(!names.contains(&"web_search"));
+    }
+
+    #[test]
+    fn core_tool_definitions_includes_web_when_enabled() {
+        let mut config = Config::default();
+        config.web.enabled = true;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"web_fetch"));
+        assert!(names.contains(&"web_search"));
+    }
+
+    #[test]
+    fn core_tool_definitions_all_have_parameters() {
+        let config = Config::default();
+        let defs = core_tool_definitions(&config);
+        for def in &defs {
+            assert!(
+                def.function.parameters.is_object(),
+                "Tool '{}' should have object parameters",
+                def.function.name
+            );
+        }
+    }
+
+    #[test]
+    fn core_tool_definitions_all_have_descriptions() {
+        let config = Config::default();
+        let defs = core_tool_definitions(&config);
+        for def in &defs {
+            assert!(
+                !def.function.description.is_empty(),
+                "Tool '{}' should have a description",
+                def.function.name
+            );
+        }
+    }
+
+    // -- handle_security_audit --
+
+    #[test]
+    fn handle_security_audit_disabled() {
+        let mut config = Config::default();
+        config.security.host_audit = false;
+        let result = handle_security_audit(&json!({}), &config).unwrap();
+        assert!(result.contains("disabled"));
+    }
+
+    #[test]
+    fn handle_security_audit_unknown_category() {
+        let mut config = Config::default();
+        config.security.host_audit = true;
+        let result = handle_security_audit(&json!({"category": "invalid"}), &config).unwrap();
+        assert!(result.contains("Unknown audit category"));
+    }
+
+    // -- handle_read_pdf --
+
+    #[test]
+    fn handle_read_pdf_missing_file() {
+        let result = handle_read_pdf(&json!({"file_path": "/nonexistent/path.pdf"})).unwrap();
+        assert!(result.contains("not found"));
+    }
+
+    #[test]
+    fn handle_read_pdf_missing_param() {
+        let result = handle_read_pdf(&json!({}));
+        assert!(result.is_err());
+    }
+
+    // -- handle_manage_tasks --
+
+    #[test]
+    fn handle_manage_tasks_unknown_action() {
+        let result = handle_manage_tasks(&json!({"action": "nope"}), &Config::default()).unwrap();
+        assert!(result.contains("Unknown action"));
+    }
+
+    #[test]
+    fn handle_manage_tasks_missing_action() {
+        let result = handle_manage_tasks(&json!({}), &Config::default());
+        assert!(result.is_err());
+    }
+}

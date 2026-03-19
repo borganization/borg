@@ -100,7 +100,9 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
         if let Some(path) = line.strip_prefix(ADD_FILE_MARKER) {
             let path = path.trim().to_string();
             if path.is_empty() {
-                return Err(ParseError::InvalidFormat("Empty file path in Add File".to_string()));
+                return Err(ParseError::InvalidFormat(
+                    "Empty file path in Add File".to_string(),
+                ));
             }
             i += 1;
 
@@ -123,7 +125,9 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
         } else if let Some(path) = line.strip_prefix(UPDATE_FILE_MARKER) {
             let path = path.trim().to_string();
             if path.is_empty() {
-                return Err(ParseError::InvalidFormat("Empty file path in Update File".to_string()));
+                return Err(ParseError::InvalidFormat(
+                    "Empty file path in Update File".to_string(),
+                ));
             }
             i += 1;
 
@@ -221,7 +225,9 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
         } else if let Some(path) = line.strip_prefix(DELETE_FILE_MARKER) {
             let path = path.trim().to_string();
             if path.is_empty() {
-                return Err(ParseError::InvalidFormat("Empty file path in Delete File".to_string()));
+                return Err(ParseError::InvalidFormat(
+                    "Empty file path in Delete File".to_string(),
+                ));
             }
             operations.push(PatchOperation::DeleteFile { path });
             i += 1;

@@ -657,28 +657,24 @@ async fn webhook_handler(
     }
 
     // Acquire concurrency permit with brief backpressure window
-    let _permit = match tokio::time::timeout(
-        Duration::from_secs(5),
-        state.semaphore.acquire(),
-    )
-    .await
-    {
-        Ok(Ok(p)) => p,
-        Ok(Err(_)) => {
-            // Semaphore closed
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(serde_json::json!({ "error": "Server shutting down" })),
-            );
-        }
-        Err(_) => {
-            // Timed out waiting for a permit
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(serde_json::json!({ "error": "Too many concurrent requests" })),
-            );
-        }
-    };
+    let _permit =
+        match tokio::time::timeout(Duration::from_secs(5), state.semaphore.acquire()).await {
+            Ok(Ok(p)) => p,
+            Ok(Err(_)) => {
+                // Semaphore closed
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({ "error": "Server shutting down" })),
+                );
+            }
+            Err(_) => {
+                // Timed out waiting for a permit
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({ "error": "Too many concurrent requests" })),
+                );
+            }
+        };
 
     // Native channel handling
     if name == "telegram" {

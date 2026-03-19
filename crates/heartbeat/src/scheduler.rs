@@ -208,7 +208,9 @@ impl HeartbeatScheduler {
             return false;
         };
         let Ok(end) = NaiveTime::parse_from_str(end_str, "%H:%M") else {
-            warn!("Invalid quiet_hours_end format '{end_str}', expected HH:MM — quiet hours disabled");
+            warn!(
+                "Invalid quiet_hours_end format '{end_str}', expected HH:MM — quiet hours disabled"
+            );
             return false;
         };
 

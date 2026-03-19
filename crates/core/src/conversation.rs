@@ -613,4 +613,214 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(history.is_empty());
     }
+
+    // -- summarize_parts --
+
+    #[test]
+    fn summarize_parts_text_only() {
+        let parts = vec![ContentPart::Text("hello world".to_string())];
+        let result = summarize_parts(&parts);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn summarize_parts_multiple_text() {
+        let parts = vec![
+            ContentPart::Text("first".to_string()),
+            ContentPart::Text("second".to_string()),
+        ];
+        let result = summarize_parts(&parts);
+        assert_eq!(result, "first second");
+    }
+
+    #[test]
+    fn summarize_parts_with_image_base64() {
+        let parts = vec![ContentPart::ImageBase64 {
+            media: crate::types::MediaData {
+                mime_type: "image/png".to_string(),
+                data: "base64data".to_string(),
+                filename: Some("photo.png".to_string()),
+            },
+        }];
+        let result = summarize_parts(&parts);
+        assert!(result.contains("[image: photo.png]"));
+    }
+
+    #[test]
+    fn summarize_parts_with_image_url() {
+        let parts = vec![ContentPart::ImageUrl {
+            url: "https://example.com/img.png".to_string(),
+        }];
+        let result = summarize_parts(&parts);
+        assert!(result.contains("[image: https://example.com/img.png]"));
+    }
+
+    #[test]
+    fn summarize_parts_with_audio() {
+        let parts = vec![ContentPart::AudioBase64 {
+            media: crate::types::MediaData {
+                mime_type: "audio/wav".to_string(),
+                data: "audiodata".to_string(),
+                filename: Some("recording.wav".to_string()),
+            },
+        }];
+        let result = summarize_parts(&parts);
+        assert!(result.contains("[audio: recording.wav]"));
+    }
+
+    #[test]
+    fn summarize_parts_empty() {
+        let parts: Vec<ContentPart> = vec![];
+        let result = summarize_parts(&parts);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn summarize_parts_image_without_filename() {
+        let parts = vec![ContentPart::ImageBase64 {
+            media: crate::types::MediaData {
+                mime_type: "image/png".to_string(),
+                data: "data".to_string(),
+                filename: None,
+            },
+        }];
+        let result = summarize_parts(&parts);
+        assert!(result.contains("[image: attached]"));
+    }
+
+    // -- message_tokens edge cases --
+
+    #[test]
+    fn message_tokens_with_parts_content() {
+        let msg = Message {
+            role: Role::User,
+            content: Some(MessageContent::Parts(vec![
+                ContentPart::Text("hello".to_string()),
+                ContentPart::ImageBase64 {
+                    media: crate::types::MediaData {
+                        mime_type: "image/png".to_string(),
+                        data: "data".to_string(),
+                        filename: None,
+                    },
+                },
+            ])),
+            tool_calls: None,
+            tool_call_id: None,
+            timestamp: None,
+        };
+        let tokens = message_tokens(&msg);
+        // Should include overhead + text tokens + IMAGE_TOKEN_ESTIMATE
+        assert!(tokens >= IMAGE_TOKEN_ESTIMATE);
+    }
+
+    #[test]
+    fn message_tokens_audio_estimate_scales_with_size() {
+        let small_audio = Message {
+            role: Role::User,
+            content: Some(MessageContent::Parts(vec![ContentPart::AudioBase64 {
+                media: crate::types::MediaData {
+                    mime_type: "audio/wav".to_string(),
+                    data: "a".repeat(100),
+                    filename: None,
+                },
+            }])),
+            tool_calls: None,
+            tool_call_id: None,
+            timestamp: None,
+        };
+        let large_audio = Message {
+            role: Role::User,
+            content: Some(MessageContent::Parts(vec![ContentPart::AudioBase64 {
+                media: crate::types::MediaData {
+                    mime_type: "audio/wav".to_string(),
+                    data: "a".repeat(100_000),
+                    filename: None,
+                },
+            }])),
+            tool_calls: None,
+            tool_call_id: None,
+            timestamp: None,
+        };
+        let small_tokens = message_tokens(&small_audio);
+        let large_tokens = message_tokens(&large_audio);
+        assert!(large_tokens > small_tokens);
+    }
+
+    // -- normalize_history edge cases --
+
+    #[test]
+    fn normalize_handles_multiple_tool_calls_in_one_message() {
+        let mut history = vec![
+            make_user("test"),
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "c1".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "tool1".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                    ToolCall {
+                        id: "c2".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "tool2".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                ]),
+                tool_call_id: None,
+                timestamp: None,
+            },
+            make_tool_result("c1", "result1"),
+            // c2 result is missing
+        ];
+        normalize_history(&mut history);
+
+        // Should synthesize a result for c2
+        let c2_result = history
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("c2"));
+        assert!(c2_result.is_some(), "Should synthesize missing c2 result");
+        assert!(c2_result
+            .unwrap()
+            .text_content()
+            .unwrap()
+            .contains("aborted"));
+    }
+
+    #[test]
+    fn normalize_preserves_order_with_valid_calls() {
+        let mut history = vec![
+            make_user("q1"),
+            make_tool_call_msg("", "c1", "read_memory"),
+            make_tool_result("c1", "data"),
+            make_user("q2"),
+            make_tool_call_msg("", "c2", "run_shell"),
+            make_tool_result("c2", "output"),
+            make_assistant("final answer"),
+        ];
+        let len_before = history.len();
+        normalize_history(&mut history);
+        assert_eq!(
+            history.len(),
+            len_before,
+            "valid history should be unchanged"
+        );
+    }
+
+    // -- undo_last_turn edge cases --
+
+    #[test]
+    fn undo_with_only_assistant_messages() {
+        let mut history = vec![make_assistant("hello"), make_assistant("world")];
+        let removed = undo_last_turn(&mut history);
+        // No user message found, so nothing to undo
+        assert_eq!(removed, 0);
+        assert_eq!(history.len(), 2);
+    }
 }

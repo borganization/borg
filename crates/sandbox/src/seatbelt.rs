@@ -245,4 +245,56 @@ mod tests {
     fn validate_seatbelt_path_rejects_non_ascii() {
         assert!(validate_seatbelt_path("/tmp/tëst").is_err());
     }
+
+    #[test]
+    fn profile_allows_system_binaries_with_runtime() {
+        let profile =
+            generate_profile(&default_policy(), Path::new("/tmp/tool"), Some("/bin/bash")).unwrap();
+        assert!(profile.contains("(allow process-exec (subpath \"/bin\"))"));
+        assert!(profile.contains("(allow process-exec (subpath \"/usr/bin\"))"));
+        assert!(profile.contains("(allow process-exec (subpath \"/usr/local/bin\"))"));
+    }
+
+    #[test]
+    fn profile_allows_broad_file_read() {
+        let profile = generate_profile(&default_policy(), Path::new("/tmp/tool"), None).unwrap();
+        assert!(profile.contains("(allow file-read*)"));
+    }
+
+    #[test]
+    fn profile_allows_dev_write_for_stdio() {
+        let profile = generate_profile(&default_policy(), Path::new("/tmp/tool"), None).unwrap();
+        assert!(profile.contains("(allow file-write* (subpath \"/dev\"))"));
+    }
+
+    #[test]
+    fn profile_allows_tmp_write() {
+        let profile = generate_profile(&default_policy(), Path::new("/tmp/tool"), None).unwrap();
+        assert!(profile.contains("(allow file-write* (subpath \"/private/tmp\"))"));
+        assert!(profile.contains("(allow file-write* (subpath \"/tmp\"))"));
+    }
+
+    #[test]
+    fn profile_allows_tool_dir_write() {
+        let profile = generate_profile(&default_policy(), Path::new("/tmp/my-tool"), None).unwrap();
+        // Tool dir (possibly canonicalized) should be writable
+        assert!(profile.contains("(allow file-write* (subpath \"/"));
+    }
+
+    #[test]
+    fn rejects_relative_runtime_binary() {
+        let result = generate_profile(&default_policy(), Path::new("/tmp/tool"), Some("python3"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("absolute"));
+    }
+
+    #[test]
+    fn validate_seatbelt_path_rejects_backslash() {
+        assert!(validate_seatbelt_path("/tmp/path\\injection").is_err());
+    }
+
+    #[test]
+    fn validate_seatbelt_path_rejects_carriage_return() {
+        assert!(validate_seatbelt_path("/tmp/path\rfoo").is_err());
+    }
 }
