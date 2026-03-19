@@ -163,6 +163,33 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+fn strip_tool_output_wrapper(s: &str) -> &str {
+    let trimmed = s.trim();
+    if let Some(rest) = trimmed.strip_prefix("<tool_output") {
+        // Ensure the tag name is exactly "tool_output" (followed by space or >)
+        if !rest.starts_with(' ') && !rest.starts_with('>') {
+            return s;
+        }
+        // Find the end of the opening tag
+        if let Some(tag_end) = rest.find('>') {
+            let inner = &rest[tag_end + 1..];
+            // Strip closing tag
+            let inner = if let Some(pos) = inner.rfind("</tool_output>") {
+                &inner[..pos]
+            } else {
+                inner
+            };
+            return inner.trim();
+        }
+    }
+    s
+}
+
+fn format_tool_call_summary(tc: &LogToolCall) -> String {
+    let args_preview = truncate(&tc.arguments, 60);
+    format!("[{}({})]", tc.name, args_preview)
+}
+
 fn format_entry(entry: &LogEntry) -> String {
     let time = format_time(&entry.timestamp);
     match &entry.kind {
@@ -173,14 +200,22 @@ fn format_entry(entry: &LogEntry) -> String {
             content,
             tool_calls,
         } => {
-            if let Some(tcs) = tool_calls {
-                if !tcs.is_empty() {
-                    let names: Vec<&str> = tcs.iter().map(|tc| tc.name.as_str()).collect();
-                    return format!("[{time}] Assistant: [called {}]", names.join(", "));
+            let mut parts = Vec::new();
+            if let Some(text) = content.as_deref() {
+                if !text.is_empty() {
+                    parts.push(truncate(text, 200));
                 }
             }
-            let text = content.as_deref().unwrap_or("");
-            format!("[{time}] Assistant: {}", truncate(text, 200))
+            if let Some(tcs) = tool_calls {
+                for tc in tcs {
+                    parts.push(format_tool_call_summary(tc));
+                }
+            }
+            if parts.is_empty() {
+                format!("[{time}] Assistant:")
+            } else {
+                format!("[{time}] Assistant: {}", parts.join(" "))
+            }
         }
         LogEntryKind::ToolResult {
             tool_call_id,
@@ -191,18 +226,66 @@ fn format_entry(entry: &LogEntry) -> String {
             } else {
                 tool_call_id
             };
-            format!("[{time}] Tool ({short_id}): {}", truncate(content, 120))
+            let stripped = strip_tool_output_wrapper(content);
+            format!("[{time}] Tool ({short_id}): {}", truncate(stripped, 200))
         }
     }
 }
 
-pub fn read_history_formatted(count: usize) -> Result<Vec<String>> {
+fn format_entry_verbose(entry: &LogEntry) -> String {
+    let time = format_time(&entry.timestamp);
+    match &entry.kind {
+        LogEntryKind::UserMessage { content } => {
+            format!("[{time}] You: {content}")
+        }
+        LogEntryKind::AssistantMessage {
+            content,
+            tool_calls,
+        } => {
+            let mut parts = Vec::new();
+            if let Some(text) = content.as_deref() {
+                if !text.is_empty() {
+                    parts.push(text.to_string());
+                }
+            }
+            if let Some(tcs) = tool_calls {
+                for tc in tcs {
+                    parts.push(format!("[{}({})]", tc.name, tc.arguments));
+                }
+            }
+            if parts.is_empty() {
+                format!("[{time}] Assistant:")
+            } else {
+                format!("[{time}] Assistant: {}", parts.join(" "))
+            }
+        }
+        LogEntryKind::ToolResult {
+            tool_call_id,
+            content,
+        } => {
+            let short_id = if tool_call_id.len() > 8 {
+                &tool_call_id[..8]
+            } else {
+                tool_call_id
+            };
+            let stripped = strip_tool_output_wrapper(content);
+            format!("[{time}] Tool ({short_id}): {stripped}")
+        }
+    }
+}
+
+pub fn read_history_formatted(count: usize, verbose: bool) -> Result<Vec<String>> {
     let raw = read_history(count)?;
+    let formatter = if verbose {
+        format_entry_verbose
+    } else {
+        format_entry
+    };
     Ok(raw
         .iter()
         .map(|line| {
             serde_json::from_str::<LogEntry>(line)
-                .map(|entry| format_entry(&entry))
+                .map(|entry| formatter(&entry))
                 .unwrap_or_else(|_| line.clone())
         })
         .collect())
@@ -313,10 +396,7 @@ mod tests {
         let entry: LogEntry = serde_json::from_str(
             r#"{"timestamp":"2026-03-14T10:32:00+00:00","type":"assistant_message","content":null,"tool_calls":[{"id":"call_abc123","name":"run_shell","arguments":"{}"}]}"#,
         ).unwrap();
-        assert_eq!(
-            format_entry(&entry),
-            "[10:32] Assistant: [called run_shell]"
-        );
+        assert_eq!(format_entry(&entry), "[10:32] Assistant: [run_shell({})]");
     }
 
     #[test]
@@ -340,5 +420,103 @@ mod tests {
         let formatted = format_entry(&entry);
         assert!(formatted.ends_with('…'));
         assert!(formatted.len() < 250);
+    }
+
+    #[test]
+    fn strip_tool_output_wrapper_basic() {
+        let input =
+            "<tool_output name=\"web_search\" trust=\"external\">\nresults here\n</tool_output>";
+        assert_eq!(strip_tool_output_wrapper(input), "results here");
+    }
+
+    #[test]
+    fn strip_tool_output_wrapper_no_tags() {
+        assert_eq!(strip_tool_output_wrapper("plain text"), "plain text");
+    }
+
+    #[test]
+    fn format_entry_assistant_with_text_and_tool_calls() {
+        let entry: LogEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-03-14T10:32:00+00:00","type":"assistant_message","content":"I'll search","tool_calls":[{"id":"call_1","name":"web_search","arguments":"{\"query\": \"test\"}"}]}"#,
+        ).unwrap();
+        let formatted = format_entry(&entry);
+        assert!(formatted.contains("I'll search"));
+        assert!(formatted.contains("[web_search("));
+    }
+
+    #[test]
+    fn format_entry_tool_result_strips_xml() {
+        let entry: LogEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-03-14T10:33:00+00:00","type":"tool_result","tool_call_id":"call_abc123def","content":"<tool_output name=\"web_search\" trust=\"external\">\nSearch results here\n</tool_output>"}"#,
+        ).unwrap();
+        let formatted = format_entry(&entry);
+        assert!(!formatted.contains("<tool_output"));
+        assert!(formatted.contains("Search results here"));
+    }
+
+    #[test]
+    fn format_entry_verbose_user() {
+        let long = "x".repeat(300);
+        let json = format!(
+            r#"{{"timestamp":"2026-03-14T10:30:00+00:00","type":"user_message","content":"{long}"}}"#
+        );
+        let entry: LogEntry = serde_json::from_str(&json).unwrap();
+        let formatted = format_entry_verbose(&entry);
+        assert!(formatted.contains(&long));
+        assert!(!formatted.ends_with('…'));
+    }
+
+    #[test]
+    fn format_entry_verbose_assistant_tool_call() {
+        let entry: LogEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-03-14T10:32:00+00:00","type":"assistant_message","content":null,"tool_calls":[{"id":"call_1","name":"run_shell","arguments":"{\"command\": \"ls -la /very/long/path\"}"}]}"#,
+        ).unwrap();
+        let formatted = format_entry_verbose(&entry);
+        assert!(formatted.contains(r#"{"command": "ls -la /very/long/path"}"#));
+    }
+
+    #[test]
+    fn format_entry_verbose_tool_result() {
+        let entry: LogEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-03-14T10:33:00+00:00","type":"tool_result","tool_call_id":"call_abc123def","content":"<tool_output name=\"web_search\" trust=\"external\">\nFull results here\n</tool_output>"}"#,
+        ).unwrap();
+        let formatted = format_entry_verbose(&entry);
+        assert!(!formatted.contains("<tool_output"));
+        assert!(formatted.contains("Full results here"));
+    }
+
+    #[test]
+    fn read_history_formatted_verbose_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let long_content = "y".repeat(300);
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"timestamp":"2026-03-14T10:30:00+00:00","type":"user_message","content":"{long_content}"}}"#
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<String> = content.lines().map(String::from).collect();
+
+        let default_fmt: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                serde_json::from_str::<LogEntry>(l)
+                    .map(|e| format_entry(&e))
+                    .unwrap_or_else(|_| l.clone())
+            })
+            .collect();
+        let verbose_fmt: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                serde_json::from_str::<LogEntry>(l)
+                    .map(|e| format_entry_verbose(&e))
+                    .unwrap_or_else(|_| l.clone())
+            })
+            .collect();
+
+        assert!(verbose_fmt[0].len() > default_fmt[0].len());
     }
 }

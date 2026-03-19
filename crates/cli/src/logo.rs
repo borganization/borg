@@ -18,7 +18,11 @@ o888bood8P'   `Y8bood8P'  o888o  o888o  `Y8bood8P'
 #[allow(dead_code)]
 pub fn print_logo() -> anyhow::Result<()> {
     let mut stdout = io::stdout();
-    stdout.execute(SetForegroundColor(Color::Rgb { r: 0, g: 185, b: 174 }))?;
+    stdout.execute(SetForegroundColor(Color::Rgb {
+        r: 0,
+        g: 185,
+        b: 174,
+    }))?;
     stdout.execute(SetAttribute(Attribute::Bold))?;
     stdout.execute(Print(LOGO))?;
     stdout.execute(ResetColor)?;
