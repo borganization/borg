@@ -155,6 +155,14 @@ mode = "strict"
 [memory]
 max_context_tokens = 8000
 
+[memory.embeddings]
+enabled = true                   # enable semantic memory search
+# provider = "openai"           # optional: override (auto-detects from API keys)
+# model = "text-embedding-3-small" # optional: override embedding model
+# dimension = 1536              # optional: override vector dimension
+# api_key_env = "OPENAI_API_KEY" # optional: override API key env var
+recency_weight = 0.2            # 0.0=pure similarity, 1.0=pure recency
+
 [skills]
 enabled = true
 max_context_tokens = 4000
@@ -198,10 +206,11 @@ MY_SECRET = { source = "env", var = "MY_SECRET" }    # explicit env SecretRef
 ## Memory System
 
 - `~/.borg/MEMORY.md` — loaded every turn
-- `~/.borg/memory/*.md` — loaded by recency until token budget exhausted
+- `~/.borg/memory/*.md` — loaded by relevance (semantic search) or recency until token budget exhausted
 - **Per-project local memory**: `$CWD/.borg/memory/*.md` — loaded in addition to global memory when present
 - `write_memory` tool accepts `scope: "local"` to write to project-local memory
 - Token estimation via `tiktoken-rs` (cl100k_base BPE tokenizer)
+- **Semantic search**: Embeddings generated on `write_memory` and stored in SQLite. Memory files ranked by cosine similarity to the user's query, blended with recency. Auto-detects embedding provider from API keys (OpenAI → OpenRouter → Gemini). Silently falls back to recency when no embedding provider available (e.g., Anthropic-only users). Configure via `[memory.embeddings]` in config.
 
 ## Identity (IDENTITY.md)
 
@@ -367,6 +376,7 @@ Six-layer defense against prompt injection attacks:
 | `crates/core/src/config.rs` | Config parsing with defaults |
 | `crates/core/src/identity.rs` | IDENTITY.md load/save |
 | `crates/core/src/memory.rs` | Memory loading with token budget |
+| `crates/core/src/embeddings.rs` | Embedding API client, cosine similarity, semantic memory ranking |
 | `crates/core/src/skills.rs` | Skills loading, parsing, progressive token budgeting |
 | `crates/core/src/hooks.rs` | Lifecycle hook system (trait, registry, dispatch) |
 | `crates/core/src/doctor.rs` | Diagnostic checks and report formatting |

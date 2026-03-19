@@ -144,6 +144,9 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
     // Memory checks
     check_memory(&mut checks);
 
+    // Embeddings checks
+    check_embeddings(config, &mut checks);
+
     // Data directory checks
     check_data_dir(&mut checks);
 
@@ -766,6 +769,73 @@ fn check_agents(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
         "Agents",
         format!("{} role(s) available", roles.len()),
     ));
+}
+
+fn check_embeddings(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
+    if !config.memory.embeddings.enabled {
+        checks.push(DiagnosticCheck::warn(
+            "Embeddings",
+            "semantic memory search",
+            "disabled in config",
+        ));
+        return;
+    }
+
+    match crate::embeddings::EmbeddingProvider::from_config(&config.memory.embeddings) {
+        Some(provider) => {
+            checks.push(DiagnosticCheck::pass(
+                "Embeddings",
+                format!(
+                    "provider: {} (model: {})",
+                    provider.endpoint, provider.model
+                ),
+            ));
+        }
+        None => {
+            checks.push(DiagnosticCheck::warn(
+                "Embeddings",
+                "embedding provider",
+                "no embedding-capable API key found, using recency-based loading",
+            ));
+            return;
+        }
+    }
+
+    match Database::open() {
+        Ok(db) => {
+            let global_count = db.count_embeddings("global").unwrap_or(0);
+
+            // Count memory files
+            let file_count = Config::memory_dir()
+                .ok()
+                .and_then(|dir| std::fs::read_dir(dir).ok())
+                .map(|entries| {
+                    entries
+                        .filter_map(std::result::Result::ok)
+                        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
+                        .count()
+                })
+                .unwrap_or(0);
+
+            let name = format!("embeddings: {global_count}/{file_count} memory files indexed");
+            if file_count == 0 || global_count >= file_count {
+                checks.push(DiagnosticCheck::pass("Embeddings", name));
+            } else {
+                checks.push(DiagnosticCheck::warn(
+                    "Embeddings",
+                    name,
+                    "some memory files not yet embedded (will be indexed on next write)",
+                ));
+            }
+        }
+        Err(e) => {
+            checks.push(DiagnosticCheck::warn(
+                "Embeddings",
+                "embedding count",
+                format!("database unavailable: {e}"),
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -92,6 +92,19 @@ pub struct PluginRow {
     pub verified_at: Option<i64>,
 }
 
+/// Memory embedding row from SQLite.
+#[derive(Debug, Clone)]
+pub struct EmbeddingRow {
+    pub id: i64,
+    pub scope: String,
+    pub filename: String,
+    pub content_hash: String,
+    pub embedding: Vec<u8>,
+    pub dimension: usize,
+    pub model: String,
+    pub created_at: i64,
+}
+
 /// Agent role row from SQLite.
 #[derive(Debug, Clone)]
 pub struct AgentRoleRow {
@@ -185,7 +198,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 9;
+    const CURRENT_VERSION: u32 = 10;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -224,6 +237,9 @@ impl Database {
         }
         if current < 9 {
             self.migrate_v9()?;
+        }
+        if current < 10 {
+            self.migrate_v10()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -520,6 +536,109 @@ impl Database {
             ",
         )?;
         Ok(())
+    }
+
+    /// V10: Add memory_embeddings table for semantic memory search
+    fn migrate_v10(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS memory_embeddings (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope       TEXT NOT NULL DEFAULT 'global',
+                filename    TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                embedding   BLOB NOT NULL,
+                dimension   INTEGER NOT NULL,
+                model       TEXT NOT NULL,
+                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                UNIQUE(scope, filename)
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_embeddings_scope ON memory_embeddings(scope);
+            ",
+        )?;
+        Ok(())
+    }
+
+    // ── Embedding CRUD ──
+
+    pub fn upsert_embedding(
+        &self,
+        scope: &str,
+        filename: &str,
+        content_hash: &str,
+        embedding: &[u8],
+        dimension: usize,
+        model: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO memory_embeddings (scope, filename, content_hash, embedding, dimension, model, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(scope, filename) DO UPDATE SET
+                content_hash = ?3, embedding = ?4, dimension = ?5, model = ?6, created_at = ?7",
+            params![scope, filename, content_hash, embedding, dimension as i64, model, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_embedding(&self, scope: &str, filename: &str) -> Result<Option<EmbeddingRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, scope, filename, content_hash, embedding, dimension, model, created_at
+             FROM memory_embeddings WHERE scope = ?1 AND filename = ?2",
+        )?;
+        let row = stmt
+            .query_row(params![scope, filename], |row| {
+                Ok(EmbeddingRow {
+                    id: row.get(0)?,
+                    scope: row.get(1)?,
+                    filename: row.get(2)?,
+                    content_hash: row.get(3)?,
+                    embedding: row.get(4)?,
+                    dimension: row.get::<_, i64>(5)? as usize,
+                    model: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn get_all_embeddings(&self, scope: &str) -> Result<Vec<EmbeddingRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, scope, filename, content_hash, embedding, dimension, model, created_at
+             FROM memory_embeddings WHERE scope = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![scope], |row| {
+                Ok(EmbeddingRow {
+                    id: row.get(0)?,
+                    scope: row.get(1)?,
+                    filename: row.get(2)?,
+                    content_hash: row.get(3)?,
+                    embedding: row.get(4)?,
+                    dimension: row.get::<_, i64>(5)? as usize,
+                    model: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_embedding(&self, scope: &str, filename: &str) -> Result<bool> {
+        let count = self.conn.execute(
+            "DELETE FROM memory_embeddings WHERE scope = ?1 AND filename = ?2",
+            params![scope, filename],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn count_embeddings(&self, scope: &str) -> Result<usize> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM memory_embeddings WHERE scope = ?1")?;
+        let count: i64 = stmt.query_row(params![scope], |row| row.get(0))?;
+        Ok(count as usize)
     }
 
     // ── Settings CRUD ──
@@ -2217,5 +2336,118 @@ mod tests {
         // Should be claimable again
         let claimed = db.claim_pending_deliveries(10).unwrap();
         assert_eq!(claimed.len(), 1);
+    }
+
+    #[test]
+    fn v10_migration_creates_embeddings_table() {
+        let db = test_db();
+        let version = db.get_meta("schema_version").unwrap().unwrap();
+        assert_eq!(version, Database::CURRENT_VERSION.to_string());
+        // Table should exist
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_embeddings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn upsert_and_get_embedding() {
+        let db = test_db();
+        let embedding = vec![1.0f32, 2.0, 3.0];
+        let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        db.upsert_embedding(
+            "global",
+            "notes.md",
+            "hash123",
+            &bytes,
+            3,
+            "text-embedding-3-small",
+        )
+        .unwrap();
+
+        let row = db.get_embedding("global", "notes.md").unwrap().unwrap();
+        assert_eq!(row.filename, "notes.md");
+        assert_eq!(row.scope, "global");
+        assert_eq!(row.content_hash, "hash123");
+        assert_eq!(row.dimension, 3);
+        assert_eq!(row.model, "text-embedding-3-small");
+        assert_eq!(row.embedding, bytes);
+    }
+
+    #[test]
+    fn upsert_embedding_updates_on_conflict() {
+        let db = test_db();
+        let bytes1 = vec![0u8; 12];
+        let bytes2 = vec![1u8; 12];
+
+        db.upsert_embedding("global", "notes.md", "hash1", &bytes1, 3, "model-a")
+            .unwrap();
+        db.upsert_embedding("global", "notes.md", "hash2", &bytes2, 3, "model-b")
+            .unwrap();
+
+        let row = db.get_embedding("global", "notes.md").unwrap().unwrap();
+        assert_eq!(row.content_hash, "hash2");
+        assert_eq!(row.embedding, bytes2);
+        assert_eq!(row.model, "model-b");
+
+        // Should still be only one row
+        assert_eq!(db.count_embeddings("global").unwrap(), 1);
+    }
+
+    #[test]
+    fn get_all_embeddings_filters_by_scope() {
+        let db = test_db();
+        let bytes = vec![0u8; 12];
+
+        db.upsert_embedding("global", "a.md", "h1", &bytes, 3, "m")
+            .unwrap();
+        db.upsert_embedding("global", "b.md", "h2", &bytes, 3, "m")
+            .unwrap();
+        db.upsert_embedding("local", "c.md", "h3", &bytes, 3, "m")
+            .unwrap();
+
+        let global = db.get_all_embeddings("global").unwrap();
+        assert_eq!(global.len(), 2);
+
+        let local = db.get_all_embeddings("local").unwrap();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].filename, "c.md");
+    }
+
+    #[test]
+    fn delete_embedding_works() {
+        let db = test_db();
+        let bytes = vec![0u8; 12];
+
+        db.upsert_embedding("global", "notes.md", "h1", &bytes, 3, "m")
+            .unwrap();
+        assert_eq!(db.count_embeddings("global").unwrap(), 1);
+
+        let deleted = db.delete_embedding("global", "notes.md").unwrap();
+        assert!(deleted);
+        assert_eq!(db.count_embeddings("global").unwrap(), 0);
+
+        // Deleting again returns false
+        let deleted = db.delete_embedding("global", "notes.md").unwrap();
+        assert!(!deleted);
+    }
+
+    #[test]
+    fn get_embedding_returns_none_for_missing() {
+        let db = test_db();
+        let result = db.get_embedding("global", "nonexistent.md").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn count_embeddings_empty() {
+        let db = test_db();
+        assert_eq!(db.count_embeddings("global").unwrap(), 0);
     }
 }

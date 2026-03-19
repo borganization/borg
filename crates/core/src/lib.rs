@@ -5,6 +5,7 @@ pub mod constants;
 pub mod conversation;
 pub mod db;
 pub mod doctor;
+pub mod embeddings;
 pub mod hooks;
 pub mod host_audit;
 pub mod identity;
