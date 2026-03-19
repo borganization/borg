@@ -39,10 +39,10 @@ enum Commands {
         /// The message to send
         message: String,
         /// Auto-approve all tool/shell calls (no user prompts)
-        #[arg(long)]
+        #[arg(long, short)]
         yes: bool,
         /// Output raw JSON instead of streaming text
-        #[arg(long)]
+        #[arg(long, short)]
         json: bool,
     },
     /// Run diagnostics to check configuration, connectivity, and dependencies
@@ -87,6 +87,9 @@ enum Commands {
         /// Number of log entries to show
         #[arg(long, short, default_value_t = 50)]
         count: usize,
+        /// Show full untruncated content
+        #[arg(long, short)]
+        verbose: bool,
     },
     /// Manage scheduled tasks
     Tasks {
@@ -125,16 +128,16 @@ enum TasksAction {
     /// Create a new scheduled task
     Create {
         /// Task name
-        #[arg(long)]
+        #[arg(long, short)]
         name: String,
         /// Prompt to send to the agent
-        #[arg(long)]
+        #[arg(long, short)]
         prompt: String,
         /// Schedule expression (cron or interval)
-        #[arg(long)]
+        #[arg(long, short)]
         schedule: String,
         /// Schedule type: cron, interval, or once
-        #[arg(long, default_value = "cron")]
+        #[arg(long, short = 't', default_value = "cron")]
         r#type: String,
     },
     /// Delete a scheduled task
@@ -305,7 +308,7 @@ async fn main() -> Result<()> {
             Some(SettingsAction::Unset { key }) => run_settings_unset(&key)?,
             None => run_settings_show()?,
         },
-        Some(Commands::Logs { count }) => run_logs(count)?,
+        Some(Commands::Logs { count, verbose }) => run_logs(count, verbose)?,
         Some(Commands::Tasks { action }) => match action {
             Some(TasksAction::List) | None => run_tasks_list()?,
             Some(TasksAction::Create {
@@ -493,8 +496,8 @@ fn run_settings_unset(key: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_logs(count: usize) -> Result<()> {
-    let lines = borg_core::logging::read_history_formatted(count)?;
+fn run_logs(count: usize, verbose: bool) -> Result<()> {
+    let lines = borg_core::logging::read_history_formatted(count, verbose)?;
     if lines.is_empty() {
         println!("No conversation history.");
     } else {
@@ -847,7 +850,10 @@ mod tests {
     fn test_parse_logs_default() {
         let cli = Cli::try_parse_from(["borg", "logs"]).unwrap();
         match cli.command {
-            Some(Commands::Logs { count }) => assert_eq!(count, 50),
+            Some(Commands::Logs { count, verbose }) => {
+                assert_eq!(count, 50);
+                assert!(!verbose);
+            }
             _ => panic!("Expected Logs"),
         }
     }
@@ -856,7 +862,40 @@ mod tests {
     fn test_parse_logs_custom_count() {
         let cli = Cli::try_parse_from(["borg", "logs", "--count", "10"]).unwrap();
         match cli.command {
-            Some(Commands::Logs { count }) => assert_eq!(count, 10),
+            Some(Commands::Logs { count, .. }) => assert_eq!(count, 10),
+            _ => panic!("Expected Logs"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logs_verbose() {
+        let cli = Cli::try_parse_from(["borg", "logs", "--verbose"]).unwrap();
+        match cli.command {
+            Some(Commands::Logs { count, verbose }) => {
+                assert_eq!(count, 50);
+                assert!(verbose);
+            }
+            _ => panic!("Expected Logs"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logs_verbose_short() {
+        let cli = Cli::try_parse_from(["borg", "logs", "-v"]).unwrap();
+        match cli.command {
+            Some(Commands::Logs { verbose, .. }) => assert!(verbose),
+            _ => panic!("Expected Logs"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logs_verbose_with_count() {
+        let cli = Cli::try_parse_from(["borg", "logs", "-v", "-c", "20"]).unwrap();
+        match cli.command {
+            Some(Commands::Logs { count, verbose }) => {
+                assert!(verbose);
+                assert_eq!(count, 20);
+            }
             _ => panic!("Expected Logs"),
         }
     }
@@ -908,6 +947,54 @@ mod tests {
                 assert_eq!(r#type, "cron");
             }
             _ => panic!("Expected Tasks Create"),
+        }
+    }
+
+    #[test]
+    fn test_parse_tasks_create_short_flags() {
+        let cli = Cli::try_parse_from([
+            "borg",
+            "tasks",
+            "create",
+            "-n",
+            "test",
+            "-p",
+            "hello",
+            "-s",
+            "*/5 * * * *",
+            "-t",
+            "interval",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Tasks {
+                action:
+                    Some(TasksAction::Create {
+                        name,
+                        prompt,
+                        schedule,
+                        r#type,
+                    }),
+            }) => {
+                assert_eq!(name, "test");
+                assert_eq!(prompt, "hello");
+                assert_eq!(schedule, "*/5 * * * *");
+                assert_eq!(r#type, "interval");
+            }
+            _ => panic!("Expected Tasks Create"),
+        }
+    }
+
+    #[test]
+    fn test_parse_ask_short_flags() {
+        let cli = Cli::try_parse_from(["borg", "ask", "-y", "-j", "hello"]).unwrap();
+        match cli.command {
+            Some(Commands::Ask { message, yes, json }) => {
+                assert_eq!(message, "hello");
+                assert!(yes);
+                assert!(json);
+            }
+            _ => panic!("Expected Ask"),
         }
     }
 
