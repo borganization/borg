@@ -367,8 +367,10 @@ impl PluginsPopup {
                 String::new()
             };
 
+            let native_note = if item.def.is_native { "  (native)" } else { "" };
+
             let label = format!(
-                "  [{check}] {}{status}{platform_note}{python_note}",
+                "  [{check}] {}{native_note}{status}{platform_note}{python_note}",
                 item.def.name,
             );
 
@@ -691,6 +693,126 @@ mod tests {
             assert_eq!(credentials.len(), 1);
             assert_eq!(credentials[0].0, "GMAIL_API_KEY");
             assert_eq!(credentials[0].1, "my-bot-token");
+        }
+    }
+
+    #[test]
+    fn native_plugins_appear_in_list() {
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-native-list");
+        popup.show(&tmp);
+
+        let native_ids = [
+            "messaging/telegram",
+            "messaging/slack",
+            "messaging/discord",
+            "messaging/teams",
+            "messaging/google-chat",
+        ];
+        for id in &native_ids {
+            assert!(
+                popup
+                    .items
+                    .iter()
+                    .any(|i| i.def.id == *id && i.def.is_native),
+                "native plugin {id} should appear in list"
+            );
+        }
+    }
+
+    #[test]
+    fn native_plugins_count() {
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-native-count");
+        popup.show(&tmp);
+
+        let native_count = popup.items.iter().filter(|i| i.def.is_native).count();
+        assert_eq!(native_count, 5);
+    }
+
+    #[test]
+    fn native_plugin_credential_input_flow() {
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-native-cred");
+        unsafe {
+            std::env::remove_var("TELEGRAM_BOT_TOKEN");
+        }
+        popup.show(&tmp);
+
+        let telegram_idx = popup
+            .items
+            .iter()
+            .position(|i| i.def.id == "messaging/telegram")
+            .expect("Telegram should be in catalog");
+        popup.cursor = telegram_idx;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(popup.items[telegram_idx].is_selected);
+
+        popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(popup.phase, PluginPhase::CredentialInput { .. }));
+
+        for c in "test-token".chars() {
+            popup.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        let result = popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(result.is_some());
+        let actions = result.unwrap();
+        let install_action = actions
+            .iter()
+            .find(|a| matches!(a, PluginAction::Install { id, .. } if id == "messaging/telegram"))
+            .expect("should have telegram install action");
+        if let PluginAction::Install { credentials, .. } = install_action {
+            assert_eq!(credentials.len(), 1);
+            assert_eq!(credentials[0].0, "TELEGRAM_BOT_TOKEN");
+            assert_eq!(credentials[0].1, "test-token");
+        }
+    }
+
+    #[test]
+    fn native_plugin_multi_credential_flow() {
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-native-multi");
+        unsafe {
+            std::env::remove_var("SLACK_BOT_TOKEN");
+            std::env::remove_var("SLACK_SIGNING_SECRET");
+        }
+        popup.show(&tmp);
+
+        let slack_idx = popup
+            .items
+            .iter()
+            .position(|i| i.def.id == "messaging/slack")
+            .expect("Slack should be in catalog");
+        popup.cursor = slack_idx;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(popup.phase, PluginPhase::CredentialInput { .. }));
+
+        for c in "xoxb-token".chars() {
+            popup.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let result = popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(result.is_none());
+
+        for c in "signing-secret".chars() {
+            popup.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let result = popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(result.is_some());
+        let actions = result.unwrap();
+        let install_action = actions
+            .iter()
+            .find(|a| matches!(a, PluginAction::Install { id, .. } if id == "messaging/slack"))
+            .expect("should have slack install action");
+        if let PluginAction::Install { credentials, .. } = install_action {
+            assert_eq!(credentials.len(), 2);
+            assert_eq!(credentials[0].0, "SLACK_BOT_TOKEN");
+            assert_eq!(credentials[1].0, "SLACK_SIGNING_SECRET");
         }
     }
 }
