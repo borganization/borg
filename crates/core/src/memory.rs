@@ -4,14 +4,7 @@ use tracing::{debug, instrument};
 
 use crate::config::Config;
 use crate::tokenizer::estimate_tokens;
-
-/// Escape a string for safe embedding in XML attribute values.
-fn escape_xml_attr(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
+use crate::xml_util::escape_xml_attr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {

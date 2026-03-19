@@ -8,6 +8,7 @@ use tracing::warn;
 use super::types::{AuthTestResponse, PostMessageRequest};
 use crate::chunker;
 use crate::circuit_breaker::CircuitBreaker;
+use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
 const MESSAGE_CHUNK_SIZE: usize = 4000;
@@ -72,12 +73,7 @@ impl SlackClient {
         text: &str,
         thread_ts: Option<&str>,
     ) -> Result<()> {
-        let chunks = chunker::chunk_text(text, MESSAGE_CHUNK_SIZE);
-        let chunks = if chunks.is_empty() {
-            vec![text.to_string()]
-        } else {
-            chunks
-        };
+        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
 
         for chunk in &chunks {
             self.send_single_message(channel, chunk, thread_ts).await?;
@@ -97,62 +93,42 @@ impl SlackClient {
             thread_ts: thread_ts.map(String::from),
         };
 
-        const MAX_RETRIES: u32 = 5;
-        const MAX_RETRY_AFTER_SECS: u64 = 300;
-        let mut attempts = 0u32;
+        let policy = RateLimitPolicy {
+            service_name: "Slack chat.postMessage",
+            ..RateLimitPolicy::default()
+        };
 
-        loop {
-            let resp = self
-                .client
+        let resp = send_with_rate_limit_retry(&policy, || async {
+            self.client
                 .post(format!("{SLACK_API_BASE}/chat.postMessage"))
                 .bearer_auth(&self.token)
                 .json(&body)
                 .send()
                 .await
-                .context("Failed to send Slack message")?;
+                .context("Failed to send Slack message")
+        })
+        .await?;
 
-            let status = resp.status();
+        let status = resp.status();
+        let resp_body: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse chat.postMessage response")?;
 
-            // Handle HTTP-level 429 rate limiting
-            if status.as_u16() == 429 {
-                attempts += 1;
-                if attempts > MAX_RETRIES {
-                    bail!("Slack chat.postMessage rate limited after {MAX_RETRIES} retries");
-                }
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(1);
-                let capped = retry_after.min(MAX_RETRY_AFTER_SECS);
-                warn!(
-                    "Slack rate limited, retry after {capped}s (attempt {attempts}/{MAX_RETRIES})"
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(capped)).await;
-                continue;
-            }
-
-            let resp_body: serde_json::Value = resp
-                .json()
-                .await
-                .context("Failed to parse chat.postMessage response")?;
-
-            if resp_body
-                .get("ok")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Ok(());
-            }
-
-            let error = resp_body
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown error");
-
-            bail!("chat.postMessage failed ({}): {}", status.as_u16(), error);
+        if resp_body
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(());
         }
+
+        let error = resp_body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+
+        bail!("chat.postMessage failed ({}): {}", status.as_u16(), error);
     }
 
     /// Set thread typing status via `assistant.threads.setStatus` API.

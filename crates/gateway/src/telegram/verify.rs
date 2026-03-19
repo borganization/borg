@@ -13,14 +13,7 @@ pub fn verify_secret_token(headers: &HeaderMap, secret: &str) -> bool {
         None => return false,
     };
 
-    constant_time_eq(header_val.as_bytes(), secret.as_bytes())
-}
-
-/// Constant-time byte comparison to prevent timing attacks.
-/// Uses the `subtle` crate which handles differing lengths safely.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    use subtle::ConstantTimeEq;
-    a.ct_eq(b).into()
+    crate::crypto::constant_time_eq(header_val.as_bytes(), secret.as_bytes())
 }
 
 /// Parse and validate a Telegram update from the request body.
@@ -99,20 +92,5 @@ mod tests {
     #[test]
     fn missing_update_id_field() {
         assert!(validate_update(r#"{ "message": {} }"#).is_err());
-    }
-
-    #[test]
-    fn constant_time_eq_same() {
-        assert!(constant_time_eq(b"hello", b"hello"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_len() {
-        assert!(!constant_time_eq(b"hello", b"hi"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_content() {
-        assert!(!constant_time_eq(b"hello", b"world"));
     }
 }

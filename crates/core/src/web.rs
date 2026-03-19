@@ -8,6 +8,14 @@ const MAX_FETCH_CHARS: usize = 50000;
 const MAX_SEARCH_RESULTS: usize = 8;
 const USER_AGENT: &str = "Mozilla/5.0 (compatible; Borg/0.1)";
 
+fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(Into::into)
+}
+
 /// Fetch a URL and return its text content. HTML is stripped to plain text.
 pub async fn web_fetch(url: &str, max_chars: Option<usize>) -> Result<String> {
     let max = max_chars.unwrap_or(MAX_FETCH_CHARS);
@@ -76,10 +84,7 @@ pub async fn web_search(query: &str, config: &WebConfig) -> Result<String> {
 
 /// Search via DuckDuckGo HTML endpoint (no API key needed).
 async fn duckduckgo_search(query: &str) -> Result<String> {
-    let client = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
+    let client = build_http_client(15)?;
 
     let resp = client
         .post("https://html.duckduckgo.com/html/")
@@ -159,10 +164,7 @@ async fn brave_search(query: &str, config: &WebConfig) -> Result<String> {
     let api_key = std::env::var(api_key_env)
         .with_context(|| format!("Brave Search API key not found. Set {api_key_env}"))?;
 
-    let client = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
+    let client = build_http_client(15)?;
 
     let resp = client
         .get("https://api.search.brave.com/res/v1/web/search")

@@ -36,3 +36,4 @@ pub mod tool_handlers;
 pub mod truncate;
 pub mod types;
 pub mod web;
+pub mod xml_util;
