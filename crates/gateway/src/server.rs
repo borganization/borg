@@ -150,18 +150,23 @@ impl GatewayServer {
         // Initialize native Slack client if token is available
         let slack_client = match slack_token {
             Some(token) => {
-                let client = SlackClient::new(&token);
-                match client.auth_test().await {
-                    Ok(resp) => {
-                        info!(
-                            "Slack native integration active (bot: {}, team: {})",
-                            resp.user.as_deref().unwrap_or("unknown"),
-                            resp.team.as_deref().unwrap_or("unknown"),
-                        );
-                        Some(Arc::new(client))
-                    }
+                match SlackClient::new(&token) {
+                    Ok(client) => match client.auth_test().await {
+                        Ok(resp) => {
+                            info!(
+                                "Slack native integration active (bot: {}, team: {})",
+                                resp.user.as_deref().unwrap_or("unknown"),
+                                resp.team.as_deref().unwrap_or("unknown"),
+                            );
+                            Some(Arc::new(client))
+                        }
+                        Err(e) => {
+                            warn!("SLACK_BOT_TOKEN set but auth.test failed: {e}");
+                            None
+                        }
+                    },
                     Err(e) => {
-                        warn!("SLACK_BOT_TOKEN set but auth.test failed: {e}");
+                        warn!("Failed to create Slack HTTP client: {e}");
                         None
                     }
                 }
@@ -183,7 +188,13 @@ impl GatewayServer {
                     "Twilio native integration active (account: {}...)",
                     &sid[..sid.len().min(8)]
                 );
-                Some(Arc::new(TwilioClient::new(sid, token)))
+                match TwilioClient::new(sid, token) {
+                    Ok(client) => Some(Arc::new(client)),
+                    Err(e) => {
+                        warn!("Failed to create Twilio HTTP client: {e}");
+                        None
+                    }
+                }
             }
             _ => None,
         };

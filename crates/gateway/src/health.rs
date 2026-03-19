@@ -86,7 +86,11 @@ impl ChannelHealthRegistry {
             .entry(name.to_string())
             .or_insert_with(ChannelHealth::new);
         let truncated = if msg.len() > 512 {
-            format!("{}...", &msg[..509])
+            let mut end = 509;
+            while end > 0 && !msg.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &msg[..end])
         } else {
             msg.to_string()
         };

@@ -75,13 +75,36 @@ impl<'a> ChannelExecutor<'a> {
             .await
     }
 
+    /// Validate that a script path stays within the channel directory.
+    fn validated_script_path(&self, script_name: &str) -> Result<std::path::PathBuf> {
+        let script_path = self.channel_dir.join(script_name);
+        if !script_path.exists() {
+            if script_name.contains("..") {
+                bail!(
+                    "Script '{}' contains path traversal",
+                    script_name
+                );
+            }
+            return Ok(script_path);
+        }
+        let canonical_script = script_path.canonicalize()?;
+        let canonical_dir = self.channel_dir.canonicalize()?;
+        if !canonical_script.starts_with(&canonical_dir) {
+            bail!(
+                "Script '{}' escapes channel directory",
+                script_name
+            );
+        }
+        Ok(script_path)
+    }
+
     async fn run_script(
         &self,
         script_name: &str,
         input_json: &str,
         blocked_paths: &[String],
     ) -> Result<String> {
-        let script_path = self.channel_dir.join(script_name);
+        let script_path = self.validated_script_path(script_name)?;
         let sandbox_policy = self
             .manifest
             .sandbox_policy()

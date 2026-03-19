@@ -1,8 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::Engine;
 use reqwest::Client;
+use std::time::Duration;
 
 const TWILIO_API_BASE: &str = "https://api.twilio.com/2010-04-01";
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Client for sending messages via the Twilio REST API.
 pub struct TwilioClient {
@@ -12,18 +14,22 @@ pub struct TwilioClient {
 }
 
 impl TwilioClient {
-    pub fn new(account_sid: &str, auth_token: &str) -> Self {
+    pub fn new(account_sid: &str, auth_token: &str) -> Result<Self> {
         let credentials = format!("{account_sid}:{auth_token}");
         let auth_header = format!(
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode(credentials)
         );
 
-        Self {
-            client: Client::new(),
+        Ok(Self {
+            client: Client::builder()
+                .timeout(HTTP_TIMEOUT)
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .context("Failed to build Twilio HTTP client")?,
             account_sid: account_sid.to_string(),
             auth_header,
-        }
+        })
     }
 
     /// Send an SMS message.
@@ -89,7 +95,7 @@ mod tests {
 
     #[test]
     fn api_url_construction() {
-        let client = TwilioClient::new("AC123", "auth-token");
+        let client = TwilioClient::new("AC123", "auth-token").unwrap();
         assert_eq!(
             client.messages_url(),
             "https://api.twilio.com/2010-04-01/Accounts/AC123/Messages.json"
@@ -98,14 +104,14 @@ mod tests {
 
     #[test]
     fn basic_auth_header() {
-        let client = TwilioClient::new("AC123", "mytoken");
+        let client = TwilioClient::new("AC123", "mytoken").unwrap();
         let expected_creds = base64::engine::general_purpose::STANDARD.encode("AC123:mytoken");
         assert_eq!(client.auth_header, format!("Basic {expected_creds}"));
     }
 
     #[test]
     fn messages_url_includes_account_sid() {
-        let client = TwilioClient::new("AC_DIFFERENT_SID", "token");
+        let client = TwilioClient::new("AC_DIFFERENT_SID", "token").unwrap();
         let url = client.messages_url();
         assert!(url.contains("AC_DIFFERENT_SID"));
         assert_eq!(
