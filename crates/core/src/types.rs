@@ -345,6 +345,46 @@ impl Message {
     }
 }
 
+/// Output from a tool execution: either plain text or multimodal (text + images).
+#[derive(Debug, Clone)]
+pub enum ToolOutput {
+    Text(String),
+    Multimodal {
+        text: String,
+        parts: Vec<ContentPart>,
+    },
+}
+
+impl From<String> for ToolOutput {
+    fn from(s: String) -> Self {
+        ToolOutput::Text(s)
+    }
+}
+
+impl From<Result<String, anyhow::Error>> for ToolOutput {
+    fn from(r: Result<String, anyhow::Error>) -> Self {
+        match r {
+            Ok(s) => ToolOutput::Text(s),
+            Err(e) => ToolOutput::Text(format!("Error: {e}")),
+        }
+    }
+}
+
+impl Message {
+    pub fn tool_result_multimodal(
+        tool_call_id: impl Into<String>,
+        parts: Vec<ContentPart>,
+    ) -> Self {
+        Self {
+            role: Role::Tool,
+            content: Some(MessageContent::Parts(parts)),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+            timestamp: Some(Self::now_rfc3339()),
+        }
+    }
+}
+
 impl ToolDefinition {
     pub fn new(
         name: impl Into<String>,
@@ -556,5 +596,59 @@ mod tests {
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["content"], "test message");
         assert_eq!(json["role"], "user");
+    }
+
+    #[test]
+    fn tool_output_text_from_string() {
+        let output: ToolOutput = "hello".to_string().into();
+        match output {
+            ToolOutput::Text(s) => assert_eq!(s, "hello"),
+            ToolOutput::Multimodal { .. } => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn tool_output_multimodal_has_parts() {
+        let output = ToolOutput::Multimodal {
+            text: "screenshot taken".to_string(),
+            parts: vec![
+                ContentPart::Text("screenshot taken".to_string()),
+                ContentPart::ImageBase64 {
+                    media: MediaData {
+                        mime_type: "image/png".to_string(),
+                        data: "abc123".to_string(),
+                        filename: None,
+                    },
+                },
+            ],
+        };
+        match output {
+            ToolOutput::Multimodal { text, parts } => {
+                assert_eq!(text, "screenshot taken");
+                assert_eq!(parts.len(), 2);
+            }
+            ToolOutput::Text(_) => panic!("expected Multimodal"),
+        }
+    }
+
+    #[test]
+    fn tool_result_multimodal_constructor() {
+        let parts = vec![
+            ContentPart::Text("result text".to_string()),
+            ContentPart::ImageBase64 {
+                media: MediaData {
+                    mime_type: "image/png".to_string(),
+                    data: "abc123".to_string(),
+                    filename: None,
+                },
+            },
+        ];
+        let msg = Message::tool_result_multimodal("call_1", parts);
+        assert_eq!(msg.role, Role::Tool);
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
+        match &msg.content {
+            Some(MessageContent::Parts(p)) => assert_eq!(p.len(), 2),
+            _ => panic!("expected Parts"),
+        }
     }
 }

@@ -2,8 +2,8 @@ mod app;
 mod colors;
 mod command_popup;
 mod composer;
-mod file_popup;
 mod external_editor;
+mod file_popup;
 mod history;
 mod layout;
 mod markdown;
@@ -289,7 +289,10 @@ async fn run_event_loop(
         };
 
         match action {
-            AppAction::Quit => return Ok(()),
+            AppAction::Quit => {
+                agent.lock().await.close_browser().await;
+                return Ok(());
+            }
             AppAction::SendMessage {
                 input,
                 event_tx,
