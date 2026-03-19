@@ -1128,6 +1128,9 @@ impl Agent {
             self.metrics.tool_executions.add(1, &[]);
             self.metrics.tool_duration.record(tool_elapsed, &[]);
 
+            // Sanitize tool name for XML embedding to prevent injection
+            let safe_name = name.replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
+
             let msg = match tool_output {
                 ToolOutput::Text(raw_result) => {
                     let truncated = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
@@ -1137,7 +1140,7 @@ impl Agent {
                         truncated
                     };
                     let result = format!(
-                        "<tool_output name=\"{name}\" trust=\"external\">\n{redacted}\n</tool_output>"
+                        "<tool_output name=\"{safe_name}\" trust=\"external\">\n{redacted}\n</tool_output>"
                     );
                     Self::fire_after_tool_hook(
                         &mut self.hook_registry,
@@ -1162,7 +1165,7 @@ impl Agent {
                         truncated
                     };
                     let xml_text = format!(
-                        "<tool_output name=\"{name}\" trust=\"external\">\n{redacted}\n</tool_output>"
+                        "<tool_output name=\"{safe_name}\" trust=\"external\">\n{redacted}\n</tool_output>"
                     );
                     Self::fire_after_tool_hook(
                         &mut self.hook_registry,

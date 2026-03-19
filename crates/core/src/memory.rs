@@ -5,6 +5,14 @@ use tracing::{debug, instrument};
 use crate::config::Config;
 use crate::tokenizer::estimate_tokens;
 
+/// Escape a string for safe embedding in XML attribute values.
+fn escape_xml_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
     Overwrite,
@@ -150,8 +158,9 @@ fn load_memory_files_from_dir(
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        let safe_name = escape_xml_attr(&format!("{label}: {filename}"));
         parts.push(format!(
-            "<memory_file name=\"{label}: {filename}\">\n{content}\n</memory_file>"
+            "<memory_file name=\"{safe_name}\">\n{content}\n</memory_file>"
         ));
         *estimated_tokens += tokens;
         debug!(
@@ -283,8 +292,9 @@ fn load_memory_files_ranked(
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        let safe_name = escape_xml_attr(&format!("{label}: {stem}"));
         parts.push(format!(
-            "<memory_file name=\"{label}: {stem}\">\n{content}\n</memory_file>"
+            "<memory_file name=\"{safe_name}\">\n{content}\n</memory_file>"
         ));
         *estimated_tokens += tokens;
         loaded.insert(filename.clone());
@@ -330,8 +340,9 @@ fn load_memory_files_ranked(
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        let safe_name = escape_xml_attr(&format!("{label}: {filename}"));
         parts.push(format!(
-            "<memory_file name=\"{label}: {filename}\">\n{content}\n</memory_file>"
+            "<memory_file name=\"{safe_name}\">\n{content}\n</memory_file>"
         ));
         *estimated_tokens += tokens;
         debug!(

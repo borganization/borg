@@ -27,18 +27,18 @@ pub struct SlackClient {
 }
 
 impl SlackClient {
-    pub fn new(token: &str) -> Self {
-        Self {
+    pub fn new(token: &str) -> Result<Self> {
+        Ok(Self {
             client: Client::builder()
                 .timeout(HTTP_TIMEOUT)
                 .build()
-                .unwrap_or_default(),
+                .context("Failed to build Slack HTTP client")?,
             token: token.to_string(),
             circuit_breaker: Arc::new(CircuitBreaker::new(
                 TYPING_CB_FAILURE_THRESHOLD,
                 TYPING_CB_SUSPENSION_SECS,
             )),
-        }
+        })
     }
 
     /// Validate the bot token by calling `auth.test`.
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn circuit_breaker_initialized() {
-        let client = SlackClient::new("xoxb-test");
+        let client = SlackClient::new("xoxb-test").unwrap();
         assert!(!client.circuit_breaker.is_open());
     }
 }

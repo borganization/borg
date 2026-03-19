@@ -146,7 +146,8 @@ pub fn scan_for_injection(text: &str) -> ThreatLevel {
 
 /// Wrap content with untrusted markers.
 pub fn wrap_untrusted(label: &str, content: &str) -> String {
-    format!("<untrusted_content source=\"{label}\">\n{content}\n</untrusted_content>")
+    let safe_label = label.replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
+    format!("<untrusted_content source=\"{safe_label}\">\n{content}\n</untrusted_content>")
 }
 
 /// Wrap content with injection warning for high-risk content.
