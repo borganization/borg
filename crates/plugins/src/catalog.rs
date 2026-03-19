@@ -12,6 +12,8 @@ pub struct PluginDef {
     pub required_bins: &'static [&'static str],
     pub templates: &'static [TemplateFile],
     pub platform: Platform,
+    /// Native integrations are handled in Rust (gateway crate) and only need credentials, not template files.
+    pub is_native: bool,
 }
 
 // ── Embedded templates via include_str! ──
@@ -61,7 +63,117 @@ const LINEAR_MAIN: &str = include_str!("../templates/productivity/linear/main.py
 
 pub static CATALOG: &[PluginDef] = &[
     // ── Messaging ──
-    // Note: Telegram is now a native integration in the gateway crate (no template needed).
+    // Native integrations (handled in Rust, credential-only)
+    PluginDef {
+        id: "messaging/telegram",
+        name: "Telegram",
+        category: Category::Messaging,
+        kind: PluginKind::Channel,
+        description: "Telegram Bot API (native)",
+        required_credentials: &[CredentialSpec {
+            key: "TELEGRAM_BOT_TOKEN",
+            label: "Bot Token",
+            help_url: "https://core.telegram.org/bots#botfather",
+            is_optional: false,
+        }],
+        required_bins: &[],
+        templates: &[],
+        platform: Platform::All,
+        is_native: true,
+    },
+    PluginDef {
+        id: "messaging/slack",
+        name: "Slack",
+        category: Category::Messaging,
+        kind: PluginKind::Channel,
+        description: "Slack Bot API (native)",
+        required_credentials: &[
+            CredentialSpec {
+                key: "SLACK_BOT_TOKEN",
+                label: "Bot Token",
+                help_url: "https://api.slack.com/apps",
+                is_optional: false,
+            },
+            CredentialSpec {
+                key: "SLACK_SIGNING_SECRET",
+                label: "Signing Secret",
+                help_url: "https://api.slack.com/apps",
+                is_optional: false,
+            },
+        ],
+        required_bins: &[],
+        templates: &[],
+        platform: Platform::All,
+        is_native: true,
+    },
+    PluginDef {
+        id: "messaging/discord",
+        name: "Discord",
+        category: Category::Messaging,
+        kind: PluginKind::Channel,
+        description: "Discord Bot API (native)",
+        required_credentials: &[
+            CredentialSpec {
+                key: "DISCORD_BOT_TOKEN",
+                label: "Bot Token",
+                help_url: "https://discord.com/developers/applications",
+                is_optional: false,
+            },
+            CredentialSpec {
+                key: "DISCORD_PUBLIC_KEY",
+                label: "Public Key",
+                help_url: "https://discord.com/developers/applications",
+                is_optional: false,
+            },
+        ],
+        required_bins: &[],
+        templates: &[],
+        platform: Platform::All,
+        is_native: true,
+    },
+    PluginDef {
+        id: "messaging/teams",
+        name: "Teams",
+        category: Category::Messaging,
+        kind: PluginKind::Channel,
+        description: "Microsoft Teams Bot (native)",
+        required_credentials: &[
+            CredentialSpec {
+                key: "TEAMS_APP_ID",
+                label: "App ID",
+                help_url: "https://portal.azure.com/",
+                is_optional: false,
+            },
+            CredentialSpec {
+                key: "TEAMS_APP_SECRET",
+                label: "App Secret",
+                help_url: "https://portal.azure.com/",
+                is_optional: false,
+            },
+        ],
+        required_bins: &[],
+        templates: &[],
+        platform: Platform::All,
+        is_native: true,
+    },
+    PluginDef {
+        id: "messaging/google-chat",
+        name: "Google Chat",
+        category: Category::Messaging,
+        kind: PluginKind::Channel,
+        description: "Google Chat Bot (native)",
+        required_credentials: &[CredentialSpec {
+            key: "GOOGLE_CHAT_WEBHOOK_TOKEN",
+            label: "Verification Token",
+            help_url: "https://console.cloud.google.com/",
+            is_optional: false,
+        }],
+        required_bins: &[],
+        templates: &[],
+        platform: Platform::All,
+        is_native: true,
+    },
+    // Template-based plugins
     PluginDef {
         id: "messaging/whatsapp",
         name: "WhatsApp",
@@ -106,6 +218,7 @@ pub static CATALOG: &[PluginDef] = &[
             },
         ],
         platform: Platform::All,
+        is_native: false,
     },
     PluginDef {
         id: "messaging/imessage",
@@ -143,6 +256,7 @@ pub static CATALOG: &[PluginDef] = &[
             },
         ],
         platform: Platform::MacOS,
+        is_native: false,
     },
     PluginDef {
         id: "messaging/sms",
@@ -188,6 +302,7 @@ pub static CATALOG: &[PluginDef] = &[
             },
         ],
         platform: Platform::All,
+        is_native: false,
     },
     // ── Email ──
     PluginDef {
@@ -216,6 +331,7 @@ pub static CATALOG: &[PluginDef] = &[
             },
         ],
         platform: Platform::All,
+        is_native: false,
     },
     PluginDef {
         id: "email/outlook",
@@ -243,6 +359,7 @@ pub static CATALOG: &[PluginDef] = &[
             },
         ],
         platform: Platform::All,
+        is_native: false,
     },
     // ── Productivity ──
     PluginDef {
@@ -271,6 +388,7 @@ pub static CATALOG: &[PluginDef] = &[
             },
         ],
         platform: Platform::All,
+        is_native: false,
     },
     PluginDef {
         id: "productivity/notion",
@@ -298,6 +416,7 @@ pub static CATALOG: &[PluginDef] = &[
             },
         ],
         platform: Platform::All,
+        is_native: false,
     },
     PluginDef {
         id: "productivity/linear",
@@ -325,6 +444,7 @@ pub static CATALOG: &[PluginDef] = &[
             },
         ],
         platform: Platform::All,
+        is_native: false,
     },
 ];
 
@@ -369,6 +489,14 @@ mod tests {
     #[test]
     fn templates_have_content() {
         for entry in CATALOG {
+            if entry.is_native {
+                assert!(
+                    entry.templates.is_empty(),
+                    "native {} should have no templates",
+                    entry.id
+                );
+                continue;
+            }
             assert!(!entry.templates.is_empty(), "no templates for {}", entry.id);
             for tmpl in entry.templates {
                 assert!(
@@ -377,6 +505,46 @@ mod tests {
                     tmpl.relative_path
                 );
             }
+        }
+    }
+
+    #[test]
+    fn find_native_by_id_works() {
+        for id in &[
+            "messaging/telegram",
+            "messaging/slack",
+            "messaging/discord",
+            "messaging/teams",
+            "messaging/google-chat",
+        ] {
+            assert!(find_by_id(id).is_some(), "native plugin {id} not found");
+        }
+    }
+
+    #[test]
+    fn native_plugins_have_credentials_and_no_bins() {
+        for entry in CATALOG.iter().filter(|e| e.is_native) {
+            assert!(
+                !entry.required_credentials.is_empty(),
+                "native {} should have credentials",
+                entry.id
+            );
+            assert!(
+                entry.required_bins.is_empty(),
+                "native {} should have no required bins",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn native_plugins_have_no_templates() {
+        for entry in CATALOG.iter().filter(|e| e.is_native) {
+            assert!(
+                entry.templates.is_empty(),
+                "native {} should have no templates",
+                entry.id
+            );
         }
     }
 

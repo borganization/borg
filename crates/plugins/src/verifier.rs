@@ -30,8 +30,8 @@ pub fn verify(def: &PluginDef, data_dir: &std::path::Path) -> VerifyResult {
         }
     }
 
-    // Check that files exist
-    if !crate::installer::is_installed(def, data_dir) {
+    // Check that files exist (skip for native integrations — they have no template files)
+    if !def.is_native && !crate::installer::is_installed(def, data_dir) {
         return VerifyResult {
             id,
             ok: false,
@@ -45,7 +45,9 @@ pub fn verify(def: &PluginDef, data_dir: &std::path::Path) -> VerifyResult {
             continue;
         }
 
-        let has_env = std::env::var(cred.key).is_ok();
+        let has_env = std::env::var(cred.key)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
         let has_keychain = check_keychain_credential(def, cred.key);
 
         if !has_env && !has_keychain {
@@ -88,9 +90,49 @@ mod tests {
 
     #[test]
     fn verify_uninstalled_fails() {
-        let def = &CATALOG[0];
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/whatsapp")
+            .expect("whatsapp in catalog");
         let tmp = std::env::temp_dir().join("borg-verify-test");
         let result = verify(def, &tmp);
         assert!(!result.ok);
+    }
+
+    #[test]
+    fn verify_native_without_creds_fails() {
+        // Use discord to avoid env var races with other tests
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/discord")
+            .expect("discord in catalog");
+        unsafe {
+            std::env::remove_var("DISCORD_BOT_TOKEN");
+            std::env::remove_var("DISCORD_PUBLIC_KEY");
+        }
+        let tmp = std::env::temp_dir().join("borg-verify-native");
+        let result = verify(def, &tmp);
+        assert!(!result.ok);
+    }
+
+    #[test]
+    fn verify_native_message_mentions_credentials() {
+        // Use discord to avoid env var races with other tests
+        let def = CATALOG
+            .iter()
+            .find(|c| c.id == "messaging/discord")
+            .expect("discord in catalog");
+        unsafe {
+            std::env::remove_var("DISCORD_BOT_TOKEN");
+            std::env::remove_var("DISCORD_PUBLIC_KEY");
+        }
+        let tmp = std::env::temp_dir().join("borg-verify-native-msg");
+        let result = verify(def, &tmp);
+        assert!(!result.ok);
+        assert!(
+            result.message.contains("not found"),
+            "message should mention 'not found': {}",
+            result.message
+        );
     }
 }
