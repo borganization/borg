@@ -237,6 +237,7 @@ impl<'a> Composer<'a> {
         self.is_single_line() && self.textarea.lines()[0].is_empty()
     }
 
+    #[cfg(test)]
     pub fn is_browsing_history(&self) -> bool {
         self.history.is_browsing()
     }
