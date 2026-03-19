@@ -18,6 +18,7 @@ pub mod media_understanding;
 pub mod memory;
 pub mod multi_agent;
 pub mod policy;
+pub mod pricing;
 pub mod provider;
 pub mod rate_guard;
 pub mod retry;

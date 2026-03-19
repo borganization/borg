@@ -1016,13 +1016,6 @@ impl<'a> App<'a> {
             AgentEvent::Usage(usage) => {
                 self.session_prompt_tokens += usage.prompt_tokens;
                 self.session_completion_tokens += usage.completion_tokens;
-                if let Ok(db) = borg_core::db::Database::open() {
-                    let _ = db.log_token_usage(
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        usage.prompt_tokens + usage.completion_tokens,
-                    );
-                }
             }
             AgentEvent::TurnComplete => {
                 // Clean up any leftover empty thinking placeholder
