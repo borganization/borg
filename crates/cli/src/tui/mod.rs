@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
+use crossterm::event::{Event, EventStream};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -114,7 +114,6 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
     }
@@ -179,10 +178,9 @@ pub async fn run() -> Result<()> {
     // don't respond to the query inside alternate screen).
     colors::query_terminal_bg();
 
-    // Setup terminal
+    // Setup terminal (no mouse capture — preserves native text selection)
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
-    stdout().execute(EnableMouseCapture)?;
 
     // Guard ensures terminal is restored on any exit path (error or normal)
     let _guard = TerminalGuard;
@@ -190,7 +188,6 @@ pub async fn run() -> Result<()> {
     // Install panic hook that restores terminal before printing panic
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        let _ = stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
         original_hook(info);
@@ -457,20 +454,9 @@ async fn run_event_loop(
                     }
                 }
             }
-            AppAction::ToggleMouseCapture => {
-                app.mouse_capture = !app.mouse_capture;
-                if app.mouse_capture {
-                    let _ = stdout().execute(EnableMouseCapture);
-                    app.push_system_message("Mouse capture enabled (scroll active).".to_string());
-                } else {
-                    let _ = stdout().execute(DisableMouseCapture);
-                    app.push_system_message("Mouse capture disabled (text selection active).".to_string());
-                }
-            }
             AppAction::LaunchExternalEditor => {
                 let current_text = app.composer.text();
                 // Leave alternate screen and disable raw mode for editor
-                let _ = stdout().execute(DisableMouseCapture);
                 let _ = disable_raw_mode();
                 let _ = stdout().execute(LeaveAlternateScreen);
 
@@ -479,9 +465,6 @@ async fn run_event_loop(
                 // Restore terminal
                 let _ = enable_raw_mode();
                 let _ = stdout().execute(EnterAlternateScreen);
-                if app.mouse_capture {
-                    let _ = stdout().execute(EnableMouseCapture);
-                }
                 terminal.clear()?;
 
                 match result {
@@ -553,38 +536,31 @@ async fn run_event_loop(
                                             };
                                             let runtime =
                                                 if def.is_native { "native" } else { "python" };
-                                            {
-                                                {
-                                                    match def.kind {
-                                                        borg_plugins::PluginKind::Tool => {
-                                                            if let Err(e) = db
-                                                                .insert_installed_tool(
-                                                                    item_name,
-                                                                    def.description,
-                                                                    runtime,
-                                                                    def.id,
-                                                                )
-                                                            {
-                                                                tracing::warn!(
-                                                                    "Failed to register tool: {e}"
-                                                                );
-                                                            }
-                                                        }
-                                                        borg_plugins::PluginKind::Channel => {
-                                                            let webhook =
-                                                                format!("/webhook/{item_name}");
-                                                            if let Err(e) = db
-                                                                .insert_installed_channel(
-                                                                    item_name,
-                                                                    def.description,
-                                                                    runtime,
-                                                                    def.id,
-                                                                    &webhook,
-                                                                )
-                                                            {
-                                                                tracing::warn!("Failed to register channel: {e}");
-                                                            }
-                                                        }
+                                            match def.kind {
+                                                borg_plugins::PluginKind::Tool => {
+                                                    if let Err(e) = db.insert_installed_tool(
+                                                        item_name,
+                                                        def.description,
+                                                        runtime,
+                                                        def.id,
+                                                    ) {
+                                                        tracing::warn!(
+                                                            "Failed to register tool: {e}"
+                                                        );
+                                                    }
+                                                }
+                                                borg_plugins::PluginKind::Channel => {
+                                                    let webhook = format!("/webhook/{item_name}");
+                                                    if let Err(e) = db.insert_installed_channel(
+                                                        item_name,
+                                                        def.description,
+                                                        runtime,
+                                                        def.id,
+                                                        &webhook,
+                                                    ) {
+                                                        tracing::warn!(
+                                                            "Failed to register channel: {e}"
+                                                        );
                                                     }
                                                 }
                                             }
