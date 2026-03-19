@@ -90,10 +90,16 @@ impl<'a> Composer<'a> {
         let mut textarea = TextArea::default();
         textarea.set_placeholder_text("Type a message...");
         textarea.set_cursor_line_style(Style::default());
+        let user_style = theme::user_message_style();
+        textarea.set_style(user_style);
+        let mut border_style = Style::default().fg(theme::BORDER);
+        if let Some(bg_color) = user_style.bg {
+            border_style = border_style.bg(bg_color);
+        }
         textarea.set_block(
             Block::bordered()
                 .title(format!("{} ", theme::INPUT_PROMPT))
-                .border_style(Style::default().fg(theme::BORDER)),
+                .border_style(border_style),
         );
         Self {
             textarea,

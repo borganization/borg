@@ -1,9 +1,7 @@
-use std::time::Duration;
-
 use ratatui::text::{Line, Span};
+use throbber_widgets_tui::{Throbber, ThrobberState, BRAILLE_EIGHT};
 
 use super::markdown;
-use super::spinner;
 use super::theme;
 
 #[derive(Clone)]
@@ -70,20 +68,42 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 }
 
 impl HistoryCell {
-    pub fn render(&self, width: u16, stream_elapsed: Option<Duration>) -> Vec<Line<'static>> {
+    pub fn render(
+        &self,
+        width: u16,
+        throbber_state: Option<&ThrobberState>,
+    ) -> Vec<Line<'static>> {
         match self {
             HistoryCell::User { text } => {
-                let mut lines = vec![Line::from(vec![
-                    Span::styled("You: ", theme::bold()),
-                    Span::raw(text.clone()),
-                ])];
-                lines.push(Line::default());
+                let bg = theme::user_message_style();
+                let prefix_style = bg.add_modifier(
+                    ratatui::style::Modifier::BOLD | ratatui::style::Modifier::DIM,
+                );
+                let mut lines = Vec::new();
+                // Top padding
+                lines.push(Line::from("").style(bg));
+                // Content lines
+                for (i, line) in text.lines().enumerate() {
+                    let prefix = if i == 0 {
+                        Span::styled(format!("{} ", theme::CHEVRON), prefix_style)
+                    } else {
+                        Span::styled("  ", bg)
+                    };
+                    lines.push(
+                        Line::from(vec![prefix, Span::styled(line.to_string(), bg)]).style(bg),
+                    );
+                }
+                // Bottom padding
+                lines.push(Line::from("").style(bg));
                 lines
             }
             HistoryCell::Assistant { text, streaming } => {
                 let mut lines = if text.is_empty() && *streaming {
-                    if let Some(elapsed) = stream_elapsed {
-                        spinner::transcript_spinner_lines(elapsed)
+                    if let Some(state) = throbber_state {
+                        let throbber = Throbber::default()
+                            .throbber_set(BRAILLE_EIGHT)
+                            .throbber_style(theme::dim());
+                        vec![Line::from(throbber.to_symbol_span(state))]
                     } else {
                         vec![Line::from(Span::styled(
                             format!("{} ...", theme::BULLET),
