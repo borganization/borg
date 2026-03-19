@@ -29,6 +29,16 @@ pub struct SandboxSection {
     pub fs_write: Vec<String>,
 }
 
+impl SandboxSection {
+    pub fn to_policy(&self) -> borg_sandbox::policy::SandboxPolicy {
+        borg_sandbox::policy::SandboxPolicy {
+            network: self.network,
+            fs_read: self.fs_read.clone(),
+            fs_write: self.fs_write.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParametersSection {
     #[serde(default = "default_param_type")]
@@ -104,11 +114,7 @@ impl ToolManifest {
     }
 
     pub fn sandbox_policy(&self) -> borg_sandbox::policy::SandboxPolicy {
-        borg_sandbox::policy::SandboxPolicy {
-            network: self.sandbox.network,
-            fs_read: self.sandbox.fs_read.clone(),
-            fs_write: self.sandbox.fs_write.clone(),
-        }
+        self.sandbox.to_policy()
     }
 }
 

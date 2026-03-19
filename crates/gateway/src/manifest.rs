@@ -140,11 +140,7 @@ impl ChannelManifest {
     }
 
     pub fn sandbox_policy(&self) -> borg_sandbox::policy::SandboxPolicy {
-        borg_sandbox::policy::SandboxPolicy {
-            network: self.sandbox.network,
-            fs_read: self.sandbox.fs_read.clone(),
-            fs_write: self.sandbox.fs_write.clone(),
-        }
+        self.sandbox.to_policy()
     }
 }
 

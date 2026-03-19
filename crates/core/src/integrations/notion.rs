@@ -1,6 +1,7 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use super::http::{send_and_check, send_json};
 use super::validate_resource_id;
 use crate::config::Config;
 use crate::types::ToolDefinition;
@@ -68,23 +69,18 @@ fn notion_request(
 async fn search(client: &Client, token: &str, args: &Value) -> Result<String, String> {
     let query = args["query"].as_str().unwrap_or("");
 
-    let resp = notion_request(
-        client,
-        reqwest::Method::POST,
-        &format!("{API_BASE}/search"),
-        token,
+    let result: Value = send_json(
+        notion_request(
+            client,
+            reqwest::Method::POST,
+            &format!("{API_BASE}/search"),
+            token,
+        )
+        .json(&json!({ "query": query })),
+        "Notion",
     )
-    .json(&json!({ "query": query }))
-    .send()
-    .await
-    .map_err(|e| format!("Request failed: {e}"))?;
+    .await?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Notion API error: {text}"));
-    }
-
-    let result: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
     let results = result["results"].as_array();
 
     match results {
@@ -133,23 +129,18 @@ async fn create_page(client: &Client, token: &str, args: &Value) -> Result<Strin
         ]
     });
 
-    let resp = notion_request(
-        client,
-        reqwest::Method::POST,
-        &format!("{API_BASE}/pages"),
-        token,
+    let result: Value = send_json(
+        notion_request(
+            client,
+            reqwest::Method::POST,
+            &format!("{API_BASE}/pages"),
+            token,
+        )
+        .json(&payload),
+        "Notion",
     )
-    .json(&payload)
-    .send()
-    .await
-    .map_err(|e| format!("Request failed: {e}"))?;
+    .await?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Notion API error: {text}"));
-    }
-
-    let result: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
     let id = result["id"].as_str().unwrap_or("unknown");
     let url = result["url"].as_str().unwrap_or("");
     Ok(format!("Page created: {title} (id: {id}, url: {url})"))
@@ -160,41 +151,34 @@ async fn read_page(client: &Client, token: &str, args: &Value) -> Result<String,
     let page_id = validate_resource_id(page_id, "page_id")?;
 
     // Fetch page properties
-    let resp = notion_request(
-        client,
-        reqwest::Method::GET,
-        &format!("{API_BASE}/pages/{page_id}"),
-        token,
+    let page: Value = send_json(
+        notion_request(
+            client,
+            reqwest::Method::GET,
+            &format!("{API_BASE}/pages/{page_id}"),
+            token,
+        ),
+        "Notion",
     )
-    .send()
-    .await
-    .map_err(|e| format!("Request failed: {e}"))?;
+    .await?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Notion API error: {text}"));
-    }
-
-    let page: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
     let title = extract_title(&page).unwrap_or_else(|| "(untitled)".to_string());
 
     // Fetch page content (blocks)
-    let blocks_resp = notion_request(
-        client,
-        reqwest::Method::GET,
-        &format!("{API_BASE}/blocks/{page_id}/children"),
-        token,
+    let blocks_resp = send_and_check(
+        notion_request(
+            client,
+            reqwest::Method::GET,
+            &format!("{API_BASE}/blocks/{page_id}/children"),
+            token,
+        ),
+        "Notion",
     )
-    .send()
-    .await
-    .map_err(|e| format!("Request failed: {e}"))?;
+    .await;
 
     let mut content = String::new();
-    if blocks_resp.status().is_success() {
-        let blocks: Value = blocks_resp
-            .json()
-            .await
-            .map_err(|e| format!("Parse error: {e}"))?;
+    if let Ok(resp) = blocks_resp {
+        let blocks: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
         if let Some(results) = blocks["results"].as_array() {
             for block in results {
                 if let Some(text) = extract_block_text(block) {
@@ -214,23 +198,18 @@ async fn query_database(client: &Client, token: &str, args: &Value) -> Result<St
         .ok_or("Missing 'database_id'")?;
     let database_id = validate_resource_id(database_id, "database_id")?;
 
-    let resp = notion_request(
-        client,
-        reqwest::Method::POST,
-        &format!("{API_BASE}/databases/{database_id}/query"),
-        token,
+    let result: Value = send_json(
+        notion_request(
+            client,
+            reqwest::Method::POST,
+            &format!("{API_BASE}/databases/{database_id}/query"),
+            token,
+        )
+        .json(&json!({ "page_size": 20 })),
+        "Notion",
     )
-    .json(&json!({ "page_size": 20 }))
-    .send()
-    .await
-    .map_err(|e| format!("Request failed: {e}"))?;
+    .await?;
 
-    if !resp.status().is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Notion API error: {text}"));
-    }
-
-    let result: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
     let results = result["results"].as_array();
 
     match results {

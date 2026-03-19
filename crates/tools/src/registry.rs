@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{debug, warn};
 
 use crate::executor::ToolExecutor;
 use crate::manifest::ToolManifest;
@@ -45,56 +44,18 @@ impl ToolRegistry {
     pub fn scan(&mut self) -> Result<()> {
         self.tools.clear();
 
-        if !self.tools_dir.exists() {
-            debug!(
-                "Tools directory does not exist: {}",
-                self.tools_dir.display()
-            );
-            return Ok(());
+        let scanned = crate::scan::scan_manifest_dir(
+            &self.tools_dir,
+            "tool.toml",
+            ToolManifest::load,
+            |m| m.name.clone(),
+            "tool",
+        )?;
+
+        for (name, (manifest, dir)) in scanned {
+            self.tools.insert(name, RegisteredTool { manifest, dir });
         }
 
-        let entries = std::fs::read_dir(&self.tools_dir)?;
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-
-            // Skip symlinks to prevent registering tools from unexpected locations
-            if path.is_symlink() {
-                warn!("Skipping symlinked tool directory: {}", path.display());
-                continue;
-            }
-
-            if !path.is_dir() {
-                continue;
-            }
-
-            let manifest_path = path.join("tool.toml");
-            if !manifest_path.exists() {
-                continue;
-            }
-
-            match ToolManifest::load(&manifest_path) {
-                Ok(manifest) => {
-                    debug!("Registered tool: {} from {}", manifest.name, path.display());
-                    let name = manifest.name.clone();
-                    self.tools.insert(
-                        name,
-                        RegisteredTool {
-                            manifest,
-                            dir: path,
-                        },
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to load tool manifest {}: {e}",
-                        manifest_path.display()
-                    );
-                }
-            }
-        }
-
-        debug!("Loaded {} user tools", self.tools.len());
         Ok(())
     }
 
