@@ -339,12 +339,8 @@ impl PluginsPopup {
             row_indices.push(lines.len());
 
             let check = if item.is_selected { "x" } else { " " };
-            let status = if item.is_installed && item.is_selected {
-                " \u{2713} installed"
-            } else if item.is_installed && !item.is_selected {
+            let status = if item.is_installed && !item.is_selected {
                 " (remove)"
-            } else if !item.is_installed && item.is_selected {
-                " (install)"
             } else {
                 ""
             };
@@ -367,10 +363,8 @@ impl PluginsPopup {
                 String::new()
             };
 
-            let native_note = if item.def.is_native { "  (native)" } else { "" };
-
             let label = format!(
-                "  [{check}] {}{native_note}{status}{platform_note}{python_note}",
+                "  [{check}] {}{status}{platform_note}{python_note}",
                 item.def.name,
             );
 

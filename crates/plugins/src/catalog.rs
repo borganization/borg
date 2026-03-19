@@ -69,7 +69,7 @@ pub static CATALOG: &[PluginDef] = &[
         name: "Telegram",
         category: Category::Messaging,
         kind: PluginKind::Channel,
-        description: "Telegram Bot API (native)",
+        description: "Telegram Bot API",
         required_credentials: &[CredentialSpec {
             key: "TELEGRAM_BOT_TOKEN",
             label: "Bot Token",
@@ -86,7 +86,7 @@ pub static CATALOG: &[PluginDef] = &[
         name: "Slack",
         category: Category::Messaging,
         kind: PluginKind::Channel,
-        description: "Slack Bot API (native)",
+        description: "Slack Bot API",
         required_credentials: &[
             CredentialSpec {
                 key: "SLACK_BOT_TOKEN",
@@ -111,7 +111,7 @@ pub static CATALOG: &[PluginDef] = &[
         name: "Discord",
         category: Category::Messaging,
         kind: PluginKind::Channel,
-        description: "Discord Bot API (native)",
+        description: "Discord Bot API",
         required_credentials: &[
             CredentialSpec {
                 key: "DISCORD_BOT_TOKEN",
@@ -136,7 +136,7 @@ pub static CATALOG: &[PluginDef] = &[
         name: "Teams",
         category: Category::Messaging,
         kind: PluginKind::Channel,
-        description: "Microsoft Teams Bot (native)",
+        description: "Microsoft Teams Bot",
         required_credentials: &[
             CredentialSpec {
                 key: "TEAMS_APP_ID",
@@ -161,7 +161,7 @@ pub static CATALOG: &[PluginDef] = &[
         name: "Google Chat",
         category: Category::Messaging,
         kind: PluginKind::Channel,
-        description: "Google Chat Bot (native)",
+        description: "Google Chat Bot",
         required_credentials: &[CredentialSpec {
             key: "GOOGLE_CHAT_WEBHOOK_TOKEN",
             label: "Verification Token",
