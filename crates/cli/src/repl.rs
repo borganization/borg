@@ -93,7 +93,11 @@ pub async fn one_shot(message: &str, auto_approve: bool, json_output: bool) -> R
                     if !json_output {
                         let preview =
                             if result.len() > borg_core::constants::TOOL_RESULT_PREVIEW_CHARS {
-                                &result[..borg_core::constants::TOOL_RESULT_PREVIEW_CHARS]
+                                let mut end = borg_core::constants::TOOL_RESULT_PREVIEW_CHARS;
+                                while end > 0 && !result.is_char_boundary(end) {
+                                    end -= 1;
+                                }
+                                &result[..end]
                             } else {
                                 &result
                             };

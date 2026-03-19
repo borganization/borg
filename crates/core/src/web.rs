@@ -36,10 +36,18 @@ pub async fn web_fetch(url: &str, max_chars: Option<usize>) -> Result<String> {
         .unwrap_or("")
         .to_string();
 
-    let body = resp
-        .text()
+    let bytes = resp
+        .bytes()
         .await
         .with_context(|| format!("Failed to read body from {url}"))?;
+    const MAX_BODY_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+    if bytes.len() > MAX_BODY_BYTES {
+        anyhow::bail!(
+            "Response body too large ({} bytes, max {MAX_BODY_BYTES})",
+            bytes.len()
+        );
+    }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
 
     let text = if content_type.contains("text/html") || content_type.contains("application/xhtml") {
         html_to_text(&body)

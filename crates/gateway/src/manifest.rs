@@ -115,6 +115,16 @@ impl ChannelManifest {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let manifest: Self = toml::from_str(&content)?;
+        // Validate channel name to prevent path traversal in webhook routes
+        if manifest.name.contains('/')
+            || manifest.name.contains('\\')
+            || manifest.name.contains("..")
+        {
+            anyhow::bail!(
+                "Channel name '{}' contains invalid characters (/, \\, or ..)",
+                manifest.name
+            );
+        }
         Ok(manifest)
     }
 

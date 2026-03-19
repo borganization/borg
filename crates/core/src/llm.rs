@@ -685,6 +685,8 @@ impl LlmClient {
 
         let response = self.send_request(&request, cancel).await?;
 
+        const MAX_SSE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
+
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
 
@@ -713,6 +715,14 @@ impl LlmClient {
             };
 
             buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            if buffer.len() > MAX_SSE_BUFFER {
+                return Err(LlmError::Retryable {
+                    source: anyhow::anyhow!("SSE buffer exceeded {MAX_SSE_BUFFER} bytes"),
+                    retry_after: None,
+                    reason: FailoverReason::Overloaded,
+                });
+            }
 
             while let Some(line_end) = buffer.find('\n') {
                 let line = buffer[..line_end].trim().to_string();
@@ -901,6 +911,8 @@ impl LlmClient {
 
         let response = self.send_request(&body, cancel).await?;
 
+        const MAX_SSE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
+
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut current_tool_index: usize = 0;
@@ -932,6 +944,14 @@ impl LlmClient {
             };
 
             buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            if buffer.len() > MAX_SSE_BUFFER {
+                return Err(LlmError::Retryable {
+                    source: anyhow::anyhow!("SSE buffer exceeded {MAX_SSE_BUFFER} bytes"),
+                    retry_after: None,
+                    reason: FailoverReason::Overloaded,
+                });
+            }
 
             while let Some(line_end) = buffer.find('\n') {
                 let line = buffer[..line_end].trim().to_string();
@@ -1027,17 +1047,19 @@ impl LlmClient {
                             "message_delta" => {
                                 // Parse usage from message_delta
                                 if let Some(usage) = event["usage"].as_object() {
+                                    let input = usage
+                                        .get("input_tokens")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .unwrap_or(0);
+                                    let output = usage
+                                        .get("output_tokens")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .unwrap_or(0);
                                     let _ = tx
                                         .send(StreamEvent::Usage(UsageData {
-                                            prompt_tokens: usage
-                                                .get("input_tokens")
-                                                .and_then(serde_json::Value::as_u64)
-                                                .unwrap_or(0),
-                                            completion_tokens: usage
-                                                .get("output_tokens")
-                                                .and_then(serde_json::Value::as_u64)
-                                                .unwrap_or(0),
-                                            total_tokens: 0,
+                                            prompt_tokens: input,
+                                            completion_tokens: output,
+                                            total_tokens: input + output,
                                             provider: self.provider.as_str().to_string(),
                                             model: self.config.llm.model.clone(),
                                         }))
