@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn read_history_formatted_verbose_flag() {
+    fn verbose_produces_longer_output() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
         let long_content = "y".repeat(300);
