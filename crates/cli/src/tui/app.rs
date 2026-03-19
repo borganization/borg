@@ -520,7 +520,7 @@ impl<'a> App<'a> {
                      /new       - Start new session\n  \
                      /plugins   - Integration marketplace\n  \
                      /schedule-tasks - Manage scheduled tasks\n  \
-                     /restart   - Restart gateway and services\n  \
+                     /restart   - Restart services\n  \
                      /logs      - Show recent logs\n  \
                      /plan      - Send message in plan mode\n  \
                      quit/exit  - Exit"

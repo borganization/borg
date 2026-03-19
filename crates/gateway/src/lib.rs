@@ -1,11 +1,13 @@
 pub mod chunker;
 pub mod circuit_breaker;
 pub mod commands;
+pub mod crypto;
 pub mod discord;
 pub mod executor;
 pub mod google_chat;
 pub mod handler;
 pub mod health;
+pub mod http_retry;
 #[cfg(target_os = "macos")]
 pub mod imessage;
 pub mod manifest;

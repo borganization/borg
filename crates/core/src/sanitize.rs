@@ -146,10 +146,7 @@ pub fn scan_for_injection(text: &str) -> ThreatLevel {
 
 /// Wrap content with untrusted markers.
 pub fn wrap_untrusted(label: &str, content: &str) -> String {
-    let safe_label = label
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
+    let safe_label = crate::xml_util::escape_xml_attr(label);
     format!("<untrusted_content source=\"{safe_label}\">\n{content}\n</untrusted_content>")
 }
 

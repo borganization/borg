@@ -1,3 +1,17 @@
+/// Split text into non-empty chunks. Falls back to a single-element vec containing
+/// the original text if `chunk_text` returns empty (e.g. for empty input).
+pub fn chunk_text_nonempty(text: &str, max_chars: usize) -> Vec<String> {
+    let chunks = chunk_text(text, max_chars);
+    if chunks.is_empty() {
+        if text.is_empty() {
+            return vec![];
+        }
+        vec![text.to_string()]
+    } else {
+        chunks
+    }
+}
+
 /// Split text into chunks that fit within `max_chars` (character count, not bytes).
 ///
 /// Splitting priority: paragraph boundary (`\n\n`), line boundary (`\n`),

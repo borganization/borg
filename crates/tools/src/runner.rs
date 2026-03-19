@@ -26,7 +26,8 @@ pub struct ScriptRunner<'a> {
 }
 
 impl<'a> ScriptRunner<'a> {
-    pub async fn run(&self, input_json: &str) -> Result<ScriptOutput> {
+    /// Build a sandboxed command, spawn it, and write input to stdin.
+    fn spawn_child(&self, label: &str) -> Result<(tokio::process::Child, std::time::Duration)> {
         let (program, base_args) = resolve_runtime(self.runtime, self.work_dir)?;
 
         if !self.script_path.exists() {
@@ -40,12 +41,17 @@ impl<'a> ScriptRunner<'a> {
             .sandbox_policy
             .wrap_command(&program, &cmd_args, self.work_dir);
 
-        debug!(
-            "Executing '{}': {} {:?}",
-            self.name, sandboxed.program, sandboxed.args
-        );
-
-        let timeout = std::time::Duration::from_millis(self.timeout_ms);
+        if label.is_empty() {
+            debug!(
+                "Executing '{}': {} {:?}",
+                self.name, sandboxed.program, sandboxed.args
+            );
+        } else {
+            debug!(
+                "Executing {label} '{}': {} {:?}",
+                self.name, sandboxed.program, sandboxed.args
+            );
+        }
 
         let mut cmd = Command::new(&sandboxed.program);
         cmd.args(&sandboxed.args)
@@ -57,13 +63,19 @@ impl<'a> ScriptRunner<'a> {
             cmd.env(key, val);
         }
 
-        let mut child = cmd.kill_on_drop(true).spawn().with_context(|| {
+        let child = cmd.kill_on_drop(true).spawn().with_context(|| {
             format!(
                 "Failed to spawn '{}' (runtime: {})",
                 self.name, self.runtime
             )
         })?;
 
+        let timeout = std::time::Duration::from_millis(self.timeout_ms);
+        Ok((child, timeout))
+    }
+
+    /// Write input JSON to a child process's stdin.
+    async fn write_stdin(&self, child: &mut tokio::process::Child, input_json: &str) {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             if let Err(e) = stdin.write_all(input_json.as_bytes()).await {
@@ -71,6 +83,11 @@ impl<'a> ScriptRunner<'a> {
             }
             drop(stdin);
         }
+    }
+
+    pub async fn run(&self, input_json: &str) -> Result<ScriptOutput> {
+        let (mut child, timeout) = self.spawn_child("")?;
+        self.write_stdin(&mut child, input_json).await;
 
         let output = tokio::time::timeout(timeout, child.wait_with_output())
             .await
@@ -89,50 +106,8 @@ impl<'a> ScriptRunner<'a> {
     where
         F: FnMut(&str, bool) + Send,
     {
-        let (program, base_args) = resolve_runtime(self.runtime, self.work_dir)?;
-
-        if !self.script_path.exists() {
-            bail!("Script not found: {}", self.script_path.display());
-        }
-
-        let mut cmd_args = base_args;
-        cmd_args.push(self.script_path.to_string_lossy().to_string());
-
-        let sandboxed = self
-            .sandbox_policy
-            .wrap_command(&program, &cmd_args, self.work_dir);
-
-        debug!(
-            "Executing streaming '{}': {} {:?}",
-            self.name, sandboxed.program, sandboxed.args
-        );
-
-        let timeout = std::time::Duration::from_millis(self.timeout_ms);
-
-        let mut cmd = Command::new(&sandboxed.program);
-        cmd.args(&sandboxed.args)
-            .current_dir(self.work_dir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        for (key, val) in self.extra_env {
-            cmd.env(key, val);
-        }
-
-        let mut child = cmd.kill_on_drop(true).spawn().with_context(|| {
-            format!(
-                "Failed to spawn '{}' (runtime: {})",
-                self.name, self.runtime
-            )
-        })?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            if let Err(e) = stdin.write_all(input_json.as_bytes()).await {
-                tracing::warn!("Failed to write input to '{}': {e}", self.name);
-            }
-            drop(stdin);
-        }
+        let (mut child, timeout) = self.spawn_child("streaming")?;
+        self.write_stdin(&mut child, input_json).await;
 
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
@@ -214,6 +189,24 @@ impl ScriptOutput {
     pub fn success(&self) -> bool {
         self.exit_code == Some(0)
     }
+}
+
+/// Validate that a script path stays within its base directory.
+/// Prevents path traversal attacks via symlinks or `..` components.
+pub fn validate_script_path(base_dir: &Path, script_name: &str) -> Result<std::path::PathBuf> {
+    let script_path = base_dir.join(script_name);
+    if !script_path.exists() {
+        if script_name.contains("..") {
+            bail!("Script '{script_name}' contains path traversal");
+        }
+        return Ok(script_path);
+    }
+    let canonical_script = script_path.canonicalize()?;
+    let canonical_dir = base_dir.canonicalize()?;
+    if !canonical_script.starts_with(&canonical_dir) {
+        bail!("Script '{script_name}' escapes base directory");
+    }
+    Ok(script_path)
 }
 
 /// Resolve a runtime string to a (program, base_args) pair.

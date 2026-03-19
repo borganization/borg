@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::path::Path;
 
 use crate::manifest::ChannelManifest;
-use borg_tools::runner::ScriptRunner;
+use borg_tools::runner::{validate_script_path, ScriptRunner};
 
 pub struct ChannelExecutor<'a> {
     manifest: &'a ChannelManifest,
@@ -77,19 +77,7 @@ impl<'a> ChannelExecutor<'a> {
 
     /// Validate that a script path stays within the channel directory.
     fn validated_script_path(&self, script_name: &str) -> Result<std::path::PathBuf> {
-        let script_path = self.channel_dir.join(script_name);
-        if !script_path.exists() {
-            if script_name.contains("..") {
-                bail!("Script '{script_name}' contains path traversal");
-            }
-            return Ok(script_path);
-        }
-        let canonical_script = script_path.canonicalize()?;
-        let canonical_dir = self.channel_dir.canonicalize()?;
-        if !canonical_script.starts_with(&canonical_dir) {
-            bail!("Script '{script_name}' escapes channel directory");
-        }
-        Ok(script_path)
+        validate_script_path(self.channel_dir, script_name)
     }
 
     async fn run_script(
