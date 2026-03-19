@@ -1,6 +1,6 @@
 [package]
-name = "borg-customizations"
-description = "Integration marketplace: curated templates for messaging, email, and productivity"
+name = "borg-plugins"
+description = "Integration marketplace: curated plugins for messaging, email, and productivity"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

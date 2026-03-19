@@ -616,10 +616,7 @@ fn check_plugins(checks: &mut Vec<DiagnosticCheck>) {
                         "none installed (use /plugins)",
                     ));
                 } else {
-                    let verified = plugins
-                        .iter()
-                        .filter(|c| c.verified_at.is_some())
-                        .count();
+                    let verified = plugins.iter().filter(|c| c.verified_at.is_some()).count();
                     checks.push(DiagnosticCheck::pass(
                         "Plugins",
                         format!(
@@ -633,11 +630,7 @@ fn check_plugins(checks: &mut Vec<DiagnosticCheck>) {
                         if c.verified_at.is_some() {
                             checks.push(DiagnosticCheck::pass("Plugins", name));
                         } else {
-                            checks.push(DiagnosticCheck::warn(
-                                "Plugins",
-                                name,
-                                "not verified",
-                            ));
+                            checks.push(DiagnosticCheck::warn("Plugins", name, "not verified"));
                         }
 
                         if let Ok(data_dir) = Config::data_dir() {
@@ -646,10 +639,7 @@ fn check_plugins(checks: &mut Vec<DiagnosticCheck>) {
                             {
                                 let integrity_name = format!("{} file integrity", c.name);
                                 if result.ok {
-                                    checks.push(DiagnosticCheck::pass(
-                                        "Plugins",
-                                        integrity_name,
-                                    ));
+                                    checks.push(DiagnosticCheck::pass("Plugins", integrity_name));
                                 } else {
                                     let mut issues = Vec::new();
                                     if !result.tampered.is_empty() {

@@ -79,9 +79,9 @@ pub struct DeliveryRow {
     pub error: Option<String>,
 }
 
-/// Customization row from SQLite.
+/// Plugin row from SQLite.
 #[derive(Debug, Clone)]
-pub struct CustomizationRow {
+pub struct PluginRow {
     pub id: String,
     pub name: String,
     pub kind: String,
@@ -834,15 +834,9 @@ impl Database {
         Ok(count as u32)
     }
 
-    // ── Customizations ──
+    // ── Plugins ──
 
-    pub fn insert_customization(
-        &self,
-        id: &str,
-        name: &str,
-        kind: &str,
-        category: &str,
-    ) -> Result<()> {
+    pub fn insert_plugin(&self, id: &str, name: &str, kind: &str, category: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(
             "INSERT OR REPLACE INTO customizations (id, name, kind, category, status, version, installed_at)
@@ -852,21 +846,21 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_customization(&self, id: &str) -> Result<bool> {
+    pub fn delete_plugin(&self, id: &str) -> Result<bool> {
         let deleted = self
             .conn
             .execute("DELETE FROM customizations WHERE id = ?1", params![id])?;
         Ok(deleted > 0)
     }
 
-    pub fn list_customizations(&self) -> Result<Vec<CustomizationRow>> {
+    pub fn list_plugins(&self) -> Result<Vec<PluginRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, kind, category, status, version, installed_at, verified_at
              FROM customizations ORDER BY category, name",
         )?;
         let rows = stmt
             .query_map([], |row| {
-                Ok(CustomizationRow {
+                Ok(PluginRow {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     kind: row.get(2)?,
@@ -881,7 +875,7 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn set_customization_verified(&self, id: &str) -> Result<()> {
+    pub fn set_plugin_verified(&self, id: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(
             "UPDATE customizations SET verified_at = ?1 WHERE id = ?2",
@@ -892,7 +886,7 @@ impl Database {
 
     pub fn insert_credential(
         &self,
-        customization_id: &str,
+        plugin_id: &str,
         credential_key: &str,
         storage_type: &str,
         keychain_service: Option<&str>,
@@ -903,7 +897,7 @@ impl Database {
              (customization_id, credential_key, storage_type, keychain_service, env_var)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
-                customization_id,
+                plugin_id,
                 credential_key,
                 storage_type,
                 keychain_service,
@@ -913,52 +907,47 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_credentials_for(&self, customization_id: &str) -> Result<usize> {
+    pub fn delete_credentials_for(&self, plugin_id: &str) -> Result<usize> {
         let count = self.conn.execute(
             "DELETE FROM customization_credentials WHERE customization_id = ?1",
-            params![customization_id],
+            params![plugin_id],
         )?;
         Ok(count)
     }
 
     // ── File hashes (integrity) ──
 
-    pub fn insert_file_hash(
-        &self,
-        customization_id: &str,
-        file_path: &str,
-        sha256: &str,
-    ) -> Result<()> {
+    pub fn insert_file_hash(&self, plugin_id: &str, file_path: &str, sha256: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(
             "INSERT OR REPLACE INTO file_hashes (customization_id, file_path, sha256, created_at)
              VALUES (?1, ?2, ?3, ?4)",
-            params![customization_id, file_path, sha256, now],
+            params![plugin_id, file_path, sha256, now],
         )?;
         Ok(())
     }
 
-    pub fn get_file_hashes(&self, customization_id: &str) -> Result<Vec<(String, String)>> {
+    pub fn get_file_hashes(&self, plugin_id: &str) -> Result<Vec<(String, String)>> {
         let mut stmt = self
             .conn
             .prepare("SELECT file_path, sha256 FROM file_hashes WHERE customization_id = ?1")?;
         let rows = stmt
-            .query_map(params![customization_id], |row| {
+            .query_map(params![plugin_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    pub fn delete_file_hashes(&self, customization_id: &str) -> Result<usize> {
+    pub fn delete_file_hashes(&self, plugin_id: &str) -> Result<usize> {
         let count = self.conn.execute(
             "DELETE FROM file_hashes WHERE customization_id = ?1",
-            params![customization_id],
+            params![plugin_id],
         )?;
         Ok(count)
     }
 
-    pub fn get_tool_customization_id(&self, tool_name: &str) -> Result<Option<String>> {
+    pub fn get_tool_plugin_id(&self, tool_name: &str) -> Result<Option<String>> {
         let mut stmt = self
             .conn
             .prepare("SELECT customization_id FROM installed_tools WHERE name = ?1")?;
@@ -969,7 +958,7 @@ impl Database {
         }
     }
 
-    pub fn get_channel_customization_id(&self, channel_name: &str) -> Result<Option<String>> {
+    pub fn get_channel_plugin_id(&self, channel_name: &str) -> Result<Option<String>> {
         let mut stmt = self
             .conn
             .prepare("SELECT customization_id FROM installed_channels WHERE name = ?1")?;
@@ -986,13 +975,13 @@ impl Database {
         name: &str,
         description: &str,
         runtime: &str,
-        customization_id: &str,
+        plugin_id: &str,
     ) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(
             "INSERT OR REPLACE INTO installed_tools (name, description, runtime, source, customization_id, installed_at)
-             VALUES (?1, ?2, ?3, 'customization', ?4, ?5)",
-            params![name, description, runtime, customization_id, now],
+             VALUES (?1, ?2, ?3, 'plugin', ?4, ?5)",
+            params![name, description, runtime, plugin_id, now],
         )?;
         Ok(())
     }
@@ -1002,14 +991,14 @@ impl Database {
         name: &str,
         description: &str,
         runtime: &str,
-        customization_id: &str,
+        plugin_id: &str,
         webhook_path: &str,
     ) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(
             "INSERT OR REPLACE INTO installed_channels (name, description, runtime, source, customization_id, webhook_path, installed_at)
-             VALUES (?1, ?2, ?3, 'customization', ?4, ?5, ?6)",
-            params![name, description, runtime, customization_id, webhook_path, now],
+             VALUES (?1, ?2, ?3, 'plugin', ?4, ?5, ?6)",
+            params![name, description, runtime, plugin_id, webhook_path, now],
         )?;
         Ok(())
     }
@@ -1836,51 +1825,47 @@ mod tests {
     }
 
     #[test]
-    fn insert_and_list_customizations() {
+    fn insert_and_list_plugins() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert");
-        db.insert_customization("email/gmail", "Gmail", "tool", "email")
+        db.insert_plugin("email/gmail", "Gmail", "tool", "email")
             .expect("insert");
-        let list = db.list_customizations().expect("list");
+        let list = db.list_plugins().expect("list");
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "email/gmail"); // ordered by category, name
         assert_eq!(list[1].id, "messaging/telegram");
     }
 
     #[test]
-    fn delete_customization() {
+    fn delete_plugin() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert");
-        assert!(db
-            .delete_customization("messaging/telegram")
-            .expect("delete"));
-        assert!(!db
-            .delete_customization("nonexistent")
-            .expect("delete missing"));
-        let list = db.list_customizations().expect("list");
+        assert!(db.delete_plugin("messaging/telegram").expect("delete"));
+        assert!(!db.delete_plugin("nonexistent").expect("delete missing"));
+        let list = db.list_plugins().expect("list");
         assert!(list.is_empty());
     }
 
     #[test]
-    fn set_customization_verified() {
+    fn set_plugin_verified() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert");
-        let list = db.list_customizations().expect("list");
+        let list = db.list_plugins().expect("list");
         assert!(list[0].verified_at.is_none());
 
-        db.set_customization_verified("messaging/telegram")
+        db.set_plugin_verified("messaging/telegram")
             .expect("verify");
-        let list = db.list_customizations().expect("list");
+        let list = db.list_plugins().expect("list");
         assert!(list[0].verified_at.is_some());
     }
 
     #[test]
     fn insert_and_delete_credentials() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert");
         db.insert_credential(
             "messaging/telegram",
@@ -1897,9 +1882,9 @@ mod tests {
     }
 
     #[test]
-    fn credential_cascade_on_customization_delete() {
+    fn credential_cascade_on_plugin_delete() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert");
         db.insert_credential(
             "messaging/telegram",
@@ -1910,8 +1895,7 @@ mod tests {
         )
         .expect("insert cred");
 
-        db.delete_customization("messaging/telegram")
-            .expect("delete");
+        db.delete_plugin("messaging/telegram").expect("delete");
         // Credential should be cascade-deleted
         let deleted = db
             .delete_credentials_for("messaging/telegram")
@@ -1920,13 +1904,13 @@ mod tests {
     }
 
     #[test]
-    fn insert_customization_replaces_existing() {
+    fn insert_plugin_replaces_existing() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert");
-        db.insert_customization("messaging/telegram", "Telegram v2", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram v2", "channel", "messaging")
             .expect("replace");
-        let list = db.list_customizations().expect("list");
+        let list = db.list_plugins().expect("list");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "Telegram v2");
     }
@@ -1945,7 +1929,7 @@ mod tests {
     #[test]
     fn insert_and_get_file_hashes() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert cust");
         db.insert_file_hash("messaging/telegram", "telegram/channel.toml", "abc123")
             .expect("insert hash 1");
@@ -1960,22 +1944,21 @@ mod tests {
     #[test]
     fn file_hashes_cascade_delete() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert cust");
         db.insert_file_hash("messaging/telegram", "telegram/channel.toml", "abc123")
             .expect("insert hash");
-        db.delete_customization("messaging/telegram")
-            .expect("delete cust");
+        db.delete_plugin("messaging/telegram").expect("delete cust");
         let hashes = db.get_file_hashes("messaging/telegram").expect("get");
         assert!(hashes.is_empty());
     }
 
     #[test]
-    fn delete_file_hashes_by_customization() {
+    fn delete_file_hashes_by_plugin() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert cust 1");
-        db.insert_customization("email/gmail", "Gmail", "tool", "email")
+        db.insert_plugin("email/gmail", "Gmail", "tool", "email")
             .expect("insert cust 2");
         db.insert_file_hash("messaging/telegram", "telegram/channel.toml", "abc")
             .expect("insert hash 1");
@@ -1989,27 +1972,27 @@ mod tests {
     }
 
     #[test]
-    fn insert_installed_tool_and_get_customization_id() {
+    fn insert_installed_tool_and_get_plugin_id() {
         let db = test_db();
-        db.insert_customization("email/gmail", "Gmail", "tool", "email")
+        db.insert_plugin("email/gmail", "Gmail", "tool", "email")
             .expect("insert cust");
         db.insert_installed_tool("gmail", "Gmail integration", "python", "email/gmail")
             .expect("insert tool");
-        let cust_id = db.get_tool_customization_id("gmail").expect("get");
+        let cust_id = db.get_tool_plugin_id("gmail").expect("get");
         assert_eq!(cust_id.as_deref(), Some("email/gmail"));
     }
 
     #[test]
-    fn get_tool_customization_id_returns_none_for_unknown() {
+    fn get_tool_plugin_id_returns_none_for_unknown() {
         let db = test_db();
-        let cust_id = db.get_tool_customization_id("nonexistent").expect("get");
+        let cust_id = db.get_tool_plugin_id("nonexistent").expect("get");
         assert!(cust_id.is_none());
     }
 
     #[test]
-    fn insert_installed_channel_and_get_customization_id() {
+    fn insert_installed_channel_and_get_plugin_id() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert cust");
         db.insert_installed_channel(
             "telegram",
@@ -2019,21 +2002,21 @@ mod tests {
             "/webhook/telegram",
         )
         .expect("insert channel");
-        let cust_id = db.get_channel_customization_id("telegram").expect("get");
+        let cust_id = db.get_channel_plugin_id("telegram").expect("get");
         assert_eq!(cust_id.as_deref(), Some("messaging/telegram"));
     }
 
     #[test]
-    fn get_channel_customization_id_returns_none_for_unknown() {
+    fn get_channel_plugin_id_returns_none_for_unknown() {
         let db = test_db();
-        let cust_id = db.get_channel_customization_id("nonexistent").expect("get");
+        let cust_id = db.get_channel_plugin_id("nonexistent").expect("get");
         assert!(cust_id.is_none());
     }
 
     #[test]
     fn file_hash_upsert_on_reinstall() {
         let db = test_db();
-        db.insert_customization("messaging/telegram", "Telegram", "channel", "messaging")
+        db.insert_plugin("messaging/telegram", "Telegram", "channel", "messaging")
             .expect("insert cust");
         db.insert_file_hash("messaging/telegram", "telegram/channel.toml", "old_hash")
             .expect("insert hash");
@@ -2198,7 +2181,7 @@ mod tests {
     #[test]
     fn insert_credential_round_trip() {
         let db = test_db();
-        db.insert_customization("email/gmail", "Gmail", "tool", "email")
+        db.insert_plugin("email/gmail", "Gmail", "tool", "email")
             .expect("insert cust");
         db.insert_credential(
             "email/gmail",

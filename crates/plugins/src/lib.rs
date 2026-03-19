@@ -5,14 +5,14 @@ pub mod verifier;
 
 use serde::{Deserialize, Serialize};
 
-/// The kind of customization — determines where files are installed.
+/// The kind of plugin — determines where files are installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CustomizationKind {
+pub enum PluginKind {
     Channel,
     Tool,
 }
 
-impl std::fmt::Display for CustomizationKind {
+impl std::fmt::Display for PluginKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Channel => write!(f, "channel"),
@@ -63,7 +63,7 @@ impl Platform {
     }
 }
 
-/// Specification for a credential required by a customization.
+/// Specification for a credential required by a plugin.
 #[derive(Debug, Clone)]
 pub struct CredentialSpec {
     pub key: &'static str,

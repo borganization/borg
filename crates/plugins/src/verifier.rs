@@ -1,4 +1,4 @@
-use crate::catalog::CustomizationDef;
+use crate::catalog::PluginDef;
 
 /// Result of a verification check.
 #[derive(Debug, Clone)]
@@ -8,7 +8,7 @@ pub struct VerifyResult {
     pub message: String,
 }
 
-/// Verify that an installed customization is working.
+/// Verify that an installed plugin is working.
 ///
 /// For now, this checks that:
 /// 1. Required binaries are available
@@ -16,7 +16,7 @@ pub struct VerifyResult {
 ///
 /// Full API health checks (e.g., calling Telegram getMe) are done per-integration
 /// when the credentials are available.
-pub fn verify(def: &CustomizationDef, data_dir: &std::path::Path) -> VerifyResult {
+pub fn verify(def: &PluginDef, data_dir: &std::path::Path) -> VerifyResult {
     let id = def.id.to_string();
 
     // Check binaries
@@ -67,7 +67,7 @@ pub fn verify(def: &CustomizationDef, data_dir: &std::path::Path) -> VerifyResul
     }
 }
 
-/// Verify all installed customizations and return results.
+/// Verify all installed plugins and return results.
 pub fn verify_all(installed_ids: &[String], data_dir: &std::path::Path) -> Vec<VerifyResult> {
     installed_ids
         .iter()
@@ -75,7 +75,7 @@ pub fn verify_all(installed_ids: &[String], data_dir: &std::path::Path) -> Vec<V
         .collect()
 }
 
-fn check_keychain_credential(def: &CustomizationDef, key: &str) -> bool {
+fn check_keychain_credential(def: &PluginDef, key: &str) -> bool {
     let service = format!("borg-{}", def.id.replace('/', "-"));
     let account = format!("borg-{key}");
     crate::keychain::check(&service, &account)

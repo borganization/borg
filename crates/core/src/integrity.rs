@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::db::Database;
 
-/// Result of verifying file integrity for a customization.
+/// Result of verifying file integrity for a plugin.
 #[derive(Debug, Clone)]
 pub struct IntegrityResult {
     pub ok: bool,
@@ -12,14 +12,14 @@ pub struct IntegrityResult {
     pub missing: Vec<String>,
 }
 
-/// Verify the integrity of files for a given customization by comparing
+/// Verify the integrity of files for a given plugin by comparing
 /// their SHA-256 hashes against the stored values in the database.
 pub fn verify_integrity(
     db: &Database,
-    customization_id: &str,
+    plugin_id: &str,
     data_dir: &Path,
 ) -> Result<IntegrityResult> {
-    let stored_hashes = db.get_file_hashes(customization_id)?;
+    let stored_hashes = db.get_file_hashes(plugin_id)?;
 
     if stored_hashes.is_empty() {
         return Ok(IntegrityResult {
@@ -110,7 +110,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let data_dir = tmp.path();
 
-        db.insert_customization("test/pkg", "Test", "tool", "test")
+        db.insert_plugin("test/pkg", "Test", "tool", "test")
             .expect("insert cust");
 
         // Create files
@@ -139,7 +139,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let data_dir = tmp.path();
 
-        db.insert_customization("test/pkg", "Test", "tool", "test")
+        db.insert_plugin("test/pkg", "Test", "tool", "test")
             .expect("insert cust");
 
         let tools_dir = data_dir.join("tools").join("pkg");
@@ -162,7 +162,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let data_dir = tmp.path();
 
-        db.insert_customization("test/pkg", "Test", "tool", "test")
+        db.insert_plugin("test/pkg", "Test", "tool", "test")
             .expect("insert cust");
 
         let hash = compute_sha256(b"content");
@@ -181,7 +181,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let data_dir = tmp.path();
 
-        db.insert_customization("test/pkg", "Test", "tool", "test")
+        db.insert_plugin("test/pkg", "Test", "tool", "test")
             .expect("insert cust");
 
         let tools_dir = data_dir.join("tools").join("pkg");
@@ -215,7 +215,7 @@ mod tests {
         let db = test_db();
         let tmp = tempfile::tempdir().expect("create temp dir");
 
-        db.insert_customization("test/pkg", "Test", "tool", "test")
+        db.insert_plugin("test/pkg", "Test", "tool", "test")
             .expect("insert cust");
 
         let result = verify_integrity(&db, "test/pkg", tmp.path()).expect("verify");
@@ -228,7 +228,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let data_dir = tmp.path();
 
-        db.insert_customization("test/pkg", "Test", "tool", "test")
+        db.insert_plugin("test/pkg", "Test", "tool", "test")
             .expect("insert cust");
 
         let tools_dir = data_dir.join("tools").join("pkg");
