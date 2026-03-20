@@ -1159,16 +1159,30 @@ impl<'a> App<'a> {
         };
 
         if self.cells.is_empty() {
-            let title = match &self.config.user.agent_name {
-                Some(name) => format!("{name} AI Assistant"),
-                None => "Borg AI Assistant".to_string(),
-            };
-            all_lines.push(Line::from(Span::styled(title, theme::bold())));
-            let subtitle = match &self.config.user.name {
-                Some(name) => format!("Hey {name}! Type a message to begin."),
-                None => "Type a message to begin.".to_string(),
-            };
-            all_lines.push(Line::from(Span::styled(subtitle, theme::dim())));
+            let version = env!("CARGO_PKG_VERSION");
+            all_lines.push(Line::from(vec![
+                Span::styled(
+                    "BORG",
+                    Style::default()
+                        .fg(theme::CYAN)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::from(" "),
+                Span::styled(format!("v{version}"), theme::dim()),
+            ]));
+            all_lines.push(Line::default());
+
+            let name = self.config.user.agent_name.as_deref().unwrap_or("Borg");
+            all_lines.push(Line::from(vec![
+                Span::styled("name:  ", theme::dim()),
+                Span::from(name.to_string()),
+            ]));
+
+            all_lines.push(Line::from(vec![
+                Span::styled("model: ", theme::dim()),
+                Span::from(self.config.llm.model.clone()),
+            ]));
+
             all_lines.push(Line::default());
         }
 
