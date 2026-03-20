@@ -101,6 +101,57 @@ pub fn plan_compaction(history: &[Message], max_tokens: usize) -> Option<usize> 
     Some(keep_from)
 }
 
+/// Compact the oldest tool results before doing full LLM-based compaction.
+///
+/// Replaces tool result content with a placeholder, cheaply reclaiming tokens
+/// without calling the LLM. Only compacts results from the oldest half of the
+/// history to preserve recent context.
+pub fn compact_tool_results(history: &mut [Message], max_tokens: usize) {
+    let total = history_tokens(history);
+    if total <= max_tokens {
+        return;
+    }
+
+    let half = history.len() / 2;
+    let placeholder = "[compacted: output removed]";
+
+    for msg in history[..half].iter_mut() {
+        if msg.role != Role::Tool {
+            continue;
+        }
+        // Only compact if the message has substantial content
+        let msg_toks = match &msg.content {
+            Some(MessageContent::Text(s)) => estimate_tokens(s),
+            _ => continue,
+        };
+        if msg_toks > 20 {
+            msg.content = Some(MessageContent::Text(placeholder.to_string()));
+        }
+    }
+}
+
+/// Enforce per-tool-result share limit: no single tool result should exceed
+/// `share_pct` of `max_history_tokens`.
+pub fn enforce_tool_result_share_limit(history: &mut [Message], max_tokens: usize, share_pct: f64) {
+    let max_per_result = (max_tokens as f64 * share_pct) as usize;
+    if max_per_result == 0 {
+        return;
+    }
+
+    for msg in history.iter_mut() {
+        if msg.role != Role::Tool {
+            continue;
+        }
+        if let Some(MessageContent::Text(ref s)) = msg.content {
+            let toks = estimate_tokens(s);
+            if toks > max_per_result {
+                let truncated = crate::truncate::truncate_output(s, max_per_result);
+                msg.content = Some(MessageContent::Text(truncated));
+            }
+        }
+    }
+}
+
 /// Compact conversation history using the LLM to summarize dropped messages.
 ///
 /// Strategy:
@@ -822,5 +873,111 @@ mod tests {
         // No user message found, so nothing to undo
         assert_eq!(removed, 0);
         assert_eq!(history.len(), 2);
+    }
+
+    // -- compact_tool_results --
+
+    #[test]
+    fn compact_tool_results_noop_under_budget() {
+        let mut history = vec![
+            make_user("test"),
+            make_tool_call_msg("", "c1", "run_shell"),
+            make_tool_result("c1", "short output"),
+            make_assistant("done"),
+        ];
+        compact_tool_results(&mut history, 100_000);
+        // Nothing should change when under budget
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[2].text_content().unwrap(), "short output");
+    }
+
+    #[test]
+    fn compact_tool_results_compacts_old_results() {
+        let big_output = "x".repeat(500);
+        let mut history = vec![
+            make_user("old question"),
+            make_tool_call_msg("", "c1", "run_shell"),
+            make_tool_result("c1", &big_output),
+            make_assistant("old answer"),
+            make_user("new question"),
+            make_tool_call_msg("", "c2", "run_shell"),
+            make_tool_result("c2", &big_output),
+            make_assistant("new answer"),
+        ];
+        // Set budget very low to trigger compaction
+        compact_tool_results(&mut history, 10);
+        // The old tool result (index 2, in first half) should be compacted
+        let old_result = history[2].text_content().unwrap();
+        assert!(
+            old_result.contains("compacted"),
+            "old result should be compacted: {old_result}"
+        );
+        // The new tool result (index 6, in second half) should be preserved
+        let new_result = history[6].text_content().unwrap();
+        assert_eq!(new_result, big_output);
+    }
+
+    #[test]
+    fn compact_tool_results_skips_small_results() {
+        let mut history = vec![
+            make_user("test"),
+            make_tool_call_msg("", "c1", "run_shell"),
+            make_tool_result("c1", "ok"), // Very small, should not be compacted
+            make_user("next"),
+        ];
+        compact_tool_results(&mut history, 1); // Very small budget
+                                               // "ok" is tiny (< 20 tokens) so should not be compacted
+        assert_eq!(history[2].text_content().unwrap(), "ok");
+    }
+
+    // -- enforce_tool_result_share_limit --
+
+    #[test]
+    fn share_limit_noop_when_results_small() {
+        let mut history = vec![
+            make_user("test"),
+            make_tool_call_msg("", "c1", "run_shell"),
+            make_tool_result("c1", "short"),
+            make_assistant("done"),
+        ];
+        enforce_tool_result_share_limit(&mut history, 100_000, 0.5);
+        assert_eq!(history[2].text_content().unwrap(), "short");
+    }
+
+    #[test]
+    fn share_limit_truncates_huge_result() {
+        let huge = "x".repeat(100_000);
+        let mut history = vec![
+            make_user("test"),
+            make_tool_call_msg("", "c1", "run_shell"),
+            make_tool_result("c1", &huge),
+            make_assistant("done"),
+        ];
+        // 1000 tokens budget, 50% share = 500 tokens max per result
+        enforce_tool_result_share_limit(&mut history, 1000, 0.5);
+        let result = history[2].text_content().unwrap();
+        assert!(result.len() < huge.len(), "result should be truncated");
+        assert!(result.contains("truncated"));
+    }
+
+    #[test]
+    fn share_limit_zero_max_tokens_noop() {
+        let mut history = vec![
+            make_user("test"),
+            make_tool_call_msg("", "c1", "run_shell"),
+            make_tool_result("c1", "data"),
+        ];
+        enforce_tool_result_share_limit(&mut history, 0, 0.5);
+        assert_eq!(history[2].text_content().unwrap(), "data");
+    }
+
+    #[test]
+    fn share_limit_skips_non_tool_messages() {
+        let big = "x".repeat(100_000);
+        let mut history = vec![make_user(&big), make_assistant(&big)];
+        enforce_tool_result_share_limit(&mut history, 100, 0.5);
+        // User and assistant messages should not be touched
+        assert_eq!(history[0].text_content().unwrap(), big);
+        assert_eq!(history[1].text_content().unwrap(), big);
     }
 }

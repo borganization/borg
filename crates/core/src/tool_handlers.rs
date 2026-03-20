@@ -76,6 +76,30 @@ pub fn handle_apply_skill_patch(args: &serde_json::Value) -> Result<String> {
     }
 }
 
+/// Unified apply_patch handler with `target` parameter.
+/// Supports: cwd (default), tools, skills, channels.
+pub fn handle_apply_patch_unified(
+    args: &serde_json::Value,
+    registry: &mut ToolRegistry,
+) -> Result<String> {
+    // Validate patch param exists before dispatching
+    let _patch = require_str_param(args, "patch")?;
+    let target = args["target"].as_str().unwrap_or("cwd");
+
+    match target {
+        "cwd" => {
+            // Delegate to CWD handler (ignores target param)
+            handle_apply_patch(args)
+        }
+        "tools" => handle_create_tool(args, registry),
+        "skills" => handle_apply_skill_patch(args),
+        "channels" => handle_create_channel(args),
+        other => Ok(format!(
+            "Unknown target: {other}. Use: cwd, tools, skills, channels."
+        )),
+    }
+}
+
 pub fn handle_apply_patch(args: &serde_json::Value) -> Result<String> {
     let patch = require_str_param(args, "patch")?;
     let base_dir =
@@ -115,6 +139,31 @@ pub fn handle_create_channel(args: &serde_json::Value) -> Result<String> {
             affected.format_summary()
         )),
         Err(e) => Ok(format!("Error applying channel patch: {e}")),
+    }
+}
+
+/// Unified list handler: dispatches based on `what` parameter.
+pub fn handle_list(
+    args: &serde_json::Value,
+    registry: &ToolRegistry,
+    config: &Config,
+    agent_control: Option<&crate::multi_agent::AgentControl>,
+) -> Result<String> {
+    let what = require_str_param(args, "what")?;
+    match what {
+        "tools" => handle_list_tools(registry),
+        "skills" => handle_list_skills(config),
+        "channels" => handle_list_channels(),
+        "agents" => {
+            if let Some(ctrl) = agent_control {
+                crate::multi_agent::tools::handle_list_agents(ctrl)
+            } else {
+                Ok("Multi-agent system is not enabled.".to_string())
+            }
+        }
+        other => Ok(format!(
+            "Unknown list target: {other}. Use: tools, skills, channels, agents."
+        )),
     }
 }
 
@@ -689,15 +738,10 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     let mut defs = vec![
         ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'IDENTITY.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories. Use scope='local' to write to project-local memory (.borg/ in CWD).", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false},"scope":{"type":"string","enum":["global","local"],"description":"Memory scope: 'global' (default, ~/.borg/) or 'local' (CWD/.borg/)","default":"global"}},"required":["filename","content"]})),
         ToolDefinition::new("read_memory", "Read a memory file.", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file to read"}},"required":["filename"]})),
-        ToolDefinition::new("list_tools", "List all available user-created tools.", serde_json::json!({"type":"object","properties":{}})),
-        ToolDefinition::new("apply_patch", "Create, update, or delete files in the current working directory using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
-        ToolDefinition::new("create_tool", "Create or modify user tools in ~/.borg/tools/ using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
+        ToolDefinition::new("list", "List resources. Specify what to list: tools, skills, channels, or agents.", serde_json::json!({"type":"object","properties":{"what":{"type":"string","enum":["tools","skills","channels","agents"],"description":"What to list"}},"required":["what"]})),
+        ToolDefinition::new("apply_patch", "Create, update, or delete files using the patch DSL. Use target to choose location: cwd (default), tools (~/.borg/tools/), skills (~/.borg/skills/), channels (~/.borg/channels/).", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"},"target":{"type":"string","enum":["cwd","tools","skills","channels"],"description":"Where to apply the patch (default: cwd)","default":"cwd"}},"required":["patch"]})),
         ToolDefinition::new("run_shell", "Execute a shell command. Requires user confirmation before execution.", serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]})),
-        ToolDefinition::new("list_skills", "List all available skills with their status and source.", serde_json::json!({"type":"object","properties":{}})),
-        ToolDefinition::new("apply_skill_patch", "Create or modify skill files in the skills directory using the patch DSL.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
         ToolDefinition::new("read_pdf", "Read and extract text from a PDF file.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the PDF file"},"max_chars":{"type":"integer","description":"Maximum characters to return (default: 50000)","default":50000}},"required":["file_path"]})),
-        ToolDefinition::new("create_channel", "Create or modify messaging channel integrations in ~/.borg/channels/ using the patch DSL. Channels receive webhooks and route messages to the agent.", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"}},"required":["patch"]})),
-        ToolDefinition::new("list_channels", "List all messaging channel integrations with their status and webhook paths.", serde_json::json!({"type":"object","properties":{}})),
     ];
 
     if config.web.enabled {
@@ -790,13 +834,16 @@ mod tests {
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert!(names.contains(&"write_memory"));
         assert!(names.contains(&"read_memory"));
-        assert!(names.contains(&"list_tools"));
+        assert!(names.contains(&"list"));
         assert!(names.contains(&"apply_patch"));
-        assert!(names.contains(&"create_tool"));
         assert!(names.contains(&"run_shell"));
-        assert!(names.contains(&"list_skills"));
         assert!(names.contains(&"read_pdf"));
         assert!(names.contains(&"manage_tasks"));
+        // Consolidated: no longer separate tools
+        assert!(!names.contains(&"list_tools"));
+        assert!(!names.contains(&"list_skills"));
+        assert!(!names.contains(&"create_tool"));
+        assert!(!names.contains(&"apply_skill_patch"));
     }
 
     #[test]
@@ -925,5 +972,132 @@ mod tests {
     fn handle_manage_tasks_missing_action() {
         let result = handle_manage_tasks(&json!({}), &Config::default());
         assert!(result.is_err());
+    }
+
+    fn empty_registry() -> ToolRegistry {
+        let dir = std::env::temp_dir().join(format!("borg_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        ToolRegistry::with_dir(dir).unwrap()
+    }
+
+    // -- consolidated apply_patch --
+
+    #[test]
+    fn apply_patch_unified_unknown_target() {
+        let mut registry = empty_registry();
+        let args = json!({"patch": "*** Begin Patch\n*** End Patch", "target": "invalid"});
+        let result = handle_apply_patch_unified(&args, &mut registry).unwrap();
+        assert!(result.contains("Unknown target"));
+    }
+
+    #[test]
+    fn apply_patch_unified_missing_patch() {
+        let mut registry = empty_registry();
+        let args = json!({"target": "cwd"});
+        let result = handle_apply_patch_unified(&args, &mut registry);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn apply_patch_unified_default_target_is_cwd() {
+        let mut registry = empty_registry();
+        // Empty patch is still valid
+        let args = json!({"patch": "*** Begin Patch\n*** End Patch"});
+        let result = handle_apply_patch_unified(&args, &mut registry);
+        assert!(result.is_ok());
+    }
+
+    // -- consolidated list --
+
+    #[test]
+    fn list_unknown_what() {
+        let registry = empty_registry();
+        let config = Config::default();
+        let args = json!({"what": "unknown"});
+        let result = handle_list(&args, &registry, &config, None).unwrap();
+        assert!(result.contains("Unknown list target"));
+    }
+
+    #[test]
+    fn list_missing_what() {
+        let registry = empty_registry();
+        let config = Config::default();
+        let args = json!({});
+        let result = handle_list(&args, &registry, &config, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_tools_returns_no_tools() {
+        let registry = empty_registry();
+        let config = Config::default();
+        let args = json!({"what": "tools"});
+        let result = handle_list(&args, &registry, &config, None).unwrap();
+        assert!(result.contains("No user tools"));
+    }
+
+    #[test]
+    fn list_agents_without_control() {
+        let registry = empty_registry();
+        let config = Config::default();
+        let args = json!({"what": "agents"});
+        let result = handle_list(&args, &registry, &config, None).unwrap();
+        assert!(result.contains("not enabled"));
+    }
+
+    // -- core_tool_definitions consolidated --
+
+    #[test]
+    fn core_tool_definitions_has_apply_patch_with_target() {
+        let config = Config::default();
+        let defs = core_tool_definitions(&config);
+        let ap = defs
+            .iter()
+            .find(|d| d.function.name == "apply_patch")
+            .expect("should have apply_patch");
+        let params = &ap.function.parameters;
+        assert!(
+            params["properties"]["target"].is_object(),
+            "apply_patch should have 'target' parameter"
+        );
+    }
+
+    #[test]
+    fn core_tool_definitions_has_list_with_what() {
+        let config = Config::default();
+        let defs = core_tool_definitions(&config);
+        let list = defs
+            .iter()
+            .find(|d| d.function.name == "list")
+            .expect("should have list");
+        let params = &list.function.parameters;
+        assert!(
+            params["properties"]["what"].is_object(),
+            "list should have 'what' parameter"
+        );
+    }
+
+    #[test]
+    fn core_tool_definitions_count_reduced() {
+        // With all defaults enabled (web, browser, security_audit):
+        // write_memory, read_memory, list, apply_patch, run_shell, read_pdf,
+        // web_fetch, web_search, manage_tasks, browser, security_audit = 11
+        let config = Config::default();
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert_eq!(
+            names.len(),
+            11,
+            "expected 11 core tools (all enabled), got: {names:?}"
+        );
+
+        // With everything disabled: 7 base tools
+        let mut minimal_config = Config::default();
+        minimal_config.web.enabled = false;
+        minimal_config.browser.enabled = false;
+        minimal_config.security.host_audit = false;
+        let defs = core_tool_definitions(&minimal_config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert_eq!(names.len(), 7, "expected 7 base tools, got: {names:?}");
     }
 }
