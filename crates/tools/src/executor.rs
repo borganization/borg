@@ -3,7 +3,7 @@ use std::path::Path;
 use tracing::info;
 
 use crate::manifest::ToolManifest;
-use crate::runner::{validate_script_path, ScriptRunner};
+use crate::runner::{run_sandboxed_script, validate_script_path, ScriptRunner};
 
 pub struct ToolExecutor<'a> {
     manifest: &'a ToolManifest,
@@ -46,18 +46,18 @@ impl<'a> ToolExecutor<'a> {
             .with_tildes_expanded()
             .with_blocked_paths_filtered(blocked_paths);
 
-        let runner = ScriptRunner {
-            runtime: &self.manifest.runtime,
-            script_path: &entrypoint,
-            work_dir: self.tool_dir,
+        let (ok, text) = run_sandboxed_script(
+            &self.manifest.runtime,
+            &entrypoint,
+            self.tool_dir,
             sandbox_policy,
-            timeout_ms: self.manifest.timeout_ms,
+            self.manifest.timeout_ms,
             extra_env,
-            name: &self.manifest.name,
-        };
+            &self.manifest.name,
+            args_json,
+        )
+        .await?;
 
-        let output = runner.run(args_json).await?;
-        let (ok, text) = output.into_result_string();
         if !ok {
             info!("Tool '{}' failed", self.manifest.name);
         }

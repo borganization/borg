@@ -2,7 +2,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use super::http::send_json;
-use super::validate_resource_id;
+use super::{format_list, require_str, validate_resource_id};
 use crate::config::Config;
 use crate::types::ToolDefinition;
 
@@ -96,34 +96,25 @@ async fn list_issues(client: &Client, token: &str, args: &Value) -> Result<Strin
     };
 
     let data = graphql_request(client, token, query, variables).await?;
-    let nodes = data["issues"]["nodes"].as_array();
 
-    match nodes {
-        Some(issues) if !issues.is_empty() => {
-            let summaries: Vec<String> = issues
-                .iter()
-                .map(|i| {
-                    let identifier = i["identifier"].as_str().unwrap_or("");
-                    let title = i["title"].as_str().unwrap_or("(untitled)");
-                    let state = i["state"]["name"].as_str().unwrap_or("?");
-                    let assignee = i["assignee"]["name"].as_str().unwrap_or("unassigned");
-                    format!("- {identifier}: {title} [{state}] ({assignee})")
-                })
-                .collect();
-            Ok(format!(
-                "{} issue(s):\n{}",
-                summaries.len(),
-                summaries.join("\n")
-            ))
-        }
-        _ => Ok("No issues found.".to_string()),
-    }
+    Ok(format_list(
+        data["issues"]["nodes"].as_array().into_iter().flatten(),
+        |n| format!("{n} issue(s):"),
+        "No issues found.",
+        |i| {
+            let identifier = i["identifier"].as_str().unwrap_or("");
+            let title = i["title"].as_str().unwrap_or("(untitled)");
+            let state = i["state"]["name"].as_str().unwrap_or("?");
+            let assignee = i["assignee"]["name"].as_str().unwrap_or("unassigned");
+            format!("- {identifier}: {title} [{state}] ({assignee})")
+        },
+    ))
 }
 
 async fn create_issue(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let title = args["title"].as_str().ok_or("Missing 'title'")?;
+    let title = require_str(args, "title")?;
     let description = args["description"].as_str().unwrap_or("");
-    let team_id = args["team_id"].as_str().ok_or("Missing 'team_id'")?;
+    let team_id = require_str(args, "team_id")?;
     let team_id = validate_resource_id(team_id, "team_id")?;
 
     let query = r#"mutation($title: String!, $description: String, $teamId: String!) {
@@ -153,7 +144,7 @@ async fn create_issue(client: &Client, token: &str, args: &Value) -> Result<Stri
 }
 
 async fn search_issues(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let search_query = args["query"].as_str().ok_or("Missing 'query'")?;
+    let search_query = require_str(args, "query")?;
 
     let query = r#"query($query: String!) {
         searchIssues(query: $query, first: 20) {
@@ -163,27 +154,21 @@ async fn search_issues(client: &Client, token: &str, args: &Value) -> Result<Str
 
     let variables = json!({ "query": search_query });
     let data = graphql_request(client, token, query, variables).await?;
-    let nodes = data["searchIssues"]["nodes"].as_array();
 
-    match nodes {
-        Some(issues) if !issues.is_empty() => {
-            let summaries: Vec<String> = issues
-                .iter()
-                .map(|i| {
-                    let identifier = i["identifier"].as_str().unwrap_or("");
-                    let title = i["title"].as_str().unwrap_or("(untitled)");
-                    let state = i["state"]["name"].as_str().unwrap_or("?");
-                    format!("- {identifier}: {title} [{state}]")
-                })
-                .collect();
-            Ok(format!(
-                "Found {} issue(s):\n{}",
-                summaries.len(),
-                summaries.join("\n")
-            ))
-        }
-        _ => Ok("No matching issues found.".to_string()),
-    }
+    Ok(format_list(
+        data["searchIssues"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten(),
+        |n| format!("Found {n} issue(s):"),
+        "No matching issues found.",
+        |i| {
+            let identifier = i["identifier"].as_str().unwrap_or("");
+            let title = i["title"].as_str().unwrap_or("(untitled)");
+            let state = i["state"]["name"].as_str().unwrap_or("?");
+            format!("- {identifier}: {title} [{state}]")
+        },
+    ))
 }
 
 #[cfg(test)]
