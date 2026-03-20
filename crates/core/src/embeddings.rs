@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use crate::config::{Config, EmbeddingsConfig};
-use crate::db::Database;
+use crate::db::{ChunkData, Database};
 
 /// Resolved embedding provider with endpoint, key, model, and dimension.
 #[derive(Debug, Clone)]
@@ -319,6 +319,164 @@ pub async fn rank_memories_by_similarity(
     )
 }
 
+/// Embed a memory file using chunking. Chunks the content, hashes each chunk,
+/// skips unchanged chunks, generates embeddings for new/changed chunks,
+/// and upserts all chunks to the database.
+pub async fn embed_memory_file_chunked(
+    config: &Config,
+    filename: &str,
+    content: &str,
+    scope: &str,
+) -> Result<()> {
+    let provider = match EmbeddingProvider::from_config(&config.memory.embeddings) {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    let chunk_size = config.memory.embeddings.chunk_size_tokens;
+    let overlap = config.memory.embeddings.chunk_overlap_tokens;
+    let chunks = crate::chunker::chunk_content(content, chunk_size, overlap);
+
+    if chunks.is_empty() {
+        return Ok(());
+    }
+
+    let db = Database::open()?;
+    let existing = db.get_chunks_for_file(scope, filename)?;
+    let existing_map: std::collections::HashMap<i64, String> = existing
+        .iter()
+        .map(|c| (c.chunk_index, c.content_hash.clone()))
+        .collect();
+
+    let client = reqwest::Client::new();
+    let mut chunk_data = Vec::new();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let hash = content_hash(&chunk.content);
+        let idx = i as i64;
+
+        // Check if chunk is unchanged
+        let needs_embedding = existing_map
+            .get(&idx)
+            .map(|existing_hash| existing_hash != &hash)
+            .unwrap_or(true);
+
+        let embedding = if needs_embedding {
+            match generate_embedding(&client, &provider, &chunk.content).await {
+                Ok(emb) => Some(embedding_to_bytes(&emb)),
+                Err(e) => {
+                    debug!("Failed to embed chunk {i} of {filename}: {e}");
+                    None
+                }
+            }
+        } else {
+            // Reuse existing embedding
+            existing
+                .iter()
+                .find(|c| c.chunk_index == idx)
+                .and_then(|c| c.embedding.clone())
+        };
+
+        chunk_data.push(ChunkData {
+            chunk_index: idx,
+            content: chunk.content.clone(),
+            content_hash: hash,
+            embedding,
+            dimension: Some(provider.dimension),
+            model: Some(provider.model.clone()),
+            start_line: Some(chunk.start_line as i64),
+            end_line: Some(chunk.end_line as i64),
+        });
+    }
+
+    db.upsert_chunks(scope, filename, &chunk_data)?;
+    debug!("Stored {} chunks for {scope}/{filename}", chunk_data.len());
+    Ok(())
+}
+
+/// Result from hybrid memory search.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub filename: String,
+    pub chunk_index: i64,
+    pub start_line: Option<i64>,
+    pub end_line: Option<i64>,
+    pub score: f32,
+    pub snippet: String,
+}
+
+/// Merge vector and FTS search scores, deduplicate, and sort descending.
+/// Each input is (filename, chunk_index, score).
+/// Returns merged (filename, chunk_index, blended_score).
+pub fn merge_search_scores(
+    vector_results: &[(&str, i64, f32)],
+    fts_results: &[(&str, i64, f32)],
+    vector_weight: f32,
+    bm25_weight: f32,
+) -> Vec<(String, i64, f32)> {
+    use std::collections::HashMap;
+
+    // Normalize scores to [0, 1] within each set
+    let normalize = |results: &[(&str, i64, f32)]| -> Vec<(String, i64, f32)> {
+        if results.is_empty() {
+            return Vec::new();
+        }
+        let max_score = results
+            .iter()
+            .map(|r| r.2)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_score = results.iter().map(|r| r.2).fold(f32::INFINITY, f32::min);
+        let range = max_score - min_score;
+        if range == 0.0 {
+            results
+                .iter()
+                .map(|r| (r.0.to_string(), r.1, 1.0f32))
+                .collect()
+        } else {
+            results
+                .iter()
+                .map(|r| (r.0.to_string(), r.1, (r.2 - min_score) / range))
+                .collect()
+        }
+    };
+
+    let norm_vec = normalize(vector_results);
+    let norm_fts = normalize(fts_results);
+
+    // Merge into a map keyed by (filename, chunk_index)
+    let mut scores: HashMap<(String, i64), (f32, f32)> = HashMap::new();
+
+    for (f, ci, s) in &norm_vec {
+        let entry = scores.entry((f.clone(), *ci)).or_insert((0.0, 0.0));
+        entry.0 = entry.0.max(*s);
+    }
+    for (f, ci, s) in &norm_fts {
+        let entry = scores.entry((f.clone(), *ci)).or_insert((0.0, 0.0));
+        entry.1 = entry.1.max(*s);
+    }
+
+    let mut merged: Vec<(String, i64, f32)> = scores
+        .into_iter()
+        .map(|((f, ci), (vs, fs))| (f, ci, vector_weight * vs + bm25_weight * fs))
+        .collect();
+
+    merged.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    merged
+}
+
+/// Aggregate chunk-level scores to file-level scores (max chunk score per file).
+pub fn aggregate_to_file_scores(chunk_scores: &[(String, i64, f32)]) -> Vec<(String, f32)> {
+    use std::collections::HashMap;
+    let mut file_max: HashMap<String, f32> = HashMap::new();
+    for (filename, _ci, score) in chunk_scores {
+        let entry = file_max.entry(filename.clone()).or_insert(0.0f32);
+        *entry = entry.max(*score);
+    }
+    let mut result: Vec<(String, f32)> = file_max.into_iter().collect();
+    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +564,53 @@ mod tests {
         let score = blended_score(1.0, 0.0, 0.2);
         // 0.8 * 1.0 + 0.2 * 0.0 = 0.8
         assert!((score - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn search_result_ordering() {
+        let vector_results = vec![("file_a.md", 0i64, 0.9f32), ("file_b.md", 0, 0.3)];
+        let fts_results = vec![("file_b.md", 0i64, 0.8f32), ("file_a.md", 0, 0.2)];
+        let merged = merge_search_scores(&vector_results, &fts_results, 0.7, 0.3);
+        assert!(merged[0].0 == "file_a.md", "file_a should rank first");
+        assert!(merged[0].2 > merged[1].2, "scores should be descending");
+    }
+
+    #[test]
+    fn search_result_deduplication() {
+        let vector_results = vec![("file.md", 0i64, 0.8f32), ("file.md", 1, 0.5)];
+        let fts_results = vec![("file.md", 0i64, 0.7f32)];
+        let merged = merge_search_scores(&vector_results, &fts_results, 0.7, 0.3);
+        let chunk0_entries: Vec<_> = merged
+            .iter()
+            .filter(|r| r.0 == "file.md" && r.1 == 0)
+            .collect();
+        assert_eq!(chunk0_entries.len(), 1, "should deduplicate");
+    }
+
+    #[test]
+    fn search_min_score_filter() {
+        let vector_results = vec![("file_a.md", 0i64, 0.9f32), ("file_b.md", 0, 0.1)];
+        let fts_results: Vec<(&str, i64, f32)> = vec![];
+        let merged = merge_search_scores(&vector_results, &fts_results, 0.7, 0.3);
+        let filtered: Vec<_> = merged.into_iter().filter(|r| r.2 >= 0.2).collect();
+        assert!(filtered.len() >= 1);
+        assert!(filtered.iter().all(|r| r.2 >= 0.2));
+    }
+
+    #[test]
+    fn aggregate_chunk_scores_to_file_scores() {
+        let chunk_scores = vec![
+            ("file_a.md".to_string(), 0i64, 0.8f32),
+            ("file_a.md".to_string(), 1, 0.9),
+            ("file_b.md".to_string(), 0, 0.7),
+        ];
+        let file_scores = aggregate_to_file_scores(&chunk_scores);
+        assert_eq!(file_scores.len(), 2);
+        let a_score = file_scores
+            .iter()
+            .find(|(f, _)| f == "file_a.md")
+            .unwrap()
+            .1;
+        assert!((a_score - 0.9).abs() < 1e-6);
     }
 }

@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod browser;
+pub mod chunker;
 pub mod config;
 pub mod config_watcher;
 pub mod constants;

@@ -528,6 +528,8 @@ impl Agent {
             ));
         }
 
+        system.push_str("\n<memory_recall>\nWhen answering questions about prior work, past decisions, dates, people, preferences, todos, or anything previously discussed, use the memory_search tool to look up relevant context. Auto-loaded memory above may not contain all relevant information.\n</memory_recall>\n");
+
         if self.config.skills.enabled {
             let resolved_creds = self.config.resolve_credentials();
             let skills =
@@ -601,6 +603,71 @@ impl Agent {
         .unwrap_or_default();
 
         load_memory_context_ranked(max_tokens, &global_rankings, &local_rankings)
+    }
+
+    /// Pre-compaction flush: extract durable information from messages about to be dropped
+    /// and save to the daily log.
+    async fn flush_memory_before_compaction(&self, messages: &[crate::types::Message]) {
+        let mut transcript = String::new();
+        for msg in messages {
+            let role = match msg.role {
+                crate::types::Role::User => "User",
+                crate::types::Role::Assistant => "Assistant",
+                crate::types::Role::Tool => "Tool",
+                crate::types::Role::System => "System",
+            };
+            if let Some(content) = msg.text_content() {
+                let truncated: String = content.chars().take(500).collect();
+                transcript.push_str(&format!("{role}: {truncated}\n"));
+            }
+        }
+
+        if transcript.is_empty() {
+            return;
+        }
+
+        // Cap transcript
+        let transcript: String = transcript.chars().take(20000).collect();
+
+        let flush_prompt =
+            "Extract durable information from this conversation that should be remembered. \
+            Include: decisions made, facts learned, user preferences, action items, identifiers \
+            (preserve exactly). Format as markdown bullet points. Be concise.";
+
+        let flush_messages = vec![
+            crate::types::Message::system(flush_prompt),
+            crate::types::Message::user(format!("Extract key information from:\n\n{transcript}")),
+        ];
+
+        let llm = match LlmClient::new(self.config.clone()) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+
+        match llm.chat(&flush_messages, None).await {
+            Ok(response) => {
+                if let Some(text) = response.text_content() {
+                    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    let filename = format!("daily/{today}.md");
+                    let header = format!(
+                        "\n\n## Pre-compaction flush ({})\n\n",
+                        chrono::Local::now().format("%H:%M")
+                    );
+                    let content = format!("{header}{text}");
+                    if let Err(e) = crate::memory::write_memory_scoped(
+                        &filename,
+                        &content,
+                        crate::memory::WriteMode::Append,
+                        "global",
+                    ) {
+                        tracing::warn!("Failed to write pre-compaction flush: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Pre-compaction flush LLM call failed: {e}");
+            }
+        }
     }
 
     fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -768,6 +835,24 @@ impl Agent {
             }
             // Only run LLM-based compaction when history still exceeds the token budget
             if history_tokens(&self.history) > max_hist {
+                // Pre-compaction memory flush: save important info before messages are dropped
+                if self.config.memory.flush_before_compaction {
+                    if let Some(keep_from) =
+                        crate::conversation::plan_compaction(&self.history, max_hist)
+                    {
+                        let dropped_tokens: usize = self.history[..keep_from]
+                            .iter()
+                            .map(|m| match m.text_content() {
+                                Some(s) => crate::tokenizer::estimate_tokens(s),
+                                None => 0,
+                            })
+                            .sum();
+                        if dropped_tokens > self.config.memory.flush_soft_threshold_tokens {
+                            let dropped = self.history[..keep_from].to_vec();
+                            self.flush_memory_before_compaction(&dropped).await;
+                        }
+                    }
+                }
                 let compaction_llm = LlmClient::new(self.config.clone())?;
                 compact_history(&mut self.history, max_hist, &compaction_llm).await;
             }
@@ -1231,13 +1316,11 @@ impl Agent {
                     let config = self.config.clone();
                     let filename = args["filename"].as_str().unwrap_or_default().to_string();
                     let scope = args["scope"].as_str().unwrap_or("global").to_string();
-                    // Read the full file content after write (handles append mode correctly)
-                    // Redact secrets before generating embeddings to prevent leaking
-                    // sensitive data to the embedding API provider
                     let full_content = crate::secrets::redact_secrets(
                         &crate::memory::read_memory(&filename).unwrap_or_default(),
                     );
                     tokio::spawn(async move {
+                        // Generate whole-file embedding (legacy, for backward compat)
                         if let Err(e) = crate::embeddings::embed_memory_file(
                             &config,
                             &filename,
@@ -1248,11 +1331,118 @@ impl Agent {
                         {
                             tracing::warn!("Failed to embed memory {filename}: {e}");
                         }
+                        // Also generate chunked embeddings for hybrid search
+                        if let Err(e) = crate::embeddings::embed_memory_file_chunked(
+                            &config,
+                            &filename,
+                            &full_content,
+                            &scope,
+                        )
+                        .await
+                        {
+                            tracing::warn!("Failed to chunk-embed memory {filename}: {e}");
+                        }
                     });
                 }
                 result
             }
             "read_memory" => tool_handlers::handle_read_memory(&args),
+            "memory_search" => {
+                let query = tool_handlers::require_str_param(&args, "query")?.to_string();
+                let max_results = args["max_results"].as_u64().unwrap_or(5) as usize;
+                let min_score = args["min_score"].as_f64().unwrap_or(0.2) as f32;
+                let config = self.config.clone();
+                let vector_weight = config.memory.embeddings.vector_weight;
+                let bm25_weight = config.memory.embeddings.bm25_weight;
+                let db = crate::db::Database::open()?;
+                let mut all_results = Vec::new();
+
+                for scope in &["global", "local"] {
+                    // FTS search — collect into owned tuples
+                    let fts_rows = db
+                        .fts_search(scope, &query, max_results * 4)
+                        .unwrap_or_default();
+                    let fts_owned: Vec<(String, i64, f32)> = fts_rows
+                        .iter()
+                        .map(|(c, score)| (c.filename.clone(), c.chunk_index, *score))
+                        .collect();
+                    // Build a snippet map from FTS results
+                    let fts_snippets: std::collections::HashMap<(String, i64), String> = fts_rows
+                        .into_iter()
+                        .map(|(c, _)| ((c.filename.clone(), c.chunk_index), c.content))
+                        .collect();
+
+                    // Vector search across chunks
+                    let chunks = db.get_all_chunks(scope).unwrap_or_default();
+                    let vec_owned: Vec<(String, i64, f32)> = if let Ok((_prov, query_emb)) =
+                        crate::embeddings::generate_query_embedding(&config, &query).await
+                    {
+                        chunks
+                            .iter()
+                            .filter_map(|c| {
+                                c.embedding.as_ref().map(|emb_bytes| {
+                                    let stored = crate::embeddings::bytes_to_embedding(emb_bytes);
+                                    let sim =
+                                        crate::embeddings::cosine_similarity(&query_emb, &stored);
+                                    (c.filename.clone(), c.chunk_index, sim)
+                                })
+                            })
+                            .filter(|(_f, _ci, sim)| *sim >= min_score * 0.5)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    // Build snippet map from vector results
+                    let vec_snippets: std::collections::HashMap<(String, i64), String> = chunks
+                        .into_iter()
+                        .map(|c| ((c.filename, c.chunk_index), c.content))
+                        .collect();
+
+                    // Convert to borrowed slices for merge_search_scores
+                    let fts_refs: Vec<(&str, i64, f32)> = fts_owned
+                        .iter()
+                        .map(|(f, ci, s)| (f.as_str(), *ci, *s))
+                        .collect();
+                    let vec_refs: Vec<(&str, i64, f32)> = vec_owned
+                        .iter()
+                        .map(|(f, ci, s)| (f.as_str(), *ci, *s))
+                        .collect();
+                    let merged = crate::embeddings::merge_search_scores(
+                        &vec_refs,
+                        &fts_refs,
+                        vector_weight,
+                        bm25_weight,
+                    );
+
+                    for (filename, chunk_index, score) in merged {
+                        if score < min_score {
+                            continue;
+                        }
+                        let key = (filename.clone(), chunk_index);
+                        let snippet = fts_snippets
+                            .get(&key)
+                            .or_else(|| vec_snippets.get(&key))
+                            .cloned()
+                            .unwrap_or_default();
+                        all_results.push(crate::embeddings::SearchResult {
+                            filename,
+                            chunk_index,
+                            start_line: None,
+                            end_line: None,
+                            score,
+                            snippet,
+                        });
+                    }
+                }
+
+                all_results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                all_results.truncate(max_results);
+                Ok(tool_handlers::format_search_results(&all_results))
+            }
             // Consolidated list tool
             "list" => tool_handlers::handle_list(
                 &args,
@@ -1652,6 +1842,7 @@ fn classify_action(tool_name: &str) -> ActionType {
             ActionType::FileWrite
         }
         "write_memory" => ActionType::MemoryWrite,
+        "memory_search" | "read_memory" => ActionType::ToolCall,
         "web_fetch" | "web_search" | "browser" => ActionType::WebRequest,
         _ => ActionType::ToolCall,
     }
