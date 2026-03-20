@@ -82,6 +82,7 @@ impl InputHistory {
         self.cursor.is_some()
     }
 
+    #[cfg(test)]
     fn draft(&self) -> &str {
         &self.draft
     }
@@ -148,8 +149,8 @@ impl<'a> Composer<'a> {
                         self.set_text(&entry);
                     }
                     Some(None) => {
-                        let draft = self.history.draft().to_string();
-                        self.set_text(&draft);
+                        // Past newest history entry: clear input instead of restoring draft
+                        self.set_text("");
                     }
                     None => {}
                 }
@@ -176,8 +177,8 @@ impl<'a> Composer<'a> {
                         self.set_text(&entry);
                     }
                     Some(None) => {
-                        let draft = self.history.draft().to_string();
-                        self.set_text(&draft);
+                        // Past newest history entry: clear input instead of restoring draft
+                        self.set_text("");
                     }
                     None => {}
                 }
@@ -311,6 +312,64 @@ mod tests {
         assert_eq!(h.up(""), Some("only"));
         assert_eq!(h.up(""), Some("only"));
         assert_eq!(h.up(""), Some("only"));
+    }
+
+    #[test]
+    fn test_down_past_newest_clears_input() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut c = Composer::new();
+        c.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        c.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        c.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Up loads "hi"
+        c.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(c.text(), "hi");
+
+        // Down past newest should clear
+        c.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(c.text(), "");
+        assert!(!c.is_browsing_history());
+    }
+
+    #[test]
+    fn test_down_past_newest_clears_even_with_draft() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut c = Composer::new();
+        c.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        c.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        c.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        c.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Type draft text
+        c.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        c.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        c.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+
+        // Up saves draft and loads "old"
+        c.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(c.text(), "old");
+
+        // Down past newest should clear, NOT restore "wip"
+        c.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(c.text(), "");
+    }
+
+    #[test]
+    fn test_ctrl_n_past_newest_clears_input() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut c = Composer::new();
+        c.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        c.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // Ctrl+P to go back
+        c.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(c.text(), "x");
+
+        // Ctrl+N past newest should clear
+        c.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(c.text(), "");
+        assert!(!c.is_browsing_history());
     }
 
     #[test]
