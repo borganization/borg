@@ -232,9 +232,7 @@ impl SettingsPopup {
     fn current_value(&self, config: &Config, key: &str) -> String {
         match key {
             "provider" => {
-                let (_, display, _) = PROVIDERS
-                    .get(self.provider_index)
-                    .unwrap_or(&PROVIDERS[0]);
+                let (_, display, _) = PROVIDERS.get(self.provider_index).unwrap_or(&PROVIDERS[0]);
                 display.to_string()
             }
             "model" => {
@@ -686,9 +684,7 @@ impl SettingsPopup {
                 match entry.kind {
                     SettingKind::Select => " \u{25C0}\u{25B6}: cycle  Enter: next  Esc: close",
                     SettingKind::Bool => " Space: toggle  Esc: close",
-                    SettingKind::Float => {
-                        " Enter: edit  \u{25C0}\u{25B6}: \u{00B1}0.1  Esc: close"
-                    }
+                    SettingKind::Float => " Enter: edit  \u{25C0}\u{25B6}: \u{00B1}0.1  Esc: close",
                     _ => " Enter: edit  Esc: close",
                 }
             }
@@ -870,7 +866,10 @@ mod tests {
         let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         let result = popup.handle_key(right, &mut cfg).unwrap();
         assert!(result.is_some());
-        assert_eq!(popup.provider_index, (initial_provider_index + 1) % PROVIDERS.len());
+        assert_eq!(
+            popup.provider_index,
+            (initial_provider_index + 1) % PROVIDERS.len()
+        );
         // Model index should reset to 0
         assert_eq!(popup.model_index, 0);
     }

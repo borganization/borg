@@ -100,7 +100,9 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                     let im_config = config.clone();
                     let im_shutdown = shutdown.clone();
                     tokio::spawn(async move {
-                        match borg_gateway::imessage::start_imessage_monitor(im_config, im_shutdown).await {
+                        match borg_gateway::imessage::start_imessage_monitor(im_config, im_shutdown)
+                            .await
+                        {
                             Ok(_handle) => tracing::info!("iMessage monitor started"),
                             Err(e) => tracing::warn!("iMessage monitor failed: {e}"),
                         }
