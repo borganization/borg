@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use std::path::Path;
 
 use crate::manifest::ChannelManifest;
-use borg_tools::runner::{validate_script_path, ScriptRunner};
+use borg_tools::runner::{run_sandboxed_script, validate_script_path};
 
 pub struct ChannelExecutor<'a> {
     manifest: &'a ChannelManifest,
@@ -107,18 +107,18 @@ impl<'a> ChannelExecutor<'a> {
         }
 
         let name = format!("channel:{}/{script_name}", self.manifest.name);
-        let runner = ScriptRunner {
-            runtime: &self.manifest.runtime,
-            script_path: &script_path,
-            work_dir: self.channel_dir,
+        let (ok, text) = run_sandboxed_script(
+            &self.manifest.runtime,
+            &script_path,
+            self.channel_dir,
             sandbox_policy,
-            timeout_ms: self.manifest.settings.timeout_ms,
-            extra_env: &extra_env,
-            name: &name,
-        };
+            self.manifest.settings.timeout_ms,
+            &extra_env,
+            &name,
+            input_json,
+        )
+        .await?;
 
-        let output = runner.run(input_json).await?;
-        let (ok, text) = output.into_result_string();
         if !ok {
             bail!("Channel script '{script_name}': {text}");
         }

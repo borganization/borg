@@ -1,30 +1,41 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::executor::ToolExecutor;
 use crate::manifest::ToolManifest;
 
-pub struct ToolRegistry {
-    tools: HashMap<String, RegisteredTool>,
-    tools_dir: PathBuf,
+// --- Generic ManifestRegistry ---
+
+/// Trait for manifest types that can be used with `ManifestRegistry`.
+pub trait ManifestItem: Sized {
+    fn load(path: &Path) -> Result<Self>;
+    fn item_name(&self) -> &str;
+    const MANIFEST_FILENAME: &'static str;
+    const SUBDIR: &'static str;
+    const ITEM_TYPE: &'static str;
 }
 
-pub struct RegisteredTool {
-    pub manifest: ToolManifest,
+pub struct RegisteredItem<M> {
+    pub manifest: M,
     pub dir: PathBuf,
 }
 
-impl ToolRegistry {
+pub struct ManifestRegistry<M> {
+    items: HashMap<String, RegisteredItem<M>>,
+    base_dir: PathBuf,
+}
+
+impl<M: ManifestItem> ManifestRegistry<M> {
     pub fn new() -> Result<Self> {
-        let tools_dir = dirs::home_dir()
+        let base_dir = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
             .join(".borg")
-            .join("tools");
+            .join(M::SUBDIR);
 
         let mut registry = Self {
-            tools: HashMap::new(),
-            tools_dir,
+            items: HashMap::new(),
+            base_dir,
         };
 
         registry.scan()?;
@@ -33,8 +44,8 @@ impl ToolRegistry {
 
     pub fn with_dir(dir: PathBuf) -> Result<Self> {
         let mut registry = Self {
-            tools: HashMap::new(),
-            tools_dir: dir,
+            items: HashMap::new(),
+            base_dir: dir,
         };
 
         registry.scan()?;
@@ -42,33 +53,82 @@ impl ToolRegistry {
     }
 
     pub fn scan(&mut self) -> Result<()> {
-        self.tools.clear();
+        self.items.clear();
 
         let scanned = crate::scan::scan_manifest_dir(
-            &self.tools_dir,
-            "tool.toml",
-            ToolManifest::load,
-            |m| m.name.clone(),
-            "tool",
+            &self.base_dir,
+            M::MANIFEST_FILENAME,
+            M::load,
+            |m| m.item_name().to_string(),
+            M::ITEM_TYPE,
         )?;
 
         for (name, (manifest, dir)) in scanned {
-            self.tools.insert(name, RegisteredTool { manifest, dir });
+            self.items.insert(name, RegisteredItem { manifest, dir });
         }
 
         Ok(())
     }
 
+    pub fn get(&self, name: &str) -> Option<&RegisteredItem<M>> {
+        self.items.get(name)
+    }
+
+    pub fn items(&self) -> impl Iterator<Item = &RegisteredItem<M>> {
+        self.items.values()
+    }
+}
+
+// --- ManifestItem impl for ToolManifest ---
+
+impl ManifestItem for ToolManifest {
+    fn load(path: &Path) -> Result<Self> {
+        ToolManifest::load(path)
+    }
+    fn item_name(&self) -> &str {
+        &self.name
+    }
+    const MANIFEST_FILENAME: &'static str = "tool.toml";
+    const SUBDIR: &'static str = "tools";
+    const ITEM_TYPE: &'static str = "tool";
+}
+
+// --- ToolRegistry (wraps ManifestRegistry<ToolManifest>) ---
+
+pub struct ToolRegistry {
+    inner: ManifestRegistry<ToolManifest>,
+}
+
+/// Legacy type alias for backward compatibility.
+pub type RegisteredTool = RegisteredItem<ToolManifest>;
+
+impl ToolRegistry {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            inner: ManifestRegistry::new()?,
+        })
+    }
+
+    pub fn with_dir(dir: PathBuf) -> Result<Self> {
+        Ok(Self {
+            inner: ManifestRegistry::with_dir(dir)?,
+        })
+    }
+
+    pub fn scan(&mut self) -> Result<()> {
+        self.inner.scan()
+    }
+
     pub fn list_tools(&self) -> Vec<String> {
-        self.tools
-            .values()
+        self.inner
+            .items()
             .map(|t| format!("{}: {}", t.manifest.name, t.manifest.description))
             .collect()
     }
 
     pub fn tool_definitions(&self) -> Vec<borg_core_types::ToolDefinition> {
-        self.tools
-            .values()
+        self.inner
+            .items()
             .map(|t| {
                 borg_core_types::ToolDefinition::new(
                     &t.manifest.name,
@@ -101,7 +161,7 @@ impl ToolRegistry {
         blocked_paths: &[String],
     ) -> Result<String> {
         let tool = self
-            .tools
+            .inner
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {name}"))?;
 
@@ -123,7 +183,7 @@ impl ToolRegistry {
         F: FnMut(&str, bool) + Send,
     {
         let tool = self
-            .tools
+            .inner
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {name}"))?;
 
@@ -134,7 +194,7 @@ impl ToolRegistry {
     }
 
     pub fn tool_credentials(&self, name: &str) -> Vec<String> {
-        self.tools
+        self.inner
             .get(name)
             .map(|t| t.manifest.credentials.clone())
             .unwrap_or_default()

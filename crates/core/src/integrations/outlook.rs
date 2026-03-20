@@ -2,7 +2,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use super::http::{send_and_check, send_json};
-use super::validate_resource_id;
+use super::{format_list, require_str, validate_resource_id};
 use crate::config::Config;
 use crate::types::ToolDefinition;
 
@@ -45,7 +45,7 @@ pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String
 }
 
 async fn send_email(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let to = args["to"].as_str().ok_or("Missing 'to'")?;
+    let to = require_str(args, "to")?;
     let subject = args["subject"].as_str().unwrap_or("(no subject)");
     let body = args["body"].as_str().unwrap_or("");
 
@@ -72,7 +72,7 @@ async fn send_email(client: &Client, token: &str, args: &Value) -> Result<String
 }
 
 async fn search_emails(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let query = args["query"].as_str().ok_or("Missing 'query'")?;
+    let query = require_str(args, "query")?;
     let limit = args["limit"].as_u64().unwrap_or(10);
 
     let result: Value = send_json(
@@ -88,32 +88,22 @@ async fn search_emails(client: &Client, token: &str, args: &Value) -> Result<Str
     )
     .await?;
 
-    let messages = result["value"].as_array();
-
-    match messages {
-        Some(msgs) if !msgs.is_empty() => {
-            let summaries: Vec<String> = msgs
-                .iter()
-                .map(|m| {
-                    let subject = m["subject"].as_str().unwrap_or("(no subject)");
-                    let from = m["from"]["emailAddress"]["address"]
-                        .as_str()
-                        .unwrap_or("unknown");
-                    format!("- {subject} (from: {from})")
-                })
-                .collect();
-            Ok(format!(
-                "Found {} email(s):\n{}",
-                summaries.len(),
-                summaries.join("\n")
-            ))
-        }
-        _ => Ok("No emails found.".to_string()),
-    }
+    Ok(format_list(
+        result["value"].as_array().into_iter().flatten(),
+        |n| format!("Found {n} email(s):"),
+        "No emails found.",
+        |m| {
+            let subject = m["subject"].as_str().unwrap_or("(no subject)");
+            let from = m["from"]["emailAddress"]["address"]
+                .as_str()
+                .unwrap_or("unknown");
+            format!("- {subject} (from: {from})")
+        },
+    ))
 }
 
 async fn read_email(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let message_id = args["message_id"].as_str().ok_or("Missing 'message_id'")?;
+    let message_id = require_str(args, "message_id")?;
     let message_id = validate_resource_id(message_id, "message_id")?;
 
     let msg: Value = send_json(
