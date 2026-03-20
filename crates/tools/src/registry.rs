@@ -16,17 +16,18 @@ pub trait ManifestItem: Sized {
     const ITEM_TYPE: &'static str;
 }
 
-pub struct RegisteredItem<M> {
+#[derive(Clone)]
+pub struct RegisteredItem<M: Clone> {
     pub manifest: M,
     pub dir: PathBuf,
 }
 
-pub struct ManifestRegistry<M> {
+pub struct ManifestRegistry<M: Clone> {
     items: HashMap<String, RegisteredItem<M>>,
     base_dir: PathBuf,
 }
 
-impl<M: ManifestItem> ManifestRegistry<M> {
+impl<M: ManifestItem + Clone> ManifestRegistry<M> {
     pub fn new() -> Result<Self> {
         let base_dir = dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
