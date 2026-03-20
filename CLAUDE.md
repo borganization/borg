@@ -45,6 +45,14 @@ All integrations are compiled unconditionally into a single binary. iMessage is 
 - `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
 - `/plugins` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
 
+## Mouse Interaction
+
+- Mouse wheel scrolls transcript 3 lines per tick
+- Click scrollbar track to jump to position
+- Drag scrollbar thumb for continuous scrolling
+- Shift+click for native text selection (standard terminal behavior with mouse capture)
+- Up/Down arrows navigate composer history and must NOT affect the scrollbar
+
 ## Plugins
 
 Plugin marketplace for one-click installation of channel and tool integrations. Categories: Messaging (Telegram, Slack, Discord, Teams, Google Chat, WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). Native integrations (Telegram, Slack, Discord, Teams, Google Chat) are marked `is_native: true` in the catalog and require only credentials. Non-native plugins use embedded template files installed to `~/.borg/channels/` or `~/.borg/tools/`.
