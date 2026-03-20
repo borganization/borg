@@ -1158,33 +1158,32 @@ impl<'a> App<'a> {
             _ => None,
         };
 
-        if self.cells.is_empty() {
-            let version = env!("CARGO_PKG_VERSION");
-            all_lines.push(Line::from(vec![
-                Span::styled(
-                    "BORG",
-                    Style::default()
-                        .fg(theme::CYAN)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::from(" "),
-                Span::styled(format!("v{version}"), theme::dim()),
-            ]));
-            all_lines.push(Line::default());
+        // Always show branded header
+        let version = env!("CARGO_PKG_VERSION");
+        all_lines.push(Line::from(vec![
+            Span::styled(
+                "BORG",
+                Style::default()
+                    .fg(theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::from(" "),
+            Span::styled(format!("v{version}"), theme::dim()),
+        ]));
+        all_lines.push(Line::default());
 
-            let name = self.config.user.agent_name.as_deref().unwrap_or("Borg");
-            all_lines.push(Line::from(vec![
-                Span::styled("name:  ", theme::dim()),
-                Span::from(name.to_string()),
-            ]));
+        let name = self.config.user.agent_name.as_deref().unwrap_or("Borg");
+        all_lines.push(Line::from(vec![
+            Span::styled("name:  ", theme::dim()),
+            Span::from(name.to_string()),
+        ]));
 
-            all_lines.push(Line::from(vec![
-                Span::styled("model: ", theme::dim()),
-                Span::from(self.config.llm.model.clone()),
-            ]));
+        all_lines.push(Line::from(vec![
+            Span::styled("model: ", theme::dim()),
+            Span::from(self.config.llm.model.clone()),
+        ]));
 
-            all_lines.push(Line::default());
-        }
+        all_lines.push(Line::default());
 
         for cell in &self.cells {
             all_lines.extend(cell.render(width, throbber_state));
