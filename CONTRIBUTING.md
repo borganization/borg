@@ -12,7 +12,15 @@
    ```sh
    cargo build
    ```
-4. Set up git hooks:
+4. Run locally:
+   ```sh
+   cargo run --bin borg
+   ```
+5. Auto-rebuild on file changes (install `cargo-watch` first with `cargo install cargo-watch --locked`):
+   ```sh
+   cargo watch -x 'build --bin borg'
+   ```
+6. Set up git hooks:
    ```sh
    git config core.hooksPath .githooks
    ```
