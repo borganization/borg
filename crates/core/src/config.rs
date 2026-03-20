@@ -219,6 +219,10 @@ pub struct MemoryConfig {
     /// When set, load memory from ~/.borg/memory/scopes/{scope}/ instead of ~/.borg/memory/.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_scope: Option<String>,
+    /// When true, extract durable information from messages about to be dropped before compaction.
+    pub flush_before_compaction: bool,
+    /// Minimum token count of dropped messages to trigger a pre-compaction flush.
+    pub flush_soft_threshold_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,6 +234,14 @@ pub struct EmbeddingsConfig {
     pub dimension: Option<usize>,
     pub api_key_env: Option<String>,
     pub recency_weight: f32,
+    /// Target token size per chunk when generating chunked embeddings.
+    pub chunk_size_tokens: usize,
+    /// Overlap tokens between adjacent chunks.
+    pub chunk_overlap_tokens: usize,
+    /// Weight for BM25/FTS scores in hybrid search (default 0.3).
+    pub bm25_weight: f32,
+    /// Weight for vector similarity scores in hybrid search (default 0.7).
+    pub vector_weight: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -572,6 +584,8 @@ impl Default for MemoryConfig {
             max_context_tokens: 8000,
             embeddings: EmbeddingsConfig::default(),
             memory_scope: None,
+            flush_before_compaction: false,
+            flush_soft_threshold_tokens: 2000,
         }
     }
 }
@@ -585,6 +599,10 @@ impl Default for EmbeddingsConfig {
             dimension: None,
             api_key_env: None,
             recency_weight: 0.2,
+            chunk_size_tokens: 400,
+            chunk_overlap_tokens: 80,
+            bm25_weight: 0.3,
+            vector_weight: 0.7,
         }
     }
 }

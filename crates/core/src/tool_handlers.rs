@@ -738,6 +738,7 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     let mut defs = vec![
         ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'IDENTITY.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories. Use scope='local' to write to project-local memory (.borg/ in CWD).", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false},"scope":{"type":"string","enum":["global","local"],"description":"Memory scope: 'global' (default, ~/.borg/) or 'local' (CWD/.borg/)","default":"global"}},"required":["filename","content"]})),
         ToolDefinition::new("read_memory", "Read a memory file.", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file to read"}},"required":["filename"]})),
+        ToolDefinition::new("memory_search", "Search memory files semantically. Use before answering questions about prior work, decisions, preferences, or anything previously discussed.", serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"Search query"},"max_results":{"type":"integer","description":"Maximum results to return (default: 5)","default":5},"min_score":{"type":"number","description":"Minimum relevance score 0-1 (default: 0.2)","default":0.2}},"required":["query"]})),
         ToolDefinition::new("list", "List resources. Specify what to list: tools, skills, channels, or agents.", serde_json::json!({"type":"object","properties":{"what":{"type":"string","enum":["tools","skills","channels","agents"],"description":"What to list"}},"required":["what"]})),
         ToolDefinition::new("apply_patch", "Create, update, or delete files using the patch DSL. Use target to choose location: cwd (default), tools (~/.borg/tools/), skills (~/.borg/skills/), channels (~/.borg/channels/).", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"},"target":{"type":"string","enum":["cwd","tools","skills","channels"],"description":"Where to apply the patch (default: cwd)","default":"cwd"}},"required":["patch"]})),
         ToolDefinition::new("run_shell", "Execute a shell command. Requires user confirmation before execution.", serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]})),
@@ -782,6 +783,28 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     }
 
     defs
+}
+
+/// Format search results for display.
+pub fn format_search_results(results: &[crate::embeddings::SearchResult]) -> String {
+    if results.is_empty() {
+        return "No matching memories found.".to_string();
+    }
+    let mut output = String::new();
+    for (i, r) in results.iter().enumerate() {
+        let lines = match (r.start_line, r.end_line) {
+            (Some(s), Some(e)) => format!("lines {s}-{e}, "),
+            _ => String::new(),
+        };
+        output.push_str(&format!(
+            "[{}] {} ({lines}score: {:.2})\n> {}\n\n",
+            i + 1,
+            r.filename,
+            r.score,
+            r.snippet.chars().take(500).collect::<String>()
+        ));
+    }
+    output.trim_end().to_string()
 }
 
 #[cfg(test)]
@@ -1080,15 +1103,15 @@ mod tests {
     #[test]
     fn core_tool_definitions_count_reduced() {
         // With all defaults enabled (web, browser, security_audit):
-        // write_memory, read_memory, list, apply_patch, run_shell, read_pdf,
-        // web_fetch, web_search, manage_tasks, browser, security_audit = 11
+        // write_memory, read_memory, memory_search, list, apply_patch, run_shell, read_pdf,
+        // web_fetch, web_search, manage_tasks, browser, security_audit = 12
         let config = Config::default();
         let defs = core_tool_definitions(&config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert_eq!(
             names.len(),
-            11,
-            "expected 11 core tools (all enabled), got: {names:?}"
+            12,
+            "expected 12 core tools (all enabled), got: {names:?}"
         );
 
         // With everything disabled: 7 base tools
@@ -1098,6 +1121,42 @@ mod tests {
         minimal_config.security.host_audit = false;
         let defs = core_tool_definitions(&minimal_config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert_eq!(names.len(), 7, "expected 7 base tools, got: {names:?}");
+        assert_eq!(names.len(), 8, "expected 8 base tools, got: {names:?}");
+    }
+
+    #[test]
+    fn format_memory_search_results() {
+        let results = vec![
+            crate::embeddings::SearchResult {
+                filename: "notes.md".into(),
+                chunk_index: 0,
+                start_line: Some(1),
+                end_line: Some(10),
+                score: 0.87,
+                snippet: "Important decision about architecture".into(),
+            },
+            crate::embeddings::SearchResult {
+                filename: "daily/2026-03-19.md".into(),
+                chunk_index: 2,
+                start_line: Some(15),
+                end_line: Some(22),
+                score: 0.65,
+                snippet: "Met with team about API design".into(),
+            },
+        ];
+        let output = format_search_results(&results);
+        assert!(output.contains("[1]"));
+        assert!(output.contains("notes.md"));
+        assert!(output.contains("0.87"));
+        assert!(output.contains("Important decision"));
+        assert!(output.contains("[2]"));
+        assert!(output.contains("daily/2026-03-19.md"));
+    }
+
+    #[test]
+    fn format_empty_search_results() {
+        let results: Vec<crate::embeddings::SearchResult> = vec![];
+        let output = format_search_results(&results);
+        assert!(output.contains("No matching memories found"));
     }
 }

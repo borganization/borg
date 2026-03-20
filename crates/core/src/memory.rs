@@ -360,11 +360,23 @@ fn load_memory_files_ranked(
 }
 
 fn validate_memory_filename(filename: &str) -> Result<()> {
-    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
-        bail!("Invalid memory filename: must not contain path separators or '..'");
-    }
     if filename.is_empty() {
         bail!("Memory filename must not be empty");
+    }
+    if filename.contains("..") || filename.contains('\\') {
+        bail!("Invalid memory filename: must not contain path separators or '..'");
+    }
+    // Allow daily/YYYY-MM-DD.md pattern
+    if filename.contains('/') {
+        use std::sync::OnceLock;
+        static DAILY_RE: OnceLock<regex::Regex> = OnceLock::new();
+        let re = DAILY_RE.get_or_init(|| {
+            regex::Regex::new(r"^daily/\d{4}-\d{2}-\d{2}\.md$")
+                .unwrap_or_else(|e| panic!("Invalid daily log regex: {e}"))
+        });
+        if !re.is_match(filename) {
+            bail!("Invalid memory filename: only 'daily/YYYY-MM-DD.md' paths are allowed");
+        }
     }
     Ok(())
 }
@@ -374,7 +386,10 @@ fn resolve_memory_path(filename: &str) -> Result<PathBuf> {
     match filename {
         "IDENTITY.md" => Config::identity_path(),
         "MEMORY.md" => memory_index_path(),
-        _ => Ok(memory_dir()?.join(filename)),
+        _ => {
+            let base = memory_dir()?;
+            Ok(base.join(filename))
+        }
     }
 }
 
@@ -478,6 +493,47 @@ pub struct MemoryFileInfo {
     pub filename: String,
     pub size_bytes: u64,
     pub modified_at: Option<chrono::DateTime<chrono::Local>>,
+}
+
+/// Load daily logs (today + yesterday) from a memory directory within token budget.
+/// Returns content wrapped in XML tags, or empty string if no logs exist.
+pub fn load_daily_logs_from_dir(memory_dir: &std::path::Path, max_tokens: usize) -> String {
+    let daily_dir = memory_dir.join("daily");
+    if !daily_dir.exists() {
+        return String::new();
+    }
+
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let yesterday = (chrono::Local::now() - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+
+    let mut parts = Vec::new();
+    let mut tokens_used = 0;
+
+    for date in &[&today, &yesterday] {
+        let path = daily_dir.join(format!("{date}.md"));
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let tokens = estimate_tokens(&content);
+            if tokens_used + tokens > max_tokens {
+                // Truncate if needed
+                if tokens_used < max_tokens {
+                    let remaining = max_tokens - tokens_used;
+                    let truncated: String = content.chars().take(remaining * 4).collect();
+                    parts.push(format!(
+                        "<daily_log date=\"{date}\">\n{truncated}\n</daily_log>"
+                    ));
+                }
+                break;
+            }
+            parts.push(format!(
+                "<daily_log date=\"{date}\">\n{content}\n</daily_log>"
+            ));
+            tokens_used += tokens;
+        }
+    }
+
+    parts.join("\n\n")
 }
 
 #[cfg(test)]
@@ -737,5 +793,90 @@ mod tests {
             "Big file exceeding budget should be skipped"
         );
         assert!(combined.contains("tiny"), "Small file should fit in budget");
+    }
+
+    #[test]
+    fn validate_daily_log_filename_accepted() {
+        assert!(validate_memory_filename("daily/2026-03-19.md").is_ok());
+        assert!(validate_memory_filename("daily/2025-01-01.md").is_ok());
+    }
+
+    #[test]
+    fn validate_daily_log_invalid_date_rejected() {
+        assert!(validate_memory_filename("daily/not-a-date.md").is_err());
+        assert!(validate_memory_filename("daily/abcd-ef-gh.md").is_err());
+    }
+
+    #[test]
+    fn validate_daily_log_nested_path_rejected() {
+        assert!(validate_memory_filename("daily/../etc/passwd").is_err());
+        assert!(validate_memory_filename("daily/sub/2026-03-19.md").is_err());
+        assert!(validate_memory_filename("other/2026-03-19.md").is_err());
+    }
+
+    #[test]
+    fn resolve_daily_log_path() {
+        let path = resolve_memory_path("daily/2026-03-19.md").unwrap();
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("memory/daily/2026-03-19.md"));
+    }
+
+    #[test]
+    fn load_daily_logs_from_tempdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daily_dir = tmp.path().join("daily");
+        std::fs::create_dir_all(&daily_dir).unwrap();
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today_file = daily_dir.join(format!("{today}.md"));
+        std::fs::write(&today_file, "Today's log entry").unwrap();
+
+        let content = load_daily_logs_from_dir(tmp.path(), 2000);
+        assert!(content.contains("Today's log entry"));
+        assert!(content.contains(&today));
+    }
+
+    #[test]
+    fn load_daily_logs_empty_when_no_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let content = load_daily_logs_from_dir(tmp.path(), 2000);
+        assert!(content.is_empty());
+    }
+
+    #[test]
+    fn load_daily_logs_includes_yesterday() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daily_dir = tmp.path().join("daily");
+        std::fs::create_dir_all(&daily_dir).unwrap();
+
+        let yesterday = (chrono::Local::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        std::fs::write(
+            daily_dir.join(format!("{yesterday}.md")),
+            "Yesterday's notes",
+        )
+        .unwrap();
+
+        let content = load_daily_logs_from_dir(tmp.path(), 2000);
+        assert!(content.contains("Yesterday's notes"));
+    }
+
+    #[test]
+    fn load_daily_logs_respects_token_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daily_dir = tmp.path().join("daily");
+        std::fs::create_dir_all(&daily_dir).unwrap();
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let large_content = "word ".repeat(5000);
+        std::fs::write(daily_dir.join(format!("{today}.md")), &large_content).unwrap();
+
+        let content = load_daily_logs_from_dir(tmp.path(), 100);
+        let tokens = estimate_tokens(&content);
+        assert!(
+            tokens <= 200,
+            "should roughly respect token budget: {tokens}"
+        );
     }
 }

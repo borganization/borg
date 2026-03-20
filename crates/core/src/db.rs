@@ -105,6 +105,34 @@ pub struct EmbeddingRow {
     pub created_at: i64,
 }
 
+/// Chunk row from SQLite (for chunked/FTS memory search).
+#[derive(Debug, Clone)]
+pub struct ChunkRow {
+    pub id: i64,
+    pub scope: String,
+    pub filename: String,
+    pub chunk_index: i64,
+    pub start_line: Option<i64>,
+    pub end_line: Option<i64>,
+    pub content: String,
+    pub content_hash: String,
+    pub embedding: Option<Vec<u8>>,
+    pub created_at: i64,
+}
+
+/// Input data for upserting a chunk.
+#[derive(Debug, Clone)]
+pub struct ChunkData {
+    pub chunk_index: i64,
+    pub content: String,
+    pub content_hash: String,
+    pub embedding: Option<Vec<u8>>,
+    pub dimension: Option<usize>,
+    pub model: Option<String>,
+    pub start_line: Option<i64>,
+    pub end_line: Option<i64>,
+}
+
 /// Agent role row from SQLite.
 #[derive(Debug, Clone)]
 pub struct AgentRoleRow {
@@ -208,7 +236,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 11;
+    const CURRENT_VERSION: u32 = 12;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -253,6 +281,9 @@ impl Database {
         }
         if current < 11 {
             self.migrate_v11()?;
+        }
+        if current < 12 {
+            self.migrate_v12()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -600,6 +631,55 @@ impl Database {
         Ok(())
     }
 
+    /// V12: Add memory_chunks table and FTS index for chunked semantic search.
+    fn migrate_v12(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS memory_chunks (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope        TEXT NOT NULL DEFAULT 'global',
+                filename     TEXT NOT NULL,
+                chunk_index  INTEGER NOT NULL,
+                start_line   INTEGER,
+                end_line     INTEGER,
+                content      TEXT NOT NULL,
+                content_hash TEXT NOT NULL DEFAULT '',
+                embedding    BLOB,
+                dimension    INTEGER,
+                model        TEXT,
+                created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+                UNIQUE(scope, filename, chunk_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_chunks_scope_file ON memory_chunks(scope, filename);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_fts USING fts5(
+                scope UNINDEXED,
+                filename UNINDEXED,
+                chunk_index UNINDEXED,
+                content,
+                content='memory_chunks',
+                content_rowid='id'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS memory_chunks_ai AFTER INSERT ON memory_chunks BEGIN
+                INSERT INTO memory_chunks_fts(rowid, scope, filename, chunk_index, content)
+                VALUES (new.id, new.scope, new.filename, new.chunk_index, new.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memory_chunks_ad AFTER DELETE ON memory_chunks BEGIN
+                INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, scope, filename, chunk_index, content)
+                VALUES ('delete', old.id, old.scope, old.filename, old.chunk_index, old.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memory_chunks_au AFTER UPDATE ON memory_chunks BEGIN
+                INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, scope, filename, chunk_index, content)
+                VALUES ('delete', old.id, old.scope, old.filename, old.chunk_index, old.content);
+                INSERT INTO memory_chunks_fts(rowid, scope, filename, chunk_index, content)
+                VALUES (new.id, new.scope, new.filename, new.chunk_index, new.content);
+            END;
+            ",
+        )?;
+        Ok(())
+    }
+
     // ── Embedding CRUD ──
 
     pub fn upsert_embedding(
@@ -680,6 +760,157 @@ impl Database {
             .prepare("SELECT COUNT(*) FROM memory_embeddings WHERE scope = ?1")?;
         let count: i64 = stmt.query_row(params![scope], |row| row.get(0))?;
         Ok(count as usize)
+    }
+
+    // ── Chunk CRUD ──
+
+    /// Upsert a set of chunks for a given scope+filename, replacing any existing chunks for that file.
+    pub fn upsert_chunks(&self, scope: &str, filename: &str, chunks: &[ChunkData]) -> Result<()> {
+        // Delete existing chunks for this file
+        self.conn.execute(
+            "DELETE FROM memory_chunks WHERE scope = ?1 AND filename = ?2",
+            params![scope, filename],
+        )?;
+        let now = chrono::Utc::now().timestamp();
+        for chunk in chunks {
+            self.conn.execute(
+                "INSERT INTO memory_chunks
+                    (scope, filename, chunk_index, start_line, end_line, content, content_hash, embedding, dimension, model, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(scope, filename, chunk_index) DO UPDATE SET
+                    start_line = ?4, end_line = ?5, content = ?6, content_hash = ?7,
+                    embedding = ?8, dimension = ?9, model = ?10, created_at = ?11",
+                params![
+                    scope,
+                    filename,
+                    chunk.chunk_index,
+                    chunk.start_line,
+                    chunk.end_line,
+                    chunk.content,
+                    chunk.content_hash,
+                    chunk.embedding,
+                    chunk.dimension.map(|d| d as i64),
+                    chunk.model,
+                    now
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Retrieve all chunks for a given scope.
+    pub fn get_all_chunks(&self, scope: &str) -> Result<Vec<ChunkRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, scope, filename, chunk_index, start_line, end_line, content, content_hash, embedding, created_at
+             FROM memory_chunks WHERE scope = ?1 ORDER BY filename, chunk_index",
+        )?;
+        let rows = stmt
+            .query_map(params![scope], |row| {
+                Ok(ChunkRow {
+                    id: row.get(0)?,
+                    scope: row.get(1)?,
+                    filename: row.get(2)?,
+                    chunk_index: row.get(3)?,
+                    start_line: row.get(4)?,
+                    end_line: row.get(5)?,
+                    content: row.get(6)?,
+                    content_hash: row.get(7)?,
+                    embedding: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Delete all chunks for a specific file.
+    pub fn delete_chunks_for_file(&self, scope: &str, filename: &str) -> Result<bool> {
+        let count = self.conn.execute(
+            "DELETE FROM memory_chunks WHERE scope = ?1 AND filename = ?2",
+            params![scope, filename],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Retrieve all chunks for a specific file in a scope.
+    pub fn get_chunks_for_file(&self, scope: &str, filename: &str) -> Result<Vec<ChunkRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, scope, filename, chunk_index, start_line, end_line, content, content_hash, embedding, created_at
+             FROM memory_chunks WHERE scope = ?1 AND filename = ?2 ORDER BY chunk_index",
+        )?;
+        let rows = stmt
+            .query_map(params![scope, filename], |row| {
+                Ok(ChunkRow {
+                    id: row.get(0)?,
+                    scope: row.get(1)?,
+                    filename: row.get(2)?,
+                    chunk_index: row.get(3)?,
+                    start_line: row.get(4)?,
+                    end_line: row.get(5)?,
+                    content: row.get(6)?,
+                    content_hash: row.get(7)?,
+                    embedding: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Sanitize a query string for FTS5 MATCH syntax.
+    /// Wraps each word in double quotes to prevent FTS5 operator injection.
+    fn sanitize_fts_query(query: &str) -> String {
+        query
+            .split_whitespace()
+            .filter(|w| !w.is_empty())
+            .map(|w| format!("\"{}\"", w.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Full-text search over chunk content within a scope.
+    /// Returns matching (ChunkRow, bm25_score) pairs sorted by relevance, limited to `limit`.
+    pub fn fts_search(
+        &self,
+        scope: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(ChunkRow, f32)>> {
+        let sanitized = Self::sanitize_fts_query(query);
+        if sanitized.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT mc.id, mc.scope, mc.filename, mc.chunk_index, mc.start_line, mc.end_line,
+                    mc.content, mc.content_hash, mc.embedding, mc.created_at,
+                    -bm25(memory_chunks_fts) AS score
+             FROM memory_chunks_fts
+             JOIN memory_chunks mc ON mc.id = memory_chunks_fts.rowid
+             WHERE memory_chunks_fts MATCH ?1
+               AND mc.scope = ?2
+             ORDER BY score DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![sanitized, scope, limit as i64], |row| {
+                Ok((
+                    ChunkRow {
+                        id: row.get(0)?,
+                        scope: row.get(1)?,
+                        filename: row.get(2)?,
+                        chunk_index: row.get(3)?,
+                        start_line: row.get(4)?,
+                        end_line: row.get(5)?,
+                        content: row.get(6)?,
+                        content_hash: row.get(7)?,
+                        embedding: row.get(8)?,
+                        created_at: row.get(9)?,
+                    },
+                    row.get::<_, f64>(10)? as f32,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // ── Settings CRUD ──
@@ -2668,5 +2899,230 @@ mod tests {
         let old_row = rows.iter().find(|r| r.model.is_empty());
         assert!(old_row.is_some());
         assert_eq!(old_row.unwrap().total_tokens, 150);
+    }
+
+    #[test]
+    fn migrate_v12_creates_memory_chunks() {
+        let db = test_db();
+        let version = db.schema_version().expect("get version");
+        assert_eq!(version, Database::CURRENT_VERSION);
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM memory_chunks", [], |r| r.get(0))
+            .expect("memory_chunks table should exist");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn migrate_v12_creates_fts_table() {
+        let db = test_db();
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM memory_chunks_fts", [], |r| r.get(0))
+            .expect("FTS table should exist");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn upsert_and_get_chunks() {
+        let db = test_db();
+        let chunks = vec![
+            ChunkData {
+                chunk_index: 0,
+                content: "First chunk about Rust programming".into(),
+                content_hash: "hash0".into(),
+                embedding: Some(vec![0u8; 12]),
+                dimension: Some(3),
+                model: Some("test-model".into()),
+                start_line: Some(1),
+                end_line: Some(10),
+            },
+            ChunkData {
+                chunk_index: 1,
+                content: "Second chunk about memory systems".into(),
+                content_hash: "hash1".into(),
+                embedding: None,
+                dimension: None,
+                model: None,
+                start_line: Some(11),
+                end_line: Some(20),
+            },
+        ];
+        db.upsert_chunks("global", "notes.md", &chunks)
+            .expect("upsert");
+        let loaded = db.get_all_chunks("global").expect("get all");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].filename, "notes.md");
+        assert_eq!(loaded[0].chunk_index, 0);
+        assert_eq!(loaded[1].chunk_index, 1);
+    }
+
+    #[test]
+    fn upsert_chunks_replaces_existing() {
+        let db = test_db();
+        let chunks_v1 = vec![ChunkData {
+            chunk_index: 0,
+            content: "Old content".into(),
+            content_hash: "old_hash".into(),
+            embedding: None,
+            dimension: None,
+            model: None,
+            start_line: Some(1),
+            end_line: Some(5),
+        }];
+        db.upsert_chunks("global", "notes.md", &chunks_v1)
+            .expect("v1");
+
+        let chunks_v2 = vec![ChunkData {
+            chunk_index: 0,
+            content: "New content".into(),
+            content_hash: "new_hash".into(),
+            embedding: None,
+            dimension: None,
+            model: None,
+            start_line: Some(1),
+            end_line: Some(8),
+        }];
+        db.upsert_chunks("global", "notes.md", &chunks_v2)
+            .expect("v2");
+
+        let loaded = db.get_all_chunks("global").expect("get");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content, "New content");
+    }
+
+    #[test]
+    fn fts_search_returns_matching_chunks() {
+        let db = test_db();
+        let chunks = vec![
+            ChunkData {
+                chunk_index: 0,
+                content: "The quick brown fox jumps over the lazy dog".into(),
+                content_hash: "h0".into(),
+                embedding: None,
+                dimension: None,
+                model: None,
+                start_line: Some(1),
+                end_line: Some(1),
+            },
+            ChunkData {
+                chunk_index: 1,
+                content: "Rust programming language is fast and safe".into(),
+                content_hash: "h1".into(),
+                embedding: None,
+                dimension: None,
+                model: None,
+                start_line: Some(2),
+                end_line: Some(2),
+            },
+        ];
+        db.upsert_chunks("global", "test.md", &chunks)
+            .expect("upsert");
+
+        let results = db.fts_search("global", "fox", 10).expect("fts search");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].0.content.contains("fox"));
+
+        let results2 = db
+            .fts_search("global", "Rust programming", 10)
+            .expect("fts");
+        assert_eq!(results2.len(), 1);
+        assert!(results2[0].0.content.contains("Rust"));
+    }
+
+    #[test]
+    fn fts_search_no_results() {
+        let db = test_db();
+        let chunks = vec![ChunkData {
+            chunk_index: 0,
+            content: "Hello world".into(),
+            content_hash: "h".into(),
+            embedding: None,
+            dimension: None,
+            model: None,
+            start_line: Some(1),
+            end_line: Some(1),
+        }];
+        db.upsert_chunks("global", "test.md", &chunks)
+            .expect("upsert");
+        let results = db.fts_search("global", "nonexistent", 10).expect("fts");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn delete_chunks_for_file_works() {
+        let db = test_db();
+        let chunks = vec![ChunkData {
+            chunk_index: 0,
+            content: "content".into(),
+            content_hash: "h".into(),
+            embedding: None,
+            dimension: None,
+            model: None,
+            start_line: Some(1),
+            end_line: Some(1),
+        }];
+        db.upsert_chunks("global", "a.md", &chunks)
+            .expect("upsert a");
+        db.upsert_chunks("global", "b.md", &chunks)
+            .expect("upsert b");
+        assert_eq!(db.get_all_chunks("global").unwrap().len(), 2);
+
+        db.delete_chunks_for_file("global", "a.md").expect("delete");
+        let remaining = db.get_all_chunks("global").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].filename, "b.md");
+    }
+
+    #[test]
+    fn chunks_scoped_isolation() {
+        let db = test_db();
+        let chunk = vec![ChunkData {
+            chunk_index: 0,
+            content: "scoped content".into(),
+            content_hash: "h".into(),
+            embedding: None,
+            dimension: None,
+            model: None,
+            start_line: Some(1),
+            end_line: Some(1),
+        }];
+        db.upsert_chunks("global", "g.md", &chunk).expect("global");
+        db.upsert_chunks("local", "l.md", &chunk).expect("local");
+
+        assert_eq!(db.get_all_chunks("global").unwrap().len(), 1);
+        assert_eq!(db.get_all_chunks("local").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fts_triggers_stay_in_sync_after_upsert() {
+        let db = test_db();
+        let v1 = vec![ChunkData {
+            chunk_index: 0,
+            content: "alpha beta gamma".into(),
+            content_hash: "h1".into(),
+            embedding: None,
+            dimension: None,
+            model: None,
+            start_line: Some(1),
+            end_line: Some(1),
+        }];
+        db.upsert_chunks("global", "test.md", &v1).expect("v1");
+        assert_eq!(db.fts_search("global", "alpha", 10).unwrap().len(), 1);
+
+        let v2 = vec![ChunkData {
+            chunk_index: 0,
+            content: "delta epsilon zeta".into(),
+            content_hash: "h2".into(),
+            embedding: None,
+            dimension: None,
+            model: None,
+            start_line: Some(1),
+            end_line: Some(1),
+        }];
+        db.upsert_chunks("global", "test.md", &v2).expect("v2");
+
+        assert!(db.fts_search("global", "alpha", 10).unwrap().is_empty());
+        assert_eq!(db.fts_search("global", "delta", 10).unwrap().len(), 1);
     }
 }
