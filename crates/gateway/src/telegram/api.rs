@@ -6,7 +6,10 @@ use reqwest::Client;
 use tracing::warn;
 
 use super::circuit_breaker::CircuitBreaker;
-use super::types::{ApiResponse, FileInfo, SendMessageRequest, Update, User};
+use super::types::{
+    ApiResponse, FileInfo, InlineKeyboardMarkup, ReactionType, SendMessageRequest, SendPollRequest,
+    SetMessageReactionRequest, Update, User,
+};
 use crate::chunker;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
@@ -98,6 +101,8 @@ impl TelegramClient {
             parse_mode: parse_mode.map(String::from),
             reply_to_message_id,
             message_thread_id,
+            reply_markup: None,
+            disable_notification: None,
         };
 
         const MAX_RETRIES: u32 = 5;
@@ -298,6 +303,180 @@ impl TelegramClient {
         Ok(bytes.to_vec())
     }
 
+    /// Send a message with an inline keyboard.
+    pub async fn send_message_with_keyboard(
+        &self,
+        chat_id: i64,
+        text: &str,
+        keyboard: InlineKeyboardMarkup,
+        parse_mode: Option<&str>,
+        message_thread_id: Option<i64>,
+    ) -> Result<()> {
+        let body = SendMessageRequest {
+            chat_id,
+            text: text.to_string(),
+            parse_mode: parse_mode.map(String::from),
+            reply_to_message_id: None,
+            message_thread_id,
+            reply_markup: Some(keyboard),
+            disable_notification: None,
+        };
+
+        let resp = self
+            .client
+            .post(self.api_url("sendMessage"))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to send message with keyboard")?;
+
+        let resp_body: ApiResponse<serde_json::Value> = resp
+            .json()
+            .await
+            .context("Failed to parse sendMessage response")?;
+
+        if !resp_body.ok {
+            bail!(
+                "sendMessage (keyboard) failed: {}",
+                resp_body
+                    .description
+                    .unwrap_or_else(|| "unknown error".into())
+            );
+        }
+        Ok(())
+    }
+
+    /// Send a message silently (no notification sound).
+    pub async fn send_message_silent(
+        &self,
+        chat_id: i64,
+        text: &str,
+        parse_mode: Option<&str>,
+        message_thread_id: Option<i64>,
+    ) -> Result<()> {
+        let body = SendMessageRequest {
+            chat_id,
+            text: text.to_string(),
+            parse_mode: parse_mode.map(String::from),
+            reply_to_message_id: None,
+            message_thread_id,
+            reply_markup: None,
+            disable_notification: Some(true),
+        };
+
+        let resp = self
+            .client
+            .post(self.api_url("sendMessage"))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to send silent message")?;
+
+        let resp_body: ApiResponse<serde_json::Value> = resp
+            .json()
+            .await
+            .context("Failed to parse sendMessage response")?;
+
+        if !resp_body.ok {
+            bail!(
+                "sendMessage (silent) failed: {}",
+                resp_body
+                    .description
+                    .unwrap_or_else(|| "unknown error".into())
+            );
+        }
+        Ok(())
+    }
+
+    /// Send a poll to a chat.
+    pub async fn send_poll(
+        &self,
+        chat_id: i64,
+        question: &str,
+        options: &[String],
+        is_anonymous: Option<bool>,
+        message_thread_id: Option<i64>,
+    ) -> Result<()> {
+        if options.len() < 2 || options.len() > 10 {
+            bail!("Poll must have 2-10 options, got {}", options.len());
+        }
+
+        let body = SendPollRequest {
+            chat_id,
+            question: question.to_string(),
+            options: options.to_vec(),
+            is_anonymous,
+            message_thread_id,
+        };
+
+        let resp = self
+            .client
+            .post(self.api_url("sendPoll"))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to send poll")?;
+
+        let resp_body: ApiResponse<serde_json::Value> = resp
+            .json()
+            .await
+            .context("Failed to parse sendPoll response")?;
+
+        if !resp_body.ok {
+            bail!(
+                "sendPoll failed: {}",
+                resp_body
+                    .description
+                    .unwrap_or_else(|| "unknown error".into())
+            );
+        }
+        Ok(())
+    }
+
+    /// Set a reaction on a message.
+    pub async fn set_message_reaction(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        emoji: &str,
+    ) -> Result<()> {
+        let body = SetMessageReactionRequest {
+            chat_id,
+            message_id,
+            reaction: vec![ReactionType::emoji(emoji)],
+        };
+
+        let result = self
+            .client
+            .post(self.api_url("setMessageReaction"))
+            .json(&body)
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) => {
+                let resp_body: ApiResponse<serde_json::Value> = resp
+                    .json()
+                    .await
+                    .context("Failed to parse setMessageReaction response")?;
+
+                if !resp_body.ok {
+                    warn!(
+                        "setMessageReaction failed: {}",
+                        resp_body
+                            .description
+                            .unwrap_or_else(|| "unknown error".into())
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("setMessageReaction network error: {e}");
+            }
+        }
+
+        Ok(())
+    }
+
     /// Long-poll for updates (used when webhook is not configured).
     pub async fn get_updates(&self, offset: Option<i64>, timeout: u64) -> Result<Vec<Update>> {
         let mut body = serde_json::json!({
@@ -369,6 +548,8 @@ mod tests {
             parse_mode: Some("Markdown".into()),
             reply_to_message_id: None,
             message_thread_id: None,
+            reply_markup: None,
+            disable_notification: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["chat_id"], 42);
@@ -386,6 +567,8 @@ mod tests {
             parse_mode: None,
             reply_to_message_id: Some(10),
             message_thread_id: Some(99),
+            reply_markup: None,
+            disable_notification: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["reply_to_message_id"], 10);
@@ -400,9 +583,40 @@ mod tests {
             parse_mode: None,
             reply_to_message_id: None,
             message_thread_id: None,
+            reply_markup: None,
+            disable_notification: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("parse_mode").is_none());
+    }
+
+    #[test]
+    fn send_poll_request_serialization() {
+        let req = SendPollRequest {
+            chat_id: 42,
+            question: "Favorite?".into(),
+            options: vec!["A".into(), "B".into()],
+            is_anonymous: Some(false),
+            message_thread_id: Some(5),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["chat_id"], 42);
+        assert_eq!(json["question"], "Favorite?");
+        assert_eq!(json["is_anonymous"], false);
+        assert_eq!(json["message_thread_id"], 5);
+    }
+
+    #[test]
+    fn set_message_reaction_serialization() {
+        let req = SetMessageReactionRequest {
+            chat_id: 42,
+            message_id: 100,
+            reaction: vec![ReactionType::emoji("👍")],
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["chat_id"], 42);
+        assert_eq!(json["message_id"], 100);
+        assert_eq!(json["reaction"][0]["emoji"], "👍");
     }
 
     #[test]

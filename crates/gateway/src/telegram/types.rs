@@ -151,6 +151,63 @@ pub struct SendMessageRequest {
     pub reply_to_message_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_thread_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_markup: Option<InlineKeyboardMarkup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_notification: Option<bool>,
+}
+
+/// Telegram inline keyboard markup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineKeyboardMarkup {
+    pub inline_keyboard: Vec<Vec<InlineKeyboardButton>>,
+}
+
+/// A single inline keyboard button.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineKeyboardButton {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Request body for sendPoll.
+#[derive(Debug, Serialize)]
+pub struct SendPollRequest {
+    pub chat_id: i64,
+    pub question: String,
+    pub options: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_anonymous: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
+}
+
+/// Request body for setMessageReaction.
+#[derive(Debug, Serialize)]
+pub struct SetMessageReactionRequest {
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub reaction: Vec<ReactionType>,
+}
+
+/// A reaction type for setMessageReaction.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReactionType {
+    #[serde(rename = "type")]
+    pub reaction_type: String,
+    pub emoji: String,
+}
+
+impl ReactionType {
+    pub fn emoji(emoji: impl Into<String>) -> Self {
+        Self {
+            reaction_type: "emoji".to_string(),
+            emoji: emoji.into(),
+        }
+    }
 }
 
 /// Webhook info returned by getWebhookInfo.
@@ -454,10 +511,14 @@ mod tests {
             parse_mode: Some("HTML".into()),
             reply_to_message_id: Some(10),
             message_thread_id: Some(99),
+            reply_markup: None,
+            disable_notification: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["message_thread_id"], 99);
         assert_eq!(json["reply_to_message_id"], 10);
+        assert!(json.get("reply_markup").is_none());
+        assert!(json.get("disable_notification").is_none());
     }
 
     #[test]
@@ -472,5 +533,133 @@ mod tests {
         let info: FileInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.file_id, "abc123");
         assert_eq!(info.file_path.as_deref(), Some("photos/file_1.jpg"));
+    }
+
+    #[test]
+    fn serialize_inline_keyboard_markup() {
+        let markup = InlineKeyboardMarkup {
+            inline_keyboard: vec![vec![
+                InlineKeyboardButton {
+                    text: "Yes".into(),
+                    callback_data: Some("yes".into()),
+                    url: None,
+                },
+                InlineKeyboardButton {
+                    text: "No".into(),
+                    callback_data: Some("no".into()),
+                    url: None,
+                },
+            ]],
+        };
+        let json = serde_json::to_value(&markup).unwrap();
+        let rows = json["inline_keyboard"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let btns = rows[0].as_array().unwrap();
+        assert_eq!(btns.len(), 2);
+        assert_eq!(btns[0]["text"], "Yes");
+        assert_eq!(btns[0]["callback_data"], "yes");
+        assert!(btns[0].get("url").is_none());
+    }
+
+    #[test]
+    fn serialize_inline_keyboard_url_button() {
+        let btn = InlineKeyboardButton {
+            text: "Open".into(),
+            callback_data: None,
+            url: Some("https://example.com".into()),
+        };
+        let json = serde_json::to_value(&btn).unwrap();
+        assert_eq!(json["text"], "Open");
+        assert_eq!(json["url"], "https://example.com");
+        assert!(json.get("callback_data").is_none());
+    }
+
+    #[test]
+    fn serialize_send_message_with_keyboard() {
+        let req = SendMessageRequest {
+            chat_id: 42,
+            text: "Choose:".into(),
+            parse_mode: None,
+            reply_to_message_id: None,
+            message_thread_id: None,
+            reply_markup: Some(InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![InlineKeyboardButton {
+                    text: "OK".into(),
+                    callback_data: Some("ok".into()),
+                    url: None,
+                }]],
+            }),
+            disable_notification: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("reply_markup").is_some());
+        assert_eq!(json["reply_markup"]["inline_keyboard"][0][0]["text"], "OK");
+    }
+
+    #[test]
+    fn serialize_send_message_silent() {
+        let req = SendMessageRequest {
+            chat_id: 42,
+            text: "silent".into(),
+            parse_mode: None,
+            reply_to_message_id: None,
+            message_thread_id: None,
+            reply_markup: None,
+            disable_notification: Some(true),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["disable_notification"], true);
+    }
+
+    #[test]
+    fn serialize_send_poll_request() {
+        let req = SendPollRequest {
+            chat_id: 42,
+            question: "Lunch?".into(),
+            options: vec!["Pizza".into(), "Sushi".into(), "Tacos".into()],
+            is_anonymous: Some(true),
+            message_thread_id: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["chat_id"], 42);
+        assert_eq!(json["question"], "Lunch?");
+        assert_eq!(json["options"].as_array().unwrap().len(), 3);
+        assert_eq!(json["is_anonymous"], true);
+    }
+
+    #[test]
+    fn serialize_set_message_reaction_request() {
+        let req = SetMessageReactionRequest {
+            chat_id: 42,
+            message_id: 100,
+            reaction: vec![ReactionType::emoji("👍")],
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["chat_id"], 42);
+        assert_eq!(json["message_id"], 100);
+        let reactions = json["reaction"].as_array().unwrap();
+        assert_eq!(reactions[0]["type"], "emoji");
+        assert_eq!(reactions[0]["emoji"], "👍");
+    }
+
+    #[test]
+    fn deserialize_inline_keyboard_markup() {
+        let json = r#"{
+            "inline_keyboard": [[
+                {"text": "A", "callback_data": "a"},
+                {"text": "B", "url": "https://b.com"}
+            ]]
+        }"#;
+        let markup: InlineKeyboardMarkup = serde_json::from_str(json).unwrap();
+        assert_eq!(markup.inline_keyboard.len(), 1);
+        assert_eq!(markup.inline_keyboard[0].len(), 2);
+        assert_eq!(
+            markup.inline_keyboard[0][0].callback_data.as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            markup.inline_keyboard[0][1].url.as_deref(),
+            Some("https://b.com")
+        );
     }
 }

@@ -41,6 +41,8 @@ pub fn parse_interaction(interaction: &Interaction) -> Option<InboundMessage> {
         message_id: Some(interaction.id.clone()),
         thread_ts: None,
         attachments: Vec::new(),
+        reaction: None,
+        metadata: serde_json::Value::Null,
     })
 }
 

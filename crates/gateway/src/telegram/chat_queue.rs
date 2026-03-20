@@ -129,6 +129,8 @@ mod tests {
             message_id: None,
             thread_ts: None,
             attachments: Vec::new(),
+            reaction: None,
+            metadata: serde_json::Value::Null,
         }
     }
 

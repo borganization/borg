@@ -183,6 +183,38 @@ impl DiscordClient {
         Ok(())
     }
 
+    /// Add a reaction to a message.
+    pub async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let url = format!(
+            "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me"
+        );
+        let token = self.token.clone();
+        let client = self.client.clone();
+
+        self.send_with_retry(move || {
+            let client = client.clone();
+            let url = url.clone();
+            let token = token.clone();
+            async move {
+                client
+                    .put(&url)
+                    .header("Authorization", format!("Bot {token}"))
+                    .header("Content-Length", "0")
+                    .send()
+                    .await
+                    .context("Discord API request failed")
+            }
+        })
+        .await?;
+
+        Ok(())
+    }
+
     /// Send a request with 429 rate-limit retry logic using the shared retry helper.
     async fn send_with_retry<F, Fut>(&self, make_request: F) -> Result<reqwest::Response>
     where
@@ -271,5 +303,19 @@ mod tests {
     fn client_construction() {
         let client = DiscordClient::new("test-token").unwrap();
         assert_eq!(client.token, "test-token");
+    }
+
+    #[test]
+    fn reaction_url_construction() {
+        let channel_id = "123";
+        let message_id = "456";
+        let emoji = "%F0%9F%91%8D"; // URL-encoded thumbs up
+        let url = format!(
+            "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me"
+        );
+        assert_eq!(
+            url,
+            "https://discord.com/api/v10/channels/123/messages/456/reactions/%F0%9F%91%8D/@me"
+        );
     }
 }

@@ -159,6 +159,15 @@ impl TeamsClient {
         Ok(())
     }
 
+    /// Send a typing indicator to a conversation.
+    pub async fn send_typing(&self, service_url: &str, conversation_id: &str) -> Result<()> {
+        validate_service_url(service_url)?;
+        let base = ensure_trailing_slash(service_url);
+        let url = format!("{base}v3/conversations/{conversation_id}/activities");
+        let typing = ReplyActivity::typing();
+        self.send_with_retry(&url, &typing).await
+    }
+
     /// Send a single request with 429 retry logic.
     async fn send_with_retry(&self, url: &str, body: &ReplyActivity) -> Result<()> {
         let policy = RateLimitPolicy {
@@ -317,5 +326,22 @@ mod tests {
             TOKEN_ENDPOINT,
             "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
         );
+    }
+
+    #[test]
+    fn typing_activity_url_construction() {
+        let base = ensure_trailing_slash("https://smba.trafficmanager.net/teams/");
+        let url = format!("{base}v3/conversations/{conv}/activities", conv = "c1");
+        assert_eq!(
+            url,
+            "https://smba.trafficmanager.net/teams/v3/conversations/c1/activities"
+        );
+    }
+
+    #[test]
+    fn typing_activity_serialization() {
+        let typing = super::super::types::ReplyActivity::typing();
+        let json = serde_json::to_value(&typing).unwrap();
+        assert_eq!(json["type"], "typing");
     }
 }
