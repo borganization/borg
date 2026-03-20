@@ -2,7 +2,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use super::http::{send_and_check, send_json};
-use super::validate_resource_id;
+use super::{format_list, require_str, validate_resource_id};
 use crate::config::Config;
 use crate::types::ToolDefinition;
 
@@ -74,34 +74,23 @@ async fn search(client: &Client, token: &str, args: &Value) -> Result<String, St
     )
     .await?;
 
-    let results = result["results"].as_array();
-
-    match results {
-        Some(items) if !items.is_empty() => {
-            let summaries: Vec<String> = items
-                .iter()
-                .take(20)
-                .map(|item| {
-                    let obj_type = item["object"].as_str().unwrap_or("unknown");
-                    let id = item["id"].as_str().unwrap_or("");
-                    let title = extract_title(item).unwrap_or_else(|| "(untitled)".to_string());
-                    format!("- [{obj_type}] {title} (id: {id})")
-                })
-                .collect();
-            Ok(format!(
-                "Found {} result(s):\n{}",
-                summaries.len(),
-                summaries.join("\n")
-            ))
-        }
-        _ => Ok("No results found.".to_string()),
-    }
+    Ok(format_list(
+        result["results"].as_array().into_iter().flatten().take(20),
+        |n| format!("Found {n} result(s):"),
+        "No results found.",
+        |item| {
+            let obj_type = item["object"].as_str().unwrap_or("unknown");
+            let id = item["id"].as_str().unwrap_or("");
+            let title = extract_title(item).unwrap_or_else(|| "(untitled)".to_string());
+            format!("- [{obj_type}] {title} (id: {id})")
+        },
+    ))
 }
 
 async fn create_page(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let title = args["title"].as_str().ok_or("Missing 'title'")?;
+    let title = require_str(args, "title")?;
     let content = args["content"].as_str().unwrap_or("");
-    let parent_id = args["parent_id"].as_str().ok_or("Missing 'parent_id'")?;
+    let parent_id = require_str(args, "parent_id")?;
     let parent_id = validate_resource_id(parent_id, "parent_id")?;
 
     let payload = json!({
@@ -140,7 +129,7 @@ async fn create_page(client: &Client, token: &str, args: &Value) -> Result<Strin
 }
 
 async fn read_page(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let page_id = args["page_id"].as_str().ok_or("Missing 'page_id'")?;
+    let page_id = require_str(args, "page_id")?;
     let page_id = validate_resource_id(page_id, "page_id")?;
 
     // Fetch page properties
@@ -186,9 +175,7 @@ async fn read_page(client: &Client, token: &str, args: &Value) -> Result<String,
 }
 
 async fn query_database(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let database_id = args["database_id"]
-        .as_str()
-        .ok_or("Missing 'database_id'")?;
+    let database_id = require_str(args, "database_id")?;
     let database_id = validate_resource_id(database_id, "database_id")?;
 
     let result: Value = send_json(
@@ -203,26 +190,16 @@ async fn query_database(client: &Client, token: &str, args: &Value) -> Result<St
     )
     .await?;
 
-    let results = result["results"].as_array();
-
-    match results {
-        Some(items) if !items.is_empty() => {
-            let summaries: Vec<String> = items
-                .iter()
-                .map(|item| {
-                    let id = item["id"].as_str().unwrap_or("");
-                    let title = extract_title(item).unwrap_or_else(|| "(untitled)".to_string());
-                    format!("- {title} (id: {id})")
-                })
-                .collect();
-            Ok(format!(
-                "Database has {} row(s):\n{}",
-                summaries.len(),
-                summaries.join("\n")
-            ))
-        }
-        _ => Ok("Database is empty.".to_string()),
-    }
+    Ok(format_list(
+        result["results"].as_array().into_iter().flatten(),
+        |n| format!("Database has {n} row(s):"),
+        "Database is empty.",
+        |item| {
+            let id = item["id"].as_str().unwrap_or("");
+            let title = extract_title(item).unwrap_or_else(|| "(untitled)".to_string());
+            format!("- {title} (id: {id})")
+        },
+    ))
 }
 
 /// Extract title from a Notion page's properties.

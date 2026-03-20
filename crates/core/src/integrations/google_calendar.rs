@@ -2,7 +2,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use super::http::{send_and_check, send_json};
-use super::validate_resource_id;
+use super::{format_list, require_str, validate_resource_id};
 use crate::config::Config;
 use crate::types::ToolDefinition;
 
@@ -65,39 +65,26 @@ async fn list_events(client: &Client, token: &str, args: &Value) -> Result<Strin
     )
     .await?;
 
-    let events = result["items"].as_array();
-
-    match events {
-        Some(evts) if !evts.is_empty() => {
-            let summaries: Vec<String> = evts
-                .iter()
-                .map(|e| {
-                    let summary = e["summary"].as_str().unwrap_or("(untitled)");
-                    let start = e["start"]["dateTime"]
-                        .as_str()
-                        .or_else(|| e["start"]["date"].as_str())
-                        .unwrap_or("?");
-                    let id = e["id"].as_str().unwrap_or("");
-                    format!("- {start}: {summary} (id: {id})")
-                })
-                .collect();
-            Ok(format!(
-                "Events in the next {days} day(s):\n{}",
-                summaries.join("\n")
-            ))
-        }
-        _ => Ok(format!("No events in the next {days} day(s).")),
-    }
+    Ok(format_list(
+        result["items"].as_array().into_iter().flatten(),
+        |n| format!("Events in the next {days} day(s) ({n}):"),
+        &format!("No events in the next {days} day(s)."),
+        |e| {
+            let summary = e["summary"].as_str().unwrap_or("(untitled)");
+            let start = e["start"]["dateTime"]
+                .as_str()
+                .or_else(|| e["start"]["date"].as_str())
+                .unwrap_or("?");
+            let id = e["id"].as_str().unwrap_or("");
+            format!("- {start}: {summary} (id: {id})")
+        },
+    ))
 }
 
 async fn create_event(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let summary = args["summary"].as_str().ok_or("Missing 'summary'")?;
-    let start = args["start"]
-        .as_str()
-        .ok_or("Missing 'start' (RFC3339 datetime)")?;
-    let end = args["end"]
-        .as_str()
-        .ok_or("Missing 'end' (RFC3339 datetime)")?;
+    let summary = require_str(args, "summary")?;
+    let start = require_str(args, "start")?;
+    let end = require_str(args, "end")?;
     let description = args["description"].as_str().unwrap_or("");
 
     let payload = json!({
@@ -121,7 +108,7 @@ async fn create_event(client: &Client, token: &str, args: &Value) -> Result<Stri
 }
 
 async fn delete_event(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let event_id = args["event_id"].as_str().ok_or("Missing 'event_id'")?;
+    let event_id = require_str(args, "event_id")?;
     let event_id = validate_resource_id(event_id, "event_id")?;
 
     send_and_check(

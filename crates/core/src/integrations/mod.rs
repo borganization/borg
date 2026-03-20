@@ -58,6 +58,34 @@ pub mod outlook;
 
 use serde_json::Value;
 
+/// Extract a required string argument, returning a consistent error message.
+pub fn require_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, String> {
+    args[field]
+        .as_str()
+        .ok_or_else(|| format!("Missing '{field}'"))
+}
+
+/// Format an array of JSON values into a list string with a header.
+/// `header_fmt` receives the item count and returns the header line.
+pub fn format_list<'a, I, H, F>(
+    items: I,
+    header_fmt: H,
+    no_results: &str,
+    format_item: F,
+) -> String
+where
+    I: IntoIterator<Item = &'a Value>,
+    H: FnOnce(usize) -> String,
+    F: Fn(&Value) -> String,
+{
+    let summaries: Vec<String> = items.into_iter().map(format_item).collect();
+    if summaries.is_empty() {
+        no_results.to_string()
+    } else {
+        format!("{}\n{}", header_fmt(summaries.len()), summaries.join("\n"))
+    }
+}
+
 pub fn resolve_credential_and_action<'a>(
     arguments: &'a Value,
     config: &crate::config::Config,
@@ -89,35 +117,34 @@ pub fn validate_resource_id<'a>(id: &'a str, field_name: &str) -> Result<&'a str
     }
 }
 
-/// Collect all integration tool definitions.
-#[allow(clippy::vec_init_then_push)]
-pub fn enabled_tool_definitions() -> Vec<crate::types::ToolDefinition> {
-    let mut tools = Vec::new();
+macro_rules! integration_dispatch {
+    ($($name:literal => $module:ident),+ $(,)?) => {
+        /// Collect all integration tool definitions.
+        pub fn enabled_tool_definitions() -> Vec<crate::types::ToolDefinition> {
+            vec![$($module::tool_definition()),+]
+        }
 
-    tools.push(gmail::tool_definition());
-    tools.push(outlook::tool_definition());
-    tools.push(google_calendar::tool_definition());
-    tools.push(notion::tool_definition());
-    tools.push(linear::tool_definition());
-
-    tools
+        /// Dispatch a tool call to the appropriate integration handler.
+        /// Returns `None` if the tool name doesn't match any integration.
+        pub async fn dispatch_tool_call(
+            tool_name: &str,
+            arguments: &Value,
+            config: &crate::config::Config,
+        ) -> Option<Result<String, String>> {
+            match tool_name {
+                $($name => Some($module::handle(arguments, config).await),)+
+                _ => None,
+            }
+        }
+    };
 }
 
-/// Dispatch a tool call to the appropriate integration handler.
-/// Returns `None` if the tool name doesn't match any integration.
-pub async fn dispatch_tool_call(
-    tool_name: &str,
-    arguments: &Value,
-    config: &crate::config::Config,
-) -> Option<Result<String, String>> {
-    match tool_name {
-        "gmail" => Some(gmail::handle(arguments, config).await),
-        "outlook" => Some(outlook::handle(arguments, config).await),
-        "google_calendar" => Some(google_calendar::handle(arguments, config).await),
-        "notion" => Some(notion::handle(arguments, config).await),
-        "linear" => Some(linear::handle(arguments, config).await),
-        _ => None,
-    }
+integration_dispatch! {
+    "gmail" => gmail,
+    "outlook" => outlook,
+    "google_calendar" => google_calendar,
+    "notion" => notion,
+    "linear" => linear,
 }
 
 #[cfg(test)]

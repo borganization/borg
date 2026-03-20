@@ -205,6 +205,34 @@ impl ScriptOutput {
     }
 }
 
+/// Run a script in a sandbox, returning (success, output_text).
+///
+/// Shared core logic used by both `ToolExecutor` and `ChannelExecutor`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_sandboxed_script(
+    runtime: &str,
+    script_path: &Path,
+    work_dir: &Path,
+    sandbox_policy: SandboxPolicy,
+    timeout_ms: u64,
+    extra_env: &[(String, String)],
+    name: &str,
+    input_json: &str,
+) -> Result<(bool, String)> {
+    let runner = ScriptRunner {
+        runtime,
+        script_path,
+        work_dir,
+        sandbox_policy,
+        timeout_ms,
+        extra_env,
+        name,
+    };
+
+    let output = runner.run(input_json).await?;
+    Ok(output.into_result_string())
+}
+
 /// Validate that a script path stays within its base directory.
 /// Prevents path traversal attacks via symlinks or `..` components.
 pub fn validate_script_path(base_dir: &Path, script_name: &str) -> Result<std::path::PathBuf> {
@@ -220,7 +248,7 @@ pub fn validate_script_path(base_dir: &Path, script_name: &str) -> Result<std::p
     if !canonical_script.starts_with(&canonical_dir) {
         bail!("Script '{script_name}' escapes base directory");
     }
-    Ok(script_path)
+    Ok(canonical_script)
 }
 
 /// Resolve a runtime string to a (program, base_args) pair.

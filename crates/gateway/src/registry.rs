@@ -1,71 +1,54 @@
 use anyhow::Result;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::manifest::ChannelManifest;
+use borg_tools::{ManifestItem, ManifestRegistry, RegisteredItem};
 
-pub struct ChannelRegistry {
-    channels: HashMap<String, RegisteredChannel>,
-    channels_dir: PathBuf,
+// --- ManifestItem impl for ChannelManifest ---
+
+impl ManifestItem for ChannelManifest {
+    fn load(path: &Path) -> Result<Self> {
+        ChannelManifest::load(path)
+    }
+    fn item_name(&self) -> &str {
+        &self.name
+    }
+    const MANIFEST_FILENAME: &'static str = "channel.toml";
+    const SUBDIR: &'static str = "channels";
+    const ITEM_TYPE: &'static str = "channel";
 }
 
-pub struct RegisteredChannel {
-    pub manifest: ChannelManifest,
-    pub dir: PathBuf,
+/// Legacy type alias for backward compatibility.
+pub type RegisteredChannel = RegisteredItem<ChannelManifest>;
+
+pub struct ChannelRegistry {
+    inner: ManifestRegistry<ChannelManifest>,
 }
 
 impl ChannelRegistry {
     pub fn new() -> Result<Self> {
-        let channels_dir = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-            .join(".borg")
-            .join("channels");
-
-        let mut registry = Self {
-            channels: HashMap::new(),
-            channels_dir,
-        };
-
-        registry.scan()?;
-        Ok(registry)
+        Ok(Self {
+            inner: ManifestRegistry::new()?,
+        })
     }
 
     pub fn with_dir(dir: PathBuf) -> Result<Self> {
-        let mut registry = Self {
-            channels: HashMap::new(),
-            channels_dir: dir,
-        };
-
-        registry.scan()?;
-        Ok(registry)
+        Ok(Self {
+            inner: ManifestRegistry::with_dir(dir)?,
+        })
     }
 
     pub fn scan(&mut self) -> Result<()> {
-        self.channels.clear();
-
-        let scanned = borg_tools::scan::scan_manifest_dir(
-            &self.channels_dir,
-            "channel.toml",
-            ChannelManifest::load,
-            |m| m.name.clone(),
-            "channel",
-        )?;
-
-        for (name, (manifest, dir)) in scanned {
-            self.channels
-                .insert(name, RegisteredChannel { manifest, dir });
-        }
-
-        Ok(())
+        self.inner.scan()
     }
 
     pub fn get(&self, name: &str) -> Option<&RegisteredChannel> {
-        self.channels.get(name)
+        self.inner.get(name)
     }
 
     pub fn list_channels(&self) -> Vec<String> {
-        self.channels
-            .values()
+        self.inner
+            .items()
             .map(|c| {
                 format!(
                     "{}: {} (webhook: {})",
@@ -78,7 +61,7 @@ impl ChannelRegistry {
     }
 
     pub fn all_channels(&self) -> impl Iterator<Item = &RegisteredChannel> {
-        self.channels.values()
+        self.inner.items()
     }
 }
 
@@ -88,20 +71,16 @@ mod tests {
 
     #[test]
     fn empty_registry_lists_nothing() {
-        let registry = ChannelRegistry {
-            channels: HashMap::new(),
-            channels_dir: PathBuf::from("/tmp/nonexistent_channels_dir"),
-        };
+        let registry =
+            ChannelRegistry::with_dir(PathBuf::from("/tmp/nonexistent_channels_dir")).unwrap();
         assert!(registry.list_channels().is_empty());
         assert!(registry.get("anything").is_none());
     }
 
     #[test]
     fn scan_nonexistent_dir_succeeds() {
-        let mut registry = ChannelRegistry {
-            channels: HashMap::new(),
-            channels_dir: PathBuf::from("/tmp/nonexistent_channels_dir_xyz"),
-        };
+        let mut registry =
+            ChannelRegistry::with_dir(PathBuf::from("/tmp/nonexistent_channels_dir_xyz")).unwrap();
         assert!(registry.scan().is_ok());
         assert!(registry.list_channels().is_empty());
     }
@@ -120,10 +99,7 @@ description = "A test channel"
         )
         .unwrap();
 
-        let mut registry = ChannelRegistry {
-            channels: HashMap::new(),
-            channels_dir: dir.path().to_path_buf(),
-        };
+        let mut registry = ChannelRegistry::with_dir(dir.path().to_path_buf()).unwrap();
         registry.scan().unwrap();
         assert_eq!(registry.list_channels().len(), 1);
         assert!(registry.get("test-channel").is_some());
