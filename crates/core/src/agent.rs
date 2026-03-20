@@ -259,6 +259,8 @@ pub struct Agent {
     rate_guard: SessionRateGuard,
     agent_control: Option<crate::multi_agent::AgentControl>,
     spawn_depth: u32,
+    /// When set, restricts which tools this agent may use (from role's `tools_allowed`).
+    tools_filter: Option<Vec<String>>,
     metrics: BorgMetrics,
     browser_session: Option<crate::browser::BrowserSession>,
     config_rx: Option<tokio::sync::watch::Receiver<Config>>,
@@ -299,6 +301,7 @@ impl Agent {
             rate_guard,
             agent_control,
             spawn_depth: 0,
+            tools_filter: None,
             metrics,
             browser_session: None,
             config_rx: None,
@@ -324,6 +327,7 @@ impl Agent {
         spawn_depth: u32,
         agents_config: &crate::config::MultiAgentConfig,
         metrics: BorgMetrics,
+        tools_filter: Option<Vec<String>>,
     ) -> Result<Self> {
         let _ = LlmClient::new(config.clone())?;
         let tool_registry = ToolRegistry::new()?;
@@ -358,6 +362,7 @@ impl Agent {
             rate_guard,
             agent_control,
             spawn_depth,
+            tools_filter,
             metrics,
             browser_session: None,
             config_rx: None,
@@ -686,6 +691,13 @@ impl Agent {
                 self.spawn_depth,
                 self.config.agents.max_spawn_depth,
             ));
+        }
+
+        // Apply role-based tools_filter (from AgentRole.tools_allowed)
+        if let Some(ref allowed) = self.tools_filter {
+            let allowed_set: std::collections::HashSet<&str> =
+                allowed.iter().map(String::as_str).collect();
+            tools.retain(|t| allowed_set.contains(t.function.name.as_str()));
         }
 
         // Apply tool policy filtering (profile + allow/deny)
@@ -1049,9 +1061,6 @@ impl Agent {
                 log_message(&msg);
                 self.persist_message(msg);
                 self.auto_save();
-                if let Some(ref mut ctrl) = self.agent_control {
-                    ctrl.shutdown_all();
-                }
                 self.metrics.agent_turns.add(1, &[]);
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
@@ -1497,11 +1506,9 @@ impl Agent {
                 }
             }
             "send_to_agent" => {
-                if let Some(ref ctrl) = self.agent_control {
-                    crate::multi_agent::tools::handle_send_to_agent(&args, ctrl).await
-                } else {
-                    Ok("Error: Multi-agent system is not enabled.".to_string())
-                }
+                // send_to_agent is not yet implemented (messages are silently dropped).
+                // Disabled until the receiving end in run_sub_agent properly handles additional messages.
+                Err(anyhow::anyhow!("send_to_agent is not yet implemented"))
             }
             "wait_for_agent" => {
                 if let Some(ref mut ctrl) = self.agent_control {
