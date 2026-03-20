@@ -67,12 +67,7 @@ pub fn require_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, String> 
 
 /// Format an array of JSON values into a list string with a header.
 /// `header_fmt` receives the item count and returns the header line.
-pub fn format_list<'a, I, H, F>(
-    items: I,
-    header_fmt: H,
-    no_results: &str,
-    format_item: F,
-) -> String
+pub fn format_list<'a, I, H, F>(items: I, header_fmt: H, no_results: &str, format_item: F) -> String
 where
     I: IntoIterator<Item = &'a Value>,
     H: FnOnce(usize) -> String,
@@ -117,10 +112,26 @@ pub fn validate_resource_id<'a>(id: &'a str, field_name: &str) -> Result<&'a str
     }
 }
 
+/// Check whether an integration's credential is available.
+pub fn is_credential_available(config: &crate::config::Config, credential_name: &str) -> bool {
+    config.resolve_credential_or_env(credential_name).is_some()
+}
+
 macro_rules! integration_dispatch {
-    ($($name:literal => $module:ident),+ $(,)?) => {
-        /// Collect all integration tool definitions.
-        pub fn enabled_tool_definitions() -> Vec<crate::types::ToolDefinition> {
+    ($($name:literal => $module:ident => $cred:literal),+ $(,)?) => {
+        /// Collect integration tool definitions, only including those whose credentials resolve.
+        pub fn enabled_tool_definitions(config: &crate::config::Config) -> Vec<crate::types::ToolDefinition> {
+            let mut defs = Vec::new();
+            $(
+                if is_credential_available(config, $cred) {
+                    defs.push($module::tool_definition());
+                }
+            )+
+            defs
+        }
+
+        /// Collect all integration tool definitions regardless of credentials.
+        pub fn all_tool_definitions() -> Vec<crate::types::ToolDefinition> {
             vec![$($module::tool_definition()),+]
         }
 
@@ -140,11 +151,11 @@ macro_rules! integration_dispatch {
 }
 
 integration_dispatch! {
-    "gmail" => gmail,
-    "outlook" => outlook,
-    "google_calendar" => google_calendar,
-    "notion" => notion,
-    "linear" => linear,
+    "gmail" => gmail => "GMAIL_API_KEY",
+    "outlook" => outlook => "MS_GRAPH_TOKEN",
+    "google_calendar" => google_calendar => "GOOGLE_CALENDAR_TOKEN",
+    "notion" => notion => "NOTION_API_KEY",
+    "linear" => linear => "LINEAR_API_KEY",
 }
 
 #[cfg(test)]
@@ -179,8 +190,8 @@ mod tests {
     }
 
     #[test]
-    fn enabled_tool_definitions_all_valid() {
-        let defs = enabled_tool_definitions();
+    fn all_tool_definitions_are_valid() {
+        let defs = all_tool_definitions();
         let mut names = std::collections::HashSet::new();
         for def in &defs {
             assert!(!def.function.name.is_empty(), "tool name must not be empty");
@@ -195,6 +206,14 @@ mod tests {
                 def.function.name
             );
         }
+    }
+
+    #[test]
+    fn enabled_tool_definitions_empty_without_credentials() {
+        let config = crate::config::Config::default();
+        let defs = enabled_tool_definitions(&config);
+        // Without any credentials configured, no integrations should appear
+        assert!(defs.is_empty());
     }
 
     #[tokio::test]
