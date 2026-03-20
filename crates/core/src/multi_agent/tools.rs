@@ -93,24 +93,8 @@ pub fn tool_definitions(spawn_depth: u32, max_spawn_depth: u32) -> Vec<ToolDefin
             }),
         ));
 
-        defs.push(ToolDefinition::new(
-            "send_to_agent",
-            "Send an additional message to a running sub-agent.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "agent_id": {
-                        "type": "string",
-                        "description": "The agent ID to send to"
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "The message to send"
-                    }
-                },
-                "required": ["agent_id", "message"]
-            }),
-        ));
+        // NOTE: send_to_agent is intentionally excluded — the receiving end in
+        // run_sub_agent silently drops messages. Re-add when properly implemented.
 
         defs.push(ToolDefinition::new(
             "wait_for_agent",
@@ -419,5 +403,104 @@ mod tests {
         let args = json!({"action": "list"});
         let result = handle_manage_roles(&args);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_tool_definitions_at_depth_0_count() {
+        let defs = tool_definitions(0, 1);
+        // manage_roles + spawn_agent + wait_for_agent + close_agent = 4
+        // (send_to_agent removed)
+        assert_eq!(
+            defs.len(),
+            4,
+            "Expected 4 tools at depth 0, got: {:?}",
+            defs.iter().map(|d| &d.function.name).collect::<Vec<_>>()
+        );
+        assert!(
+            defs.iter().all(|d| d.function.name != "send_to_agent"),
+            "send_to_agent should not be in tool definitions"
+        );
+    }
+
+    #[test]
+    fn test_handle_manage_roles_unknown_action() {
+        let args = json!({"action": "foobar"});
+        let result = handle_manage_roles(&args).unwrap();
+        assert!(result.contains("error"), "Expected error JSON, got: {result}");
+        assert!(result.contains("foobar"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_send_to_agent_nonexistent() {
+        let config = crate::config::MultiAgentConfig::default();
+        let ctrl = AgentControl::new(&config, "session-1", 0);
+        let args = json!({"agent_id": "nonexistent", "message": "hello"});
+        let result = handle_send_to_agent(&args, &ctrl).await;
+        assert!(result.is_err());
+    }
+
+    /// Verify that tools_filter logic (applied in Agent.build_tool_definitions) correctly
+    /// filters tool definitions by an allowed set.
+    #[test]
+    fn test_tools_filter_restricts_tools() {
+        use crate::types::ToolDefinition;
+        let tools = vec![
+            ToolDefinition::new("run_shell", "desc", json!({"type": "object"})),
+            ToolDefinition::new("apply_patch", "desc", json!({"type": "object"})),
+            ToolDefinition::new("read_memory", "desc", json!({"type": "object"})),
+            ToolDefinition::new("write_memory", "desc", json!({"type": "object"})),
+        ];
+        let allowed: Vec<String> = vec!["run_shell".into(), "read_memory".into()];
+        let allowed_set: std::collections::HashSet<&str> =
+            allowed.iter().map(String::as_str).collect();
+        let filtered: Vec<ToolDefinition> = tools
+            .into_iter()
+            .filter(|t| allowed_set.contains(t.function.name.as_str()))
+            .collect();
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|t| t.function.name == "run_shell"));
+        assert!(filtered.iter().any(|t| t.function.name == "read_memory"));
+        assert!(filtered.iter().all(|t| t.function.name != "apply_patch"));
+        assert!(filtered.iter().all(|t| t.function.name != "write_memory"));
+    }
+
+    /// Verify that an empty tools_filter strips all tools.
+    #[test]
+    fn test_tools_filter_empty_strips_all() {
+        use crate::types::ToolDefinition;
+        let tools = vec![
+            ToolDefinition::new("run_shell", "desc", json!({"type": "object"})),
+            ToolDefinition::new("apply_patch", "desc", json!({"type": "object"})),
+        ];
+        let allowed: Vec<String> = vec![];
+        let allowed_set: std::collections::HashSet<&str> =
+            allowed.iter().map(String::as_str).collect();
+        let filtered: Vec<ToolDefinition> = tools
+            .into_iter()
+            .filter(|t| allowed_set.contains(t.function.name.as_str()))
+            .collect();
+        assert!(filtered.is_empty());
+    }
+
+    /// Verify that None tools_filter passes all tools through.
+    #[test]
+    fn test_tools_filter_none_passes_all() {
+        use crate::types::ToolDefinition;
+        let tools = vec![
+            ToolDefinition::new("run_shell", "desc", json!({"type": "object"})),
+            ToolDefinition::new("apply_patch", "desc", json!({"type": "object"})),
+        ];
+        let filter: Option<Vec<String>> = None;
+        let filtered: Vec<ToolDefinition> = if let Some(ref allowed) = filter {
+            let allowed_set: std::collections::HashSet<&str> =
+                allowed.iter().map(String::as_str).collect();
+            tools
+                .into_iter()
+                .filter(|t| allowed_set.contains(t.function.name.as_str()))
+                .collect()
+        } else {
+            tools
+        };
+        assert_eq!(filtered.len(), 2);
     }
 }

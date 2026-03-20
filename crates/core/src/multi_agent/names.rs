@@ -107,4 +107,29 @@ mod tests {
         let mut pool = NamePool::new();
         assert_eq!(pool.next_name(), "Atlas");
     }
+
+    #[test]
+    fn test_third_cycle_ordinal() {
+        let mut pool = NamePool::new();
+        for _ in 0..(DEFAULT_NAMES.len() * 2) {
+            pool.next_name();
+        }
+        let name = pool.next_name();
+        assert!(
+            name.contains("the 3rd"),
+            "Expected 'the 3rd' suffix, got: {name}"
+        );
+    }
+
+    #[test]
+    fn test_all_first_round_names_are_base_names() {
+        let mut pool = NamePool::new();
+        for _ in 0..DEFAULT_NAMES.len() {
+            let name = pool.next_name();
+            assert!(
+                !name.contains("the"),
+                "First round name should not have ordinal suffix, got: {name}"
+            );
+        }
+    }
 }
