@@ -68,6 +68,7 @@ fn spawn_gateway(config: &Config, shutdown: CancellationToken, metrics: BorgMetr
     }
 
     // Start native iMessage monitor if channel is installed (mirrors service.rs)
+    #[cfg(target_os = "macos")]
     if let Ok(data_dir) = Config::data_dir() {
         let imessage_dir = data_dir.join("channels/imessage");
         if imessage_dir.join("channel.toml").exists() {
