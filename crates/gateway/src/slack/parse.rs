@@ -45,6 +45,8 @@ pub fn parse_event(callback: &EventCallback) -> Option<InboundMessage> {
         message_id: None,
         thread_ts: event.thread_ts.clone(),
         attachments: Vec::new(),
+        reaction: None,
+        metadata: serde_json::Value::Null,
     })
 }
 

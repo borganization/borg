@@ -91,6 +91,31 @@ impl TwilioWebhook {
     }
 }
 
+/// Twilio message status callback (delivery receipt).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct StatusCallback {
+    /// The message SID.
+    pub message_sid: String,
+    /// The message status (queued, sent, delivered, failed, undelivered).
+    pub message_status: String,
+    /// The account SID.
+    #[serde(default)]
+    pub account_sid: String,
+    /// The sender number.
+    #[serde(default)]
+    pub from: String,
+    /// The recipient number.
+    #[serde(default)]
+    pub to: String,
+    /// Error code (if failed/undelivered).
+    #[serde(default)]
+    pub error_code: Option<String>,
+    /// Error message (if failed/undelivered).
+    #[serde(default)]
+    pub error_message: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +212,33 @@ mod tests {
         };
         assert!(!wh.has_audio_media());
         assert!(wh.first_media().is_none());
+    }
+
+    #[test]
+    fn deserialize_status_callback_delivered() {
+        let body = "MessageSid=SM123&MessageStatus=delivered&AccountSid=AC123&From=%2B14155551234&To=%2B14155555678";
+        let cb: StatusCallback = serde_urlencoded::from_str(body).unwrap();
+        assert_eq!(cb.message_sid, "SM123");
+        assert_eq!(cb.message_status, "delivered");
+        assert!(cb.error_code.is_none());
+    }
+
+    #[test]
+    fn deserialize_status_callback_failed() {
+        let body = "MessageSid=SM456&MessageStatus=failed&AccountSid=AC123&From=%2B14155551234&To=%2B14155555678&ErrorCode=30008&ErrorMessage=Unknown+error";
+        let cb: StatusCallback = serde_urlencoded::from_str(body).unwrap();
+        assert_eq!(cb.message_sid, "SM456");
+        assert_eq!(cb.message_status, "failed");
+        assert_eq!(cb.error_code.as_deref(), Some("30008"));
+        assert_eq!(cb.error_message.as_deref(), Some("Unknown error"));
+    }
+
+    #[test]
+    fn deserialize_status_callback_minimal() {
+        let body = "MessageSid=SM789&MessageStatus=queued";
+        let cb: StatusCallback = serde_urlencoded::from_str(body).unwrap();
+        assert_eq!(cb.message_sid, "SM789");
+        assert_eq!(cb.message_status, "queued");
+        assert!(cb.from.is_empty());
     }
 }

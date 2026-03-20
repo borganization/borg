@@ -426,7 +426,10 @@ mod tests {
     fn test_handle_manage_roles_unknown_action() {
         let args = json!({"action": "foobar"});
         let result = handle_manage_roles(&args).unwrap();
-        assert!(result.contains("error"), "Expected error JSON, got: {result}");
+        assert!(
+            result.contains("error"),
+            "Expected error JSON, got: {result}"
+        );
         assert!(result.contains("foobar"));
     }
 

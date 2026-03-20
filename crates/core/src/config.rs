@@ -369,6 +369,12 @@ pub struct GatewayConfig {
     /// Per-channel agent routing bindings (first match wins).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<GatewayBinding>,
+    /// Optional allowlist of Slack channel IDs. Empty = allow all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack_channel_allowlist: Option<Vec<String>>,
+    /// Optional allowlist of Discord guild IDs. Empty = allow all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_guild_allowlist: Option<Vec<String>>,
 }
 
 /// Route a gateway channel to specific agent configuration overrides.
@@ -427,6 +433,8 @@ impl Default for GatewayConfig {
             telegram_circuit_suspension_secs: constants::TELEGRAM_CIRCUIT_SUSPENSION_SECS,
             telegram_dedup_capacity: constants::TELEGRAM_DEDUP_CAPACITY,
             bindings: Vec::new(),
+            slack_channel_allowlist: None,
+            discord_guild_allowlist: None,
         }
     }
 }

@@ -84,6 +84,8 @@ pub fn parse_update(update: &Update) -> Option<(InboundMessage, Option<TelegramA
                 message_id,
                 thread_ts: None,
                 attachments: Vec::new(),
+                reaction: None,
+                metadata: serde_json::Value::Null,
             },
             audio_ref,
         ));
@@ -113,6 +115,8 @@ pub fn parse_update(update: &Update) -> Option<(InboundMessage, Option<TelegramA
                 message_id,
                 thread_ts: None,
                 attachments: Vec::new(),
+                reaction: None,
+                metadata: serde_json::Value::Null,
             },
             None,
         ));

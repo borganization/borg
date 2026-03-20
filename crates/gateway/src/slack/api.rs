@@ -91,6 +91,7 @@ impl SlackClient {
             channel: channel.to_string(),
             text: text.to_string(),
             thread_ts: thread_ts.map(String::from),
+            blocks: None,
         };
 
         let policy = RateLimitPolicy {
@@ -213,6 +214,57 @@ impl SlackClient {
         }
     }
 
+    /// Upload a file to a Slack channel via `files.upload`.
+    pub async fn upload_file(
+        &self,
+        channels: &str,
+        content: &[u8],
+        filename: &str,
+        filetype: Option<&str>,
+    ) -> Result<()> {
+        let mut form = reqwest::multipart::Form::new()
+            .text("channels", channels.to_string())
+            .text("filename", filename.to_string())
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(content.to_vec()).file_name(filename.to_string()),
+            );
+
+        if let Some(ft) = filetype {
+            form = form.text("filetype", ft.to_string());
+        }
+
+        let resp = self
+            .client
+            .post(format!("{SLACK_API_BASE}/files.upload"))
+            .bearer_auth(&self.token)
+            .multipart(form)
+            .send()
+            .await
+            .context("Failed to upload file to Slack")?;
+
+        let status = resp.status();
+        let resp_body: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse files.upload response")?;
+
+        if resp_body
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        let error = resp_body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+
+        bail!("files.upload failed ({}): {}", status.as_u16(), error);
+    }
+
     /// Remove a reaction emoji from a message. Non-fatal on failure.
     pub async fn remove_reaction(&self, channel: &str, message_ts: &str, emoji: &str) {
         let body = serde_json::json!({
@@ -257,6 +309,7 @@ mod tests {
             channel: "C789".into(),
             text: "hello".into(),
             thread_ts: Some("1234567890.111111".into()),
+            blocks: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["channel"], "C789");
@@ -270,6 +323,7 @@ mod tests {
             channel: "C789".into(),
             text: "hello".into(),
             thread_ts: None,
+            blocks: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("thread_ts").is_none());
@@ -313,5 +367,13 @@ mod tests {
     fn circuit_breaker_initialized() {
         let client = SlackClient::new("xoxb-test").unwrap();
         assert!(!client.circuit_breaker.is_open());
+    }
+
+    #[test]
+    fn file_upload_url_construction() {
+        assert_eq!(
+            format!("{SLACK_API_BASE}/files.upload"),
+            "https://slack.com/api/files.upload"
+        );
     }
 }
