@@ -55,6 +55,8 @@ pub fn parse_event(event: &ChatEvent) -> Option<InboundMessage> {
         message_id,
         thread_ts: None,
         attachments: Vec::new(),
+        reaction: None,
+        metadata: serde_json::Value::Null,
     })
 }
 

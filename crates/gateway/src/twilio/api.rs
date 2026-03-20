@@ -80,6 +80,44 @@ impl TwilioClient {
         Ok(sid)
     }
 
+    /// Send a message with a media URL attachment.
+    pub async fn send_message_with_media(
+        &self,
+        from: &str,
+        to: &str,
+        body: &str,
+        media_url: &str,
+    ) -> Result<String> {
+        let url = format!(
+            "{}/Accounts/{}/Messages.json",
+            TWILIO_API_BASE, self.account_sid
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", &self.auth_header)
+            .form(&[
+                ("From", from),
+                ("To", to),
+                ("Body", body),
+                ("MediaUrl", media_url),
+            ])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Twilio API error ({status}): {text}");
+        }
+
+        let json: serde_json::Value = response.json().await?;
+        let sid = json["sid"].as_str().unwrap_or("unknown").to_string();
+
+        Ok(sid)
+    }
+
     /// Returns the Messages API URL (for testing).
     pub fn messages_url(&self) -> String {
         format!(

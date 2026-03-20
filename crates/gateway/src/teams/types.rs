@@ -23,6 +23,10 @@ pub struct Activity {
     pub entities: Option<Vec<Entity>>,
     #[serde(default)]
     pub timestamp: Option<String>,
+    #[serde(default)]
+    pub members_added: Option<Vec<ChannelAccount>>,
+    #[serde(default)]
+    pub members_removed: Option<Vec<ChannelAccount>>,
 }
 
 /// A user or bot account in a Teams conversation.
@@ -59,6 +63,8 @@ pub struct ReplyActivity {
     #[serde(rename = "type")]
     pub activity_type: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<AdaptiveCardAttachment>>,
 }
 
 impl ReplyActivity {
@@ -67,8 +73,48 @@ impl ReplyActivity {
         Self {
             activity_type: "message".to_string(),
             text: text.into(),
+            attachments: None,
         }
     }
+
+    /// Create a typing indicator activity.
+    pub fn typing() -> Self {
+        Self {
+            activity_type: "typing".to_string(),
+            text: String::new(),
+            attachments: None,
+        }
+    }
+
+    /// Create a message with an Adaptive Card attachment.
+    pub fn with_adaptive_card(text: impl Into<String>, card: serde_json::Value) -> Self {
+        Self {
+            activity_type: "message".to_string(),
+            text: text.into(),
+            attachments: Some(vec![AdaptiveCardAttachment {
+                content_type: "application/vnd.microsoft.card.adaptive".to_string(),
+                content: card,
+            }]),
+        }
+    }
+}
+
+/// An Adaptive Card attachment for Teams.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptiveCardAttachment {
+    pub content_type: String,
+    pub content: serde_json::Value,
+}
+
+/// Members added/removed in a conversationUpdate activity.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationUpdateData {
+    #[serde(default)]
+    pub members_added: Option<Vec<ChannelAccount>>,
+    #[serde(default)]
+    pub members_removed: Option<Vec<ChannelAccount>>,
 }
 
 /// OAuth2 token response from the Microsoft identity platform.
@@ -185,5 +231,73 @@ mod tests {
         let deserialized: ChannelAccount = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.id, "user-1");
         assert_eq!(deserialized.name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn serialize_typing_activity() {
+        let typing = ReplyActivity::typing();
+        let json = serde_json::to_value(&typing).unwrap();
+        assert_eq!(json["type"], "typing");
+        assert!(json.get("attachments").is_none());
+    }
+
+    #[test]
+    fn serialize_adaptive_card_attachment() {
+        let card_content = serde_json::json!({
+            "type": "AdaptiveCard",
+            "version": "1.4",
+            "body": [{"type": "TextBlock", "text": "Hello"}]
+        });
+        let reply = ReplyActivity::with_adaptive_card("fallback text", card_content);
+        let json = serde_json::to_value(&reply).unwrap();
+        assert_eq!(json["type"], "message");
+        assert_eq!(json["text"], "fallback text");
+        let attachments = json["attachments"].as_array().unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0]["contentType"],
+            "application/vnd.microsoft.card.adaptive"
+        );
+        assert_eq!(attachments[0]["content"]["type"], "AdaptiveCard");
+    }
+
+    #[test]
+    fn serialize_reply_no_attachments_skipped() {
+        let reply = ReplyActivity::message("hi");
+        let json = serde_json::to_value(&reply).unwrap();
+        assert!(json.get("attachments").is_none());
+    }
+
+    #[test]
+    fn deserialize_conversation_update_with_members() {
+        let json = r#"{
+            "id": "act-cu",
+            "type": "conversationUpdate",
+            "membersAdded": [
+                {"id": "user-new", "name": "NewUser"}
+            ],
+            "conversation": {"id": "conv-1"},
+            "serviceUrl": "https://smba.trafficmanager.net/teams/"
+        }"#;
+        let activity: Activity = serde_json::from_str(json).unwrap();
+        assert_eq!(activity.activity_type, "conversationUpdate");
+        let members = activity.members_added.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].id, "user-new");
+    }
+
+    #[test]
+    fn deserialize_conversation_update_members_removed() {
+        let json = r#"{
+            "id": "act-cu2",
+            "type": "conversationUpdate",
+            "membersRemoved": [
+                {"id": "user-gone"}
+            ]
+        }"#;
+        let activity: Activity = serde_json::from_str(json).unwrap();
+        let removed = activity.members_removed.unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].id, "user-gone");
     }
 }

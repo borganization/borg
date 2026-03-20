@@ -88,6 +88,69 @@ pub struct InteractionResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractionResponseData {
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embeds: Option<Vec<Embed>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub components: Option<Vec<ActionRow>>,
+}
+
+/// A Discord embed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Embed {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<EmbedField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<EmbedImage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footer: Option<EmbedFooter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbedField {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub inline: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbedImage {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbedFooter {
+    pub text: String,
+}
+
+/// Discord action row container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionRow {
+    /// Always 1 for ActionRow.
+    #[serde(rename = "type")]
+    pub component_type: u8,
+    pub components: Vec<Component>,
+}
+
+/// A Discord message component (button or select menu).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Component {
+    #[serde(rename = "type")]
+    pub component_type: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 impl InteractionResponse {
@@ -105,6 +168,8 @@ impl InteractionResponse {
             response_type: 4,
             data: Some(InteractionResponseData {
                 content: text.to_string(),
+                embeds: None,
+                components: None,
             }),
         }
     }
@@ -298,5 +363,133 @@ mod tests {
         assert_eq!(user.id, "u1");
         assert_eq!(user.username, "borgbot");
         assert_eq!(user.bot, Some(true));
+    }
+
+    #[test]
+    fn embed_serialization_minimal() {
+        let embed = Embed {
+            title: None,
+            description: Some("Hello".into()),
+            color: None,
+            fields: vec![],
+            image: None,
+            footer: None,
+        };
+        let json = serde_json::to_value(&embed).unwrap();
+        assert_eq!(json["description"], "Hello");
+        assert!(json.get("title").is_none());
+        assert!(json.get("fields").is_none());
+        assert!(json.get("color").is_none());
+    }
+
+    #[test]
+    fn embed_serialization_full() {
+        let embed = Embed {
+            title: Some("Title".into()),
+            description: Some("Desc".into()),
+            color: Some(0xFF0000),
+            fields: vec![EmbedField {
+                name: "Field1".into(),
+                value: "Val1".into(),
+                inline: true,
+            }],
+            image: Some(EmbedImage {
+                url: "https://example.com/img.png".into(),
+            }),
+            footer: Some(EmbedFooter {
+                text: "footer text".into(),
+            }),
+        };
+        let json = serde_json::to_value(&embed).unwrap();
+        assert_eq!(json["title"], "Title");
+        assert_eq!(json["color"], 0xFF0000);
+        assert_eq!(json["fields"][0]["name"], "Field1");
+        assert_eq!(json["fields"][0]["inline"], true);
+        assert_eq!(json["image"]["url"], "https://example.com/img.png");
+        assert_eq!(json["footer"]["text"], "footer text");
+    }
+
+    #[test]
+    fn embed_deserialization() {
+        let json = r#"{ "title": "T", "description": "D", "color": 255 }"#;
+        let embed: Embed = serde_json::from_str(json).unwrap();
+        assert_eq!(embed.title.as_deref(), Some("T"));
+        assert_eq!(embed.color, Some(255));
+        assert!(embed.fields.is_empty());
+    }
+
+    #[test]
+    fn action_row_serialization() {
+        let row = ActionRow {
+            component_type: 1,
+            components: vec![Component {
+                component_type: 2,
+                style: Some(1),
+                label: Some("Click me".into()),
+                custom_id: Some("btn1".into()),
+                url: None,
+            }],
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["type"], 1);
+        assert_eq!(json["components"][0]["type"], 2);
+        assert_eq!(json["components"][0]["style"], 1);
+        assert_eq!(json["components"][0]["label"], "Click me");
+        assert_eq!(json["components"][0]["custom_id"], "btn1");
+        assert!(json["components"][0].get("url").is_none());
+    }
+
+    #[test]
+    fn component_link_button() {
+        let comp = Component {
+            component_type: 2,
+            style: Some(5),
+            label: Some("Visit".into()),
+            custom_id: None,
+            url: Some("https://example.com".into()),
+        };
+        let json = serde_json::to_value(&comp).unwrap();
+        assert_eq!(json["style"], 5);
+        assert_eq!(json["url"], "https://example.com");
+        assert!(json.get("custom_id").is_none());
+    }
+
+    #[test]
+    fn interaction_response_with_embeds_and_components() {
+        let resp = InteractionResponse {
+            response_type: 4,
+            data: Some(InteractionResponseData {
+                content: "text".into(),
+                embeds: Some(vec![Embed {
+                    title: Some("E".into()),
+                    description: None,
+                    color: None,
+                    fields: vec![],
+                    image: None,
+                    footer: None,
+                }]),
+                components: Some(vec![ActionRow {
+                    component_type: 1,
+                    components: vec![],
+                }]),
+            }),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["data"]["content"], "text");
+        assert_eq!(json["data"]["embeds"][0]["title"], "E");
+        assert_eq!(json["data"]["components"][0]["type"], 1);
+    }
+
+    #[test]
+    fn interaction_response_data_without_embeds_or_components() {
+        let data = InteractionResponseData {
+            content: "hello".into(),
+            embeds: None,
+            components: None,
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["content"], "hello");
+        assert!(json.get("embeds").is_none());
+        assert!(json.get("components").is_none());
     }
 }

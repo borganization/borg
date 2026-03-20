@@ -47,6 +47,12 @@ pub struct InboundMessage {
     pub thread_ts: Option<String>,
     #[serde(default)]
     pub attachments: Vec<InboundAttachment>,
+    /// Emoji reaction event (e.g. from a reaction_added event).
+    #[serde(default)]
+    pub reaction: Option<String>,
+    /// Platform-specific metadata escape hatch.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 /// Process a webhook request for a channel end-to-end.

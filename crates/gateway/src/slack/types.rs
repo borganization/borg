@@ -53,6 +53,22 @@ pub struct PostMessageRequest {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_ts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<serde_json::Value>>,
+}
+
+/// Slack slash command payload (application/x-www-form-urlencoded).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SlashCommandPayload {
+    pub command: String,
+    pub text: Option<String>,
+    pub user_id: String,
+    pub user_name: Option<String>,
+    pub channel_id: String,
+    pub channel_name: Option<String>,
+    pub team_id: Option<String>,
+    pub response_url: Option<String>,
+    pub trigger_id: Option<String>,
 }
 
 /// Generic Slack Web API response.
@@ -231,6 +247,7 @@ mod tests {
             channel: "C789".into(),
             text: "hello".into(),
             thread_ts: Some("1234567890.111111".into()),
+            blocks: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["channel"], "C789");
@@ -244,6 +261,7 @@ mod tests {
             channel: "C789".into(),
             text: "hello".into(),
             thread_ts: None,
+            blocks: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("thread_ts").is_none());
@@ -268,5 +286,65 @@ mod tests {
             }
             _ => panic!("expected EventCallback"),
         }
+    }
+
+    #[test]
+    fn serialize_post_message_with_blocks() {
+        let req = PostMessageRequest {
+            channel: "C789".into(),
+            text: "fallback".into(),
+            thread_ts: None,
+            blocks: Some(vec![serde_json::json!({
+                "type": "section",
+                "text": { "type": "mrkdwn", "text": "*Hello*" }
+            })]),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["text"], "fallback");
+        let blocks = json["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "section");
+    }
+
+    #[test]
+    fn serialize_post_message_without_blocks() {
+        let req = PostMessageRequest {
+            channel: "C789".into(),
+            text: "hello".into(),
+            thread_ts: None,
+            blocks: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("blocks").is_none());
+    }
+
+    #[test]
+    fn deserialize_slash_command_payload() {
+        let form = "command=%2Fborg&text=hello+world&user_id=U123&channel_id=C456";
+        let payload: SlashCommandPayload = serde_urlencoded::from_str(form).unwrap();
+        assert_eq!(payload.command, "/borg");
+        assert_eq!(payload.text.as_deref(), Some("hello world"));
+        assert_eq!(payload.user_id, "U123");
+        assert_eq!(payload.channel_id, "C456");
+        assert!(payload.user_name.is_none());
+        assert!(payload.team_id.is_none());
+        assert!(payload.response_url.is_none());
+        assert!(payload.trigger_id.is_none());
+    }
+
+    #[test]
+    fn deserialize_slash_command_full() {
+        let form = "command=%2Fborg&text=deploy&user_id=U123&user_name=alice\
+            &channel_id=C456&channel_name=general&team_id=T789\
+            &response_url=https%3A%2F%2Fhooks.slack.com%2Fcommands%2Fxyz\
+            &trigger_id=tr1";
+        let payload: SlashCommandPayload = serde_urlencoded::from_str(form).unwrap();
+        assert_eq!(payload.command, "/borg");
+        assert_eq!(payload.text.as_deref(), Some("deploy"));
+        assert_eq!(payload.user_name.as_deref(), Some("alice"));
+        assert_eq!(payload.channel_name.as_deref(), Some("general"));
+        assert_eq!(payload.team_id.as_deref(), Some("T789"));
+        assert!(payload.response_url.is_some());
+        assert_eq!(payload.trigger_id.as_deref(), Some("tr1"));
     }
 }

@@ -42,6 +42,8 @@ pub fn parse_activity(activity: &Activity) -> Option<InboundMessage> {
         message_id: Some(activity.id.clone()),
         thread_ts: activity.reply_to_id.clone(),
         attachments: Vec::new(),
+        reaction: None,
+        metadata: serde_json::Value::Null,
     })
 }
 
@@ -78,6 +80,8 @@ mod tests {
             reply_to_id: None,
             entities: None,
             timestamp: Some("2026-03-17T12:00:00Z".to_string()),
+            members_added: None,
+            members_removed: None,
         }
     }
 
