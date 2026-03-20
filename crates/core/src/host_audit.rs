@@ -491,6 +491,7 @@ fn run_cmd_timeout(program: &str, args: &[&str], timeout: Duration) -> Result<St
 // Pure parsing functions (testable)
 // ===========================================================================
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_macos_firewall(output: &str) -> CheckStatus {
     if output.contains("enabled") {
         CheckStatus::Pass
@@ -501,6 +502,7 @@ fn parse_macos_firewall(output: &str) -> CheckStatus {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_pf_status(output: &str) -> CheckStatus {
     if output.contains("Status: Enabled") {
         CheckStatus::Pass
@@ -574,6 +576,7 @@ fn parse_ssh_config(content: &str) -> Vec<String> {
     issues
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_fde_status(output: &str) -> CheckStatus {
     if output.contains("FileVault is On") {
         CheckStatus::Pass
@@ -587,6 +590,7 @@ fn parse_fde_status(output: &str) -> CheckStatus {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_softwareupdate(output: &str) -> CheckStatus {
     if output.contains("No new software available") {
         CheckStatus::Pass
