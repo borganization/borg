@@ -11,11 +11,6 @@ use super::AgentControl;
 pub fn tool_definitions(spawn_depth: u32, max_spawn_depth: u32) -> Vec<ToolDefinition> {
     let mut defs = vec![
         ToolDefinition::new(
-            "list_agents",
-            "List all active sub-agents with their status, role, and elapsed time.",
-            json!({"type": "object", "properties": {}}),
-        ),
-        ToolDefinition::new(
             "manage_roles",
             "Manage agent roles: list, create, update, or delete role definitions. Roles define model, temperature, allowed tools, and instructions for sub-agents.",
             json!({
@@ -387,8 +382,7 @@ mod tests {
             defs.iter().all(|d| d.function.name != "close_agent"),
             "close_agent should be excluded at max depth"
         );
-        // list_agents and manage_roles should still be present
-        assert!(defs.iter().any(|d| d.function.name == "list_agents"));
+        // manage_roles should still be present (list_agents moved to unified `list` tool)
         assert!(defs.iter().any(|d| d.function.name == "manage_roles"));
     }
 

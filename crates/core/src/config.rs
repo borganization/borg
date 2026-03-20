@@ -171,6 +171,36 @@ pub struct HeartbeatConfig {
 #[serde(default)]
 pub struct ToolsConfig {
     pub default_timeout_ms: u64,
+    #[serde(default)]
+    pub policy: ToolPolicyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolPolicyConfig {
+    /// Tool profile: minimal, coding, messaging, full (default: full)
+    pub profile: String,
+    /// Explicit allow list (supports `group:xxx` references). Empty = all allowed.
+    pub allow: Vec<String>,
+    /// Explicit deny list (supports `group:xxx` references). Deny always wins.
+    pub deny: Vec<String>,
+    /// Tools denied to subagents.
+    pub subagent_deny: Vec<String>,
+}
+
+impl Default for ToolPolicyConfig {
+    fn default() -> Self {
+        Self {
+            profile: "full".to_string(),
+            allow: Vec::new(),
+            deny: Vec::new(),
+            subagent_deny: vec![
+                "manage_tasks".to_string(),
+                "security_audit".to_string(),
+                "browser".to_string(),
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -522,6 +552,7 @@ impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             default_timeout_ms: 30000,
+            policy: ToolPolicyConfig::default(),
         }
     }
 }
@@ -2287,5 +2318,61 @@ memory_scope = "team"
     fn gateway_bindings_empty_by_default() {
         let cfg = Config::default();
         assert!(cfg.gateway.bindings.is_empty());
+    }
+
+    // -- ToolPolicyConfig --
+
+    #[test]
+    fn tool_policy_default_values() {
+        let policy = ToolPolicyConfig::default();
+        assert_eq!(policy.profile, "full");
+        assert!(policy.allow.is_empty());
+        assert!(policy.deny.is_empty());
+        assert!(policy.subagent_deny.contains(&"manage_tasks".to_string()));
+        assert!(policy.subagent_deny.contains(&"security_audit".to_string()));
+        assert!(policy.subagent_deny.contains(&"browser".to_string()));
+    }
+
+    #[test]
+    fn tool_policy_config_is_part_of_tools_config() {
+        let cfg = Config::default();
+        assert_eq!(cfg.tools.policy.profile, "full");
+    }
+
+    #[test]
+    fn parse_tool_policy_from_toml() {
+        let toml_str = r#"
+[tools]
+default_timeout_ms = 30000
+
+[tools.policy]
+profile = "coding"
+allow = ["write_memory", "group:fs"]
+deny = ["security_audit"]
+subagent_deny = ["manage_tasks"]
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse tools policy");
+        assert_eq!(cfg.tools.policy.profile, "coding");
+        assert_eq!(cfg.tools.policy.allow.len(), 2);
+        assert!(cfg.tools.policy.allow.contains(&"write_memory".to_string()));
+        assert!(cfg.tools.policy.allow.contains(&"group:fs".to_string()));
+        assert_eq!(cfg.tools.policy.deny, vec!["security_audit".to_string()]);
+        assert_eq!(
+            cfg.tools.policy.subagent_deny,
+            vec!["manage_tasks".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_tool_policy_empty_defaults() {
+        let toml_str = r#"
+[tools]
+default_timeout_ms = 30000
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        let default_policy = ToolPolicyConfig::default();
+        assert_eq!(cfg.tools.policy.profile, default_policy.profile);
+        assert_eq!(cfg.tools.policy.allow.len(), default_policy.allow.len());
+        assert_eq!(cfg.tools.policy.deny.len(), default_policy.deny.len());
     }
 }

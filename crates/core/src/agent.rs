@@ -7,7 +7,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
 
 use crate::config::Config;
-use crate::conversation::{compact_history, history_tokens, normalize_history, undo_last_turn};
+use crate::conversation::{
+    compact_history, compact_tool_results, enforce_tool_result_share_limit, history_tokens,
+    normalize_history, undo_last_turn,
+};
 use crate::db::Database;
 use crate::hooks::{HookAction, HookContext, HookData, HookPoint, HookRegistry};
 use crate::identity::load_identity;
@@ -609,14 +612,23 @@ impl Agent {
                 td.function.parameters.clone(),
             ));
         }
-        // Append integration tools (gmail, outlook, etc.)
-        tools.extend(crate::integrations::enabled_tool_definitions());
+        // Append credential-gated integration tools (gmail, outlook, etc.)
+        tools.extend(crate::integrations::enabled_tool_definitions(&self.config));
         if self.agent_control.is_some() {
             tools.extend(crate::multi_agent::tools::tool_definitions(
                 self.spawn_depth,
                 self.config.agents.max_spawn_depth,
             ));
         }
+
+        // Apply tool policy filtering (profile + allow/deny)
+        let policy = &self.config.tools.policy;
+        if self.spawn_depth > 0 {
+            tools = crate::tool_policy::filter_subagent_tools(tools, policy);
+        } else {
+            tools = crate::tool_policy::filter_tools(tools, policy);
+        }
+
         tools
     }
 
@@ -747,15 +759,17 @@ impl Agent {
 
             normalize_history(&mut self.history);
 
-            // Only run LLM-based compaction when history exceeds the token budget
-            if history_tokens(&self.history) > self.config.conversation.max_history_tokens {
+            // Tool result context management before LLM compaction
+            let max_hist = self.config.conversation.max_history_tokens;
+            enforce_tool_result_share_limit(&mut self.history, max_hist, 0.5);
+            if history_tokens(&self.history) > max_hist {
+                // Try cheap tool result compaction first
+                compact_tool_results(&mut self.history, max_hist);
+            }
+            // Only run LLM-based compaction when history still exceeds the token budget
+            if history_tokens(&self.history) > max_hist {
                 let compaction_llm = LlmClient::new(self.config.clone())?;
-                compact_history(
-                    &mut self.history,
-                    self.config.conversation.max_history_tokens,
-                    &compaction_llm,
-                )
-                .await;
+                compact_history(&mut self.history, max_hist, &compaction_llm).await;
             }
 
             let mut system_prompt = self.build_system_prompt().await?;
@@ -1239,13 +1253,25 @@ impl Agent {
                 result
             }
             "read_memory" => tool_handlers::handle_read_memory(&args),
+            // Consolidated list tool
+            "list" => tool_handlers::handle_list(
+                &args,
+                &self.tool_registry,
+                &self.config,
+                self.agent_control.as_ref(),
+            ),
+            // Legacy aliases for list
             "list_tools" => tool_handlers::handle_list_tools(&self.tool_registry),
             "list_skills" => tool_handlers::handle_list_skills(&self.config),
+            "list_channels" => tool_handlers::handle_list_channels(),
+            // Consolidated apply_patch with target param
+            "apply_patch" => {
+                tool_handlers::handle_apply_patch_unified(&args, &mut self.tool_registry)
+            }
+            // Legacy aliases for patch tools
             "apply_skill_patch" => tool_handlers::handle_apply_skill_patch(&args),
-            "apply_patch" => tool_handlers::handle_apply_patch(&args),
             "create_tool" => tool_handlers::handle_create_tool(&args, &mut self.tool_registry),
             "create_channel" => tool_handlers::handle_create_channel(&args),
-            "list_channels" => tool_handlers::handle_list_channels(),
             "run_shell" => {
                 tool_handlers::handle_run_shell(&args, &self.config, &self.policy, event_tx).await
             }
@@ -1295,6 +1321,7 @@ impl Agent {
                 }
             }
             "list_agents" => {
+                // Legacy alias — prefer `list` with `what: "agents"`
                 if let Some(ref ctrl) = self.agent_control {
                     crate::multi_agent::tools::handle_list_agents(ctrl)
                 } else {

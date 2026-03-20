@@ -1,0 +1,376 @@
+//! Tool catalog: maps every tool to a group and supports profile-based filtering.
+//!
+//! Each built-in tool belongs to exactly one `ToolGroup`. `ToolProfile` selects
+//! which groups are included when building the tool definitions sent to the LLM.
+
+use std::collections::HashSet;
+
+/// Logical grouping of tools by purpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolGroup {
+    Memory,
+    Fs,
+    Runtime,
+    Discovery,
+    Web,
+    Ui,
+    Scheduling,
+    Media,
+    Security,
+    Integration,
+    Agents,
+}
+
+impl ToolGroup {
+    /// Parse a group name from a string (case-insensitive).
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "memory" => Some(Self::Memory),
+            "fs" => Some(Self::Fs),
+            "runtime" => Some(Self::Runtime),
+            "discovery" => Some(Self::Discovery),
+            "web" => Some(Self::Web),
+            "ui" => Some(Self::Ui),
+            "scheduling" => Some(Self::Scheduling),
+            "media" => Some(Self::Media),
+            "security" => Some(Self::Security),
+            "integration" => Some(Self::Integration),
+            "agents" => Some(Self::Agents),
+            _ => None,
+        }
+    }
+
+    /// All tool names that belong to this group.
+    pub fn tool_names(&self) -> &[&str] {
+        match self {
+            Self::Memory => &["write_memory", "read_memory"],
+            Self::Fs => &["apply_patch"],
+            Self::Runtime => &["run_shell"],
+            Self::Discovery => &["list"],
+            Self::Web => &["web_fetch", "web_search"],
+            Self::Ui => &["browser"],
+            Self::Scheduling => &["manage_tasks"],
+            Self::Media => &["read_pdf"],
+            Self::Security => &["security_audit"],
+            Self::Integration => &["gmail", "outlook", "google_calendar", "notion", "linear"],
+            Self::Agents => &[
+                "spawn_agent",
+                "send_to_agent",
+                "wait_for_agent",
+                "close_agent",
+                "manage_roles",
+            ],
+        }
+    }
+}
+
+/// Predefined profiles that select which tool groups are available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolProfile {
+    Minimal,
+    Coding,
+    Messaging,
+    #[default]
+    Full,
+}
+
+impl ToolProfile {
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "minimal" => Some(Self::Minimal),
+            "coding" => Some(Self::Coding),
+            "messaging" => Some(Self::Messaging),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    /// The set of groups included in this profile.
+    pub fn groups(&self) -> HashSet<ToolGroup> {
+        match self {
+            Self::Minimal => [ToolGroup::Memory, ToolGroup::Discovery]
+                .into_iter()
+                .collect(),
+            Self::Coding => [
+                ToolGroup::Memory,
+                ToolGroup::Fs,
+                ToolGroup::Runtime,
+                ToolGroup::Discovery,
+                ToolGroup::Web,
+                ToolGroup::Media,
+                ToolGroup::Scheduling,
+            ]
+            .into_iter()
+            .collect(),
+            Self::Messaging => [
+                ToolGroup::Memory,
+                ToolGroup::Discovery,
+                ToolGroup::Integration,
+                ToolGroup::Scheduling,
+            ]
+            .into_iter()
+            .collect(),
+            Self::Full => [
+                ToolGroup::Memory,
+                ToolGroup::Fs,
+                ToolGroup::Runtime,
+                ToolGroup::Discovery,
+                ToolGroup::Web,
+                ToolGroup::Ui,
+                ToolGroup::Scheduling,
+                ToolGroup::Media,
+                ToolGroup::Security,
+                ToolGroup::Integration,
+                ToolGroup::Agents,
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+}
+
+/// Map a tool name to its group. Returns `None` for user-created tools.
+pub fn tool_group(name: &str) -> Option<ToolGroup> {
+    match name {
+        "write_memory" | "read_memory" => Some(ToolGroup::Memory),
+        "apply_patch" | "create_tool" | "apply_skill_patch" | "create_channel" => {
+            Some(ToolGroup::Fs)
+        }
+        "run_shell" => Some(ToolGroup::Runtime),
+        "list" | "list_tools" | "list_skills" | "list_channels" | "list_agents" => {
+            Some(ToolGroup::Discovery)
+        }
+        "web_fetch" | "web_search" => Some(ToolGroup::Web),
+        "browser" => Some(ToolGroup::Ui),
+        "manage_tasks" => Some(ToolGroup::Scheduling),
+        "read_pdf" => Some(ToolGroup::Media),
+        "security_audit" => Some(ToolGroup::Security),
+        "gmail" | "outlook" | "google_calendar" | "notion" | "linear" => {
+            Some(ToolGroup::Integration)
+        }
+        "spawn_agent" | "send_to_agent" | "wait_for_agent" | "close_agent" | "manage_roles" => {
+            Some(ToolGroup::Agents)
+        }
+        _ => None, // user tool or unknown
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_full_includes_all_groups() {
+        let groups = ToolProfile::Full.groups();
+        assert!(groups.contains(&ToolGroup::Memory));
+        assert!(groups.contains(&ToolGroup::Fs));
+        assert!(groups.contains(&ToolGroup::Runtime));
+        assert!(groups.contains(&ToolGroup::Web));
+        assert!(groups.contains(&ToolGroup::Ui));
+        assert!(groups.contains(&ToolGroup::Security));
+        assert!(groups.contains(&ToolGroup::Integration));
+        assert!(groups.contains(&ToolGroup::Agents));
+    }
+
+    #[test]
+    fn profile_minimal_only_memory_and_discovery() {
+        let groups = ToolProfile::Minimal.groups();
+        assert_eq!(groups.len(), 2);
+        assert!(groups.contains(&ToolGroup::Memory));
+        assert!(groups.contains(&ToolGroup::Discovery));
+    }
+
+    #[test]
+    fn profile_coding_excludes_integration_and_agents() {
+        let groups = ToolProfile::Coding.groups();
+        assert!(!groups.contains(&ToolGroup::Integration));
+        assert!(!groups.contains(&ToolGroup::Agents));
+        assert!(!groups.contains(&ToolGroup::Ui));
+        assert!(!groups.contains(&ToolGroup::Security));
+    }
+
+    #[test]
+    fn tool_group_maps_correctly() {
+        assert_eq!(tool_group("write_memory"), Some(ToolGroup::Memory));
+        assert_eq!(tool_group("apply_patch"), Some(ToolGroup::Fs));
+        assert_eq!(tool_group("run_shell"), Some(ToolGroup::Runtime));
+        assert_eq!(tool_group("gmail"), Some(ToolGroup::Integration));
+        assert_eq!(tool_group("my_custom_tool"), None);
+    }
+
+    #[test]
+    fn tool_group_aliases_map_to_fs() {
+        assert_eq!(tool_group("create_tool"), Some(ToolGroup::Fs));
+        assert_eq!(tool_group("apply_skill_patch"), Some(ToolGroup::Fs));
+        assert_eq!(tool_group("create_channel"), Some(ToolGroup::Fs));
+    }
+
+    #[test]
+    fn tool_group_aliases_map_to_discovery() {
+        assert_eq!(tool_group("list_tools"), Some(ToolGroup::Discovery));
+        assert_eq!(tool_group("list_skills"), Some(ToolGroup::Discovery));
+        assert_eq!(tool_group("list_channels"), Some(ToolGroup::Discovery));
+    }
+
+    #[test]
+    fn profile_from_str_round_trip() {
+        assert_eq!(
+            ToolProfile::from_str_opt("minimal"),
+            Some(ToolProfile::Minimal)
+        );
+        assert_eq!(
+            ToolProfile::from_str_opt("coding"),
+            Some(ToolProfile::Coding)
+        );
+        assert_eq!(
+            ToolProfile::from_str_opt("messaging"),
+            Some(ToolProfile::Messaging)
+        );
+        assert_eq!(ToolProfile::from_str_opt("full"), Some(ToolProfile::Full));
+        assert_eq!(ToolProfile::from_str_opt("FULL"), Some(ToolProfile::Full));
+        assert_eq!(ToolProfile::from_str_opt("unknown"), None);
+    }
+
+    #[test]
+    fn group_from_str_round_trip() {
+        assert_eq!(ToolGroup::from_str_opt("memory"), Some(ToolGroup::Memory));
+        assert_eq!(ToolGroup::from_str_opt("fs"), Some(ToolGroup::Fs));
+        assert_eq!(ToolGroup::from_str_opt("RUNTIME"), Some(ToolGroup::Runtime));
+        assert_eq!(ToolGroup::from_str_opt("bogus"), None);
+    }
+
+    #[test]
+    fn group_tool_names_non_empty() {
+        let all_groups = [
+            ToolGroup::Memory,
+            ToolGroup::Fs,
+            ToolGroup::Runtime,
+            ToolGroup::Discovery,
+            ToolGroup::Web,
+            ToolGroup::Ui,
+            ToolGroup::Scheduling,
+            ToolGroup::Media,
+            ToolGroup::Security,
+            ToolGroup::Integration,
+            ToolGroup::Agents,
+        ];
+        for g in all_groups {
+            assert!(!g.tool_names().is_empty(), "{g:?} should have tool names");
+        }
+    }
+
+    #[test]
+    fn profile_messaging_includes_integration() {
+        let groups = ToolProfile::Messaging.groups();
+        assert!(groups.contains(&ToolGroup::Integration));
+        assert!(groups.contains(&ToolGroup::Memory));
+        assert!(groups.contains(&ToolGroup::Discovery));
+        assert!(groups.contains(&ToolGroup::Scheduling));
+        assert!(!groups.contains(&ToolGroup::Fs));
+        assert!(!groups.contains(&ToolGroup::Runtime));
+        assert!(!groups.contains(&ToolGroup::Web));
+    }
+
+    #[test]
+    fn profile_coding_includes_expected_groups() {
+        let groups = ToolProfile::Coding.groups();
+        assert!(groups.contains(&ToolGroup::Memory));
+        assert!(groups.contains(&ToolGroup::Fs));
+        assert!(groups.contains(&ToolGroup::Runtime));
+        assert!(groups.contains(&ToolGroup::Discovery));
+        assert!(groups.contains(&ToolGroup::Web));
+        assert!(groups.contains(&ToolGroup::Media));
+        assert!(groups.contains(&ToolGroup::Scheduling));
+        assert_eq!(groups.len(), 7);
+    }
+
+    #[test]
+    fn profile_full_includes_all_11_groups() {
+        let groups = ToolProfile::Full.groups();
+        assert_eq!(groups.len(), 11);
+    }
+
+    #[test]
+    fn tool_group_web_tools() {
+        assert_eq!(tool_group("web_fetch"), Some(ToolGroup::Web));
+        assert_eq!(tool_group("web_search"), Some(ToolGroup::Web));
+    }
+
+    #[test]
+    fn tool_group_agent_tools() {
+        assert_eq!(tool_group("spawn_agent"), Some(ToolGroup::Agents));
+        assert_eq!(tool_group("send_to_agent"), Some(ToolGroup::Agents));
+        assert_eq!(tool_group("wait_for_agent"), Some(ToolGroup::Agents));
+        assert_eq!(tool_group("close_agent"), Some(ToolGroup::Agents));
+        assert_eq!(tool_group("manage_roles"), Some(ToolGroup::Agents));
+    }
+
+    #[test]
+    fn tool_group_integration_tools() {
+        assert_eq!(tool_group("gmail"), Some(ToolGroup::Integration));
+        assert_eq!(tool_group("outlook"), Some(ToolGroup::Integration));
+        assert_eq!(tool_group("google_calendar"), Some(ToolGroup::Integration));
+        assert_eq!(tool_group("notion"), Some(ToolGroup::Integration));
+        assert_eq!(tool_group("linear"), Some(ToolGroup::Integration));
+    }
+
+    #[test]
+    fn tool_group_singleton_tools() {
+        assert_eq!(tool_group("browser"), Some(ToolGroup::Ui));
+        assert_eq!(tool_group("manage_tasks"), Some(ToolGroup::Scheduling));
+        assert_eq!(tool_group("read_pdf"), Some(ToolGroup::Media));
+        assert_eq!(tool_group("security_audit"), Some(ToolGroup::Security));
+    }
+
+    #[test]
+    fn group_from_str_all_variants() {
+        let variants = [
+            ("memory", ToolGroup::Memory),
+            ("fs", ToolGroup::Fs),
+            ("runtime", ToolGroup::Runtime),
+            ("discovery", ToolGroup::Discovery),
+            ("web", ToolGroup::Web),
+            ("ui", ToolGroup::Ui),
+            ("scheduling", ToolGroup::Scheduling),
+            ("media", ToolGroup::Media),
+            ("security", ToolGroup::Security),
+            ("integration", ToolGroup::Integration),
+            ("agents", ToolGroup::Agents),
+        ];
+        for (s, expected) in variants {
+            assert_eq!(ToolGroup::from_str_opt(s), Some(expected), "failed for {s}");
+        }
+    }
+
+    #[test]
+    fn tool_group_names_match_group_mapping() {
+        // Every tool name returned by a group's tool_names() should map back to that group
+        let all_groups = [
+            ToolGroup::Memory,
+            ToolGroup::Fs,
+            ToolGroup::Runtime,
+            ToolGroup::Discovery,
+            ToolGroup::Web,
+            ToolGroup::Ui,
+            ToolGroup::Scheduling,
+            ToolGroup::Media,
+            ToolGroup::Security,
+            ToolGroup::Integration,
+            ToolGroup::Agents,
+        ];
+        for group in all_groups {
+            for name in group.tool_names() {
+                assert_eq!(
+                    tool_group(name),
+                    Some(group),
+                    "tool_names() for {group:?} lists '{name}' but tool_group maps it differently"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_profile_is_full() {
+        assert_eq!(ToolProfile::default(), ToolProfile::Full);
+    }
+}
