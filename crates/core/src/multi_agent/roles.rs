@@ -164,4 +164,15 @@ mod tests {
     fn test_builtin_roles_count() {
         assert_eq!(BUILTIN_ROLES.len(), 3);
     }
+
+    #[test]
+    fn test_builtin_roles_all_have_tools_allowed() {
+        for (name, ..) in BUILTIN_ROLES {
+            let role = builtin_role(name).unwrap_or_else(|| panic!("{name} should exist"));
+            assert!(
+                role.tools_allowed.as_ref().map_or(false, |t| !t.is_empty()),
+                "Role '{name}' should have non-empty tools_allowed"
+            );
+        }
+    }
 }

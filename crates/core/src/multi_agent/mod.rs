@@ -97,6 +97,8 @@ pub struct AgentControl {
     agents: HashMap<String, SubAgentHandle>,
     completion_tx: mpsc::Sender<SubAgentCompletion>,
     completion_rx: mpsc::Receiver<SubAgentCompletion>,
+    /// Buffer for completions consumed while waiting for a specific agent.
+    completion_buffer: Vec<SubAgentCompletion>,
     semaphore: Arc<Semaphore>,
     pub max_spawn_depth: u32,
     pub max_children_per_agent: u32,
@@ -117,6 +119,7 @@ impl AgentControl {
             agents: HashMap::new(),
             completion_tx,
             completion_rx,
+            completion_buffer: Vec::new(),
             semaphore: Arc::new(Semaphore::new(config.max_concurrent as usize)),
             max_spawn_depth: config.max_spawn_depth,
             max_children_per_agent: config.max_children_per_agent,
@@ -144,6 +147,9 @@ impl AgentControl {
             }
             if let Some(temp) = role.temperature {
                 child_config.llm.temperature = temp;
+            }
+            if let Some(max_iter) = role.max_iterations {
+                child_config.conversation.max_iterations = max_iter;
             }
         }
         if let Some(model) = model_override {
@@ -275,6 +281,7 @@ impl AgentControl {
         let fork_context_owned: Option<Vec<crate::types::Message>> =
             fork_context.map(<[crate::types::Message]>::to_vec);
         let agents_config = parent_config.agents.clone();
+        let tools_filter = role.as_ref().and_then(|r| r.tools_allowed.clone());
 
         let join_handle = tokio::spawn(async move {
             // Acquire semaphore permit
@@ -306,6 +313,7 @@ impl AgentControl {
                 fork_context_owned,
                 input_rx,
                 cancel_clone,
+                tools_filter,
             )
             .await;
 
@@ -402,6 +410,15 @@ impl AgentControl {
             }
         }
 
+        // Check buffered completions first (from previous wait_for_agent calls)
+        if let Some(idx) = self
+            .completion_buffer
+            .iter()
+            .position(|c| c.agent_id == agent_id)
+        {
+            return Ok(self.completion_buffer.remove(idx));
+        }
+
         // Poll completion channel until we get the one we want
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -419,7 +436,8 @@ impl AgentControl {
                     if completed_id == agent_id {
                         return Ok(completion);
                     }
-                    // Not the one we want, keep polling
+                    // Not the one we want — buffer it for later retrieval
+                    self.completion_buffer.push(completion);
                 }
                 Ok(None) => bail!("Completion channel closed"),
                 Err(_) => bail!("Timeout waiting for agent '{agent_id}'"),
@@ -456,7 +474,8 @@ impl AgentControl {
 
     /// Drain any pending completions without blocking.
     pub fn drain_completions(&mut self) -> Vec<SubAgentCompletion> {
-        let mut completions = Vec::new();
+        // Start with any buffered completions from wait_for_agent
+        let mut completions: Vec<SubAgentCompletion> = self.completion_buffer.drain(..).collect();
         while let Ok(completion) = self.completion_rx.try_recv() {
             if let Some(handle) = self.agents.get_mut(&completion.agent_id) {
                 handle.info.status = completion.status.clone();
@@ -476,6 +495,36 @@ impl AgentControl {
 
     pub fn is_empty(&self) -> bool {
         self.agents.is_empty()
+    }
+
+    /// Test helper: get a clone of the completion sender for injecting test completions.
+    #[cfg(test)]
+    pub fn test_completion_tx(&self) -> mpsc::Sender<SubAgentCompletion> {
+        self.completion_tx.clone()
+    }
+
+    /// Test helper: insert a mock SubAgentHandle for testing wait/shutdown operations.
+    #[cfg(test)]
+    pub fn insert_mock_handle(&mut self, agent_id: &str, nickname: &str) -> CancellationToken {
+        let (input_tx, _input_rx) = mpsc::channel::<String>(1);
+        let cancel = CancellationToken::new();
+        let handle = SubAgentHandle {
+            info: SubAgentInfo {
+                id: agent_id.to_string(),
+                nickname: nickname.to_string(),
+                role: "test".to_string(),
+                parent_session_id: self.parent_session_id.clone(),
+                session_id: uuid::Uuid::new_v4().to_string(),
+                depth: self.current_depth + 1,
+                status: SubAgentStatus::Running,
+                created_at: chrono::Utc::now().timestamp(),
+            },
+            input_tx,
+            cancel: cancel.clone(),
+            _join_handle: tokio::spawn(async {}),
+        };
+        self.agents.insert(agent_id.to_string(), handle);
+        cancel
     }
 }
 
@@ -499,6 +548,7 @@ fn run_sub_agent(
     fork_context: Option<Vec<crate::types::Message>>,
     mut input_rx: mpsc::Receiver<String>,
     cancel: CancellationToken,
+    tools_filter: Option<Vec<String>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>> {
     Box::pin(async move {
         use crate::agent::{Agent, AgentEvent};
@@ -508,6 +558,7 @@ fn run_sub_agent(
             depth,
             &agents_config,
             crate::telemetry::BorgMetrics::noop(),
+            tools_filter,
         )?;
 
         // Inject fork context if provided
@@ -792,5 +843,146 @@ mod tests {
         // At depth 1 with max_spawn_depth=2, should pass
         let ctrl = AgentControl::new(&config, "session-1", 1);
         assert!(ctrl.validate_spawn_limits().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_drain_completions_receives_sent_completion() {
+        let config = test_config();
+        let mut ctrl = AgentControl::new(&config, "session-1", 0);
+        let tx = ctrl.test_completion_tx();
+
+        ctrl.insert_mock_handle("agent-1", "Atlas");
+
+        tx.send(SubAgentCompletion {
+            agent_id: "agent-1".to_string(),
+            nickname: "Atlas".to_string(),
+            status: SubAgentStatus::Completed {
+                result: "done".to_string(),
+            },
+            final_response: Some("done".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let completions = ctrl.drain_completions();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].agent_id, "agent-1");
+        assert_eq!(completions[0].status.as_str(), "completed");
+
+        let info = ctrl.get_status("agent-1").unwrap();
+        assert_eq!(info.status.as_str(), "completed");
+    }
+
+    #[tokio::test]
+    async fn test_wait_buffers_other_completions() {
+        let config = test_config();
+        let mut ctrl = AgentControl::new(&config, "session-1", 0);
+        let tx = ctrl.test_completion_tx();
+
+        ctrl.insert_mock_handle("agent-a", "Atlas");
+        ctrl.insert_mock_handle("agent-b", "Aurora");
+
+        tx.send(SubAgentCompletion {
+            agent_id: "agent-a".to_string(),
+            nickname: "Atlas".to_string(),
+            status: SubAgentStatus::Completed {
+                result: "result-a".to_string(),
+            },
+            final_response: Some("result-a".to_string()),
+        })
+        .await
+        .unwrap();
+
+        tx.send(SubAgentCompletion {
+            agent_id: "agent-b".to_string(),
+            nickname: "Aurora".to_string(),
+            status: SubAgentStatus::Completed {
+                result: "result-b".to_string(),
+            },
+            final_response: Some("result-b".to_string()),
+        })
+        .await
+        .unwrap();
+
+        // Wait for B — should buffer A's completion
+        let completion = ctrl.wait_for_agent("agent-b", 5).await.unwrap();
+        assert_eq!(completion.agent_id, "agent-b");
+
+        // A's completion should be retrievable via drain
+        let drained = ctrl.drain_completions();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].agent_id, "agent-a");
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_agent_cancels_token() {
+        let config = test_config();
+        let mut ctrl = AgentControl::new(&config, "session-1", 0);
+        let cancel = ctrl.insert_mock_handle("agent-1", "Atlas");
+
+        assert!(!cancel.is_cancelled());
+        ctrl.shutdown_agent("agent-1").unwrap();
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            ctrl.get_status("agent-1").unwrap().status.as_str(),
+            "shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_all_cancels_all_tokens() {
+        let config = test_config();
+        let mut ctrl = AgentControl::new(&config, "session-1", 0);
+        let cancel_a = ctrl.insert_mock_handle("agent-a", "Atlas");
+        let cancel_b = ctrl.insert_mock_handle("agent-b", "Aurora");
+
+        assert!(!cancel_a.is_cancelled());
+        assert!(!cancel_b.is_cancelled());
+        ctrl.shutdown_all();
+        assert!(cancel_a.is_cancelled());
+        assert!(cancel_b.is_cancelled());
+    }
+
+    #[test]
+    fn test_build_sub_agent_config_max_iterations() {
+        let role = AgentRole {
+            name: "researcher".to_string(),
+            description: "Research agent".to_string(),
+            model: None,
+            provider: None,
+            temperature: None,
+            system_instructions: None,
+            tools_allowed: None,
+            max_iterations: Some(10),
+        };
+        let parent_config = Config::default();
+        let ctrl = AgentControl::new(&test_config(), "session-1", 0);
+        let child_config = ctrl.build_sub_agent_config(Some(&role), None, &parent_config);
+        assert_eq!(child_config.conversation.max_iterations, 10);
+    }
+
+    #[test]
+    fn test_build_sub_agent_config_auto_approve() {
+        let parent_config = Config::default();
+        let ctrl = AgentControl::new(&test_config(), "session-1", 0);
+        let child_config = ctrl.build_sub_agent_config(None, None, &parent_config);
+        assert_eq!(child_config.policy.auto_approve, vec!["*".to_string()]);
+        assert_eq!(child_config.policy.deny, parent_config.policy.deny);
+    }
+
+    #[tokio::test]
+    async fn test_send_input_nonexistent_agent() {
+        let config = test_config();
+        let ctrl = AgentControl::new(&config, "session-1", 0);
+        let result = ctrl.send_input("nonexistent", "hello").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_get_status_returns_none_for_unknown() {
+        let config = test_config();
+        let ctrl = AgentControl::new(&config, "session-1", 0);
+        assert!(ctrl.get_status("nonexistent").is_none());
     }
 }
