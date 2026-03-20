@@ -282,7 +282,16 @@ impl GatewayServer {
             .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
             .with_state(state.clone());
 
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                anyhow::anyhow!(
+                    "Gateway port {addr} is already in use. Another borg instance may be running. \
+                     Stop it or change [gateway] port in config.toml"
+                )
+            } else {
+                anyhow::anyhow!("Failed to bind gateway to {addr}: {e}")
+            }
+        })?;
         info!("Gateway listening on {addr} with {channel_count} channel(s)");
 
         // Replay unfinished deliveries from previous run

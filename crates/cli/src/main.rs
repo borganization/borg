@@ -206,8 +206,8 @@ async fn main() -> Result<()> {
             });
         _telemetry_guard = tg;
 
-        let env_filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("warn,chromiumoxide=error,tungstenite=error"));
 
         if tui_mode {
             let (non_blocking, guard) = match borg_core::config::Config::logs_dir() {

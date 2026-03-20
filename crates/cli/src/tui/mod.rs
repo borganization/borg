@@ -52,7 +52,12 @@ fn spawn_gateway(config: &Config, shutdown: CancellationToken, metrics: BorgMetr
                 match borg_gateway::GatewayServer::new(gw_config, gw_shutdown, gw_metrics) {
                     Ok(server) => {
                         if let Err(e) = server.run().await {
-                            tracing::error!("Gateway exited with error: {e}");
+                            let msg = e.to_string();
+                            if msg.contains("address already in use") || msg.contains("AddrInUse") {
+                                tracing::warn!("Gateway: {e}");
+                            } else {
+                                tracing::error!("Gateway exited with error: {e}");
+                            }
                         }
                     }
                     Err(e) => tracing::error!("Failed to initialize gateway: {e}"),
@@ -66,15 +71,26 @@ fn spawn_gateway(config: &Config, shutdown: CancellationToken, metrics: BorgMetr
     if let Ok(data_dir) = Config::data_dir() {
         let imessage_dir = data_dir.join("channels/imessage");
         if imessage_dir.join("channel.toml").exists() {
-            let im_config = config.clone();
-            let im_shutdown = shutdown;
-            tokio::spawn(async move {
-                match borg_gateway::imessage::start_imessage_monitor(im_config, im_shutdown).await {
-                    Ok(_handle) => tracing::info!("iMessage monitor started"),
-                    Err(e) => tracing::error!("iMessage monitor failed: {e}"),
+            let probe = borg_gateway::imessage::probe::probe_imessage();
+            match probe.status {
+                borg_gateway::imessage::probe::ProbeStatus::Ok => {
+                    let im_config = config.clone();
+                    let im_shutdown = shutdown;
+                    tokio::spawn(async move {
+                        match borg_gateway::imessage::start_imessage_monitor(im_config, im_shutdown).await {
+                            Ok(_handle) => tracing::info!("iMessage monitor started"),
+                            Err(e) => tracing::warn!("iMessage monitor failed: {e}"),
+                        }
+                    });
+                    spawned = true;
                 }
-            });
-            spawned = true;
+                borg_gateway::imessage::probe::ProbeStatus::NoDiskAccess => {
+                    tracing::warn!("iMessage: Full Disk Access required (System Settings > Privacy & Security). Skipping monitor.");
+                }
+                other => {
+                    tracing::warn!("iMessage probe: {other}. Skipping monitor.");
+                }
+            }
         }
     }
 
