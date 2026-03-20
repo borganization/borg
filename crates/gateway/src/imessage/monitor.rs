@@ -27,7 +27,7 @@ pub fn spawn_monitor(config: Config, shutdown: CancellationToken) -> Result<Join
 
     let handle = tokio::spawn(async move {
         if let Err(e) = monitor_loop(config, channel_dir, shutdown).await {
-            tracing::error!("iMessage monitor exited with error: {e}");
+            tracing::warn!("iMessage monitor exited with error: {e}");
         }
     });
 
