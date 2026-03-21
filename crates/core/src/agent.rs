@@ -1452,7 +1452,7 @@ impl Agent {
             // Legacy aliases for list
             "list_tools" => tool_handlers::handle_list_tools(&self.tool_registry),
             "list_skills" => tool_handlers::handle_list_skills(&self.config),
-            "list_channels" => tool_handlers::handle_list_channels(),
+            "list_channels" => tool_handlers::handle_list_channels(&self.config),
             // Consolidated apply_patch with target param
             "apply_patch" => {
                 tool_handlers::handle_apply_patch_unified(&args, &mut self.tool_registry)

@@ -321,6 +321,20 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Ensure daemon service is installed and running on every command
+    // (skip commands that manage the service themselves)
+    if !matches!(
+        cli.command,
+        Some(Commands::Daemon)
+            | Some(Commands::Init)
+            | Some(Commands::Uninstall)
+            | Some(Commands::Service { .. })
+    ) {
+        if let Err(e) = service::ensure_service_running() {
+            tracing::warn!("Auto-start service: {e}");
+        }
+    }
+
     match cli.command {
         Some(Commands::Start) | None => {
             ensure_onboarded()?;
@@ -396,10 +410,6 @@ fn ensure_onboarded() -> Result<()> {
     let config_path = data_dir.join("config.toml");
     if !config_path.exists() {
         init_data_dir()?;
-    }
-    // Auto-start daemon service (non-fatal)
-    if let Err(e) = service::ensure_service_running() {
-        tracing::warn!("Auto-start service: {e}");
     }
     Ok(())
 }
