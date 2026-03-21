@@ -245,11 +245,34 @@ pub struct EmbeddingsConfig {
     pub vector_weight: f32,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillEntryConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+impl Default for SkillEntryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            env: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SkillsConfig {
     pub enabled: bool,
     pub max_context_tokens: usize,
+    #[serde(default)]
+    pub entries: HashMap<String, SkillEntryConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -640,6 +663,7 @@ impl Default for SkillsConfig {
         Self {
             enabled: true,
             max_context_tokens: 4000,
+            entries: HashMap::new(),
         }
     }
 }
@@ -2429,5 +2453,42 @@ default_timeout_ms = 30000
         assert_eq!(cfg.tools.policy.profile, default_policy.profile);
         assert_eq!(cfg.tools.policy.allow.len(), default_policy.allow.len());
         assert_eq!(cfg.tools.policy.deny.len(), default_policy.deny.len());
+    }
+
+    #[test]
+    fn test_skills_entries_deserialize() {
+        let toml_str = r#"
+[skills]
+enabled = true
+max_context_tokens = 4000
+
+[skills.entries.slack]
+enabled = true
+env = { SLACK_BOT_TOKEN = "xoxb-test" }
+
+[skills.entries.docker]
+enabled = false
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.skills.entries.contains_key("slack"));
+        assert!(cfg.skills.entries.contains_key("docker"));
+        let slack = &cfg.skills.entries["slack"];
+        assert!(slack.enabled);
+        assert_eq!(slack.env.get("SLACK_BOT_TOKEN").unwrap(), "xoxb-test");
+        let docker = &cfg.skills.entries["docker"];
+        assert!(!docker.enabled);
+    }
+
+    #[test]
+    fn test_skills_entries_default_empty() {
+        let cfg = SkillsConfig::default();
+        assert!(cfg.entries.is_empty());
+    }
+
+    #[test]
+    fn test_skill_entry_enabled_default_true() {
+        let entry = SkillEntryConfig::default();
+        assert!(entry.enabled);
+        assert!(entry.env.is_empty());
     }
 }

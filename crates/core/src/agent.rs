@@ -537,8 +537,11 @@ impl Agent {
 
         if self.config.skills.enabled {
             let resolved_creds = self.config.resolve_credentials();
-            let skills =
-                load_skills_context(self.config.skills.max_context_tokens, &resolved_creds)?;
+            let skills = load_skills_context(
+                self.config.skills.max_context_tokens,
+                &resolved_creds,
+                &self.config.skills,
+            )?;
             if !skills.is_empty() {
                 system.push_str(&format!(
                     "\n<skills trust=\"verified\">\n{skills}\n</skills>\n"
