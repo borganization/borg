@@ -20,12 +20,19 @@ Borg is a personal AI assistant that runs locally on your machine, remembers you
 
 ## Quick Start
 
-1. **Download Borg** from [Releases](https://github.com/borganization/borg/releases)
+**Install with one command:**
 
-2. **Run it:**
-    ```sh
-    borg
-    ```
+```sh
+curl -fsSL https://raw.githubusercontent.com/borganization/borg/main/scripts/install.sh | bash
+```
+
+The installer detects your OS, downloads the right binary, and walks you through setup.
+
+Or download manually from [Releases](https://github.com/borganization/borg/releases) and run:
+
+```sh
+borg
+```
 
 ## Plugins
 

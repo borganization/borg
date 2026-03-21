@@ -550,6 +550,21 @@ impl Agent {
             "\n<security_policy>\n{SECURITY_POLICY}\n</security_policy>\n"
         ));
 
+        // Inject first-conversation instructions from SETUP.md (created during onboarding)
+        if let Ok(data_dir) = crate::config::Config::data_dir() {
+            let setup_path = data_dir.join("SETUP.md");
+            // Atomically rename to prevent duplicate injection from concurrent sessions
+            let consumed = setup_path.with_extension("md.consumed");
+            if std::fs::rename(&setup_path, &consumed).is_ok() {
+                if let Ok(setup) = std::fs::read_to_string(&consumed) {
+                    system.push_str(&format!(
+                        "\n<first_conversation>\n{setup}\n</first_conversation>\n"
+                    ));
+                }
+                let _ = std::fs::remove_file(&consumed);
+            }
+        }
+
         Ok(system)
     }
 
