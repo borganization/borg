@@ -5,6 +5,11 @@ use std::str::FromStr;
 use borg_core::config::Config;
 use borg_core::provider::Provider;
 
+/// Auto-detect the system's IANA timezone (e.g. "America/New_York").
+pub(crate) fn detect_system_timezone() -> Option<String> {
+    iana_time_zone::get_timezone().ok()
+}
+
 /// Provider choices with display labels.
 pub(crate) const PROVIDERS: &[(&str, &str, &str)] = &[
     (
@@ -204,7 +209,14 @@ You are {name}, a helpful AI personal assistant. You belong to {owner_name} and 
 }
 
 /// Generate SETUP.md content for the agent's first conversation.
-pub fn generate_setup(agent_name: &str, owner_name: &str) -> String {
+pub fn generate_setup(agent_name: &str, owner_name: &str, timezone: Option<&str>) -> String {
+    let tz_note = match timezone {
+        Some(tz) => {
+            format!("- Their timezone was auto-detected as {tz}. Confirm if that's correct.")
+        }
+        None => "- Find out their timezone so you can respect quiet hours.".to_string(),
+    };
+
     format!(
         r#"# First Conversation
 
@@ -214,7 +226,8 @@ You are {agent_name} — a brand new AI personal assistant. Fresh start, no memo
 Introduce yourself naturally. Don't be another "Hello! How may I assist you today?" bot.
 
 Things to figure out together:
-- Get to know {owner_name} — what should you call them? What's their timezone?
+- Get to know {owner_name} — what should you call them?
+{tz_note}
 - What's your vibe? Be genuine, not corporate. Show some personality.
 - What does {owner_name} need help with? What matters to them?
 - Set the tone for your working relationship.
@@ -280,6 +293,7 @@ pub fn generate_config(
     agent_name: &str,
     monthly_token_limit: u64,
     key_storage: &KeyStorage,
+    timezone: Option<&str>,
 ) -> Result<String> {
     validate_model_id(model_id)?;
     let user_name = escape_toml_string(user_name);
@@ -306,10 +320,16 @@ pub fn generate_config(
         }
     };
 
+    let tz_line = match timezone {
+        Some(tz) => format!("timezone = \"{tz}\""),
+        None => "# timezone = \"America/New_York\"  # auto-detect failed; set manually".into(),
+    };
+
     Ok(format!(
         r#"[user]
 name = "{user_name}"
 agent_name = "{agent_name}"
+{tz_line}
 
 [llm]
 provider = "{provider_id}"
@@ -321,8 +341,9 @@ max_tokens = 4096
 [heartbeat]
 enabled = false
 interval = "30m"
-quiet_hours_start = "23:00"
-quiet_hours_end = "07:00"
+quiet_hours_start = "00:00"
+quiet_hours_end = "06:00"
+# channels = ["telegram"]  # uncomment to deliver heartbeat to channels
 
 [tools]
 default_timeout_ms = 30000
@@ -365,6 +386,9 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
         Err(e) => eprintln!("  Warning: failed to install default skills: {e}"),
     }
 
+    // Auto-detect timezone
+    let timezone = detect_system_timezone();
+
     // Write config.toml (skip if already exists to avoid clobbering manual edits)
     let config_path = data_dir.join("config.toml");
     if config_path.exists() {
@@ -377,6 +401,7 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
             &result.agent_name,
             result.monthly_token_limit,
             &result.key_storage,
+            timezone.as_deref(),
         )?;
         std::fs::write(&config_path, &config_content)?;
         println!("  Created {}", config_path.display());
@@ -405,7 +430,8 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     // Write SETUP.md for first conversation instructions
     let setup_path = data_dir.join("SETUP.md");
     if !setup_path.exists() {
-        let setup_content = generate_setup(&result.agent_name, &result.user_name);
+        let setup_content =
+            generate_setup(&result.agent_name, &result.user_name, timezone.as_deref());
         std::fs::write(&setup_path, &setup_content)?;
         println!("  Created {}", setup_path.display());
     }
@@ -432,6 +458,7 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
                         &result.agent_name,
                         result.monthly_token_limit,
                         &KeyStorage::EnvFile,
+                        timezone.as_deref(),
                     )?;
                     std::fs::write(&config_path, &fallback_config)?;
                     let provider = Provider::from_str(&result.provider)?;
@@ -500,6 +527,7 @@ mod tests {
             "Buddy",
             1_000_000,
             &KeyStorage::EnvFile,
+            None,
         )
         .expect("valid model");
         assert!(config.contains("model = \"anthropic/claude-sonnet-4\""));
@@ -518,6 +546,7 @@ mod tests {
             "Buddy",
             1_000_000,
             &KeyStorage::EnvFile,
+            None,
         )
         .expect("valid model");
         assert!(config.contains("[user]"));
@@ -534,6 +563,7 @@ mod tests {
             "Agent",
             500_000,
             &KeyStorage::EnvFile,
+            None,
         )
         .expect("valid");
         assert!(config.contains("provider = \"anthropic\""));
@@ -549,6 +579,7 @@ mod tests {
             "Agent",
             0,
             &KeyStorage::EnvFile,
+            None,
         )
         .expect("valid");
         assert!(config.contains("provider = \"openai\""));
@@ -564,6 +595,7 @@ mod tests {
             "Agent",
             0,
             &KeyStorage::EnvFile,
+            None,
         )
         .expect("valid");
         assert!(config.contains("provider = \"gemini\""));
@@ -572,9 +604,16 @@ mod tests {
 
     #[test]
     fn generate_config_rejects_empty_model() {
-        assert!(
-            generate_config("", "openrouter", "User", "Agent", 0, &KeyStorage::EnvFile).is_err()
-        );
+        assert!(generate_config(
+            "",
+            "openrouter",
+            "User",
+            "Agent",
+            0,
+            &KeyStorage::EnvFile,
+            None
+        )
+        .is_err());
     }
 
     #[test]
@@ -586,6 +625,7 @@ mod tests {
             "Agent",
             0,
             &KeyStorage::EnvFile,
+            None,
         )
         .is_err());
     }
@@ -632,6 +672,7 @@ mod tests {
             "Buddy",
             1_000_000,
             &KeyStorage::EnvFile,
+            None,
         )
         .expect("valid");
         assert!(config.contains("[budget]"));
@@ -648,6 +689,7 @@ mod tests {
             "Agent",
             0,
             &KeyStorage::EnvFile,
+            None,
         )
         .expect("valid");
         assert!(config.contains("monthly_token_limit = 0"));
@@ -662,6 +704,7 @@ mod tests {
             "Agent",
             0,
             &KeyStorage::Keychain,
+            None,
         )
         .expect("valid");
         assert!(config.contains("api_key = {"));

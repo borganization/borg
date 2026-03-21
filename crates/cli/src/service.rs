@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use borg_core::agent::{Agent, AgentEvent};
 use borg_core::config::Config;
+use borg_heartbeat::scheduler::{HeartbeatEvent, HeartbeatScheduler};
 
 const LAUNCHD_LABEL: &str = "com.borg.daemon";
 
@@ -63,15 +66,35 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
     let max_concurrent = config.tasks.max_concurrent;
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
-    // Start gateway server
+    // Set up heartbeat scheduler
+    let (hb_tx, mut hb_rx) = mpsc::channel::<HeartbeatEvent>(32);
+    let (wake_tx, wake_rx) = mpsc::channel::<()>(8);
+
+    if config.heartbeat.enabled {
+        let tz = config.user_timezone();
+        let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), tz, wake_rx);
+        let hb_cancel = shutdown.clone();
+        tokio::spawn(async move {
+            scheduler.run(hb_tx, hb_cancel).await;
+        });
+        println!("Heartbeat scheduler started.");
+    }
+
+    // Start gateway server (with wake channel for /internal/wake endpoint)
     {
         let gw_config = config.clone();
         let gw_shutdown = shutdown.clone();
+        let gw_wake_tx = if config.heartbeat.enabled {
+            Some(wake_tx)
+        } else {
+            None
+        };
         tokio::spawn(async move {
             match borg_gateway::GatewayServer::new(
                 gw_config,
                 gw_shutdown,
                 borg_core::telemetry::BorgMetrics::noop(),
+                gw_wake_tx,
             ) {
                 Ok(gateway) => {
                     if let Err(e) = gateway.run().await {
@@ -124,6 +147,7 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
 
     loop {
         tokio::select! {
+            biased;
             _ = shutdown.cancelled() => {
                 println!("Daemon shutting down gracefully...");
                 // Wait for in-progress tasks to finish (acquire all permits)
@@ -132,6 +156,13 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                 }
                 println!("All tasks drained. Goodbye.");
                 return Ok(());
+            }
+            Some(HeartbeatEvent::Fire) = hb_rx.recv() => {
+                let hb_config = config.clone();
+                tokio::spawn(async move {
+                    daemon_heartbeat_turn(hb_config).await;
+                });
+                continue;
             }
             _ = interval.tick() => {}
         }
@@ -238,6 +269,126 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
             }
         }
     }
+}
+
+/// Run a heartbeat agent turn in the daemon and deliver to configured channels.
+/// Shared heartbeat turn: creates a temporary agent, sends the heartbeat message
+/// (with HEARTBEAT.md checklist if present), deduplicates, and returns the response.
+pub async fn execute_heartbeat_turn(config: &Config) -> Option<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static LAST_HASH: AtomicU64 = AtomicU64::new(0);
+
+    let metrics = borg_core::telemetry::BorgMetrics::noop();
+    let mut agent = match Agent::new(config.clone(), metrics) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!("Heartbeat: failed to create agent: {e}");
+            return None;
+        }
+    };
+
+    let checklist = borg_core::memory::load_heartbeat_checklist();
+    let mut user_msg = "*heartbeat tick*".to_string();
+    if let Some(ref cl) = checklist {
+        user_msg.push_str("\n\n# Heartbeat Checklist\n");
+        user_msg.push_str(cl);
+    }
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
+    let cancel = CancellationToken::new();
+
+    if let Err(e) = agent
+        .send_message_with_cancel(&user_msg, event_tx, cancel)
+        .await
+    {
+        tracing::warn!("Heartbeat: agent error: {e}");
+        return None;
+    }
+
+    let mut response = String::new();
+    while let Some(event) = event_rx.recv().await {
+        if let AgentEvent::TextDelta(delta) = event {
+            response.push_str(&delta);
+        }
+    }
+
+    let trimmed = response.trim().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Dedup: skip if identical to last heartbeat response
+    let mut hasher = DefaultHasher::new();
+    trimmed.hash(&mut hasher);
+    let hash = hasher.finish();
+    let prev = LAST_HASH.swap(hash, Ordering::Relaxed);
+    if prev == hash {
+        tracing::debug!("Heartbeat: duplicate response, suppressing");
+        return None;
+    }
+
+    Some(trimmed)
+}
+
+/// Run a heartbeat turn in the daemon and deliver to configured channels.
+async fn daemon_heartbeat_turn(config: Config) {
+    if let Some(text) = execute_heartbeat_turn(&config).await {
+        tracing::info!("Heartbeat: {}", &text[..text.len().min(100)]);
+        deliver_heartbeat_to_channels(&config, &text).await;
+    }
+}
+
+/// Send a heartbeat message to all configured channels.
+async fn deliver_heartbeat_to_channels(config: &Config, text: &str) {
+    for channel_name in &config.heartbeat.channels {
+        if let Err(e) = deliver_to_channel(config, channel_name, text).await {
+            tracing::warn!("Heartbeat delivery to {channel_name} failed: {e}");
+        }
+    }
+}
+
+/// Deliver a heartbeat message to a single channel using native clients.
+async fn deliver_to_channel(config: &Config, channel_name: &str, text: &str) -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+
+    // Find the owner's sender_id from approved_senders for this channel
+    let approved = db.list_approved_senders(Some(channel_name))?;
+    if approved.is_empty() {
+        tracing::debug!("Heartbeat: no approved senders for {channel_name}, skipping");
+        return Ok(());
+    }
+
+    let sender_id = &approved[0].sender_id;
+
+    match channel_name {
+        "telegram" => {
+            let token = config
+                .resolve_credential_or_env("TELEGRAM_BOT_TOKEN")
+                .ok_or_else(|| anyhow::anyhow!("TELEGRAM_BOT_TOKEN not configured"))?;
+            let client = borg_gateway::telegram::api::TelegramClient::new(&token)?;
+            let chat_id: i64 = sender_id
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid Telegram chat_id: {sender_id}"))?;
+            client.send_message(chat_id, text, None, None, None).await?;
+            tracing::info!("Heartbeat delivered to telegram:{sender_id}");
+        }
+        "slack" => {
+            let token = config
+                .resolve_credential_or_env("SLACK_BOT_TOKEN")
+                .ok_or_else(|| anyhow::anyhow!("SLACK_BOT_TOKEN not configured"))?;
+            let client = borg_gateway::slack::api::SlackClient::new(&token)?;
+            client.post_message(sender_id, text, None).await?;
+            tracing::info!("Heartbeat delivered to slack:{sender_id}");
+        }
+        other => {
+            tracing::debug!("Heartbeat: channel '{other}' not supported for native delivery");
+        }
+    }
+
+    Ok(())
 }
 
 /// Ensure the daemon service is installed and running.

@@ -553,10 +553,7 @@ struct BotCommand {
 #[async_trait]
 impl NativeCommandRegistration for TelegramClient {
     async fn register_commands(&self, commands: &[CommandDef]) -> Result<()> {
-        let pairs: Vec<(&str, &str)> = commands
-            .iter()
-            .map(|c| (c.name, c.description))
-            .collect();
+        let pairs: Vec<(&str, &str)> = commands.iter().map(|c| (c.name, c.description)).collect();
         self.set_my_commands(&pairs).await
     }
 }

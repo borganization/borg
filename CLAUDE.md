@@ -53,6 +53,7 @@ Release binaries are built via `.github/workflows/release.yml` on tag push (`v*`
 - `borg remove <name>` — remove an integration's credentials
 - `borg plugins` — list all integrations with configured/unconfigured status
 - `borg gateway` — start webhook gateway server for messaging channels
+- `borg wake` — trigger an immediate heartbeat check-in (sends wake signal to daemon)
 - `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
 - `/plugins` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
 
@@ -176,8 +177,9 @@ max_tokens = 4096
 enabled = false
 interval = "30m"
 cron = "0 */30 * * * *"          # optional, overrides interval
-quiet_hours_start = "23:00"
-quiet_hours_end = "07:00"
+quiet_hours_start = "00:00"
+quiet_hours_end = "06:00"
+# channels = ["telegram"]        # deliver heartbeat to channels (empty = TUI only)
 
 [tools]
 default_timeout_ms = 30000
@@ -400,7 +402,16 @@ SQLite at `~/.borg/borg.db` with versioned migrations:
 
 ## Heartbeat
 
-Separate tokio task. Fires at configured interval, skips during quiet hours, suppresses duplicate/empty responses. Renders in cyan in the REPL.
+Proactive check-in system. The `HeartbeatScheduler` (pure timer) emits `Fire` events on schedule; the consumer (daemon or TUI) runs a full agent turn with tools, then delivers to configured channels.
+
+- **Scheduling**: Interval-based (default `30m`) or cron-based; minimum 60s enforced
+- **Quiet hours**: Default `00:00`–`06:00`, uses `[user] timezone` from config (IANA string, e.g. `America/New_York`)
+- **HEARTBEAT.md**: Optional checklist at `~/.borg/HEARTBEAT.md`; injected into the heartbeat agent turn so the agent can check email, calendar, etc.
+- **Channel delivery**: `heartbeat.channels` list (e.g. `["telegram"]`); delivers to the owner's sender_id from `approved_senders` table
+- **Suppression**: Empty responses and duplicate hash responses are suppressed
+- **Wake**: `borg wake` sends HTTP POST to `/internal/wake` on the gateway, triggering an immediate heartbeat (bypasses quiet hours)
+- **Daemon**: Heartbeat is spawned in `run_daemon()` alongside the gateway; runs without a TUI
+- **TUI**: Heartbeat renders in cyan as `[heartbeat]` prefix in the transcript
 
 ## Sandboxing
 
@@ -451,7 +462,7 @@ Six-layer defense against prompt injection attacks:
 | `crates/core/src/rate_guard.rs` | Per-session rate limiting for tool calls, shell commands, file/memory writes, web requests |
 | `crates/core/src/db.rs` | SQLite database with versioned migrations |
 | `crates/core/src/types.rs` | Message (with timestamps), ToolCall, ToolDefinition |
-| `crates/heartbeat/src/scheduler.rs` | Interval + quiet hours + dedup |
+| `crates/heartbeat/src/scheduler.rs` | Pure timer: interval/cron scheduling, quiet hours (timezone-aware), wake signal |
 | `crates/tools/src/manifest.rs` | tool.toml parsing |
 | `crates/tools/src/registry.rs` | Scan + register user tools |
 | `crates/tools/src/executor.rs` | Runtime resolution + subprocess |

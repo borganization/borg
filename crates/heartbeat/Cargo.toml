@@ -10,9 +10,9 @@ repository.workspace = true
 borg-core = { path = "../core" }
 tokio = { workspace = true }
 tokio-util = "0.7"
-anyhow = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 cron = { workspace = true }
 
 [lints]

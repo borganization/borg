@@ -165,6 +165,7 @@ pub struct HeartbeatConfig {
     pub quiet_hours_start: Option<String>,
     pub quiet_hours_end: Option<String>,
     pub cron: Option<String>,
+    pub channels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,6 +269,8 @@ pub struct UserConfig {
     pub name: Option<String>,
     #[serde(default)]
     pub agent_name: Option<String>,
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -577,9 +580,10 @@ impl Default for HeartbeatConfig {
         Self {
             enabled: false,
             interval: "30m".into(),
-            quiet_hours_start: None,
-            quiet_hours_end: None,
+            quiet_hours_start: Some("00:00".into()),
+            quiet_hours_end: Some("06:00".into()),
             cron: None,
+            channels: Vec::new(),
         }
     }
 }
@@ -698,6 +702,15 @@ impl Config {
 
     pub fn memory_dir() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("memory"))
+    }
+
+    /// Resolve the user's configured timezone, falling back to UTC.
+    pub fn user_timezone(&self) -> chrono_tz::Tz {
+        self.user
+            .timezone
+            .as_deref()
+            .and_then(|s| s.parse::<chrono_tz::Tz>().ok())
+            .unwrap_or(chrono_tz::Tz::UTC)
     }
 
     pub fn skills_dir() -> Result<PathBuf> {
