@@ -148,6 +148,13 @@ impl<'a> App<'a> {
         }
     }
 
+    // =========================================================================
+    // IMPORTANT: Mouse handling must NOT break native text selection.
+    // Only scroll wheel and scrollbar interactions are handled here.
+    // Regular left-click/drag in the transcript area must pass through to the
+    // terminal for native text selection. See mod.rs EnableScrollMouseCapture.
+    // DO NOT add handlers for arbitrary left-click or motion events.
+    // =========================================================================
     pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> AppAction {
         use crossterm::event::{MouseButton, MouseEventKind};
 
@@ -1818,6 +1825,68 @@ mod tests {
     fn mouse_y_to_scroll_offset_degenerate_height() {
         assert_eq!(mouse_y_to_scroll_offset(0, 0, 50), 50);
         assert_eq!(mouse_y_to_scroll_offset(0, 1, 50), 50);
+    }
+
+    // --- Text selection protection (DO NOT REMOVE) ---
+    // These tests guard against regressions where mouse handling breaks native
+    // text selection. If any of these fail, something is consuming mouse events
+    // that should be passed through to the terminal.
+
+    #[test]
+    fn left_click_in_transcript_does_not_change_state() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = setup_app_with_transcript();
+        app.scroll_offset = 5;
+        app.auto_scroll = false;
+
+        // Click in transcript body (not scrollbar) must be a no-op so the
+        // terminal can handle native text selection.
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 40, 20));
+        assert_eq!(app.scroll_offset, 5, "click in transcript must not change scroll");
+        assert!(!app.scrollbar_dragging, "click in transcript must not start drag");
+    }
+
+    #[test]
+    fn drag_in_transcript_does_not_change_state() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = setup_app_with_transcript();
+        app.scroll_offset = 5;
+
+        // Drag without prior scrollbar click must be a no-op (text selection).
+        app.handle_mouse(mouse_event(MouseEventKind::Drag(MouseButton::Left), 40, 25));
+        assert_eq!(app.scroll_offset, 5, "drag in transcript must not change scroll");
+    }
+
+    #[test]
+    fn mouse_move_events_are_ignored() {
+        use crossterm::event::MouseEventKind;
+        let mut app = setup_app_with_transcript();
+        app.scroll_offset = 5;
+
+        // MouseEventKind::Moved should be a no-op. If EnableMouseCapture's
+        // ?1003h is accidentally enabled, these events will flood in.
+        app.handle_mouse(mouse_event(MouseEventKind::Moved, 40, 20));
+        assert_eq!(app.scroll_offset, 5, "mouse move must not change scroll");
+    }
+
+    #[test]
+    fn right_click_is_ignored() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = setup_app_with_transcript();
+        app.scroll_offset = 5;
+
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Right), 40, 20));
+        assert_eq!(app.scroll_offset, 5, "right click must not change scroll");
+    }
+
+    #[test]
+    fn middle_click_is_ignored() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = setup_app_with_transcript();
+        app.scroll_offset = 5;
+
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Middle), 40, 20));
+        assert_eq!(app.scroll_offset, 5, "middle click must not change scroll");
     }
 
     // --- PageUp / PageDown ---
