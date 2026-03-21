@@ -149,7 +149,7 @@ pub fn handle_list(
     match what {
         "tools" => handle_list_tools(registry),
         "skills" => handle_list_skills(config),
-        "channels" => handle_list_channels(),
+        "channels" => handle_list_channels(config),
         "agents" => {
             if let Some(ctrl) = agent_control {
                 crate::multi_agent::tools::handle_list_agents(ctrl)
@@ -163,32 +163,46 @@ pub fn handle_list(
     }
 }
 
-pub fn handle_list_channels() -> Result<String> {
-    let channels_dir = Config::channels_dir()?;
-    if !channels_dir.exists() {
-        return Ok("No channels directory found.".to_string());
-    }
+pub fn handle_list_channels(config: &Config) -> Result<String> {
     let mut channels = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&channels_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let manifest_path = path.join("channel.toml");
-                if manifest_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                        if let Ok(manifest) = toml::from_str::<toml::Value>(&content) {
-                            let name = manifest.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                            let desc = manifest
-                                .get("description")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            channels.push(format!("{name}: {desc}"));
+
+    // Script-based channels from ~/.borg/channels/
+    if let Ok(channels_dir) = Config::channels_dir() {
+        if channels_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&channels_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let manifest_path = path.join("channel.toml");
+                        if manifest_path.exists() {
+                            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                                if let Ok(manifest) = toml::from_str::<toml::Value>(&content) {
+                                    let name = manifest
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("?");
+                                    let desc = manifest
+                                        .get("description")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    channels.push(format!("{name}: {desc}"));
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    // Native channels detected via credentials
+    for (name, desc) in config.detected_native_channels() {
+        let prefix = format!("{name}:");
+        if !channels.iter().any(|c| c.starts_with(&prefix)) {
+            channels.push(format!("{name}: {desc}"));
+        }
+    }
+
     Ok(if channels.is_empty() {
         "No channels installed.".to_string()
     } else {
@@ -1210,5 +1224,49 @@ mod tests {
         let results: Vec<crate::embeddings::SearchResult> = vec![];
         let output = format_search_results(&results);
         assert!(output.contains("No matching memories found"));
+    }
+
+    #[test]
+    fn list_channels_includes_native_telegram() {
+        std::env::set_var("TELEGRAM_BOT_TOKEN", "test-token-for-list-test");
+        let config = Config::default();
+        let result = handle_list_channels(&config).unwrap();
+        assert!(
+            result.contains("telegram"),
+            "Should list native Telegram channel, got: {result}"
+        );
+        assert!(
+            result.contains("native"),
+            "Should indicate it's native, got: {result}"
+        );
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+    }
+
+    #[test]
+    fn list_channels_no_native_when_no_credentials() {
+        let keys = [
+            "TELEGRAM_BOT_TOKEN",
+            "SLACK_BOT_TOKEN",
+            "DISCORD_BOT_TOKEN",
+            "TWILIO_ACCOUNT_SID",
+            "TEAMS_APP_ID",
+            "GOOGLE_CHAT_SERVICE_TOKEN",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in &keys {
+            std::env::remove_var(k);
+        }
+        let config = Config::default();
+        let result = handle_list_channels(&config).unwrap();
+        assert!(
+            !result.contains("native"),
+            "Should not list native channels without credentials, got: {result}"
+        );
+        // Restore
+        for (k, v) in saved {
+            if let Some(val) = v {
+                std::env::set_var(k, val);
+            }
+        }
     }
 }

@@ -283,7 +283,10 @@ pub fn add_plugin(name: &str) -> Result<()> {
     println!();
     println!("{} configured successfully.", def.description);
     if def.is_channel {
-        println!("Gateway will start automatically when you run `borg`.");
+        match crate::service::restart_service() {
+            Ok(()) => println!("Daemon restarted to activate {name} channel."),
+            Err(_) => println!("Gateway will start automatically when you run `borg`."),
+        }
     }
 
     Ok(())
