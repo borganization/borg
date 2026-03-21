@@ -34,6 +34,13 @@ pub struct ScheduledTaskRow {
     pub status: String,
     pub next_run: Option<i64>,
     pub created_at: i64,
+    pub max_retries: i32,
+    pub retry_count: i32,
+    pub retry_after: Option<i64>,
+    pub last_error: Option<String>,
+    pub timeout_ms: i64,
+    pub delivery_channel: Option<String>,
+    pub delivery_target: Option<String>,
 }
 
 /// Task run log row from SQLite.
@@ -208,6 +215,10 @@ pub struct NewTask<'a> {
     pub schedule_expr: &'a str,
     pub timezone: &'a str,
     pub next_run: Option<i64>,
+    pub max_retries: Option<i32>,
+    pub timeout_ms: Option<i64>,
+    pub delivery_channel: Option<&'a str>,
+    pub delivery_target: Option<&'a str>,
 }
 
 /// Parameters for enqueuing a delivery.
@@ -264,7 +275,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 13;
+    const CURRENT_VERSION: u32 = 14;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -315,6 +326,9 @@ impl Database {
         }
         if current < 13 {
             self.migrate_v13()?;
+        }
+        if current < 14 {
+            self.migrate_v14()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -739,6 +753,33 @@ impl Database {
                 UNIQUE(channel_name, sender_id)
             );
             ",
+        )?;
+        Ok(())
+    }
+
+    /// V14: Add retry, timeout, and delivery columns to scheduled_tasks
+    fn migrate_v14(&self) -> Result<()> {
+        // retry_count already exists from V2, add remaining columns
+        let alters = [
+            "ALTER TABLE scheduled_tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3",
+            "ALTER TABLE scheduled_tasks ADD COLUMN retry_after INTEGER",
+            "ALTER TABLE scheduled_tasks ADD COLUMN last_error TEXT",
+            "ALTER TABLE scheduled_tasks ADD COLUMN timeout_ms INTEGER NOT NULL DEFAULT 300000",
+            "ALTER TABLE scheduled_tasks ADD COLUMN delivery_channel TEXT",
+            "ALTER TABLE scheduled_tasks ADD COLUMN delivery_target TEXT",
+        ];
+        for sql in &alters {
+            self.conn.execute(sql, []).or_else(|e| {
+                let msg = e.to_string();
+                if msg.contains("duplicate column") || msg.contains("already exists") {
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
+            })?;
+        }
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_retry ON scheduled_tasks(status, retry_after);",
         )?;
         Ok(())
     }
@@ -1781,58 +1822,39 @@ impl Database {
 
     pub fn create_task(&self, task: &NewTask<'_>) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
+        let max_retries = task.max_retries.unwrap_or(3);
+        let timeout_ms = task.timeout_ms.unwrap_or(300_000);
         self.conn.execute(
-            "INSERT INTO scheduled_tasks (id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8)",
-            params![task.id, task.name, task.prompt, task.schedule_type, task.schedule_expr, task.timezone, task.next_run, now],
+            "INSERT INTO scheduled_tasks (id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at, max_retries, timeout_ms, delivery_channel, delivery_target)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![task.id, task.name, task.prompt, task.schedule_type, task.schedule_expr, task.timezone, task.next_run, now, max_retries, timeout_ms, task.delivery_channel, task.delivery_target],
         )?;
         Ok(())
     }
 
     pub fn list_tasks(&self) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at
+            "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target
              FROM scheduled_tasks ORDER BY created_at DESC",
         )?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok(ScheduledTaskRow {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    prompt: row.get(2)?,
-                    schedule_type: row.get(3)?,
-                    schedule_expr: row.get(4)?,
-                    timezone: row.get(5)?,
-                    status: row.get(6)?,
-                    next_run: row.get(7)?,
-                    created_at: row.get(8)?,
-                })
-            })?
+            .query_map([], Self::map_task_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
     pub fn get_due_tasks(&self, now: i64) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at
+            "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target
              FROM scheduled_tasks
              WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?1
+               AND retry_after IS NULL
              ORDER BY next_run ASC",
         )?;
         let rows = stmt
-            .query_map(params![now], |row| {
-                Ok(ScheduledTaskRow {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    prompt: row.get(2)?,
-                    schedule_type: row.get(3)?,
-                    schedule_expr: row.get(4)?,
-                    timezone: row.get(5)?,
-                    status: row.get(6)?,
-                    next_run: row.get(7)?,
-                    created_at: row.get(8)?,
-                })
-            })?
+            .query_map(params![now], Self::map_task_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -1891,26 +1913,72 @@ impl Database {
 
     pub fn get_task_by_id(&self, id: &str) -> Result<Option<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at
+            "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target
              FROM scheduled_tasks WHERE id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![id], |row| {
-            Ok(ScheduledTaskRow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                prompt: row.get(2)?,
-                schedule_type: row.get(3)?,
-                schedule_expr: row.get(4)?,
-                timezone: row.get(5)?,
-                status: row.get(6)?,
-                next_run: row.get(7)?,
-                created_at: row.get(8)?,
-            })
-        })?;
+        let mut rows = stmt.query_map(params![id], Self::map_task_row)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
         }
+    }
+
+    fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTaskRow> {
+        Ok(ScheduledTaskRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            prompt: row.get(2)?,
+            schedule_type: row.get(3)?,
+            schedule_expr: row.get(4)?,
+            timezone: row.get(5)?,
+            status: row.get(6)?,
+            next_run: row.get(7)?,
+            created_at: row.get(8)?,
+            max_retries: row.get(9)?,
+            retry_count: row.get(10)?,
+            retry_after: row.get(11)?,
+            last_error: row.get(12)?,
+            timeout_ms: row.get(13)?,
+            delivery_channel: row.get(14)?,
+            delivery_target: row.get(15)?,
+        })
+    }
+
+    pub fn set_task_retry(
+        &self,
+        task_id: &str,
+        retry_count: i32,
+        last_error: &str,
+        retry_after: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE scheduled_tasks SET retry_count = ?1, last_error = ?2, retry_after = ?3 WHERE id = ?4",
+            params![retry_count, last_error, retry_after, task_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_task_retry(&self, task_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE scheduled_tasks SET retry_count = 0, retry_after = NULL, last_error = NULL WHERE id = ?1",
+            params![task_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_tasks_pending_retry(&self, now: i64) -> Result<Vec<ScheduledTaskRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target
+             FROM scheduled_tasks
+             WHERE status = 'active' AND retry_after IS NOT NULL AND retry_after <= ?1
+             ORDER BY retry_after ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![now], Self::map_task_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn delete_task(&self, id: &str) -> Result<bool> {
@@ -2139,28 +2207,49 @@ mod tests {
         db
     }
 
+    fn simple_task<'a>(
+        id: &'a str,
+        name: &'a str,
+        prompt: &'a str,
+        schedule_type: &'a str,
+        schedule_expr: &'a str,
+        next_run: Option<i64>,
+    ) -> NewTask<'a> {
+        NewTask {
+            id,
+            name,
+            prompt,
+            schedule_type,
+            schedule_expr,
+            timezone: "local",
+            next_run,
+            max_retries: None,
+            timeout_ms: None,
+            delivery_channel: None,
+            delivery_target: None,
+        }
+    }
+
     #[test]
     fn create_and_list_tasks() {
         let db = test_db();
-        db.create_task(&NewTask {
-            id: "t1",
-            name: "morning summary",
-            prompt: "summarize",
-            schedule_type: "cron",
-            schedule_expr: "0 9 * * *",
-            timezone: "local",
-            next_run: Some(100),
-        })
+        db.create_task(&simple_task(
+            "t1",
+            "morning summary",
+            "summarize",
+            "cron",
+            "0 9 * * *",
+            Some(100),
+        ))
         .expect("create task");
-        db.create_task(&NewTask {
-            id: "t2",
-            name: "stock check",
-            prompt: "check stocks",
-            schedule_type: "interval",
-            schedule_expr: "1h",
-            timezone: "local",
-            next_run: Some(200),
-        })
+        db.create_task(&simple_task(
+            "t2",
+            "stock check",
+            "check stocks",
+            "interval",
+            "1h",
+            Some(200),
+        ))
         .expect("create task 2");
 
         let tasks = db.list_tasks().expect("list");
@@ -2170,35 +2259,32 @@ mod tests {
     #[test]
     fn get_due_tasks_filters_correctly() {
         let db = test_db();
-        db.create_task(&NewTask {
-            id: "t1",
-            name: "due",
-            prompt: "prompt",
-            schedule_type: "cron",
-            schedule_expr: "expr",
-            timezone: "local",
-            next_run: Some(50),
-        })
+        db.create_task(&simple_task(
+            "t1",
+            "due",
+            "prompt",
+            "cron",
+            "expr",
+            Some(50),
+        ))
         .expect("create");
-        db.create_task(&NewTask {
-            id: "t2",
-            name: "not due",
-            prompt: "prompt",
-            schedule_type: "cron",
-            schedule_expr: "expr",
-            timezone: "local",
-            next_run: Some(200),
-        })
+        db.create_task(&simple_task(
+            "t2",
+            "not due",
+            "prompt",
+            "cron",
+            "expr",
+            Some(200),
+        ))
         .expect("create");
-        db.create_task(&NewTask {
-            id: "t3",
-            name: "paused",
-            prompt: "prompt",
-            schedule_type: "cron",
-            schedule_expr: "expr",
-            timezone: "local",
-            next_run: Some(50),
-        })
+        db.create_task(&simple_task(
+            "t3",
+            "paused",
+            "prompt",
+            "cron",
+            "expr",
+            Some(50),
+        ))
         .expect("create");
         db.update_task_status("t3", "paused").expect("pause");
 
@@ -2210,15 +2296,14 @@ mod tests {
     #[test]
     fn update_task_status_and_next_run() {
         let db = test_db();
-        db.create_task(&NewTask {
-            id: "t1",
-            name: "test",
-            prompt: "prompt",
-            schedule_type: "cron",
-            schedule_expr: "expr",
-            timezone: "local",
-            next_run: Some(100),
-        })
+        db.create_task(&simple_task(
+            "t1",
+            "test",
+            "prompt",
+            "cron",
+            "expr",
+            Some(100),
+        ))
         .expect("create");
 
         assert!(db.update_task_status("t1", "paused").expect("update"));
@@ -2234,15 +2319,14 @@ mod tests {
     #[test]
     fn record_and_query_task_runs() {
         let db = test_db();
-        db.create_task(&NewTask {
-            id: "t1",
-            name: "test",
-            prompt: "prompt",
-            schedule_type: "interval",
-            schedule_expr: "30m",
-            timezone: "local",
-            next_run: Some(100),
-        })
+        db.create_task(&simple_task(
+            "t1",
+            "test",
+            "prompt",
+            "interval",
+            "30m",
+            Some(100),
+        ))
         .expect("create");
         db.record_task_run("t1", 1000, 500, Some("done"), None)
             .expect("record");
@@ -2291,15 +2375,14 @@ mod tests {
     #[test]
     fn get_task_by_id_found() {
         let db = test_db();
-        db.create_task(&NewTask {
-            id: "t1",
-            name: "test",
-            prompt: "prompt",
-            schedule_type: "interval",
-            schedule_expr: "30m",
-            timezone: "local",
-            next_run: Some(100),
-        })
+        db.create_task(&simple_task(
+            "t1",
+            "test",
+            "prompt",
+            "interval",
+            "30m",
+            Some(100),
+        ))
         .expect("create");
         let task = db.get_task_by_id("t1").expect("get").expect("some");
         assert_eq!(task.name, "test");
@@ -2315,15 +2398,14 @@ mod tests {
     #[test]
     fn delete_task_removes_task_and_runs() {
         let db = test_db();
-        db.create_task(&NewTask {
-            id: "t1",
-            name: "test",
-            prompt: "prompt",
-            schedule_type: "interval",
-            schedule_expr: "30m",
-            timezone: "local",
-            next_run: Some(100),
-        })
+        db.create_task(&simple_task(
+            "t1",
+            "test",
+            "prompt",
+            "interval",
+            "30m",
+            Some(100),
+        ))
         .expect("create");
         db.record_task_run("t1", 1000, 500, Some("done"), None)
             .expect("record");
@@ -2342,15 +2424,14 @@ mod tests {
     #[test]
     fn update_task_fields() {
         let db = test_db();
-        db.create_task(&NewTask {
-            id: "t1",
-            name: "old name",
-            prompt: "old prompt",
-            schedule_type: "interval",
-            schedule_expr: "30m",
-            timezone: "local",
-            next_run: Some(100),
-        })
+        db.create_task(&simple_task(
+            "t1",
+            "old name",
+            "old prompt",
+            "interval",
+            "30m",
+            Some(100),
+        ))
         .expect("create");
 
         let update = UpdateTask {
@@ -2384,15 +2465,14 @@ mod tests {
     #[test]
     fn last_task_run_returns_most_recent() {
         let db = test_db();
-        db.create_task(&NewTask {
-            id: "t1",
-            name: "test",
-            prompt: "prompt",
-            schedule_type: "interval",
-            schedule_expr: "30m",
-            timezone: "local",
-            next_run: Some(100),
-        })
+        db.create_task(&simple_task(
+            "t1",
+            "test",
+            "prompt",
+            "interval",
+            "30m",
+            Some(100),
+        ))
         .expect("create");
         db.record_task_run("t1", 1000, 500, Some("first"), None)
             .expect("record");
@@ -3640,5 +3720,148 @@ mod tests {
         let senders = db.list_approved_senders(Some("telegram")).expect("list");
         let matching: Vec<_> = senders.iter().filter(|s| s.sender_id == "u_dup").collect();
         assert_eq!(matching.len(), 1);
+    }
+
+    // ── V14 scheduled task retry/delivery tests ──
+
+    #[test]
+    fn migrate_v14_adds_task_columns() {
+        let db = test_db();
+        let version = db.get_meta("schema_version").unwrap().unwrap();
+        assert_eq!(version, Database::CURRENT_VERSION.to_string());
+
+        // Create a task and verify new columns have defaults
+        db.create_task(&simple_task(
+            "t1",
+            "test",
+            "prompt",
+            "interval",
+            "30m",
+            Some(100),
+        ))
+        .expect("create");
+        let task = db.get_task_by_id("t1").expect("get").expect("some");
+        assert_eq!(task.max_retries, 3);
+        assert_eq!(task.retry_count, 0);
+        assert!(task.retry_after.is_none());
+        assert!(task.last_error.is_none());
+        assert_eq!(task.timeout_ms, 300_000);
+        assert!(task.delivery_channel.is_none());
+        assert!(task.delivery_target.is_none());
+    }
+
+    #[test]
+    fn create_task_with_delivery_config() {
+        let db = test_db();
+        db.create_task(&NewTask {
+            id: "t1",
+            name: "notify task",
+            prompt: "do stuff",
+            schedule_type: "interval",
+            schedule_expr: "1h",
+            timezone: "local",
+            next_run: Some(100),
+            max_retries: Some(5),
+            timeout_ms: Some(60_000),
+            delivery_channel: Some("telegram"),
+            delivery_target: Some("12345"),
+        })
+        .expect("create");
+        let task = db.get_task_by_id("t1").expect("get").expect("some");
+        assert_eq!(task.max_retries, 5);
+        assert_eq!(task.timeout_ms, 60_000);
+        assert_eq!(task.delivery_channel.as_deref(), Some("telegram"));
+        assert_eq!(task.delivery_target.as_deref(), Some("12345"));
+    }
+
+    #[test]
+    fn set_and_clear_task_retry() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "test",
+            "prompt",
+            "interval",
+            "30m",
+            Some(100),
+        ))
+        .expect("create");
+
+        db.set_task_retry("t1", 2, "connection timeout", 9999)
+            .expect("set retry");
+        let task = db.get_task_by_id("t1").expect("get").expect("some");
+        assert_eq!(task.retry_count, 2);
+        assert_eq!(task.retry_after, Some(9999));
+        assert_eq!(task.last_error.as_deref(), Some("connection timeout"));
+
+        db.clear_task_retry("t1").expect("clear");
+        let task = db.get_task_by_id("t1").expect("get").expect("some");
+        assert_eq!(task.retry_count, 0);
+        assert!(task.retry_after.is_none());
+        assert!(task.last_error.is_none());
+    }
+
+    #[test]
+    fn get_tasks_pending_retry() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "retry-me",
+            "prompt",
+            "interval",
+            "30m",
+            Some(100),
+        ))
+        .expect("create");
+        db.create_task(&simple_task(
+            "t2",
+            "not-retry",
+            "prompt",
+            "interval",
+            "30m",
+            Some(100),
+        ))
+        .expect("create");
+
+        db.set_task_retry("t1", 1, "timeout", 50).expect("set");
+
+        // t1 has retry_after=50, query with now=60 should find it
+        let pending = db.get_tasks_pending_retry(60).expect("pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "t1");
+
+        // query with now=40 should find nothing (not yet due)
+        let pending = db.get_tasks_pending_retry(40).expect("pending");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn get_due_tasks_excludes_retry_pending() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "normal",
+            "prompt",
+            "interval",
+            "30m",
+            Some(50),
+        ))
+        .expect("create");
+        db.create_task(&simple_task(
+            "t2",
+            "retrying",
+            "prompt",
+            "interval",
+            "30m",
+            Some(50),
+        ))
+        .expect("create");
+
+        // t2 is pending retry — should not appear in get_due_tasks
+        db.set_task_retry("t2", 1, "error", 9999).expect("set");
+
+        let due = db.get_due_tasks(100).expect("due");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "t1");
     }
 }

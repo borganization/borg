@@ -124,6 +124,35 @@ pub fn parse_interval(s: &str) -> Option<std::time::Duration> {
     }
 }
 
+/// Exponential backoff delays for task retries: 30s, 60s, 5m, 15m, 1h.
+pub fn retry_delay_secs(attempt: i32) -> i64 {
+    const DELAYS: [i64; 5] = [30, 60, 300, 900, 3600];
+    DELAYS.get(attempt as usize).copied().unwrap_or(3600)
+}
+
+/// Check if an error message indicates a transient failure worth retrying.
+pub fn is_transient_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("rate limit")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("broken pipe")
+        || lower.contains("status 429")
+        || lower.contains("http 429")
+        || lower.contains(" 429 ")
+        || lower.contains("status 503")
+        || lower.contains("http 503")
+        || lower.contains(" 503 ")
+        || lower.contains("status 502")
+        || lower.contains("http 502")
+        || lower.contains(" 502 ")
+        || lower.contains("status 500")
+        || lower.contains("http 500")
+        || lower.contains(" 500 ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +273,56 @@ mod tests {
         let result = truncate_str(s, 6);
         assert!(result.ends_with("..."));
         assert_eq!(result.chars().count(), 9); // 6 + "..."
+    }
+
+    // ── Retry logic tests ──
+
+    #[test]
+    fn retry_delay_secs_escalates() {
+        assert_eq!(retry_delay_secs(0), 30);
+        assert_eq!(retry_delay_secs(1), 60);
+        assert_eq!(retry_delay_secs(2), 300);
+        assert_eq!(retry_delay_secs(3), 900);
+        assert_eq!(retry_delay_secs(4), 3600);
+    }
+
+    #[test]
+    fn retry_delay_secs_caps_at_max() {
+        assert_eq!(retry_delay_secs(5), 3600);
+        assert_eq!(retry_delay_secs(100), 3600);
+    }
+
+    #[test]
+    fn is_transient_error_true_cases() {
+        assert!(is_transient_error("request timed out"));
+        assert!(is_transient_error("Connection timeout after 30s"));
+        assert!(is_transient_error("rate limit exceeded"));
+        assert!(is_transient_error("HTTP 429 Too Many Requests"));
+        assert!(is_transient_error("HTTP 503 Service Unavailable"));
+        assert!(is_transient_error("HTTP 502 Bad Gateway"));
+        assert!(is_transient_error("HTTP 500 Internal Server Error"));
+        assert!(is_transient_error("status 500"));
+        assert!(is_transient_error("connection refused"));
+        assert!(is_transient_error("Connection reset by peer"));
+        assert!(is_transient_error("broken pipe"));
+    }
+
+    #[test]
+    fn is_transient_error_false_cases() {
+        assert!(!is_transient_error("invalid API key"));
+        assert!(!is_transient_error("model not found"));
+        assert!(!is_transient_error("unauthorized"));
+        assert!(!is_transient_error("bad request: missing required field"));
+        assert!(!is_transient_error("content policy violation"));
+    }
+
+    #[test]
+    fn is_transient_error_no_false_positive_on_numbers() {
+        // "500" should not match inside "5000ms" (no "timeout" word here)
+        assert!(!is_transient_error("processed 5000 items"));
+        // "429" should not match port numbers
+        assert!(!is_transient_error("connected on port 4290"));
+        // But "timeout after 5000ms" IS transient (matches "timeout")
+        assert!(is_transient_error("timeout after 5000ms"));
     }
 }
