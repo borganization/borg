@@ -322,7 +322,7 @@ pub struct BudgetConfig {
 impl Default for BudgetConfig {
     fn default() -> Self {
         Self {
-            monthly_token_limit: 0,
+            monthly_token_limit: 1_000_000,
             warning_threshold: 0.8,
         }
     }
@@ -841,15 +841,8 @@ impl Config {
              security.host_audit = {}\n  \
              budget.monthly_token_limit = {}\n  \
              budget.warning_threshold = {}\n  \
-             telemetry.tracing_enabled = {}\n  \
-             telemetry.metrics_enabled = {}\n  \
-             telemetry.otlp_endpoint = {}\n  \
-             telemetry.service_name = {}\n  \
-             telemetry.sampling_ratio = {}\n  \
              browser.enabled = {}\n  \
-             browser.headless = {}\n  \
-             browser.cdp_port = {}\n  \
-             browser.timeout_ms = {}",
+             browser.headless = {}",
             self.llm.model,
             self.llm.temperature,
             self.llm.max_tokens,
@@ -864,15 +857,8 @@ impl Config {
             self.security.host_audit,
             self.budget.monthly_token_limit,
             self.budget.warning_threshold,
-            self.telemetry.tracing_enabled,
-            self.telemetry.metrics_enabled,
-            self.telemetry.otlp_endpoint,
-            self.telemetry.service_name,
-            self.telemetry.sampling_ratio,
             self.browser.enabled,
             self.browser.headless,
-            self.browser.cdp_port,
-            self.browser.timeout_ms,
         )
     }
 
@@ -978,78 +964,6 @@ impl Config {
                 self.budget.warning_threshold = v;
                 Ok(format!("budget.warning_threshold = {v}"))
             }
-            "conversation.tool_output_max_tokens" => {
-                let v: usize = value.parse().with_context(|| "Invalid integer")?;
-                self.conversation.tool_output_max_tokens = v;
-                Ok(format!("conversation.tool_output_max_tokens = {v}"))
-            }
-            "conversation.compaction_marker_tokens" => {
-                let v: usize = value.parse().with_context(|| "Invalid integer")?;
-                self.conversation.compaction_marker_tokens = v;
-                Ok(format!("conversation.compaction_marker_tokens = {v}"))
-            }
-            "conversation.max_transcript_chars" => {
-                let v: usize = value.parse().with_context(|| "Invalid integer")?;
-                self.conversation.max_transcript_chars = v;
-                Ok(format!("conversation.max_transcript_chars = {v}"))
-            }
-            "gateway.max_body_size" => {
-                let v: usize = value.parse().with_context(|| "Invalid integer")?;
-                self.gateway.max_body_size = v;
-                Ok(format!("gateway.max_body_size = {v}"))
-            }
-            "gateway.telegram_poll_timeout_secs" => {
-                let v: u64 = value.parse().with_context(|| "Invalid integer")?;
-                self.gateway.telegram_poll_timeout_secs = v;
-                Ok(format!("gateway.telegram_poll_timeout_secs = {v}"))
-            }
-            "gateway.telegram_circuit_failure_threshold" => {
-                let v: u32 = value.parse().with_context(|| "Invalid integer")?;
-                self.gateway.telegram_circuit_failure_threshold = v;
-                Ok(format!("gateway.telegram_circuit_failure_threshold = {v}"))
-            }
-            "gateway.telegram_circuit_suspension_secs" => {
-                let v: u64 = value.parse().with_context(|| "Invalid integer")?;
-                self.gateway.telegram_circuit_suspension_secs = v;
-                Ok(format!("gateway.telegram_circuit_suspension_secs = {v}"))
-            }
-            "gateway.telegram_dedup_capacity" => {
-                let v: usize = value.parse().with_context(|| "Invalid integer")?;
-                self.gateway.telegram_dedup_capacity = v;
-                Ok(format!("gateway.telegram_dedup_capacity = {v}"))
-            }
-            "telemetry.tracing_enabled" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for telemetry.tracing_enabled")?;
-                self.telemetry.tracing_enabled = v;
-                Ok(format!("telemetry.tracing_enabled = {v}"))
-            }
-            "telemetry.metrics_enabled" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for telemetry.metrics_enabled")?;
-                self.telemetry.metrics_enabled = v;
-                Ok(format!("telemetry.metrics_enabled = {v}"))
-            }
-            "telemetry.otlp_endpoint" => {
-                self.telemetry.otlp_endpoint = value.to_string();
-                Ok(format!("telemetry.otlp_endpoint = {value}"))
-            }
-            "telemetry.service_name" => {
-                self.telemetry.service_name = value.to_string();
-                Ok(format!("telemetry.service_name = {value}"))
-            }
-            "telemetry.sampling_ratio" => {
-                let v: f64 = value
-                    .parse()
-                    .with_context(|| "Invalid float for telemetry.sampling_ratio")?;
-                if !(0.0..=1.0).contains(&v) {
-                    anyhow::bail!("telemetry.sampling_ratio must be between 0.0 and 1.0");
-                }
-                self.telemetry.sampling_ratio = v;
-                Ok(format!("telemetry.sampling_ratio = {v}"))
-            }
             "browser.enabled" => {
                 let v: bool = value
                     .parse()
@@ -1064,47 +978,13 @@ impl Config {
                 self.browser.headless = v;
                 Ok(format!("browser.headless = {v}"))
             }
-            "browser.cdp_port" => {
-                let v: u16 = value
-                    .parse()
-                    .with_context(|| "Invalid integer for browser.cdp_port")?;
-                self.browser.cdp_port = v;
-                Ok(format!("browser.cdp_port = {v}"))
-            }
-            "browser.timeout_ms" => {
-                let v: u64 = value
-                    .parse()
-                    .with_context(|| "Invalid integer for browser.timeout_ms")?;
-                self.browser.timeout_ms = v;
-                Ok(format!("browser.timeout_ms = {v}"))
-            }
-            "browser.startup_timeout_ms" => {
-                let v: u64 = value
-                    .parse()
-                    .with_context(|| "Invalid integer for browser.startup_timeout_ms")?;
-                self.browser.startup_timeout_ms = v;
-                Ok(format!("browser.startup_timeout_ms = {v}"))
-            }
-            "browser.no_sandbox" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for browser.no_sandbox")?;
-                self.browser.no_sandbox = v;
-                Ok(format!("browser.no_sandbox = {v}"))
-            }
             _ => anyhow::bail!(
                 "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
                  sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled, \
                  skills.max_context_tokens, conversation.max_iterations, conversation.show_thinking, \
-                 conversation.tool_output_max_tokens, conversation.compaction_marker_tokens, \
-                 conversation.max_transcript_chars, security.secret_detection, security.host_audit, \
-                 budget.monthly_token_limit, budget.warning_threshold, gateway.max_body_size, \
-                 gateway.telegram_poll_timeout_secs, gateway.telegram_circuit_failure_threshold, \
-                 gateway.telegram_circuit_suspension_secs, gateway.telegram_dedup_capacity, \
-                 telemetry.tracing_enabled, telemetry.metrics_enabled, telemetry.otlp_endpoint, \
-                 telemetry.service_name, telemetry.sampling_ratio, \
-                 browser.enabled, browser.headless, browser.cdp_port, browser.timeout_ms, \
-                 browser.startup_timeout_ms, browser.no_sandbox"
+                 security.secret_detection, security.host_audit, \
+                 budget.monthly_token_limit, budget.warning_threshold, \
+                 browser.enabled, browser.headless"
             ),
         }
     }
@@ -1561,7 +1441,7 @@ max_concurrent = 5
     #[test]
     fn default_budget_config_values() {
         let cfg = BudgetConfig::default();
-        assert_eq!(cfg.monthly_token_limit, 0);
+        assert_eq!(cfg.monthly_token_limit, 1_000_000);
         assert!((cfg.warning_threshold - 0.8).abs() < f64::EPSILON);
     }
 
@@ -1580,7 +1460,7 @@ warning_threshold = 0.9
     #[test]
     fn parse_budget_config_defaults_when_absent() {
         let cfg: Config = toml::from_str("").expect("should parse");
-        assert_eq!(cfg.budget.monthly_token_limit, 0);
+        assert_eq!(cfg.budget.monthly_token_limit, 1_000_000);
         assert!((cfg.budget.warning_threshold - 0.8).abs() < f64::EPSILON);
     }
 
@@ -1648,25 +1528,10 @@ sampling_ratio = 0.5
     }
 
     #[test]
-    fn apply_setting_telemetry() {
+    fn apply_setting_telemetry_hidden_from_user() {
         let mut cfg = Config::default();
-        cfg.apply_setting("telemetry.tracing_enabled", "true")
-            .unwrap();
-        assert!(cfg.telemetry.tracing_enabled);
-        cfg.apply_setting("telemetry.metrics_enabled", "true")
-            .unwrap();
-        assert!(cfg.telemetry.metrics_enabled);
-        cfg.apply_setting("telemetry.otlp_endpoint", "http://custom:4317")
-            .unwrap();
-        assert_eq!(cfg.telemetry.otlp_endpoint, "http://custom:4317");
-        cfg.apply_setting("telemetry.service_name", "test-borg")
-            .unwrap();
-        assert_eq!(cfg.telemetry.service_name, "test-borg");
-        cfg.apply_setting("telemetry.sampling_ratio", "0.25")
-            .unwrap();
-        assert!((cfg.telemetry.sampling_ratio - 0.25).abs() < f64::EPSILON);
         assert!(cfg
-            .apply_setting("telemetry.sampling_ratio", "1.5")
+            .apply_setting("telemetry.tracing_enabled", "true")
             .is_err());
     }
 
@@ -2183,10 +2048,9 @@ startup_timeout_ms = 20000
     }
 
     #[test]
-    fn apply_setting_browser_cdp_port() {
+    fn apply_setting_browser_cdp_port_hidden() {
         let mut cfg = Config::default();
-        cfg.apply_setting("browser.cdp_port", "9333").unwrap();
-        assert_eq!(cfg.browser.cdp_port, 9333);
+        assert!(cfg.apply_setting("browser.cdp_port", "9333").is_err());
     }
 
     #[test]
@@ -2195,7 +2059,7 @@ startup_timeout_ms = 20000
         let display = cfg.display_settings();
         assert!(display.contains("browser.enabled"));
         assert!(display.contains("browser.headless"));
-        assert!(display.contains("browser.cdp_port"));
+        assert!(!display.contains("browser.cdp_port"));
     }
 
     #[test]
