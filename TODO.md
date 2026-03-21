@@ -161,6 +161,32 @@ Phase 3 (P1):        #6 Vision Pipeline (M) + #7 Channel Auth (M) + #8 Hot Reloa
 Phase 4 (P2):        #10 Audio + #11 Provider Failover + #12 Multi-Agent Routing
 ```
 
+## Onboarding & Distribution
+
+### Skills Setup During Onboarding
+
+- [ ] Detect available skills and their dependency status during onboarding
+- [ ] Prompt user to install missing skill dependencies (similar to OpenClaw's skill picker)
+- [ ] Multi-select UI for choosing which skill dependencies to install
+
+**Size:** M
+**Files:** `cli/onboarding_tui.rs`, `core/skills.rs`
+
+### Web Search Provider During Onboarding
+
+- [ ] Add web search provider selection step (Brave Search, DuckDuckGo, etc.)
+- [ ] Prompt for API key if required
+
+**Size:** S
+
+### Additional Distribution
+
+- [ ] Homebrew tap (`brew install borganization/tap/borg`)
+- [ ] Windows install script (`install.ps1`)
+- [ ] GPG/cosign release signature verification in install.sh
+
+---
+
 ## Out of Scope (Bells & Whistles)
 
 Not pursuing parity on: Canvas/A2UI, voice wake, mobile/desktop companion apps, ACP protocol, Tailscale integration, VNC browser viewing, WebChat control UI, video processing, Bonjour device discovery.

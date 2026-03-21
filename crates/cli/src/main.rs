@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
@@ -16,7 +18,7 @@ mod service;
 mod tui;
 
 #[derive(Parser)]
-#[command(name = "borg", about = "AI Personal Assistant Agent")]
+#[command(name = "borg", about = "AI Personal Assistant Agent", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -425,6 +427,16 @@ fn init_data_dir() -> Result<()> {
 
             println!();
             println!("Initialized {}", data_dir.display());
+
+            // Auto-launch TUI for the first conversation
+            let setup_path = data_dir.join("SETUP.md");
+            if setup_path.exists() && std::io::stdin().is_terminal() {
+                println!();
+                println!("Launching your agent for the first time...");
+                // The TUI will detect SETUP.md and inject it into the system prompt
+                return Ok(());
+            }
+
             println!();
             println!("You're all set! Run `borg` to start chatting.");
         }
