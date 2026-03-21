@@ -664,7 +664,8 @@ impl<'a> App<'a> {
             }
             "/skills" => {
                 let resolved_creds = self.config.resolve_credentials();
-                let skills = borg_core::skills::load_all_skills(&resolved_creds)?;
+                let skills =
+                    borg_core::skills::load_all_skills(&resolved_creds, &self.config.skills)?;
                 let text = if skills.is_empty() {
                     "No skills installed.".to_string()
                 } else {

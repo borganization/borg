@@ -51,7 +51,7 @@ pub fn handle_list_tools(registry: &ToolRegistry) -> Result<String> {
 
 pub fn handle_list_skills(config: &Config) -> Result<String> {
     let resolved_creds = config.resolve_credentials();
-    let skills = load_all_skills(&resolved_creds)?;
+    let skills = load_all_skills(&resolved_creds, &config.skills)?;
     if skills.is_empty() {
         Ok("No skills installed.".to_string())
     } else {
@@ -308,7 +308,12 @@ pub async fn handle_run_shell(
         }
     }
 
-    let resolved_creds = config.resolve_credentials();
+    let mut resolved_creds = config.resolve_credentials();
+    // Merge per-skill env vars (don't override existing)
+    let skill_env = crate::skills::collect_skill_env(&config.skills);
+    for (k, v) in skill_env {
+        resolved_creds.entry(k).or_insert(v);
+    }
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c")
         .arg(command)

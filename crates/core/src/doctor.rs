@@ -393,7 +393,7 @@ fn check_tools(checks: &mut Vec<DiagnosticCheck>) {
 
 fn check_skills(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
     let resolved_creds = config.resolve_credentials();
-    match load_all_skills(&resolved_creds) {
+    match load_all_skills(&resolved_creds, &config.skills) {
         Ok(skills) => {
             let available = skills.iter().filter(|s| s.available).count();
             let total = skills.len();

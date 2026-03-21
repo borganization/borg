@@ -259,7 +259,7 @@ fn handle_usage(db: &Database, config: &Config, session_id: &str) -> String {
 
 fn handle_skills(config: &Config) -> String {
     let resolved_creds = config.resolve_credentials();
-    match borg_core::skills::load_all_skills(&resolved_creds) {
+    match borg_core::skills::load_all_skills(&resolved_creds, &config.skills) {
         Ok(skills) if skills.is_empty() => "No skills installed.".to_string(),
         Ok(skills) => {
             let mut lines = vec![format!("Skills ({}):", skills.len())];
