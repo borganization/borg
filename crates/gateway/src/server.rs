@@ -130,6 +130,16 @@ impl GatewayServer {
                             }
                         }
 
+                        // Register bot command menu
+                        {
+                            use crate::commands::{NativeCommandRegistration, GATEWAY_COMMANDS};
+                            if let Err(e) = client.register_commands(GATEWAY_COMMANDS).await {
+                                warn!("Failed to register Telegram bot commands: {e}");
+                            } else {
+                                info!("Telegram bot menu commands registered");
+                            }
+                        }
+
                         Some(Arc::new(client))
                     }
                     Err(e) => {
@@ -204,10 +214,22 @@ impl GatewayServer {
 
         let discord_client = match discord_token {
             Some(token) => {
-                let client = DiscordClient::new(&token)?;
+                let mut client = DiscordClient::new(&token)?;
                 match client.get_current_user().await {
                     Ok(user) => {
                         info!("Discord native integration active (bot: {})", user.username);
+                        client.set_application_id(user.id.clone());
+
+                        // Register global slash commands
+                        {
+                            use crate::commands::{NativeCommandRegistration, GATEWAY_COMMANDS};
+                            if let Err(e) = client.register_commands(GATEWAY_COMMANDS).await {
+                                warn!("Failed to register Discord slash commands: {e}");
+                            } else {
+                                info!("Discord slash commands registered");
+                            }
+                        }
+
                         Some(Arc::new(client))
                     }
                     Err(e) => {
