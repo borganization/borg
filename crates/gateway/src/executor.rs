@@ -166,4 +166,133 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
+
+    #[tokio::test]
+    async fn verify_no_script_returns_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = bash_channel_manifest("test-chan", "echo.sh");
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        // No verify script configured — should return Ok(true)
+        let result = executor.verify("{}", &[]).await.unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn verify_script_returns_json_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("verify.sh");
+        std::fs::write(&script, "#!/bin/bash\necho '{\"valid\": true}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let manifest: ChannelManifest = toml::from_str(
+            "name = \"test\"\ndescription = \"test\"\nruntime = \"bash\"\n\n[scripts]\ninbound = \"echo.sh\"\noutbound = \"out.sh\"\nverify = \"verify.sh\"\n"
+        ).unwrap();
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor.verify("{}", &[]).await.unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn verify_script_returns_json_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("verify.sh");
+        std::fs::write(&script, "#!/bin/bash\necho '{\"valid\": false}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let manifest: ChannelManifest = toml::from_str(
+            "name = \"test\"\ndescription = \"test\"\nruntime = \"bash\"\n\n[scripts]\ninbound = \"echo.sh\"\noutbound = \"out.sh\"\nverify = \"verify.sh\"\n"
+        ).unwrap();
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor.verify("{}", &[]).await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn verify_bare_true_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("verify.sh");
+        std::fs::write(&script, "#!/bin/bash\necho 'true'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let manifest: ChannelManifest = toml::from_str(
+            "name = \"test\"\ndescription = \"test\"\nruntime = \"bash\"\n\n[scripts]\ninbound = \"echo.sh\"\noutbound = \"out.sh\"\nverify = \"verify.sh\"\n"
+        ).unwrap();
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor.verify("{}", &[]).await.unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn verify_bare_ok_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("verify.sh");
+        std::fs::write(&script, "#!/bin/bash\necho 'ok'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let manifest: ChannelManifest = toml::from_str(
+            "name = \"test\"\ndescription = \"test\"\nruntime = \"bash\"\n\n[scripts]\ninbound = \"echo.sh\"\noutbound = \"out.sh\"\nverify = \"verify.sh\"\n"
+        ).unwrap();
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor.verify("{}", &[]).await.unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn poll_without_script_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = bash_channel_manifest("test-chan", "echo.sh");
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor.poll("{}", &[]).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no poll script"));
+    }
+
+    #[tokio::test]
+    async fn send_outbound_runs_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbound_script = dir.path().join("echo.sh");
+        std::fs::write(&inbound_script, "#!/bin/bash\ncat\n").unwrap();
+        let outbound_script = dir.path().join("out.sh");
+        std::fs::write(&outbound_script, "#!/bin/bash\necho 'sent'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&inbound_script, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            std::fs::set_permissions(&outbound_script, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let manifest = bash_channel_manifest("test-chan", "echo.sh");
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor
+            .send_outbound(r#"{"text":"hello"}"#, &[])
+            .await
+            .unwrap();
+        assert_eq!(result.trim(), "sent");
+    }
+
+    #[tokio::test]
+    async fn path_traversal_in_script_name_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = bash_channel_manifest("test-chan", "../../../etc/passwd");
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor.parse_inbound("{}", &[]).await;
+        assert!(result.is_err());
+    }
 }

@@ -260,4 +260,113 @@ mod tests {
         // MemoryWrite should still be at 1 (under warn of 3)
         assert_eq!(guard.record(ActionType::MemoryWrite), RateDecision::Allow);
     }
+
+    #[test]
+    fn test_update_limits_changes_thresholds() {
+        let limits = ActionLimits {
+            tool_calls_warn: 100,
+            tool_calls_block: 200,
+            ..Default::default()
+        };
+        let mut guard = SessionRateGuard::new(limits);
+
+        // Record 3 tool calls — under old limits
+        for _ in 0..3 {
+            assert_eq!(guard.record(ActionType::ToolCall), RateDecision::Allow);
+        }
+
+        // Now lower the warn threshold to 3 (already at 3, so next should warn)
+        let new_limits = ActionLimits {
+            tool_calls_warn: 3,
+            tool_calls_block: 5,
+            ..Default::default()
+        };
+        guard.update_limits(new_limits);
+
+        match guard.record(ActionType::ToolCall) {
+            RateDecision::Warn(_) => {}
+            other => panic!("Expected Warn after limit update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_web_request_limits() {
+        let limits = ActionLimits {
+            web_requests_warn: 2,
+            web_requests_block: 4,
+            ..Default::default()
+        };
+        let mut guard = SessionRateGuard::new(limits);
+        assert_eq!(guard.record(ActionType::WebRequest), RateDecision::Allow);
+        match guard.record(ActionType::WebRequest) {
+            RateDecision::Warn(_) => {}
+            other => panic!("Expected Warn, got {other:?}"),
+        }
+        // 3rd is still warn
+        match guard.record(ActionType::WebRequest) {
+            RateDecision::Warn(_) => {}
+            other => panic!("Expected Warn, got {other:?}"),
+        }
+        // 4th hits block
+        match guard.record(ActionType::WebRequest) {
+            RateDecision::Block(_) => {}
+            other => panic!("Expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_block_message_contains_info() {
+        let limits = ActionLimits {
+            tool_calls_warn: 1,
+            tool_calls_block: 2,
+            ..Default::default()
+        };
+        let mut guard = SessionRateGuard::new(limits);
+        guard.record(ActionType::ToolCall);
+        match guard.record(ActionType::ToolCall) {
+            RateDecision::Block(msg) => {
+                assert!(msg.contains("ToolCall"));
+                assert!(msg.contains("2")); // count
+            }
+            other => panic!("Expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_limits_for_all_action_types() {
+        let limits = ActionLimits::default();
+        assert_eq!(
+            limits.limits_for(ActionType::ToolCall),
+            (50, 100)
+        );
+        assert_eq!(
+            limits.limits_for(ActionType::ShellCommand),
+            (20, 50)
+        );
+        assert_eq!(
+            limits.limits_for(ActionType::FileWrite),
+            (15, 30)
+        );
+        assert_eq!(
+            limits.limits_for(ActionType::MemoryWrite),
+            (10, 20)
+        );
+        assert_eq!(
+            limits.limits_for(ActionType::WebRequest),
+            (20, 50)
+        );
+    }
+
+    #[test]
+    fn test_action_limits_deserialize() {
+        let toml_str = r#"
+tool_calls_warn = 5
+tool_calls_block = 10
+"#;
+        let limits: ActionLimits = toml::from_str(toml_str).unwrap();
+        assert_eq!(limits.tool_calls_warn, 5);
+        assert_eq!(limits.tool_calls_block, 10);
+        // Others should be defaults
+        assert_eq!(limits.shell_commands_warn, 20);
+    }
 }
