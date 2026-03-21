@@ -261,6 +261,8 @@ pub struct Agent {
     spawn_depth: u32,
     /// When set, restricts which tools this agent may use (from role's `tools_allowed`).
     tools_filter: Option<Vec<String>>,
+    /// Env vars declared by skills' `requires.env` — only these credentials are injected into run_shell.
+    skill_env_allowlist: std::collections::HashSet<String>,
     metrics: BorgMetrics,
     browser_session: Option<crate::browser::BrowserSession>,
     config_rx: Option<tokio::sync::watch::Receiver<Config>>,
@@ -290,6 +292,9 @@ impl Agent {
                 None
             }
         };
+        let resolved_creds = config.resolve_credentials();
+        let skill_env_allowlist =
+            crate::skills::collect_required_env_vars(&resolved_creds, &config.skills);
         Ok(Self {
             config,
             history: Vec::new(),
@@ -302,6 +307,7 @@ impl Agent {
             agent_control,
             spawn_depth: 0,
             tools_filter: None,
+            skill_env_allowlist,
             metrics,
             browser_session: None,
             config_rx: None,
@@ -351,6 +357,9 @@ impl Agent {
                 None
             }
         };
+        let resolved_creds = config.resolve_credentials();
+        let skill_env_allowlist =
+            crate::skills::collect_required_env_vars(&resolved_creds, &config.skills);
         Ok(Self {
             config,
             history: Vec::new(),
@@ -363,6 +372,7 @@ impl Agent {
             agent_control,
             spawn_depth,
             tools_filter,
+            skill_env_allowlist,
             metrics,
             browser_session: None,
             config_rx: None,
@@ -994,7 +1004,15 @@ impl Agent {
                         match event {
                             Some(StreamEvent::TextDelta(delta)) => {
                                 if let Some(filtered) = tag_filter.push(&delta) {
-                                    let _ = event_tx.send(AgentEvent::TextDelta(filtered)).await;
+                                    // Best-effort stream-time redaction. Patterns split across
+                                    // chunk boundaries won't match here but are caught by the
+                                    // post-hoc redaction on the full assembled text.
+                                    let redacted = if self.config.security.secret_detection {
+                                        redact_secrets(&filtered)
+                                    } else {
+                                        filtered
+                                    };
+                                    let _ = event_tx.send(AgentEvent::TextDelta(redacted)).await;
                                 }
                             }
                             Some(StreamEvent::ToolCallDelta {
@@ -1064,7 +1082,12 @@ impl Agent {
 
             // Flush any remaining buffered text from the internal-tag filter
             if let Some(remaining) = tag_filter.flush() {
-                let _ = event_tx.send(AgentEvent::TextDelta(remaining)).await;
+                let redacted = if self.config.security.secret_detection {
+                    redact_secrets(&remaining)
+                } else {
+                    remaining
+                };
+                let _ = event_tx.send(AgentEvent::TextDelta(redacted)).await;
             }
             let text_content = tag_filter.full_clean();
 
@@ -1462,7 +1485,14 @@ impl Agent {
             "create_tool" => tool_handlers::handle_create_tool(&args, &mut self.tool_registry),
             "create_channel" => tool_handlers::handle_create_channel(&args),
             "run_shell" => {
-                tool_handlers::handle_run_shell(&args, &self.config, &self.policy, event_tx).await
+                tool_handlers::handle_run_shell(
+                    &args,
+                    &self.config,
+                    &self.policy,
+                    event_tx,
+                    Some(&self.skill_env_allowlist),
+                )
+                .await
             }
             "web_fetch" => tool_handlers::handle_web_fetch(&args, &self.config).await,
             "web_search" => tool_handlers::handle_web_search(&args, &self.config).await,

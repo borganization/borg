@@ -879,8 +879,14 @@ mod tests {
 
         // Must include the modes we need
         assert!(buf.contains("?1000h"), "must enable normal button tracking");
-        assert!(buf.contains("?1002h"), "must enable button-event (drag) tracking");
-        assert!(buf.contains("?1006h"), "must enable SGR extended coordinates");
+        assert!(
+            buf.contains("?1002h"),
+            "must enable button-event (drag) tracking"
+        );
+        assert!(
+            buf.contains("?1006h"),
+            "must enable SGR extended coordinates"
+        );
 
         // Must NOT include any-event tracking — this breaks text selection
         assert!(

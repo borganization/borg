@@ -13,7 +13,14 @@ use super::types::ChatEvent;
 pub fn verify_google_chat_token(event: &ChatEvent, expected_token: Option<&str>) -> Result<()> {
     let expected = match expected_token {
         Some(t) => t,
-        None => return Ok(()), // No verification configured
+        None => {
+            tracing::warn!(
+                "Google Chat webhook verification token not configured — \
+                 accepting message without verification. Set GOOGLE_CHAT_WEBHOOK_TOKEN \
+                 to enable verification."
+            );
+            return Ok(());
+        }
     };
 
     let actual = event
