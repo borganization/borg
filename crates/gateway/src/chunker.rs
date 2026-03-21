@@ -151,4 +151,44 @@ mod tests {
         assert_eq!(chunks[0], "\u{4F60}\u{597D}\u{4E16}");
         assert_eq!(chunks[1], "\u{754C}\u{FF01}");
     }
+
+    #[test]
+    fn zero_max_chars_returns_single_chunk() {
+        let chunks = chunk_text("hello world", 0);
+        assert_eq!(chunks, vec!["hello world"]);
+    }
+
+    #[test]
+    fn chunk_text_nonempty_empty_input() {
+        let chunks = chunk_text_nonempty("", 100);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunk_text_nonempty_short_text() {
+        let chunks = chunk_text_nonempty("hello", 100);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn chunk_text_nonempty_splits_properly() {
+        let text = "First paragraph.\n\nSecond paragraph.";
+        let chunks = chunk_text_nonempty(text, 25);
+        assert_eq!(chunks.len(), 2);
+    }
+
+    #[test]
+    fn single_char_max_produces_single_chars() {
+        let chunks = chunk_text("abc", 1);
+        assert_eq!(chunks, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn mixed_boundaries_prefers_paragraph() {
+        let text = "Hello world. Nice day.\n\nSecond paragraph.";
+        let chunks = chunk_text(text, 30);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "Hello world. Nice day.");
+        assert_eq!(chunks[1], "Second paragraph.");
+    }
 }

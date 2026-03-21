@@ -253,4 +253,124 @@ mod tests {
         }));
         assert_eq!(registry.hook_count(), 1);
     }
+
+    #[test]
+    fn continue_hook_does_not_affect_result() {
+        let mut registry = HookRegistry::new();
+        registry.register(Box::new(TestHook {
+            name: "noop".to_string(),
+            points: vec![HookPoint::BeforeLlmCall],
+            action: HookAction::Continue,
+        }));
+        let ctx = HookContext {
+            point: HookPoint::BeforeLlmCall,
+            session_id: "test".to_string(),
+            turn_count: 1,
+            data: HookData::LlmCall { message_count: 5 },
+        };
+        assert!(matches!(registry.dispatch(&ctx), HookAction::Continue));
+    }
+
+    #[test]
+    fn hook_multi_point_registration() {
+        let mut registry = HookRegistry::new();
+        registry.register(Box::new(TestHook {
+            name: "multi".to_string(),
+            points: vec![HookPoint::BeforeAgentStart, HookPoint::TurnComplete],
+            action: HookAction::InjectContext("ctx".to_string()),
+        }));
+
+        let ctx1 = make_ctx(HookPoint::BeforeAgentStart);
+        assert!(matches!(
+            registry.dispatch(&ctx1),
+            HookAction::InjectContext(_)
+        ));
+
+        let ctx2 = HookContext {
+            point: HookPoint::TurnComplete,
+            session_id: "test".to_string(),
+            turn_count: 1,
+            data: HookData::TurnEnd {
+                total_tool_calls: 3,
+            },
+        };
+        assert!(matches!(
+            registry.dispatch(&ctx2),
+            HookAction::InjectContext(_)
+        ));
+    }
+
+    #[test]
+    fn skip_before_inject_short_circuits() {
+        let mut registry = HookRegistry::new();
+        // Skip registered first
+        registry.register(Box::new(TestHook {
+            name: "skipper".to_string(),
+            points: vec![HookPoint::AfterLlmResponse],
+            action: HookAction::Skip,
+        }));
+        // Inject registered second — should not execute
+        registry.register(Box::new(TestHook {
+            name: "injector".to_string(),
+            points: vec![HookPoint::AfterLlmResponse],
+            action: HookAction::InjectContext("should not appear".to_string()),
+        }));
+
+        let ctx = HookContext {
+            point: HookPoint::AfterLlmResponse,
+            session_id: "test".to_string(),
+            turn_count: 1,
+            data: HookData::LlmResponse {
+                has_tool_calls: false,
+                text_length: 100,
+            },
+        };
+        assert!(matches!(registry.dispatch(&ctx), HookAction::Skip));
+    }
+
+    #[test]
+    fn registry_debug_format() {
+        let mut registry = HookRegistry::new();
+        registry.register(Box::new(TestHook {
+            name: "test".to_string(),
+            points: vec![HookPoint::BeforeAgentStart],
+            action: HookAction::Continue,
+        }));
+        let debug = format!("{registry:?}");
+        assert!(debug.contains("hook_count: 1"));
+    }
+
+    #[test]
+    fn hook_data_variants_constructible() {
+        // Ensure all HookData variants can be constructed (compile-time coverage)
+        let _ = HookData::AgentStart {
+            user_message: "hi".to_string(),
+        };
+        let _ = HookData::LlmCall { message_count: 1 };
+        let _ = HookData::LlmResponse {
+            has_tool_calls: true,
+            text_length: 42,
+        };
+        let _ = HookData::ToolCall {
+            name: "foo".to_string(),
+            args: "{}".to_string(),
+        };
+        let _ = HookData::ToolResult {
+            name: "foo".to_string(),
+            result: "ok".to_string(),
+            is_error: false,
+        };
+        let _ = HookData::TurnEnd {
+            total_tool_calls: 5,
+        };
+        let _ = HookData::Error {
+            message: "oops".to_string(),
+        };
+    }
+
+    #[test]
+    fn hook_point_equality() {
+        assert_eq!(HookPoint::BeforeAgentStart, HookPoint::BeforeAgentStart);
+        assert_ne!(HookPoint::BeforeAgentStart, HookPoint::TurnComplete);
+    }
 }

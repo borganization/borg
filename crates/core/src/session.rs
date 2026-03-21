@@ -179,6 +179,128 @@ pub fn recover_session_from_db(session_id: &str) -> Result<Option<Vec<Message>>>
     Ok(Some(messages))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_session_id_empty() {
+        assert!(validate_session_id("").is_err());
+    }
+
+    #[test]
+    fn validate_session_id_path_traversal() {
+        assert!(validate_session_id("../etc/passwd").is_err());
+        assert!(validate_session_id("foo/bar").is_err());
+        assert!(validate_session_id("foo\\bar").is_err());
+        assert!(validate_session_id("..").is_err());
+    }
+
+    #[test]
+    fn validate_session_id_valid() {
+        assert!(validate_session_id("abc-123").is_ok());
+        assert!(validate_session_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn session_new_has_uuid_and_defaults() {
+        let session = Session::new();
+        assert!(!session.meta.id.is_empty());
+        assert_eq!(session.meta.title, "New conversation");
+        assert_eq!(session.meta.message_count, 0);
+        assert!(session.messages.is_empty());
+        // Timestamps should be non-empty RFC3339
+        assert!(!session.meta.created_at.is_empty());
+        assert!(!session.meta.updated_at.is_empty());
+    }
+
+    #[test]
+    fn session_default_equals_new() {
+        let s1 = Session::new();
+        let s2 = Session::default();
+        assert_eq!(s1.meta.title, s2.meta.title);
+        assert_eq!(s1.meta.message_count, s2.meta.message_count);
+    }
+
+    #[test]
+    fn update_from_history_sets_count_and_title() {
+        let mut session = Session::new();
+        let messages = vec![Message {
+            role: Role::User,
+            content: Some(MessageContent::Text("Hello, world!".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            timestamp: None,
+        }];
+        session.update_from_history(&messages);
+        assert_eq!(session.meta.message_count, 1);
+        assert_eq!(session.meta.title, "Hello, world!");
+    }
+
+    #[test]
+    fn update_from_history_truncates_long_title() {
+        let mut session = Session::new();
+        let long_text = "a".repeat(100);
+        let messages = vec![Message {
+            role: Role::User,
+            content: Some(MessageContent::Text(long_text)),
+            tool_calls: None,
+            tool_call_id: None,
+            timestamp: None,
+        }];
+        session.update_from_history(&messages);
+        assert!(session.meta.title.ends_with("..."));
+        assert!(session.meta.title.chars().count() <= 64); // 60 + "..."
+    }
+
+    #[test]
+    fn update_from_history_skips_title_if_already_set() {
+        let mut session = Session::new();
+        session.meta.title = "Custom title".to_string();
+        let messages = vec![Message {
+            role: Role::User,
+            content: Some(MessageContent::Text("Different text".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            timestamp: None,
+        }];
+        session.update_from_history(&messages);
+        // Title should not change since it's not "New conversation"
+        assert_eq!(session.meta.title, "Custom title");
+    }
+
+    #[test]
+    fn update_from_history_ignores_assistant_for_title() {
+        let mut session = Session::new();
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: Some(MessageContent::Text("I am the assistant".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            timestamp: None,
+        }];
+        session.update_from_history(&messages);
+        assert_eq!(session.meta.title, "New conversation");
+    }
+
+    #[test]
+    fn update_from_history_empty_preserves_title() {
+        let mut session = Session::new();
+        session.update_from_history(&[]);
+        assert_eq!(session.meta.message_count, 0);
+        assert_eq!(session.meta.title, "New conversation");
+    }
+
+    #[test]
+    fn session_meta_serializable() {
+        let session = Session::new();
+        let json = serde_json::to_string(&session.meta).unwrap();
+        let deserialized: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, session.meta.id);
+        assert_eq!(deserialized.title, session.meta.title);
+    }
+}
+
 pub fn list_sessions() -> Result<Vec<SessionMeta>> {
     let dir = sessions_dir()?;
     let mut sessions = Vec::new();
