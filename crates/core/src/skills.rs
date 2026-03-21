@@ -468,6 +468,24 @@ pub fn collect_skill_env(
     env
 }
 
+/// Collect the set of env var names declared in `requires.env` across all skills.
+/// Used to filter which credentials are injected into `run_shell` subprocesses.
+pub fn collect_required_env_vars(
+    resolved_creds: &std::collections::HashMap<String, String>,
+    skills_config: &SkillsConfig,
+) -> std::collections::HashSet<String> {
+    match load_all_skills(resolved_creds, skills_config) {
+        Ok(skills) => skills
+            .iter()
+            .flat_map(|s| s.manifest.requires.env.iter().cloned())
+            .collect(),
+        Err(e) => {
+            tracing::warn!("Failed to load skills for env allowlist: {e}; no credentials will be injected into run_shell");
+            std::collections::HashSet::new()
+        }
+    }
+}
+
 /// Install missing dependencies for a skill.
 /// Returns list of successfully installed dependency names.
 pub fn install_skill_deps(skill: &Skill) -> Result<Vec<String>> {

@@ -22,6 +22,26 @@ use crate::health::ChannelHealthRegistry;
 use crate::registry::RegisteredChannel;
 use crate::retry::{self, RetryOutcome, RetryPolicy};
 
+/// Sanitize an attachment filename from an external webhook.
+/// Extracts the basename, rejects path traversal, hidden files, and null bytes.
+fn sanitize_filename(name: &Option<String>) -> Option<String> {
+    name.as_ref().map(|n| {
+        let basename = std::path::Path::new(n)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("attachment");
+        if basename.contains("..")
+            || basename.starts_with('.')
+            || basename.contains('\0')
+            || basename.is_empty()
+        {
+            "attachment".to_string()
+        } else {
+            basename.to_string()
+        }
+    })
+}
+
 /// A media attachment on an inbound message.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InboundAttachment {
@@ -277,6 +297,10 @@ pub async fn invoke_agent(
 
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
 
+    // Scan full text for injection BEFORE truncation so patterns spanning
+    // the truncation boundary are still detected.
+    let injection_level = scan_for_injection(&inbound.text);
+
     // Truncate inbound text to prevent excessive LLM token consumption
     const MAX_INBOUND_TEXT_BYTES: usize = 32 * 1024; // 32 KB
     let text = if inbound.text.len() > MAX_INBOUND_TEXT_BYTES {
@@ -297,13 +321,13 @@ pub async fn invoke_agent(
         inbound.text.clone()
     };
 
-    // Apply injection scanning and source attribution
+    // Apply injection wrapping using the pre-truncation scan result
     let message_text = {
         let base = format!(
             "[Channel: {}, Sender: {}]\n{}",
             channel_name, inbound.sender_id, text
         );
-        match scan_for_injection(&text) {
+        match injection_level {
             ThreatLevel::HighRisk { .. } => wrap_with_injection_warning(channel_name, &base),
             ThreatLevel::Flagged { .. } => wrap_untrusted(channel_name, &base),
             ThreatLevel::Clean => base,
@@ -325,7 +349,7 @@ pub async fn invoke_agent(
                     media: borg_core::types::MediaData {
                         mime_type: att.mime_type.clone(),
                         data: att.data.clone(),
-                        filename: att.filename.clone(),
+                        filename: sanitize_filename(&att.filename),
                     },
                 });
             }
@@ -654,5 +678,59 @@ mod tests {
 fn record_delivery_failure_sync(db: &Database, delivery_id: &str, error: &str) {
     if let Err(db_err) = db.mark_failed(delivery_id, error, None) {
         warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_filename_strips_path_traversal() {
+        assert_eq!(
+            sanitize_filename(&Some("../../etc/passwd".to_string())),
+            Some("passwd".to_string())
+        );
+        assert_eq!(
+            sanitize_filename(&Some("/var/log/../secret".to_string())),
+            Some("secret".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_blocks_hidden_files() {
+        assert_eq!(
+            sanitize_filename(&Some(".hidden".to_string())),
+            Some("attachment".to_string())
+        );
+        assert_eq!(
+            sanitize_filename(&Some(".env".to_string())),
+            Some("attachment".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_passes_normal_names() {
+        assert_eq!(
+            sanitize_filename(&Some("photo.jpg".to_string())),
+            Some("photo.jpg".to_string())
+        );
+        assert_eq!(
+            sanitize_filename(&Some("document.pdf".to_string())),
+            Some("document.pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_handles_none() {
+        assert_eq!(sanitize_filename(&None), None);
+    }
+
+    #[test]
+    fn sanitize_filename_blocks_null_bytes() {
+        assert_eq!(
+            sanitize_filename(&Some("file\0name.txt".to_string())),
+            Some("attachment".to_string())
+        );
     }
 }
