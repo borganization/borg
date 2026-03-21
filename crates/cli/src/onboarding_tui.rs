@@ -132,6 +132,10 @@ impl OnboardingState {
         let Ok(provider) = Provider::from_str(provider_id) else {
             return false;
         };
+        // Keyless providers: check if server is reachable instead of API key
+        if !provider.requires_api_key() {
+            return Provider::ollama_available();
+        }
         let env_var_name = provider.default_env_var();
         let Ok(data_dir) = Config::data_dir() else {
             return false;
@@ -169,6 +173,13 @@ impl OnboardingState {
     fn detect_provider_from_env(&self) -> &'static str {
         for (id, _, _) in PROVIDERS {
             if let Ok(p) = Provider::from_str(id) {
+                if !p.requires_api_key() {
+                    // Keyless providers: detect by checking if server is reachable
+                    if Provider::ollama_available() {
+                        return id;
+                    }
+                    continue;
+                }
                 if std::env::var(p.default_env_var())
                     .ok()
                     .is_some_and(|k| !k.is_empty())

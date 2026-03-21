@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::db::Database;
+use crate::provider::Provider;
 use crate::skills::load_all_skills;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -212,7 +213,17 @@ fn check_config(checks: &mut Vec<DiagnosticCheck>) {
 fn check_provider(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
     match config.resolve_provider() {
         Ok((provider, _key)) => {
-            checks.push(DiagnosticCheck::pass("Provider", "API key set"));
+            if provider.requires_api_key() {
+                checks.push(DiagnosticCheck::pass("Provider", "API key set"));
+            } else if Provider::ollama_available() {
+                checks.push(DiagnosticCheck::pass("Provider", "Ollama server reachable"));
+            } else {
+                checks.push(DiagnosticCheck::warn(
+                    "Provider",
+                    "Ollama server",
+                    "not reachable at localhost:11434 — run `ollama serve`",
+                ));
+            }
             checks.push(DiagnosticCheck::pass(
                 "Provider",
                 format!("Provider: {provider}"),
