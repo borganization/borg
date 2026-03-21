@@ -6,6 +6,7 @@ use borg_core::config::Config;
 use borg_core::provider::Provider;
 
 /// Auto-detect the system's IANA timezone (e.g. "America/New_York").
+#[allow(dead_code)]
 pub(crate) fn detect_system_timezone() -> Option<String> {
     iana_time_zone::get_timezone().ok()
 }
@@ -55,90 +56,13 @@ pub(crate) const GEMINI_MODELS: &[(&str, &str)] = &[
     ("gemini-2.5-flash", "Gemini 2.5 Flash (fast)"),
 ];
 
-/// Personality style presets.
-#[allow(dead_code)]
-pub(crate) struct PersonalityStyle {
-    pub(crate) name: &'static str,
-    pub(crate) description: &'static str,
-    pub(crate) identity_snippet: &'static str,
-}
-
-pub(crate) const STYLES: &[PersonalityStyle] = &[
-    PersonalityStyle {
-        name: "Professional",
-        description: "Clear, direct, business-appropriate tone",
-        identity_snippet: r#"## Communication Style
-- Professional and direct — no fluff, no filler
-- Use structured responses with headers and bullet points when helpful
-- Maintain a polished, business-appropriate tone
-- Lead with the answer, then provide supporting detail
-- Be decisive in recommendations while noting trade-offs"#,
-    },
-    PersonalityStyle {
-        name: "Casual",
-        description: "Friendly, relaxed, conversational",
-        identity_snippet: r#"## Communication Style
-- Casual and conversational — talk like a helpful friend
-- Use natural language, contractions, and a relaxed tone
-- Keep things light and approachable
-- It's fine to use humor when it fits naturally
-- Be warm and encouraging without being over-the-top"#,
-    },
-    PersonalityStyle {
-        name: "Snarky",
-        description: "Witty, dry humor, still helpful",
-        identity_snippet: r#"## Communication Style
-- Witty and dry — deliver help with a side of personality
-- Use sarcasm sparingly but effectively (never mean-spirited)
-- Keep a slightly irreverent tone while still being genuinely useful
-- Playful roasts are fine, but always prioritize actually helping
-- Think helpful friend who happens to be funny, not comedian who happens to help"#,
-    },
-    PersonalityStyle {
-        name: "Nurturing",
-        description: "Encouraging, patient, supportive mentor",
-        identity_snippet: r#"## Communication Style
-- Warm, patient, and encouraging — like a great mentor
-- Celebrate progress and acknowledge effort
-- Break down complex topics gently, never condescend
-- Offer reassurance when tasks feel overwhelming
-- Guide with questions when it helps the user learn"#,
-    },
-    PersonalityStyle {
-        name: "Minimal",
-        description: "Terse, to the point, no frills",
-        identity_snippet: r#"## Communication Style
-- Maximum brevity — say it in as few words as possible
-- Skip pleasantries, greetings, and filler
-- Use code and commands over prose when possible
-- One-line answers are preferred when they suffice
-- Only elaborate when explicitly asked"#,
-    },
-];
-
-/// How the API key should be stored.
-#[derive(Debug, Clone, PartialEq)]
-pub enum KeyStorage {
-    /// Store in ~/.borg/.env (legacy plaintext)
-    EnvFile,
-    /// Store in OS keychain (macOS Keychain / Linux secret-tool)
-    Keychain,
-}
-
 /// Assembled choices from the onboarding wizard.
 pub struct OnboardingResult {
     pub user_name: String,
     pub agent_name: String,
-    pub style_index: usize,
     pub model_id: String,
     pub api_key: Option<String>,
-    pub key_storage: KeyStorage,
     pub provider: String,
-    pub monthly_token_limit: u64,
-    #[allow(dead_code)]
-    pub configured_channels: Vec<String>,
-    #[allow(dead_code)]
-    pub channel_credentials: Vec<(String, Vec<(String, String)>)>,
 }
 
 /// Get the model list for a given provider.
@@ -151,36 +75,14 @@ pub(crate) fn models_for_provider(provider_id: &str) -> &'static [(&'static str,
     }
 }
 
-pub(crate) fn provider_id_to_display(id: &str) -> &str {
-    PROVIDERS
-        .iter()
-        .find(|(pid, _, _)| *pid == id)
-        .map(|(_, name, _)| *name)
-        .unwrap_or(id)
-}
-
-pub(crate) fn provider_key_url(provider_id: &str) -> &'static str {
-    match provider_id {
-        "openrouter" => "https://openrouter.ai/keys",
-        "openai" => "https://platform.openai.com/api-keys",
-        "anthropic" => "https://console.anthropic.com/settings/keys",
-        "gemini" => "https://aistudio.google.com/apikey",
-        _ => "your provider's website",
-    }
-}
-
 /// Run the interactive onboarding wizard. Returns `None` if the user cancels.
 pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
     crate::onboarding_tui::run()
 }
 
 /// Generate IDENTITY.md content from onboarding choices.
-pub fn generate_identity(name: &str, style_index: usize, owner_name: &str) -> Result<String> {
-    let style = STYLES
-        .get(style_index)
-        .ok_or_else(|| anyhow::anyhow!("invalid style index {style_index}"))?;
-
-    Ok(format!(
+pub fn generate_identity(name: &str, owner_name: &str) -> String {
+    format!(
         r#"# {name} — Your AI Personal Assistant
 
 You are {name}, a helpful AI personal assistant. You belong to {owner_name} and live on their computer. You help them with tasks, remember things for them, and occasionally check in to see how they're doing.
@@ -190,7 +92,12 @@ You are {name}, a helpful AI personal assistant. You belong to {owner_name} and 
 - Honest about your limitations
 - You remember context from past conversations
 
-{style_snippet}
+## Communication Style
+- Professional and direct — no fluff, no filler
+- Use structured responses with headers and bullet points when helpful
+- Maintain a polished, business-appropriate tone
+- Lead with the answer, then provide supporting detail
+- Be decisive in recommendations while noting trade-offs
 
 ## Capabilities
 - You can create and use tools (scripts) to extend your abilities
@@ -203,20 +110,11 @@ You are {name}, a helpful AI personal assistant. You belong to {owner_name} and 
 - Always explain what you're doing before executing tools
 - Respect the user's time and attention
 "#,
-        name = name,
-        style_snippet = style.identity_snippet,
-    ))
+    )
 }
 
 /// Generate SETUP.md content for the agent's first conversation.
-pub fn generate_setup(agent_name: &str, owner_name: &str, timezone: Option<&str>) -> String {
-    let tz_note = match timezone {
-        Some(tz) => {
-            format!("- Their timezone was auto-detected as {tz}. Confirm if that's correct.")
-        }
-        None => "- Find out their timezone so you can respect quiet hours.".to_string(),
-    };
-
+pub fn generate_setup(agent_name: &str, owner_name: &str) -> String {
     format!(
         r#"# First Conversation
 
@@ -226,11 +124,11 @@ You are {agent_name} — a brand new AI personal assistant. Fresh start, no memo
 Introduce yourself naturally. Don't be another "Hello! How may I assist you today?" bot.
 
 Things to figure out together:
-- Get to know {owner_name} — what should you call them?
-{tz_note}
+- Get to know {owner_name} — what should you call them? What's their timezone?
 - What's your vibe? Be genuine, not corporate. Show some personality.
 - What does {owner_name} need help with? What matters to them?
 - Set the tone for your working relationship.
+- Ask if they'd like to connect a messaging channel (Telegram, Slack, Discord, etc.) — they can run `borg add <channel>` anytime.
 
 Be yourself. Be curious. Make this first conversation count.
 "#,
@@ -291,9 +189,7 @@ pub fn generate_config(
     provider_id: &str,
     user_name: &str,
     agent_name: &str,
-    monthly_token_limit: u64,
-    key_storage: &KeyStorage,
-    timezone: Option<&str>,
+    use_keychain: bool,
 ) -> Result<String> {
     validate_model_id(model_id)?;
     let user_name = escape_toml_string(user_name);
@@ -302,34 +198,25 @@ pub fn generate_config(
     let provider = Provider::from_str(provider_id)?;
     let env_var = provider.default_env_var();
 
-    let api_key_line = match key_storage {
-        KeyStorage::Keychain => {
-            let service_name = format!("borg-{provider_id}");
-            if cfg!(target_os = "macos") {
-                format!(
-                    r#"api_key = {{ source = "exec", command = "security", args = ["find-generic-password", "-s", "{service_name}", "-a", "borg", "-w"] }}"#,
-                )
-            } else {
-                format!(
-                    r#"api_key = {{ source = "exec", command = "secret-tool", args = ["lookup", "service", "borg", "provider", "{provider_id}"] }}"#,
-                )
-            }
+    let api_key_line = if use_keychain {
+        let service_name = format!("borg-{provider_id}");
+        if cfg!(target_os = "macos") {
+            format!(
+                r#"api_key = {{ source = "exec", command = "security", args = ["find-generic-password", "-s", "{service_name}", "-a", "borg", "-w"] }}"#,
+            )
+        } else {
+            format!(
+                r#"api_key = {{ source = "exec", command = "secret-tool", args = ["lookup", "service", "borg", "provider", "{provider_id}"] }}"#,
+            )
         }
-        KeyStorage::EnvFile => {
-            format!(r#"api_key_env = "{env_var}""#)
-        }
-    };
-
-    let tz_line = match timezone {
-        Some(tz) => format!("timezone = \"{tz}\""),
-        None => "# timezone = \"America/New_York\"  # auto-detect failed; set manually".into(),
+    } else {
+        format!(r#"api_key_env = "{env_var}""#)
     };
 
     Ok(format!(
         r#"[user]
 name = "{user_name}"
 agent_name = "{agent_name}"
-{tz_line}
 
 [llm]
 provider = "{provider_id}"
@@ -337,35 +224,6 @@ provider = "{provider_id}"
 model = "{model_id}"
 temperature = 0.7
 max_tokens = 4096
-
-[heartbeat]
-enabled = false
-interval = "30m"
-quiet_hours_start = "00:00"
-quiet_hours_end = "06:00"
-# channels = ["telegram"]  # uncomment to deliver heartbeat to channels
-
-[tools]
-default_timeout_ms = 30000
-
-[sandbox]
-enabled = true
-mode = "strict"
-
-[memory]
-max_context_tokens = 8000
-
-[skills]
-enabled = true
-max_context_tokens = 4000
-
-[budget]
-monthly_token_limit = {monthly_token_limit}
-warning_threshold = 0.8
-
-[gateway]
-host = "127.0.0.1"
-port = 7842
 "#,
     ))
 }
@@ -386,8 +244,8 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
         Err(e) => eprintln!("  Warning: failed to install default skills: {e}"),
     }
 
-    // Auto-detect timezone
-    let timezone = detect_system_timezone();
+    // Determine key storage automatically
+    let use_keychain = result.api_key.is_some() && keychain_available();
 
     // Write config.toml (skip if already exists to avoid clobbering manual edits)
     let config_path = data_dir.join("config.toml");
@@ -399,9 +257,7 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
             &result.provider,
             &result.user_name,
             &result.agent_name,
-            result.monthly_token_limit,
-            &result.key_storage,
-            timezone.as_deref(),
+            use_keychain,
         )?;
         std::fs::write(&config_path, &config_content)?;
         println!("  Created {}", config_path.display());
@@ -412,8 +268,7 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     if identity_path.exists() {
         println!("  Skipped {} (already exists)", identity_path.display());
     } else {
-        let identity_content =
-            generate_identity(&result.agent_name, result.style_index, &result.user_name)?;
+        let identity_content = generate_identity(&result.agent_name, &result.user_name);
         std::fs::write(&identity_path, &identity_content)?;
         println!("  Created {}", identity_path.display());
     }
@@ -430,16 +285,15 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     // Write SETUP.md for first conversation instructions
     let setup_path = data_dir.join("SETUP.md");
     if !setup_path.exists() {
-        let setup_content =
-            generate_setup(&result.agent_name, &result.user_name, timezone.as_deref());
+        let setup_content = generate_setup(&result.agent_name, &result.user_name);
         std::fs::write(&setup_path, &setup_content)?;
         println!("  Created {}", setup_path.display());
     }
 
     // Store API key based on chosen storage method
     if let Some(ref api_key) = result.api_key {
-        match result.key_storage {
-            KeyStorage::Keychain => match store_in_keychain(&result.provider, api_key) {
+        if use_keychain {
+            match store_in_keychain(&result.provider, api_key) {
                 Ok(()) => {
                     println!(
                         "  Stored API key in OS keychain (service: borg-{})",
@@ -449,16 +303,12 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
                 Err(e) => {
                     eprintln!("  Warning: Failed to store in keychain: {e}");
                     eprintln!("  Falling back to .env file");
-                    // Rewrite config to use api_key_env instead of SecretRef exec,
-                    // so the config matches the actual storage location.
                     let fallback_config = generate_config(
                         &result.model_id,
                         &result.provider,
                         &result.user_name,
                         &result.agent_name,
-                        result.monthly_token_limit,
-                        &KeyStorage::EnvFile,
-                        timezone.as_deref(),
+                        false,
                     )?;
                     std::fs::write(&config_path, &fallback_config)?;
                     let provider = Provider::from_str(&result.provider)?;
@@ -469,22 +319,20 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
                     println!("  Updated config to use .env file");
                     println!("  Created {}", env_path.display());
                 }
-            },
-            KeyStorage::EnvFile => {
-                let provider = Provider::from_str(&result.provider)?;
-                let env_var = provider.default_env_var();
-                let env_path = data_dir.join(".env");
-                let clean_key = api_key.trim().replace(['\n', '\r'], "");
-                std::fs::write(&env_path, format!("{env_var}={clean_key}\n"))?;
-                // Restrict permissions on .env file
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ =
-                        std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600));
-                }
-                println!("  Created {}", env_path.display());
             }
+        } else {
+            let provider = Provider::from_str(&result.provider)?;
+            let env_var = provider.default_env_var();
+            let env_path = data_dir.join(".env");
+            let clean_key = api_key.trim().replace(['\n', '\r'], "");
+            std::fs::write(&env_path, format!("{env_var}={clean_key}\n"))?;
+            // Restrict permissions on .env file
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600));
+            }
+            println!("  Created {}", env_path.display());
         }
     }
 
@@ -497,25 +345,12 @@ mod tests {
 
     #[test]
     fn generate_identity_contains_name_and_style() {
-        let identity = generate_identity("Buddy", 0, "Mike").expect("valid style index");
+        let identity = generate_identity("Buddy", "Mike");
         assert!(identity.contains("# Buddy — Your AI Personal Assistant"));
         assert!(identity.contains("You are Buddy"));
         assert!(identity.contains("You belong to Mike"));
         assert!(identity.contains("## Communication Style"));
         assert!(identity.contains("Professional and direct"));
-    }
-
-    #[test]
-    fn generate_identity_all_styles_valid() {
-        for i in 0..STYLES.len() {
-            let identity = generate_identity("Test", i, "Owner").expect("valid style index");
-            assert!(identity.contains(STYLES[i].name) || identity.contains("Communication Style"));
-        }
-    }
-
-    #[test]
-    fn generate_identity_invalid_index_errors() {
-        assert!(generate_identity("Test", 999, "Owner").is_err());
     }
 
     #[test]
@@ -525,16 +360,13 @@ mod tests {
             "openrouter",
             "Mike",
             "Buddy",
-            1_000_000,
-            &KeyStorage::EnvFile,
-            None,
+            false,
         )
         .expect("valid model");
         assert!(config.contains("model = \"anthropic/claude-sonnet-4\""));
         assert!(config.contains("provider = \"openrouter\""));
         assert!(config.contains("api_key_env = \"OPENROUTER_API_KEY\""));
         assert!(config.contains("[llm]"));
-        assert!(config.contains("[sandbox]"));
     }
 
     #[test]
@@ -544,9 +376,7 @@ mod tests {
             "openrouter",
             "Mike",
             "Buddy",
-            1_000_000,
-            &KeyStorage::EnvFile,
-            None,
+            false,
         )
         .expect("valid model");
         assert!(config.contains("[user]"));
@@ -556,64 +386,30 @@ mod tests {
 
     #[test]
     fn generate_config_anthropic_provider() {
-        let config = generate_config(
-            "claude-sonnet-4",
-            "anthropic",
-            "User",
-            "Agent",
-            500_000,
-            &KeyStorage::EnvFile,
-            None,
-        )
-        .expect("valid");
+        let config =
+            generate_config("claude-sonnet-4", "anthropic", "User", "Agent", false).expect("valid");
         assert!(config.contains("provider = \"anthropic\""));
         assert!(config.contains("api_key_env = \"ANTHROPIC_API_KEY\""));
     }
 
     #[test]
     fn generate_config_openai_provider() {
-        let config = generate_config(
-            "gpt-4.1",
-            "openai",
-            "User",
-            "Agent",
-            0,
-            &KeyStorage::EnvFile,
-            None,
-        )
-        .expect("valid");
+        let config = generate_config("gpt-4.1", "openai", "User", "Agent", false).expect("valid");
         assert!(config.contains("provider = \"openai\""));
         assert!(config.contains("api_key_env = \"OPENAI_API_KEY\""));
     }
 
     #[test]
     fn generate_config_gemini_provider() {
-        let config = generate_config(
-            "gemini-2.5-pro",
-            "gemini",
-            "User",
-            "Agent",
-            0,
-            &KeyStorage::EnvFile,
-            None,
-        )
-        .expect("valid");
+        let config =
+            generate_config("gemini-2.5-pro", "gemini", "User", "Agent", false).expect("valid");
         assert!(config.contains("provider = \"gemini\""));
         assert!(config.contains("api_key_env = \"GEMINI_API_KEY\""));
     }
 
     #[test]
     fn generate_config_rejects_empty_model() {
-        assert!(generate_config(
-            "",
-            "openrouter",
-            "User",
-            "Agent",
-            0,
-            &KeyStorage::EnvFile,
-            None
-        )
-        .is_err());
+        assert!(generate_config("", "openrouter", "User", "Agent", false).is_err());
     }
 
     #[test]
@@ -623,9 +419,7 @@ mod tests {
             "openrouter",
             "User",
             "Agent",
-            0,
-            &KeyStorage::EnvFile,
-            None,
+            false,
         )
         .is_err());
     }
@@ -664,47 +458,13 @@ mod tests {
     }
 
     #[test]
-    fn generate_config_includes_budget_section() {
-        let config = generate_config(
-            "anthropic/claude-sonnet-4",
-            "openrouter",
-            "Mike",
-            "Buddy",
-            1_000_000,
-            &KeyStorage::EnvFile,
-            None,
-        )
-        .expect("valid");
-        assert!(config.contains("[budget]"));
-        assert!(config.contains("monthly_token_limit = 1000000"));
-        assert!(config.contains("warning_threshold = 0.8"));
-    }
-
-    #[test]
-    fn generate_config_budget_unlimited() {
-        let config = generate_config(
-            "anthropic/claude-sonnet-4",
-            "openrouter",
-            "User",
-            "Agent",
-            0,
-            &KeyStorage::EnvFile,
-            None,
-        )
-        .expect("valid");
-        assert!(config.contains("monthly_token_limit = 0"));
-    }
-
-    #[test]
     fn generate_config_keychain_storage() {
         let config = generate_config(
             "anthropic/claude-sonnet-4",
             "openrouter",
             "User",
             "Agent",
-            0,
-            &KeyStorage::Keychain,
-            None,
+            true,
         )
         .expect("valid");
         assert!(config.contains("api_key = {"));
