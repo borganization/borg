@@ -143,6 +143,24 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
 
     println!("Daemon running. Press Ctrl+C to stop.");
 
+    // Missed job catch-up: skip tasks overdue by more than 7 days
+    {
+        let now = chrono::Utc::now().timestamp();
+        if let Ok(stale_tasks) = db.get_due_tasks(now) {
+            for task in &stale_tasks {
+                let age = now - task.next_run.unwrap_or(0);
+                if age > 7 * 86400 {
+                    tracing::warn!(
+                        "Skipping stale task '{}' ({}d overdue), advancing to next run",
+                        task.name,
+                        age / 86400
+                    );
+                    let _ = borg_core::tasks::advance_next_run(task, &db);
+                }
+            }
+        }
+    }
+
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
 
     loop {
@@ -150,7 +168,6 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
             biased;
             _ = shutdown.cancelled() => {
                 println!("Daemon shutting down gracefully...");
-                // Wait for in-progress tasks to finish (acquire all permits)
                 for _ in 0..max_concurrent {
                     let _ = semaphore.acquire().await;
                 }
@@ -168,6 +185,8 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
         }
 
         let now = chrono::Utc::now().timestamp();
+
+        // Process due tasks (normal scheduled runs)
         match db.get_due_tasks(now) {
             Ok(tasks) => {
                 for task in tasks {
@@ -175,99 +194,247 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                     if let Err(e) = borg_core::tasks::advance_next_run(&task, &db) {
                         tracing::warn!("Failed to advance task next_run: {e}");
                     }
-
-                    let permit = semaphore.clone().acquire_owned().await;
-                    let task_config = config.clone();
-                    let task_name = task.name.clone();
-                    let task_id = task.id.clone();
-                    let task_prompt = task.prompt.clone();
-                    let task_timeout = std::time::Duration::from_secs(300); // 5 min per task
-
-                    tokio::spawn(async move {
-                        let _permit = permit;
-                        tracing::info!("Executing scheduled task: {task_name} ({task_id})");
-                        let started_at = chrono::Utc::now().timestamp();
-
-                        let identity = borg_core::identity::load_identity().unwrap_or_default();
-                        let memory =
-                            borg_core::memory::load_memory_context(4000).unwrap_or_default();
-                        let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-
-                        let system = format!(
-                            "{identity}\n\n# Current Time\n{time}\n\n{memory}\n\n\
-                             # Scheduled Task\nYou are executing a scheduled task: \"{task_name}\"\n\
-                             Respond with the task result. Be concise."
-                        );
-
-                        let messages = vec![
-                            borg_core::types::Message::system(system),
-                            borg_core::types::Message::user(&task_prompt),
-                        ];
-
-                        let llm = match borg_core::llm::LlmClient::new(task_config) {
-                            Ok(l) => l,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to create LLM client for task '{task_name}': {e}"
-                                );
-                                return;
-                            }
-                        };
-                        let result =
-                            tokio::time::timeout(task_timeout, llm.chat(&messages, None)).await;
-
-                        if let Ok(db) = borg_core::db::Database::open() {
-                            match result {
-                                Ok(Ok(response)) => {
-                                    let duration_ms =
-                                        (chrono::Utc::now().timestamp() - started_at) * 1000;
-                                    let result_text = response.text_content().unwrap_or("");
-                                    let _ = db.record_task_run(
-                                        &task_id,
-                                        started_at,
-                                        duration_ms,
-                                        Some(result_text),
-                                        None,
-                                    );
-                                    tracing::info!(
-                                        "Task '{task_name}' completed: {}",
-                                        &result_text[..result_text.len().min(100)]
-                                    );
-                                }
-                                Ok(Err(e)) => {
-                                    let duration_ms =
-                                        (chrono::Utc::now().timestamp() - started_at) * 1000;
-                                    let err_str = format!("{e}");
-                                    let _ = db.record_task_run(
-                                        &task_id,
-                                        started_at,
-                                        duration_ms,
-                                        None,
-                                        Some(&err_str),
-                                    );
-                                    tracing::warn!("Task '{task_name}' failed: {e}");
-                                }
-                                Err(_) => {
-                                    let duration_ms =
-                                        (chrono::Utc::now().timestamp() - started_at) * 1000;
-                                    let _ = db.record_task_run(
-                                        &task_id,
-                                        started_at,
-                                        duration_ms,
-                                        None,
-                                        Some("Task timed out"),
-                                    );
-                                    tracing::warn!("Task '{task_name}' timed out");
-                                }
-                            }
-                        }
-                    });
+                    spawn_task_execution(&task, false, semaphore.clone(), config.clone()).await;
                 }
             }
+            Err(e) => tracing::warn!("Failed to check due tasks: {e}"),
+        }
+
+        // Process tasks pending retry
+        match db.get_tasks_pending_retry(now) {
+            Ok(retries) => {
+                for task in retries {
+                    spawn_task_execution(&task, true, semaphore.clone(), config.clone()).await;
+                }
+            }
+            Err(e) => tracing::warn!("Failed to check retry tasks: {e}"),
+        }
+    }
+}
+
+async fn spawn_task_execution(
+    task: &borg_core::db::ScheduledTaskRow,
+    is_retry: bool,
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    config: Config,
+) {
+    let permit = semaphore.acquire_owned().await;
+    let task_name = task.name.clone();
+    let task_id = task.id.clone();
+    let task_prompt = task.prompt.clone();
+    let task_timeout = std::time::Duration::from_millis(task.timeout_ms as u64);
+    let max_retries = task.max_retries;
+    let retry_count = task.retry_count;
+    let delivery_channel = task.delivery_channel.clone();
+    let delivery_target = task.delivery_target.clone();
+    let schedule_type = task.schedule_type.clone();
+
+    tokio::spawn(async move {
+        let _permit = permit;
+        let attempt_label = if is_retry {
+            format!(" (retry {retry_count})")
+        } else {
+            String::new()
+        };
+        tracing::info!("Executing scheduled task: {task_name} ({task_id}){attempt_label}");
+        let started_at = chrono::Utc::now().timestamp();
+
+        let identity = borg_core::identity::load_identity().unwrap_or_default();
+        let memory = borg_core::memory::load_memory_context(4000).unwrap_or_default();
+        let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+
+        let system = format!(
+            "{identity}\n\n# Current Time\n{time}\n\n{memory}\n\n\
+             # Scheduled Task\nYou are executing a scheduled task: \"{task_name}\"\n\
+             Respond with the task result. Be concise."
+        );
+
+        let messages = vec![
+            borg_core::types::Message::system(system),
+            borg_core::types::Message::user(&task_prompt),
+        ];
+
+        let llm = match borg_core::llm::LlmClient::new(config.clone()) {
+            Ok(l) => l,
             Err(e) => {
-                tracing::warn!("Failed to check due tasks: {e}");
+                tracing::warn!("Failed to create LLM client for task '{task_name}': {e}");
+                return;
+            }
+        };
+        let result = tokio::time::timeout(task_timeout, llm.chat(&messages, None)).await;
+
+        match result {
+            Ok(Ok(response)) => {
+                let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
+                let result_text = response.text_content().unwrap_or("");
+                if let Ok(db) = borg_core::db::Database::open() {
+                    if let Err(e) = db.record_task_run(
+                        &task_id,
+                        started_at,
+                        duration_ms,
+                        Some(result_text),
+                        None,
+                    ) {
+                        tracing::warn!("Failed to record task run for '{task_name}': {e}");
+                    }
+                    if let Err(e) = db.clear_task_retry(&task_id) {
+                        tracing::warn!("Failed to clear retry state for '{task_name}': {e}");
+                    }
+                }
+                tracing::info!(
+                    "Task '{task_name}' completed: {}",
+                    &result_text[..result_text.len().min(100)]
+                );
+                if let (Some(ch), Some(tgt)) = (&delivery_channel, &delivery_target) {
+                    deliver_task_result(ch, tgt, &task_name, result_text, &config).await;
+                }
+            }
+            Ok(Err(e)) => {
+                let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
+                let err_str = format!("{e}");
+                handle_task_failure(
+                    &task_id,
+                    &task_name,
+                    &err_str,
+                    started_at,
+                    duration_ms,
+                    retry_count,
+                    max_retries,
+                    &schedule_type,
+                    &delivery_channel,
+                    &delivery_target,
+                    &config,
+                )
+                .await;
+            }
+            Err(_) => {
+                let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
+                handle_task_failure(
+                    &task_id,
+                    &task_name,
+                    "Task timed out",
+                    started_at,
+                    duration_ms,
+                    retry_count,
+                    max_retries,
+                    &schedule_type,
+                    &delivery_channel,
+                    &delivery_target,
+                    &config,
+                )
+                .await;
             }
         }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_task_failure(
+    task_id: &str,
+    task_name: &str,
+    error: &str,
+    started_at: i64,
+    duration_ms: i64,
+    retry_count: i32,
+    max_retries: i32,
+    schedule_type: &str,
+    delivery_channel: &Option<String>,
+    delivery_target: &Option<String>,
+    config: &Config,
+) {
+    if borg_core::tasks::is_transient_error(error) && retry_count < max_retries {
+        let next_attempt = retry_count + 1;
+        let delay = borg_core::tasks::retry_delay_secs(next_attempt);
+        let retry_at = chrono::Utc::now().timestamp() + delay;
+        if let Ok(db) = borg_core::db::Database::open() {
+            if let Err(e) = db.set_task_retry(task_id, next_attempt, error, retry_at) {
+                tracing::warn!("Failed to set retry state for '{task_name}': {e}");
+            }
+        }
+        tracing::warn!(
+            "Task '{task_name}' failed (transient), retry {next_attempt}/{max_retries} in {delay}s: {error}"
+        );
+    } else {
+        if let Ok(db) = borg_core::db::Database::open() {
+            if let Err(e) = db.record_task_run(task_id, started_at, duration_ms, None, Some(error))
+            {
+                tracing::warn!("Failed to record task failure for '{task_name}': {e}");
+            }
+            if let Err(e) = db.clear_task_retry(task_id) {
+                tracing::warn!("Failed to clear retry state for '{task_name}': {e}");
+            }
+            if schedule_type == "once" {
+                if let Err(e) = db.update_task_status(task_id, "completed") {
+                    tracing::warn!("Failed to mark task '{task_name}' completed: {e}");
+                }
+            }
+        }
+        tracing::warn!("Task '{task_name}' failed: {error}");
+
+        if let (Some(ch), Some(tgt)) = (delivery_channel, delivery_target) {
+            let msg = format!("Error: {error}");
+            deliver_task_result(ch, tgt, &format!("{task_name} [FAILED]"), &msg, config).await;
+        }
+    }
+}
+
+async fn deliver_task_result(
+    channel: &str,
+    target: &str,
+    task_name: &str,
+    text: &str,
+    config: &Config,
+) {
+    let msg = format!("[Task: {task_name}]\n{text}");
+    let result = match channel {
+        "telegram" => {
+            let token = config.resolve_credential_or_env("TELEGRAM_BOT_TOKEN");
+            match (token, target.parse::<i64>()) {
+                (Some(t), Ok(chat_id)) => {
+                    match borg_gateway::telegram::api::TelegramClient::new(&t) {
+                        Ok(client) => client.send_message(chat_id, &msg, None, None, None).await,
+                        Err(e) => Err(e),
+                    }
+                }
+                _ => {
+                    tracing::warn!("Telegram delivery: missing token or invalid chat_id");
+                    return;
+                }
+            }
+        }
+        "slack" => {
+            let token = config.resolve_credential_or_env("SLACK_BOT_TOKEN");
+            match token {
+                Some(t) => match borg_gateway::slack::api::SlackClient::new(&t) {
+                    Ok(client) => client.post_message(target, &msg, None).await,
+                    Err(e) => Err(e),
+                },
+                None => {
+                    tracing::warn!("Slack delivery: missing SLACK_BOT_TOKEN");
+                    return;
+                }
+            }
+        }
+        "discord" => {
+            let token = config.resolve_credential_or_env("DISCORD_BOT_TOKEN");
+            match token {
+                Some(t) => match borg_gateway::discord::api::DiscordClient::new(&t) {
+                    Ok(client) => client.send_message(target, &msg).await,
+                    Err(e) => Err(e),
+                },
+                None => {
+                    tracing::warn!("Discord delivery: missing DISCORD_BOT_TOKEN");
+                    return;
+                }
+            }
+        }
+        _ => {
+            tracing::warn!("Unknown delivery channel: {channel}");
+            return;
+        }
+    };
+    if let Err(e) = result {
+        tracing::warn!("Failed to deliver task result via {channel}: {e}");
     }
 }
 
