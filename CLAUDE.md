@@ -29,7 +29,7 @@ cargo fmt --check
 cargo clippy -- -D warnings
 ```
 
-Binary name is `borg`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` at runtime (see `.env.example`).
+Binary name is `borg`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or a running Ollama instance at runtime (see `.env.example`).
 
 All integrations are compiled unconditionally into a single binary. iMessage is macOS-only via `#[cfg(target_os = "macos")]`.
 
@@ -69,7 +69,7 @@ Opinionated QuickStart flow — one streamlined path with sensible defaults:
 
 1. **Welcome** — User name + agent name
 2. **Security** — Security warning acknowledgment (required)
-3. **Provider** — Select LLM provider (OpenRouter, OpenAI, Anthropic, Gemini)
+3. **Provider** — Select LLM provider (OpenRouter, OpenAI, Anthropic, Gemini, Ollama)
 4. **API Key** — Enter API key (auto-detects existing keys)
 5. **Channels** — Configure messaging channels (Telegram, Slack, Discord, etc.)
 6. **Summary** — Review all settings including defaults, confirm and launch
@@ -174,11 +174,12 @@ Used by `apply_patch` to create/modify/delete files. Follows the codex apply-pat
 
 ```toml
 [llm]
-provider = "openrouter"             # openrouter | openai | anthropic | gemini (auto-detected if omitted)
+provider = "openrouter"             # openrouter | openai | anthropic | gemini | ollama (auto-detected if omitted)
 api_key_env = "OPENROUTER_API_KEY"
 model = "anthropic/claude-sonnet-4"
 temperature = 0.7
 max_tokens = 4096
+# base_url = "https://custom-endpoint/v1/chat/completions"  # optional: override provider's default URL
 
 [heartbeat]
 enabled = false

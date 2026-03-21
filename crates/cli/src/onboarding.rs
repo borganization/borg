@@ -21,6 +21,7 @@ pub(crate) const PROVIDERS: &[(&str, &str, &str)] = &[
     ("openai", "OpenAI", "GPT models directly"),
     ("anthropic", "Anthropic", "Claude models directly"),
     ("gemini", "Gemini", "Google Gemini models directly"),
+    ("ollama", "Ollama", "Run models locally (no API key)"),
 ];
 
 /// Model choices per provider.
@@ -29,13 +30,8 @@ pub(crate) const OPENROUTER_MODELS: &[(&str, &str)] = &[
     ("anthropic/claude-haiku-4", "Claude Haiku 4 (fast, cheap)"),
     ("openai/gpt-4.1", "GPT-4.1"),
     ("openai/gpt-4.1-mini", "GPT-4.1 Mini (fast, cheap)"),
-    ("openai/gpt-4.1-nano", "GPT-4.1 Nano (fastest)"),
     ("google/gemini-2.5-pro", "Gemini 2.5 Pro"),
-    ("google/gemini-2.5-flash", "Gemini 2.5 Flash (fast)"),
-    ("meta-llama/llama-4-maverick", "Llama 4 Maverick"),
-    ("meta-llama/llama-4-scout", "Llama 4 Scout (fast)"),
-    ("deepseek/deepseek-r1", "DeepSeek R1"),
-    ("mistralai/mistral-large", "Mistral Large"),
+    ("deepseek/deepseek-r1", "DeepSeek R1 (reasoning)"),
 ];
 
 pub(crate) const OPENAI_MODELS: &[(&str, &str)] = &[
@@ -56,6 +52,14 @@ pub(crate) const GEMINI_MODELS: &[(&str, &str)] = &[
     ("gemini-2.5-flash", "Gemini 2.5 Flash (fast)"),
 ];
 
+pub(crate) const OLLAMA_MODELS: &[(&str, &str)] = &[
+    ("llama3.3", "Llama 3.3 70B (recommended)"),
+    ("qwen2.5", "Qwen 2.5 (versatile)"),
+    ("deepseek-r1", "DeepSeek R1 (reasoning)"),
+    ("mistral", "Mistral 7B (fast, lightweight)"),
+    ("codellama", "Code Llama (coding)"),
+];
+
 /// Assembled choices from the onboarding wizard.
 pub struct OnboardingResult {
     pub user_name: String,
@@ -71,6 +75,7 @@ pub(crate) fn models_for_provider(provider_id: &str) -> &'static [(&'static str,
         "openai" => OPENAI_MODELS,
         "anthropic" => ANTHROPIC_MODELS,
         "gemini" => GEMINI_MODELS,
+        "ollama" => OLLAMA_MODELS,
         _ => OPENROUTER_MODELS,
     }
 }
@@ -196,9 +201,11 @@ pub fn generate_config(
     let agent_name = escape_toml_string(agent_name);
 
     let provider = Provider::from_str(provider_id)?;
-    let env_var = provider.default_env_var();
 
-    let api_key_line = if use_keychain {
+    let api_key_line = if !provider.requires_api_key() {
+        // Keyless providers (e.g., Ollama) — no API key config needed
+        "# No API key required for local provider\n# base_url = \"http://localhost:11434/v1/chat/completions\"  # uncomment to override".to_string()
+    } else if use_keychain {
         let service_name = format!("borg-{provider_id}");
         if cfg!(target_os = "macos") {
             format!(
@@ -210,6 +217,7 @@ pub fn generate_config(
             )
         }
     } else {
+        let env_var = provider.default_env_var();
         format!(r#"api_key_env = "{env_var}""#)
     };
 
@@ -437,6 +445,7 @@ mod tests {
         assert!(validate_model_id("anthropic/claude-sonnet-4").is_ok());
         assert!(validate_model_id("openai/gpt-4.1-mini").is_ok());
         assert!(validate_model_id("meta-llama/llama-4-scout").is_ok());
+        assert!(validate_model_id("llama3.3").is_ok());
     }
 
     #[test]
@@ -477,5 +486,52 @@ mod tests {
     fn keychain_available_returns_bool() {
         // Just verify it doesn't panic — actual availability depends on platform
         let _available = keychain_available();
+    }
+
+    #[test]
+    fn generate_config_ollama_provider() {
+        let config =
+            generate_config("llama3.3", "ollama", "Mike", "Buddy", false).expect("valid config");
+        assert!(config.contains("provider = \"ollama\""));
+        assert!(config.contains("model = \"llama3.3\""));
+        // Ollama config should NOT contain api_key_env or api_key = { lines
+        assert!(!config.contains("api_key_env"));
+        assert!(!config.contains("api_key = {"));
+    }
+
+    #[test]
+    fn generate_config_ollama_keychain_still_no_api_key() {
+        // Even with keychain flag, Ollama should skip API key config
+        let config =
+            generate_config("llama3.3", "ollama", "Mike", "Buddy", true).expect("valid config");
+        assert!(config.contains("provider = \"ollama\""));
+        assert!(!config.contains("api_key_env"));
+        assert!(!config.contains("api_key = {"));
+    }
+
+    #[test]
+    fn ollama_models_non_empty() {
+        assert!(!OLLAMA_MODELS.is_empty());
+        for (id, _) in OLLAMA_MODELS {
+            assert!(validate_model_id(id).is_ok(), "invalid model id: {id}");
+        }
+    }
+
+    #[test]
+    fn models_for_provider_ollama() {
+        let models = models_for_provider("ollama");
+        assert_eq!(models.len(), OLLAMA_MODELS.len());
+    }
+
+    #[test]
+    fn openrouter_models_trimmed() {
+        assert!(
+            OPENROUTER_MODELS.len() <= 7,
+            "OpenRouter models should be trimmed to ~6"
+        );
+        assert!(
+            OPENROUTER_MODELS.len() >= 5,
+            "OpenRouter models should have at least 5"
+        );
     }
 }

@@ -135,6 +135,9 @@ pub struct LlmConfig {
     pub max_retries: u32,
     pub initial_retry_delay_ms: u64,
     pub request_timeout_ms: u64,
+    /// Override the provider's default API URL (e.g., for Ollama on a remote host, Azure OpenAI, or proxies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
     /// Provider-level failover chain (tried in order when primary provider fails).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback: Vec<LlmFallback>,
@@ -155,6 +158,8 @@ pub struct LlmFallback {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -593,6 +598,7 @@ impl Default for LlmConfig {
             max_retries: 3,
             initial_retry_delay_ms: 200,
             request_timeout_ms: 60000,
+            base_url: None,
             fallback: Vec::new(),
         }
     }
@@ -1008,6 +1014,11 @@ impl Config {
         if let Some(ref provider_str) = self.llm.provider {
             let provider = Provider::from_str(provider_str)?;
 
+            // Keyless providers (e.g., Ollama) don't need API key resolution
+            if !provider.requires_api_key() {
+                return Ok((provider, String::new()));
+            }
+
             // Try SecretRef first
             if let Some(ref secret_ref) = self.llm.api_key {
                 match secret_ref.resolve() {
@@ -1042,6 +1053,7 @@ impl Config {
                         "OPENAI_API_KEY" => Provider::OpenAi,
                         "ANTHROPIC_API_KEY" => Provider::Anthropic,
                         "GEMINI_API_KEY" => Provider::Gemini,
+                        "OLLAMA_HOST" => Provider::Ollama,
                         _ => Provider::OpenRouter,
                     };
                     return Ok((provider, key));
@@ -1062,6 +1074,7 @@ impl Config {
                         "OPENAI_API_KEY" => Provider::OpenAi,
                         "ANTHROPIC_API_KEY" => Provider::Anthropic,
                         "GEMINI_API_KEY" => Provider::Gemini,
+                        "OLLAMA_HOST" => Provider::Ollama,
                         _ => Provider::OpenRouter,
                     };
                     return Ok((provider, key));
@@ -1143,6 +1156,7 @@ mod tests {
         assert_eq!(cfg.llm.model, "anthropic/claude-sonnet-4");
         assert!((cfg.llm.temperature - 0.7).abs() < f32::EPSILON);
         assert_eq!(cfg.llm.max_tokens, 4096);
+        assert!(cfg.llm.base_url.is_none());
         assert!(!cfg.heartbeat.enabled);
         assert_eq!(cfg.heartbeat.interval, "30m");
         assert_eq!(cfg.tools.default_timeout_ms, 30000);
@@ -1400,6 +1414,7 @@ model = "custom-model"
         assert_eq!(cfg.llm.initial_retry_delay_ms, 200);
         assert_eq!(cfg.llm.request_timeout_ms, 60000);
         assert_eq!(cfg.llm.api_key_env, "OPENROUTER_API_KEY");
+        assert!(cfg.llm.base_url.is_none());
     }
 
     #[test]
@@ -2354,5 +2369,110 @@ enabled = false
         let entry = SkillEntryConfig::default();
         assert!(entry.enabled);
         assert!(entry.env.is_empty());
+    }
+
+    #[test]
+    fn parse_config_with_base_url() {
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "llama3.3"
+base_url = "http://my-server:11434/v1/chat/completions"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.llm.provider.as_deref(), Some("ollama"));
+        assert_eq!(
+            cfg.llm.base_url.as_deref(),
+            Some("http://my-server:11434/v1/chat/completions")
+        );
+    }
+
+    #[test]
+    fn parse_ollama_config_no_api_key_required() {
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "llama3.3"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        let (provider, key) = cfg
+            .resolve_provider()
+            .expect("should resolve ollama without key");
+        assert_eq!(provider, Provider::Ollama);
+        assert!(key.is_empty());
+    }
+
+    #[test]
+    fn resolve_api_keys_ollama_returns_empty_key() {
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "llama3.3"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        let (provider, keys) = cfg.resolve_api_keys().expect("should resolve");
+        assert_eq!(provider, Provider::Ollama);
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].is_empty());
+    }
+
+    #[test]
+    fn parse_config_with_base_url_for_cloud_provider() {
+        let toml_str = r#"
+[llm]
+provider = "openai"
+model = "gpt-4.1"
+base_url = "https://my-azure-proxy.example.com/v1/chat/completions"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.llm.provider.as_deref(), Some("openai"));
+        assert_eq!(
+            cfg.llm.base_url.as_deref(),
+            Some("https://my-azure-proxy.example.com/v1/chat/completions")
+        );
+    }
+
+    #[test]
+    fn parse_realistic_ollama_config() {
+        let toml_str = r#"
+[user]
+name = "Mike"
+agent_name = "Buddy"
+
+[llm]
+provider = "ollama"
+model = "llama3.3"
+temperature = 0.7
+max_tokens = 4096
+
+[sandbox]
+enabled = true
+mode = "strict"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.llm.provider.as_deref(), Some("ollama"));
+        assert_eq!(cfg.llm.model, "llama3.3");
+        assert!(cfg.llm.api_key.is_none());
+        assert!(cfg.llm.api_keys.is_empty());
+    }
+
+    #[test]
+    fn parse_fallback_with_base_url() {
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "llama3.3"
+
+[[llm.fallback]]
+provider = "openai"
+model = "gpt-4.1-mini"
+base_url = "https://proxy.example.com/v1/chat/completions"
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(cfg.llm.fallback.len(), 1);
+        assert_eq!(
+            cfg.llm.fallback[0].base_url.as_deref(),
+            Some("https://proxy.example.com/v1/chat/completions")
+        );
     }
 }

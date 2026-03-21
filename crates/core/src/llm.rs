@@ -271,6 +271,7 @@ struct ProviderSlot {
     keys: Vec<String>,
     temperature: f32,
     max_tokens: u32,
+    base_url: Option<String>,
     cooldown: ProviderCooldown,
 }
 
@@ -289,6 +290,15 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
+    /// Effective API URL: config override → provider default.
+    fn effective_base_url(&self) -> &str {
+        self.config
+            .llm
+            .base_url
+            .as_deref()
+            .unwrap_or_else(|| self.provider.base_url())
+    }
+
     pub fn new(config: Config) -> Result<Self> {
         let (provider, mut keys) = config.resolve_api_keys()?;
         let debug_logging = config.debug.llm_logging;
@@ -365,6 +375,11 @@ impl LlmClient {
             }
         }
 
+        // Keyless providers (e.g., Ollama) don't need API keys
+        if slot_keys.is_empty() && !provider.requires_api_key() {
+            slot_keys.push(String::new());
+        }
+
         if slot_keys.is_empty() {
             bail!("No API keys found for fallback provider {provider}");
         }
@@ -375,6 +390,7 @@ impl LlmClient {
             keys: slot_keys,
             temperature: fb.temperature.unwrap_or(config.llm.temperature),
             max_tokens: fb.max_tokens.unwrap_or(config.llm.max_tokens),
+            base_url: fb.base_url.clone(),
             cooldown: ProviderCooldown::default(),
         })
     }
@@ -400,6 +416,7 @@ impl LlmClient {
             self.config.llm.model = slot.model.clone();
             self.config.llm.temperature = slot.temperature;
             self.config.llm.max_tokens = slot.max_tokens;
+            self.config.llm.base_url = slot.base_url.clone();
             self.active_slot_index = i;
             info!(
                 "Failover to provider {} (model: {})",
@@ -609,7 +626,7 @@ impl LlmClient {
 
         let fut =
             self.client
-                .post(self.provider.base_url())
+                .post(self.effective_base_url())
                 .headers(self.provider.build_headers(&self.api_key).map_err(|e| {
                     LlmError::Fatal {
                         source: e,
@@ -811,7 +828,7 @@ impl LlmClient {
 
         let response = self
             .client
-            .post(self.provider.base_url())
+            .post(self.effective_base_url())
             .headers(self.provider.build_headers(&self.api_key)?)
             .json(&request)
             .send()
@@ -1098,7 +1115,7 @@ impl LlmClient {
 
         let response = self
             .client
-            .post(self.provider.base_url())
+            .post(self.effective_base_url())
             .headers(self.provider.build_headers(&self.api_key)?)
             .json(&body)
             .send()
@@ -1740,5 +1757,39 @@ mod tests {
         assert_eq!(FailoverReason::Timeout.to_string(), "timeout");
         assert_eq!(FailoverReason::Format.to_string(), "format");
         assert_eq!(FailoverReason::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn llm_client_new_ollama_no_panic() {
+        let mut config = Config::default();
+        config.llm.provider = Some("ollama".to_string());
+        config.llm.model = "llama3.3".to_string();
+        let client = LlmClient::new(config);
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn effective_base_url_uses_config_override() {
+        let mut config = Config::default();
+        config.llm.provider = Some("ollama".to_string());
+        config.llm.model = "llama3.3".to_string();
+        config.llm.base_url = Some("http://custom:8080/v1/chat/completions".to_string());
+        let client = LlmClient::new(config).expect("should create client");
+        assert_eq!(
+            client.effective_base_url(),
+            "http://custom:8080/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn effective_base_url_falls_back_to_provider_default() {
+        let mut config = Config::default();
+        config.llm.provider = Some("ollama".to_string());
+        config.llm.model = "llama3.3".to_string();
+        let client = LlmClient::new(config).expect("should create client");
+        assert_eq!(
+            client.effective_base_url(),
+            "http://localhost:11434/v1/chat/completions"
+        );
     }
 }
