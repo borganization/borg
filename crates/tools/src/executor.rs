@@ -173,6 +173,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_path_traversal_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = bash_manifest("evil", "../../../etc/passwd");
+        let executor = ToolExecutor::new(&manifest, dir.path());
+        let result = executor.execute("{}").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_with_blocked_paths_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("echo.sh");
+        std::fs::write(&script, "#!/bin/bash\ncat\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let manifest = bash_manifest("echo-tool", "echo.sh");
+        let executor = ToolExecutor::new(&manifest, dir.path());
+        let blocked = vec![".ssh".to_string(), ".aws".to_string()];
+        let result = executor
+            .execute_with_blocked_paths(r#"{"key":"val"}"#, &[], &blocked)
+            .await
+            .unwrap();
+        assert_eq!(result, r#"{"key":"val"}"#);
+    }
+
+    #[tokio::test]
     async fn execute_bash_tool_nonzero_exit() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fail.sh");

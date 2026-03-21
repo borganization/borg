@@ -299,6 +299,86 @@ mod tests {
         assert!(config.channels.is_empty());
     }
 
+    #[test]
+    fn parse_interval_zero_seconds() {
+        let d = parse_interval("0s").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(0));
+    }
+
+    #[test]
+    fn parse_interval_zero_bare() {
+        let d = parse_interval("0").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(0));
+    }
+
+    #[test]
+    fn parse_interval_large_hours() {
+        let d = parse_interval("24h").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(24 * 3600));
+    }
+
+    #[test]
+    fn quiet_hours_wraparound_midnight() {
+        // Quiet hours that cross midnight: 22:00 - 06:00
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: Some("22:00".to_string()),
+            quiet_hours_end: Some("06:00".to_string()),
+            cron: None,
+            channels: Vec::new(),
+        };
+        let sched = test_scheduler(config, chrono_tz::UTC);
+        // This test just ensures the wrap-around path doesn't panic.
+        // The actual result depends on current UTC time.
+        let _ = sched.is_quiet_hours();
+    }
+
+    #[test]
+    fn quiet_hours_only_start_configured() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: Some("00:00".to_string()),
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+        let sched = test_scheduler(config, chrono_tz::UTC);
+        // Missing end => not quiet
+        assert!(!sched.is_quiet_hours());
+    }
+
+    #[tokio::test]
+    async fn scheduler_cancels_cleanly() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (_wake_tx, wake_rx) = mpsc::channel(1);
+        let (fire_tx, _fire_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        let handle =
+            tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // Cancel immediately
+        cancel.cancel();
+
+        // Should complete without hanging
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("scheduler did not shut down in time")
+            .expect("scheduler task panicked");
+    }
+
     #[tokio::test]
     async fn wake_signal_triggers_fire() {
         let config = HeartbeatConfig {
