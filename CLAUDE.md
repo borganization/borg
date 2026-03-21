@@ -331,6 +331,37 @@ request_timeout_ms = 120000
 
 **Database:** V3 migration adds `channel_sessions` and `channel_messages` tables.
 
+## Sender Pairing (Access Control)
+
+Gateway messages from unknown senders are gated behind a pairing approval system. When an unapproved sender messages the bot, they receive a pairing code challenge. The bot owner approves via CLI or TUI.
+
+**Flow:** Unknown sender → bot replies with pairing code + sender ID → owner runs `borg pairing approve <channel> <CODE>` → sender added to approved list.
+
+**DM Policy** (`dm_policy`): `pairing` (default, require approval) | `open` (allow all) | `disabled` (reject all). Per-channel overrides via `channel_policies` map.
+
+**Config:**
+```toml
+[gateway]
+dm_policy = "pairing"           # pairing | open | disabled
+pairing_ttl_secs = 3600         # code expiration (default 60 min)
+
+[gateway.channel_policies]
+telegram = "pairing"
+slack = "open"                  # trust Slack workspace auth
+```
+
+**CLI commands:**
+- `borg pairing` or `borg pairing list [channel]` — list pending pairing requests
+- `borg pairing approve <channel> <CODE>` — approve a sender by pairing code
+- `borg pairing revoke <channel> <sender_id>` — revoke an approved sender
+- `borg pairing approved [channel]` — list all approved senders
+
+**TUI command:** `/pairing` — shows pending requests and approved senders inline.
+
+**Database:** V13 migration adds `pairing_requests` and `approved_senders` tables.
+
+**Interception point:** `handler::invoke_agent()` in `crates/gateway/src/handler.rs` — single check for all channels (Telegram, Slack, Discord, Teams, Google Chat, Twilio, script-based).
+
 ## Lifecycle Hooks
 
 `crates/core/src/hooks.rs` — extensible hook system for intercepting agent loop events.

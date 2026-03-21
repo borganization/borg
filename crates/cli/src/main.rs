@@ -100,6 +100,11 @@ enum Commands {
     },
     /// Show token usage and cost breakdown for the current month
     Usage,
+    /// Manage sender pairing and access control for messaging channels
+    Pairing {
+        #[command(subcommand)]
+        action: Option<PairingAction>,
+    },
     /// Permanently delete all Borg data and uninstall the service
     Uninstall,
 }
@@ -176,6 +181,34 @@ enum ServiceAction {
     Uninstall,
     /// Show the daemon service status
     Status,
+}
+
+#[derive(Subcommand)]
+enum PairingAction {
+    /// List pending pairing requests
+    List {
+        /// Filter by channel name
+        channel: Option<String>,
+    },
+    /// Approve a pairing request by code
+    Approve {
+        /// Channel name (e.g. telegram, slack, discord)
+        channel: String,
+        /// Pairing code (8 characters)
+        code: String,
+    },
+    /// Revoke an approved sender
+    Revoke {
+        /// Channel name
+        channel: String,
+        /// Sender ID to revoke
+        sender_id: String,
+    },
+    /// List all approved senders
+    Approved {
+        /// Filter by channel name
+        channel: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -326,6 +359,15 @@ async fn main() -> Result<()> {
             Some(TasksAction::Resume { id }) => run_tasks_update_status(&id, "active")?,
         },
         Some(Commands::Usage) => run_usage()?,
+        Some(Commands::Pairing { action }) => match action {
+            Some(PairingAction::List { channel }) => run_pairing_list(channel.as_deref())?,
+            Some(PairingAction::Approve { channel, code }) => run_pairing_approve(&channel, &code)?,
+            Some(PairingAction::Revoke { channel, sender_id }) => {
+                run_pairing_revoke(&channel, &sender_id)?
+            }
+            Some(PairingAction::Approved { channel }) => run_pairing_approved(channel.as_deref())?,
+            None => run_pairing_list(None)?,
+        },
         Some(Commands::Uninstall) => run_uninstall()?,
     }
 
@@ -350,6 +392,77 @@ async fn run_gateway(shutdown: CancellationToken) -> Result<()> {
     let metrics = borg_core::telemetry::BorgMetrics::from_config(&config);
     let gateway = borg_gateway::GatewayServer::new(config, shutdown, metrics)?;
     gateway.run().await
+}
+
+fn run_pairing_list(channel: Option<&str>) -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    let requests = db.list_pairings(channel)?;
+    if requests.is_empty() {
+        println!("No pending pairing requests.");
+        return Ok(());
+    }
+    println!(
+        "{:<12} {:<20} {:<10} {:<20}",
+        "Channel", "Sender ID", "Code", "Expires"
+    );
+    println!("{}", "─".repeat(64));
+    for r in &requests {
+        let expires = chrono::DateTime::from_timestamp(r.expires_at, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| "?".into());
+        println!(
+            "{:<12} {:<20} {:<10} {:<20}",
+            r.channel_name, r.sender_id, r.code, expires
+        );
+    }
+    println!();
+    println!("Approve with: borg pairing approve <channel> <code>");
+    Ok(())
+}
+
+fn run_pairing_approve(channel: &str, code: &str) -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    let request = db.approve_pairing(channel, code)?;
+    println!(
+        "Approved {} sender {}.",
+        request.channel_name, request.sender_id
+    );
+    Ok(())
+}
+
+fn run_pairing_revoke(channel: &str, sender_id: &str) -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    if db.revoke_sender(channel, sender_id)? {
+        println!("Revoked {channel} sender {sender_id}.");
+    } else {
+        println!("No approved sender found for {channel} with ID {sender_id}.");
+    }
+    Ok(())
+}
+
+fn run_pairing_approved(channel: Option<&str>) -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    let senders = db.list_approved_senders(channel)?;
+    if senders.is_empty() {
+        println!("No approved senders.");
+        return Ok(());
+    }
+    println!(
+        "{:<12} {:<20} {:<16} {:<20}",
+        "Channel", "Sender ID", "Display Name", "Approved At"
+    );
+    println!("{}", "─".repeat(70));
+    for s in &senders {
+        let approved = chrono::DateTime::from_timestamp(s.approved_at, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| "?".into());
+        let name = s.display_name.as_deref().unwrap_or("—");
+        println!(
+            "{:<12} {:<20} {:<16} {:<20}",
+            s.channel_name, s.sender_id, name, approved
+        );
+    }
+    Ok(())
 }
 
 fn run_usage() -> Result<()> {

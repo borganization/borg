@@ -92,6 +92,10 @@ const COMMANDS: &[SlashCommandDef] = &[
         name: "/plan",
         description: "Send message in plan mode (review before proceeding)",
     },
+    SlashCommandDef {
+        name: "/pairing",
+        description: "Manage sender pairing",
+    },
 ];
 
 pub struct CommandPopup {

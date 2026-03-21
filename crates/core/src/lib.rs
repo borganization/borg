@@ -19,6 +19,7 @@ pub mod media;
 pub mod media_understanding;
 pub mod memory;
 pub mod multi_agent;
+pub mod pairing;
 pub mod policy;
 pub mod pricing;
 pub mod provider;
