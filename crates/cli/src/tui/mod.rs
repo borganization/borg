@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -133,6 +133,7 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
     }
@@ -197,9 +198,9 @@ pub async fn run() -> Result<()> {
     // don't respond to the query inside alternate screen).
     colors::query_terminal_bg();
 
-    // Setup terminal (no mouse capture — preserves native text selection)
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(EnableMouseCapture)?;
 
     // Guard ensures terminal is restored on any exit path (error or normal)
     let _guard = TerminalGuard;
@@ -207,6 +208,7 @@ pub async fn run() -> Result<()> {
     // Install panic hook that restores terminal before printing panic
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
+        let _ = stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
         original_hook(info);

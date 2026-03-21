@@ -101,6 +101,8 @@ pub struct App<'a> {
     pub schedule_popup: SchedulePopup,
     pub file_popup: FileSearchPopup,
     pub throbber_state: ThrobberState,
+    transcript_area: Rect,
+    scrollbar_dragging: bool,
 }
 
 impl<'a> App<'a> {
@@ -129,6 +131,8 @@ impl<'a> App<'a> {
             schedule_popup: SchedulePopup::new(),
             file_popup: FileSearchPopup::new(),
             throbber_state: ThrobberState::default(),
+            transcript_area: Rect::default(),
+            scrollbar_dragging: false,
         }
     }
 
@@ -138,9 +142,56 @@ impl<'a> App<'a> {
         }
     }
 
-    pub fn handle_mouse(&mut self, _event: crossterm::event::MouseEvent) -> AppAction {
-        // Mouse capture is disabled so the terminal handles native text selection.
-        // Scrolling is handled via PageUp/PageDown keys.
+    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> AppAction {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let area = self.transcript_area;
+        if area.width == 0 || area.height == 0 {
+            return AppAction::Continue;
+        }
+
+        let visible_height = area.height as usize;
+        let max_scroll = self.total_lines.saturating_sub(visible_height);
+
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_offset = (self.scroll_offset + 3).min(max_scroll);
+                self.auto_scroll = false;
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                if self.scroll_offset == 0 {
+                    self.auto_scroll = true;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let scrollbar_col = area.x + area.width - 1;
+                if event.column == scrollbar_col
+                    && event.row >= area.y
+                    && event.row < area.y + area.height
+                {
+                    self.scrollbar_dragging = true;
+                    let local_y = (event.row - area.y) as usize;
+                    self.scroll_offset =
+                        mouse_y_to_scroll_offset(local_y, visible_height, max_scroll);
+                    self.auto_scroll = self.scroll_offset == 0;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.scrollbar_dragging {
+                    let local_y = event.row.saturating_sub(area.y) as usize;
+                    let clamped = local_y.min(visible_height.saturating_sub(1));
+                    self.scroll_offset =
+                        mouse_y_to_scroll_offset(clamped, visible_height, max_scroll);
+                    self.auto_scroll = self.scroll_offset == 0;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.scrollbar_dragging = false;
+            }
+            _ => {}
+        }
+
         AppAction::Continue
     }
 
@@ -1164,6 +1215,7 @@ impl<'a> App<'a> {
     }
 
     fn render_transcript(&mut self, frame: &mut Frame, area: Rect) {
+        self.transcript_area = area;
         let width = area.width;
         let mut all_lines: Vec<Line<'static>> = Vec::new();
 
@@ -1376,6 +1428,16 @@ impl<'a> App<'a> {
     }
 }
 
+/// Map a mouse y-position within the scrollbar track to a scroll offset.
+/// Top of track (y=0) maps to max_scroll, bottom (y=visible_height-1) maps to 0.
+fn mouse_y_to_scroll_offset(y: usize, visible_height: usize, max_scroll: usize) -> usize {
+    if visible_height <= 1 {
+        return max_scroll;
+    }
+    let fraction = y as f64 / (visible_height - 1) as f64;
+    (((1.0 - fraction) * max_scroll as f64).round() as usize).min(max_scroll)
+}
+
 /// Estimate the number of screen rows after wrapping.
 fn estimate_wrapped_height(lines: &[Line<'_>], width: u16) -> usize {
     let w = width.max(1) as usize;
@@ -1522,23 +1584,187 @@ mod tests {
         assert_eq!(app.scroll_offset, 0);
     }
 
-    // --- Mouse events are ignored (native text selection) ---
+    // --- Mouse scrollbar interaction ---
+
+    fn mouse_event(
+        kind: crossterm::event::MouseEventKind,
+        col: u16,
+        row: u16,
+    ) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn setup_app_with_transcript() -> App<'static> {
+        let mut app = make_app();
+        app.transcript_area = Rect::new(0, 0, 80, 40);
+        app.total_lines = 100;
+        app
+    }
 
     #[test]
-    fn mouse_events_are_ignored() {
-        use crossterm::event::{MouseEvent, MouseEventKind};
-        let mut app = make_app();
+    fn mouse_scroll_up_increases_offset() {
+        use crossterm::event::MouseEventKind;
+        let mut app = setup_app_with_transcript();
 
-        let event = MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        };
-        let action = app.handle_mouse(event);
-        assert!(matches!(action, AppAction::Continue));
-        // Mouse capture is disabled — scroll offset unchanged
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 10, 10));
+        assert_eq!(app.scroll_offset, 3);
+        assert!(!app.auto_scroll);
+    }
+
+    #[test]
+    fn mouse_scroll_down_decreases_offset() {
+        use crossterm::event::MouseEventKind;
+        let mut app = setup_app_with_transcript();
+        app.scroll_offset = 10;
+        app.auto_scroll = false;
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 10, 10));
+        assert_eq!(app.scroll_offset, 7);
+        assert!(!app.auto_scroll);
+    }
+
+    #[test]
+    fn mouse_scroll_down_restores_auto_scroll_at_zero() {
+        use crossterm::event::MouseEventKind;
+        let mut app = setup_app_with_transcript();
+        app.scroll_offset = 2;
+        app.auto_scroll = false;
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 10, 10));
         assert_eq!(app.scroll_offset, 0);
+        assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn mouse_scroll_up_clamped_to_max_scroll() {
+        use crossterm::event::MouseEventKind;
+        let mut app = setup_app_with_transcript();
+        let max_scroll = app.total_lines.saturating_sub(app.transcript_area.height as usize);
+        app.scroll_offset = max_scroll;
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 10, 10));
+        assert_eq!(app.scroll_offset, max_scroll);
+    }
+
+    #[test]
+    fn click_scrollbar_bottom_sets_offset_zero() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = setup_app_with_transcript();
+        app.scroll_offset = 30;
+        let scrollbar_col = app.transcript_area.x + app.transcript_area.width - 1;
+        let bottom_row = app.transcript_area.y + app.transcript_area.height - 1;
+
+        app.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            scrollbar_col,
+            bottom_row,
+        ));
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn click_scrollbar_top_sets_max_offset() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = setup_app_with_transcript();
+        let max_scroll = app.total_lines.saturating_sub(app.transcript_area.height as usize);
+        let scrollbar_col = app.transcript_area.x + app.transcript_area.width - 1;
+        let top_row = app.transcript_area.y;
+
+        app.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            scrollbar_col,
+            top_row,
+        ));
+        assert_eq!(app.scroll_offset, max_scroll);
+    }
+
+    #[test]
+    fn click_outside_scrollbar_does_nothing() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = setup_app_with_transcript();
+        app.scroll_offset = 10;
+
+        app.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            10,
+            10,
+        ));
+        assert_eq!(app.scroll_offset, 10);
+        assert!(!app.scrollbar_dragging);
+    }
+
+    #[test]
+    fn drag_scrollbar_updates_offset() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = setup_app_with_transcript();
+        let scrollbar_col = app.transcript_area.x + app.transcript_area.width - 1;
+
+        // Start drag on scrollbar
+        app.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            scrollbar_col,
+            0,
+        ));
+        assert!(app.scrollbar_dragging);
+
+        // Drag to middle
+        app.handle_mouse(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            scrollbar_col,
+            20,
+        ));
+        let max_scroll = app.total_lines.saturating_sub(app.transcript_area.height as usize);
+        let expected = mouse_y_to_scroll_offset(20, 40, max_scroll);
+        assert_eq!(app.scroll_offset, expected);
+    }
+
+    #[test]
+    fn drag_without_scrollbar_flag_does_nothing() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = setup_app_with_transcript();
+        app.scroll_offset = 10;
+
+        app.handle_mouse(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            79,
+            20,
+        ));
+        assert_eq!(app.scroll_offset, 10);
+    }
+
+    #[test]
+    fn mouse_up_clears_dragging() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = setup_app_with_transcript();
+        app.scrollbar_dragging = true;
+
+        app.handle_mouse(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            0,
+            0,
+        ));
+        assert!(!app.scrollbar_dragging);
+    }
+
+    #[test]
+    fn mouse_ignored_before_first_render() {
+        use crossterm::event::MouseEventKind;
+        let mut app = make_app();
+        // transcript_area is Rect::default() (all zeros)
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 10, 10));
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn mouse_y_to_scroll_offset_degenerate_height() {
+        assert_eq!(mouse_y_to_scroll_offset(0, 0, 50), 50);
+        assert_eq!(mouse_y_to_scroll_offset(0, 1, 50), 50);
     }
 
     // --- PageUp / PageDown ---
