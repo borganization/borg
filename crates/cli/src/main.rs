@@ -28,8 +28,6 @@ struct Cli {
 enum Commands {
     /// Start Borg — interactive TUI with auto-gateway (default)
     Start,
-    /// Start interactive chat (alias for start)
-    Chat,
     /// Stop the background daemon service
     Stop,
     /// Restart the background daemon service
@@ -49,21 +47,12 @@ enum Commands {
     },
     /// Run diagnostics to check configuration, connectivity, and dependencies
     Doctor,
-    /// Start the webhook gateway server for messaging channels
-    Gateway,
     /// Run as a background daemon (executes scheduled tasks and heartbeat)
     Daemon,
     /// Manage the daemon as a system service
     Service {
         #[command(subcommand)]
         action: ServiceAction,
-    },
-    /// List built-in and user-created tools
-    Tools,
-    /// Manage skills
-    Skills {
-        #[command(subcommand)]
-        action: Option<SkillsAction>,
     },
     /// Set up an integration (e.g. borg add telegram)
     Add {
@@ -77,11 +66,6 @@ enum Commands {
     },
     /// List all available integrations and their status
     Plugins,
-    /// List agent roles or show role details
-    Agents {
-        #[command(subcommand)]
-        action: Option<AgentsAction>,
-    },
     /// Show or update configuration settings
     Settings {
         #[command(subcommand)]
@@ -172,15 +156,6 @@ enum TasksAction {
 }
 
 #[derive(Subcommand)]
-enum AgentsAction {
-    /// Show details of a specific role
-    Show {
-        /// Role name
-        name: String,
-    },
-}
-
-#[derive(Subcommand)]
 enum ServiceAction {
     /// Uninstall the daemon service
     Uninstall,
@@ -216,22 +191,6 @@ enum PairingAction {
     },
 }
 
-#[derive(Subcommand)]
-enum SkillsAction {
-    /// Install missing dependencies for a skill
-    Install {
-        /// Skill name
-        name: String,
-    },
-    /// Show detailed info about a skill
-    Info {
-        /// Skill name
-        name: String,
-    },
-    /// Audit all skill dependencies
-    Check,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
@@ -244,10 +203,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let tui_mode = matches!(
-        cli.command,
-        Some(Commands::Start) | Some(Commands::Chat) | None
-    );
+    let tui_mode = matches!(cli.command, Some(Commands::Start) | None);
 
     // _guard and _telemetry_guard must live for the program's duration to flush logs
     let _guard;
@@ -336,7 +292,7 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Commands::Start) | Some(Commands::Chat) | None => {
+        Some(Commands::Start) | None => {
             ensure_onboarded()?;
             repl::run().await?;
         }
@@ -345,21 +301,14 @@ async fn main() -> Result<()> {
         Some(Commands::Init) => init_data_dir()?,
         Some(Commands::Ask { message, yes, json }) => repl::one_shot(&message, yes, json).await?,
         Some(Commands::Doctor) => run_doctor()?,
-        Some(Commands::Gateway) => run_gateway(shutdown).await?,
         Some(Commands::Daemon) => service::run_daemon(shutdown).await?,
         Some(Commands::Service { action }) => match action {
             ServiceAction::Uninstall => service::uninstall_service()?,
             ServiceAction::Status => service::service_status()?,
         },
-        Some(Commands::Tools) => run_tools()?,
-        Some(Commands::Skills { action }) => run_skills(action)?,
         Some(Commands::Add { name }) => plugins::add_plugin(&name)?,
         Some(Commands::Remove { name }) => plugins::remove_plugin(&name)?,
         Some(Commands::Plugins) => plugins::list_plugins()?,
-        Some(Commands::Agents { action }) => match action {
-            Some(AgentsAction::Show { name }) => run_agents_show(&name)?,
-            None => run_agents_list()?,
-        },
         Some(Commands::Settings { action }) => match action {
             Some(SettingsAction::Set { key, value }) => run_settings_set(&key, &value)?,
             Some(SettingsAction::Get { key }) => run_settings_get(&key)?,
@@ -407,13 +356,6 @@ fn ensure_onboarded() -> Result<()> {
         tracing::warn!("Auto-start service: {e}");
     }
     Ok(())
-}
-
-async fn run_gateway(shutdown: CancellationToken) -> Result<()> {
-    let config = borg_core::config::Config::load()?;
-    let metrics = borg_core::telemetry::BorgMetrics::from_config(&config);
-    let gateway = borg_gateway::GatewayServer::new(config, shutdown, metrics, None)?;
-    gateway.run().await
 }
 
 async fn run_wake() -> Result<()> {
@@ -624,102 +566,6 @@ fn harden_data_dir(_data_dir: &std::path::Path) {
     // No-op on non-Unix platforms
 }
 
-fn run_tools() -> Result<()> {
-    let config = borg_core::config::Config::load().unwrap_or_default();
-
-    println!("Built-in tools:");
-    let builtins = [
-        ("write_memory", "Write/append to memory files"),
-        ("read_memory", "Read a memory file"),
-        ("list_tools", "List user-created tools"),
-        ("apply_patch", "Create/update/delete files via patch DSL"),
-        ("create_tool", "Create/modify user tools via patch DSL"),
-        ("run_shell", "Execute a shell command"),
-        ("list_skills", "List skills with status"),
-        (
-            "apply_skill_patch",
-            "Create/modify skill files via patch DSL",
-        ),
-        ("read_pdf", "Extract text from a PDF file"),
-        ("create_channel", "Create/modify channel integrations"),
-        ("list_channels", "List messaging channels"),
-        ("manage_tasks", "Manage scheduled tasks"),
-    ];
-    for (name, desc) in &builtins {
-        println!("  {name:20} {desc}");
-    }
-    if config.web.enabled {
-        println!("  {:20} Fetch a URL", "web_fetch");
-        println!("  {:20} Search the web", "web_search");
-    }
-    if config.security.host_audit {
-        println!("  {:20} Run host security audit", "security_audit");
-    }
-
-    if let Ok(registry) = borg_tools::registry::ToolRegistry::new() {
-        let user_tools = registry.list_tools();
-        if !user_tools.is_empty() {
-            println!();
-            println!("User tools:");
-            for tool in &user_tools {
-                println!("  {tool}");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn run_skills(action: Option<SkillsAction>) -> Result<()> {
-    let config = borg_core::config::Config::load().unwrap_or_default();
-    let creds = config.resolve_credentials();
-
-    match action {
-        None => {
-            let skills = borg_core::skills::load_all_skills(&creds, &config.skills)?;
-            if skills.is_empty() {
-                println!("No skills found.");
-            } else {
-                println!("Skills:");
-                for skill in &skills {
-                    println!("  {}", skill.summary_line());
-                }
-            }
-        }
-        Some(SkillsAction::Info { name }) => {
-            let skills = borg_core::skills::load_all_skills(&creds, &config.skills)?;
-            match skills.iter().find(|s| s.manifest.name == name) {
-                Some(skill) => print!("{}", borg_core::skills::format_skill_info(skill)),
-                None => println!("Skill '{name}' not found."),
-            }
-        }
-        Some(SkillsAction::Check) => {
-            let report = borg_core::skills::check_all_skills(&creds, &config.skills)?;
-            println!("Skills Dependency Check:");
-            println!("{report}");
-        }
-        Some(SkillsAction::Install { name }) => {
-            let skills = borg_core::skills::load_all_skills(&creds, &config.skills)?;
-            match skills.iter().find(|s| s.manifest.name == name) {
-                Some(skill) => {
-                    if skill.manifest.install.is_empty() {
-                        println!("Skill '{name}' has no install specs.");
-                    } else {
-                        println!("Installing dependencies for '{name}':");
-                        let installed = borg_core::skills::install_skill_deps(skill)?;
-                        if installed.is_empty() {
-                            println!("No new dependencies installed.");
-                        } else {
-                            println!("Installed: {}", installed.join(", "));
-                        }
-                    }
-                }
-                None => println!("Skill '{name}' not found."),
-            }
-        }
-    }
-    Ok(())
-}
-
 fn run_settings_show() -> Result<()> {
     let resolver = borg_core::settings::SettingsResolver::load()?;
     let all = resolver.list_all()?;
@@ -853,54 +699,6 @@ fn truncate_str(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-fn run_agents_list() -> Result<()> {
-    let roles = borg_core::multi_agent::roles::list_all_roles();
-    if roles.is_empty() {
-        println!("No agent roles configured.");
-    } else {
-        println!("{:15} {:50} {:6} TOOLS", "NAME", "DESCRIPTION", "TEMP");
-        for role in &roles {
-            let temp = role
-                .temperature
-                .map(|t| format!("{t:.1}"))
-                .unwrap_or_else(|| "-".to_string());
-            let tools = role
-                .tools_allowed
-                .as_ref()
-                .map(|t| t.join(", "))
-                .unwrap_or_else(|| "all".to_string());
-            let desc = truncate_str(&role.description, 50);
-            println!("{:15} {:50} {:6} {}", role.name, desc, temp, tools);
-        }
-    }
-    Ok(())
-}
-
-fn run_agents_show(name: &str) -> Result<()> {
-    match borg_core::multi_agent::roles::load_role(name) {
-        Some(role) => {
-            println!("Role: {}", role.name);
-            println!("Description: {}", role.description);
-            if let Some(model) = &role.model {
-                println!("Model: {model}");
-            }
-            if let Some(temp) = role.temperature {
-                println!("Temperature: {temp}");
-            }
-            if let Some(tools) = &role.tools_allowed {
-                println!("Tools: {}", tools.join(", "));
-            } else {
-                println!("Tools: all");
-            }
-            if let Some(instructions) = &role.system_instructions {
-                println!("Instructions: {instructions}");
-            }
-        }
-        None => println!("Role '{name}' not found."),
-    }
-    Ok(())
-}
-
 fn run_uninstall() -> Result<()> {
     let data_dir = borg_core::config::Config::data_dir()?;
 
@@ -948,15 +746,8 @@ fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
 
     let config_path = data_dir.join("config.toml");
     if !config_path.exists() {
-        let config_content = onboarding::generate_config(
-            "anthropic/claude-sonnet-4",
-            "openrouter",
-            "",
-            "",
-            0,
-            &onboarding::KeyStorage::EnvFile,
-            None,
-        )?;
+        let config_content =
+            onboarding::generate_config("anthropic/claude-sonnet-4", "openrouter", "", "", false)?;
         std::fs::write(&config_path, config_content)?;
         println!("  Created {}", config_path.display());
     }
@@ -1043,48 +834,6 @@ mod tests {
     }
 
     // -- Clap parsing tests --
-
-    #[test]
-    fn test_parse_tools_command() {
-        let cli = Cli::try_parse_from(["borg", "tools"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Tools)));
-    }
-
-    #[test]
-    fn test_parse_skills_command() {
-        let cli = Cli::try_parse_from(["borg", "skills"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Skills { action: None })
-        ));
-    }
-
-    #[test]
-    fn test_parse_skills_subcommands() {
-        let cli = Cli::try_parse_from(["borg", "skills", "install", "docker"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Skills {
-                action: Some(SkillsAction::Install { .. })
-            })
-        ));
-
-        let cli = Cli::try_parse_from(["borg", "skills", "info", "github"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Skills {
-                action: Some(SkillsAction::Info { .. })
-            })
-        ));
-
-        let cli = Cli::try_parse_from(["borg", "skills", "check"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Skills {
-                action: Some(SkillsAction::Check)
-            })
-        ));
-    }
 
     #[test]
     fn test_parse_settings_show() {
