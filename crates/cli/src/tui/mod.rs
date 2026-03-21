@@ -89,34 +89,27 @@ use borg_heartbeat::scheduler::{HeartbeatEvent, HeartbeatScheduler};
 use app::{App, AppAction};
 use history::HistoryCell;
 
-/// Spawn the gateway server and/or iMessage monitor if channels are installed.
-/// Returns `true` if anything was actually spawned.
+/// Spawn the gateway server and/or iMessage monitor.
+/// Always starts the gateway (native channels are detected via credentials inside GatewayServer).
 fn spawn_gateway(config: &Config, shutdown: CancellationToken, metrics: BorgMetrics) -> bool {
-    let mut spawned = false;
-
-    if let Ok(registry) = borg_gateway::ChannelRegistry::new() {
-        if !registry.list_channels().is_empty() {
-            let gw_config = config.clone();
-            let gw_shutdown = shutdown.clone();
-            let gw_metrics = metrics;
-            tokio::spawn(async move {
-                match borg_gateway::GatewayServer::new(gw_config, gw_shutdown, gw_metrics, None) {
-                    Ok(server) => {
-                        if let Err(e) = server.run().await {
-                            let msg = e.to_string();
-                            if msg.contains("address already in use") || msg.contains("AddrInUse") {
-                                tracing::warn!("Gateway: {e}");
-                            } else {
-                                tracing::error!("Gateway exited with error: {e}");
-                            }
-                        }
+    let gw_config = config.clone();
+    let gw_shutdown = shutdown.clone();
+    let gw_metrics = metrics;
+    tokio::spawn(async move {
+        match borg_gateway::GatewayServer::new(gw_config, gw_shutdown, gw_metrics, None) {
+            Ok(server) => {
+                if let Err(e) = server.run().await {
+                    let msg = e.to_string();
+                    if msg.contains("address already in use") || msg.contains("AddrInUse") {
+                        tracing::warn!("Gateway: {e}");
+                    } else {
+                        tracing::error!("Gateway exited with error: {e}");
                     }
-                    Err(e) => tracing::error!("Failed to initialize gateway: {e}"),
                 }
-            });
-            spawned = true;
+            }
+            Err(e) => tracing::error!("Failed to initialize gateway: {e}"),
         }
-    }
+    });
 
     // Start native iMessage monitor if channel is installed (mirrors service.rs)
     #[cfg(target_os = "macos")]
@@ -136,7 +129,6 @@ fn spawn_gateway(config: &Config, shutdown: CancellationToken, metrics: BorgMetr
                             Err(e) => tracing::warn!("iMessage monitor failed: {e}"),
                         }
                     });
-                    spawned = true;
                 }
                 borg_gateway::imessage::probe::ProbeStatus::NoDiskAccess => {
                     tracing::warn!("iMessage: Full Disk Access required (System Settings > Privacy & Security). Skipping monitor.");
@@ -148,7 +140,7 @@ fn spawn_gateway(config: &Config, shutdown: CancellationToken, metrics: BorgMetr
         }
     }
 
-    spawned
+    true
 }
 
 /// Restart the gateway: cancel old token, reload config, spawn fresh server.
@@ -169,11 +161,8 @@ fn restart_gateway(gateway_shutdown: &Arc<Mutex<CancellationToken>>) -> String {
     // Reload config and spawn
     match Config::load() {
         Ok(config) => {
-            if spawn_gateway(&config, new_token, BorgMetrics::noop()) {
-                "Gateway restarted.".to_string()
-            } else {
-                "No channels installed — gateway not started.".to_string()
-            }
+            spawn_gateway(&config, new_token, BorgMetrics::noop());
+            "Gateway restarted.".to_string()
         }
         Err(e) => format!("Gateway restart failed: could not reload config: {e}"),
     }

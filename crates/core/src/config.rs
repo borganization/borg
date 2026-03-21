@@ -1141,6 +1141,42 @@ impl Config {
             .or_else(|| std::env::var(name).ok())
             .filter(|t| !t.is_empty())
     }
+
+    /// Returns true if any native channel credentials are configured.
+    pub fn has_any_native_channel(&self) -> bool {
+        const NATIVE_KEYS: &[&str] = &[
+            "TELEGRAM_BOT_TOKEN",
+            "SLACK_BOT_TOKEN",
+            "DISCORD_BOT_TOKEN",
+            "TWILIO_ACCOUNT_SID",
+            "TEAMS_APP_ID",
+            "GOOGLE_CHAT_SERVICE_TOKEN",
+        ];
+        NATIVE_KEYS
+            .iter()
+            .any(|k| self.resolve_credential_or_env(k).is_some())
+    }
+
+    /// Returns a list of detected native channels with their names and descriptions.
+    pub fn detected_native_channels(&self) -> Vec<(&'static str, &'static str)> {
+        const NATIVE_CHANNELS: &[(&str, &str, &str)] = &[
+            ("telegram", "Telegram Bot API (native)", "TELEGRAM_BOT_TOKEN"),
+            ("slack", "Slack Bot API (native)", "SLACK_BOT_TOKEN"),
+            ("discord", "Discord Bot (native)", "DISCORD_BOT_TOKEN"),
+            ("twilio", "Twilio SMS/WhatsApp (native)", "TWILIO_ACCOUNT_SID"),
+            ("teams", "Microsoft Teams (native)", "TEAMS_APP_ID"),
+            (
+                "google-chat",
+                "Google Chat (native)",
+                "GOOGLE_CHAT_SERVICE_TOKEN",
+            ),
+        ];
+        NATIVE_CHANNELS
+            .iter()
+            .filter(|(_, _, key)| self.resolve_credential_or_env(key).is_some())
+            .map(|(name, desc, _)| (*name, *desc))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -2474,5 +2510,48 @@ base_url = "https://proxy.example.com/v1/chat/completions"
             cfg.llm.fallback[0].base_url.as_deref(),
             Some("https://proxy.example.com/v1/chat/completions")
         );
+    }
+
+    #[test]
+    fn has_any_native_channel_detects_telegram_env() {
+        // Use a unique env var name to avoid conflicts with real credentials
+        std::env::set_var("TELEGRAM_BOT_TOKEN", "test-token-for-unit-test");
+        let cfg = Config::default();
+        assert!(cfg.has_any_native_channel());
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+    }
+
+    #[test]
+    fn has_any_native_channel_false_when_no_creds() {
+        // Temporarily clear all native channel env vars
+        let keys = [
+            "TELEGRAM_BOT_TOKEN",
+            "SLACK_BOT_TOKEN",
+            "DISCORD_BOT_TOKEN",
+            "TWILIO_ACCOUNT_SID",
+            "TEAMS_APP_ID",
+            "GOOGLE_CHAT_SERVICE_TOKEN",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in &keys {
+            std::env::remove_var(k);
+        }
+        let cfg = Config::default();
+        assert!(!cfg.has_any_native_channel());
+        // Restore
+        for (k, v) in saved {
+            if let Some(val) = v {
+                std::env::set_var(k, val);
+            }
+        }
+    }
+
+    #[test]
+    fn detected_native_channels_returns_configured() {
+        std::env::set_var("SLACK_BOT_TOKEN", "xoxb-test-token");
+        let cfg = Config::default();
+        let channels = cfg.detected_native_channels();
+        assert!(channels.iter().any(|(name, _)| *name == "slack"));
+        std::env::remove_var("SLACK_BOT_TOKEN");
     }
 }
