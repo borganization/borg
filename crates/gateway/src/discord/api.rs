@@ -1,12 +1,15 @@
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
 use reqwest::Client;
+use serde::Serialize;
 use serde_json::json;
 use tracing::warn;
 
 use super::types::{CreateMessageRequest, CurrentUser, InteractionResponse};
 use crate::chunker;
+use crate::commands::{CommandDef, NativeCommandRegistration};
 use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
@@ -18,6 +21,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct DiscordClient {
     client: Client,
     token: String,
+    application_id: Option<String>,
 }
 
 impl DiscordClient {
@@ -28,7 +32,13 @@ impl DiscordClient {
                 .build()
                 .context("Failed to build Discord HTTP client")?,
             token: token.to_string(),
+            application_id: None,
         })
+    }
+
+    /// Set the application ID (typically the bot user ID from get_current_user).
+    pub fn set_application_id(&mut self, id: String) {
+        self.application_id = Some(id);
     }
 
     /// Get the current bot user via GET /users/@me.
@@ -215,6 +225,38 @@ impl DiscordClient {
         Ok(())
     }
 
+    /// Register global application commands with Discord.
+    /// Uses `PUT /applications/{app_id}/commands` to bulk overwrite all commands.
+    pub async fn register_global_commands(
+        &self,
+        application_id: &str,
+        commands: &[DiscordCommandPayload],
+    ) -> Result<()> {
+        let url = format!("{DISCORD_API_BASE}/applications/{application_id}/commands");
+        let token = self.token.clone();
+        let body = serde_json::to_value(commands).context("Failed to serialize commands")?;
+        let client = self.client.clone();
+
+        self.send_with_retry(move || {
+            let client = client.clone();
+            let url = url.clone();
+            let token = token.clone();
+            let body = body.clone();
+            async move {
+                client
+                    .put(&url)
+                    .header("Authorization", format!("Bot {token}"))
+                    .json(&body)
+                    .send()
+                    .await
+                    .context("Discord API request failed")
+            }
+        })
+        .await?;
+
+        Ok(())
+    }
+
     /// Send a request with 429 rate-limit retry logic using the shared retry helper.
     async fn send_with_retry<F, Fut>(&self, make_request: F) -> Result<reqwest::Response>
     where
@@ -235,6 +277,37 @@ impl DiscordClient {
         }
 
         Ok(resp)
+    }
+}
+
+/// Payload for registering a Discord global application command.
+#[derive(Serialize, Clone)]
+pub struct DiscordCommandPayload {
+    pub name: String,
+    pub description: String,
+    /// Command type: 1 = CHAT_INPUT (slash command)
+    #[serde(rename = "type")]
+    pub command_type: u8,
+}
+
+#[async_trait]
+impl NativeCommandRegistration for DiscordClient {
+    async fn register_commands(&self, commands: &[CommandDef]) -> Result<()> {
+        let app_id = self
+            .application_id
+            .as_deref()
+            .context("Discord application_id not set")?;
+
+        let payloads: Vec<DiscordCommandPayload> = commands
+            .iter()
+            .map(|c| DiscordCommandPayload {
+                name: c.name.to_string(),
+                description: c.description.to_string(),
+                command_type: 1,
+            })
+            .collect();
+
+        self.register_global_commands(app_id, &payloads).await
     }
 }
 
