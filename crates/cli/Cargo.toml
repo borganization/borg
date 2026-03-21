@@ -37,6 +37,8 @@ futures = { workspace = true }
 serde_json = { workspace = true }
 which = { workspace = true }
 uuid = { workspace = true }
+iana-time-zone = "0.1"
+reqwest = { workspace = true }
 tokio-util = "0.7"
 tracing-appender = { workspace = true }
 tempfile = { workspace = true }

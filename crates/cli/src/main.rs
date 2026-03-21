@@ -105,6 +105,8 @@ enum Commands {
         #[command(subcommand)]
         action: Option<PairingAction>,
     },
+    /// Trigger an immediate heartbeat check-in
+    Wake,
     /// Permanently delete all Borg data and uninstall the service
     Uninstall,
 }
@@ -368,6 +370,7 @@ async fn main() -> Result<()> {
             Some(PairingAction::Approved { channel }) => run_pairing_approved(channel.as_deref())?,
             None => run_pairing_list(None)?,
         },
+        Some(Commands::Wake) => run_wake().await?,
         Some(Commands::Uninstall) => run_uninstall()?,
     }
 
@@ -390,8 +393,31 @@ fn ensure_onboarded() -> Result<()> {
 async fn run_gateway(shutdown: CancellationToken) -> Result<()> {
     let config = borg_core::config::Config::load()?;
     let metrics = borg_core::telemetry::BorgMetrics::from_config(&config);
-    let gateway = borg_gateway::GatewayServer::new(config, shutdown, metrics)?;
+    let gateway = borg_gateway::GatewayServer::new(config, shutdown, metrics, None)?;
     gateway.run().await
+}
+
+async fn run_wake() -> Result<()> {
+    let config = borg_core::config::Config::load()?;
+    let url = format!(
+        "http://{}:{}/internal/wake",
+        config.gateway.host, config.gateway.port
+    );
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => println!("Wake signal sent."),
+        Ok(r) => println!("Wake failed: {}", r.status()),
+        Err(_) => {
+            println!("Could not reach daemon. Is it running?");
+            println!("Start it with: borg service start");
+        }
+    }
+    Ok(())
 }
 
 fn run_pairing_list(channel: Option<&str>) -> Result<()> {
@@ -875,6 +901,7 @@ fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
             "",
             0,
             &onboarding::KeyStorage::EnvFile,
+            None,
         )?;
         std::fs::write(&config_path, config_content)?;
         println!("  Created {}", config_path.display());
