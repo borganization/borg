@@ -400,6 +400,27 @@ impl Agent {
         }
     }
 
+    /// Log a message and push it to history + SQLite in one step.
+    fn log_and_persist(&mut self, msg: Message) {
+        log_message(&msg);
+        self.persist_message(msg);
+    }
+
+    /// Record a skipped/cancelled tool call as a tool_result message.
+    fn skip_tool_call(&mut self, tool_call_id: &str, reason: &str) {
+        self.log_and_persist(Message::tool_result(tool_call_id, reason));
+    }
+
+    /// Truncate and optionally redact secrets from raw tool output.
+    fn truncate_and_redact(&self, raw: &str) -> String {
+        let truncated = truncate_output(raw, TOOL_OUTPUT_MAX_TOKENS);
+        if self.config.security.secret_detection {
+            redact_secrets(&truncated)
+        } else {
+            truncated
+        }
+    }
+
     /// Push a message to history and persist it to SQLite for crash recovery.
     fn persist_message(&mut self, msg: Message) {
         let session_id = self.session.meta.id.clone();
@@ -745,8 +766,7 @@ impl Agent {
         cancel: CancellationToken,
     ) -> Result<()> {
         let msg = Message::user(user_input);
-        log_message(&msg);
-        self.persist_message(msg);
+        self.log_and_persist(msg);
         self.turn_count += 1;
         self.run_agent_loop(event_tx, cancel).await
     }
@@ -758,8 +778,7 @@ impl Agent {
         event_tx: mpsc::Sender<AgentEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        log_message(&msg);
-        self.persist_message(msg);
+        self.log_and_persist(msg);
         self.turn_count += 1;
         self.run_agent_loop(event_tx, cancel).await
     }
@@ -965,9 +984,7 @@ impl Agent {
                         let text_content = tag_filter.full_clean();
                         if !text_content.is_empty() {
                             let content = format!("{text_content}\n\n[response interrupted]");
-                            let msg = Message::assistant(&content);
-                            log_message(&msg);
-                            self.persist_message(msg);
+                            self.log_and_persist(Message::assistant(&content));
                         }
                         let _ = event_tx.send(AgentEvent::TurnComplete).await;
                         let _ = stream_handle.await;
@@ -1075,9 +1092,7 @@ impl Agent {
                 };
                 self.hook_registry.dispatch(&hook_ctx);
 
-                let msg = Message::assistant(&text_content);
-                log_message(&msg);
-                self.persist_message(msg);
+                self.log_and_persist(Message::assistant(&text_content));
                 self.auto_save();
                 self.metrics.agent_turns.add(1, &[]);
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
@@ -1116,9 +1131,7 @@ impl Agent {
                 } else {
                     format!("{text_content}\n\n[incomplete tool calls discarded]")
                 };
-                let msg = Message::assistant(&content);
-                log_message(&msg);
-                self.persist_message(msg);
+                self.log_and_persist(Message::assistant(&content));
                 let _ = event_tx.send(AgentEvent::TurnComplete).await;
                 return Ok(());
             }
@@ -1140,8 +1153,7 @@ impl Agent {
                     timestamp: Some(chrono::Local::now().to_rfc3339()),
                 }
             };
-            log_message(&assistant_msg);
-            self.persist_message(assistant_msg);
+            self.log_and_persist(assistant_msg);
 
             let (sequential, parallel): (Vec<_>, Vec<_>) = tc
                 .iter()
@@ -1160,10 +1172,7 @@ impl Agent {
     ) {
         for tool_call in tool_calls {
             if cancel.is_cancelled() {
-                let remaining_msg =
-                    Message::tool_result(&tool_call.id, "[tool call cancelled by user]");
-                log_message(&remaining_msg);
-                self.persist_message(remaining_msg);
+                self.skip_tool_call(&tool_call.id, "[tool call cancelled by user]");
                 continue;
             }
 
@@ -1181,9 +1190,7 @@ impl Agent {
                 },
             };
             if matches!(self.hook_registry.dispatch(&hook_ctx), HookAction::Skip) {
-                let skip_msg = Message::tool_result(&tool_call.id, "[tool call skipped by hook]");
-                log_message(&skip_msg);
-                self.persist_message(skip_msg);
+                self.skip_tool_call(&tool_call.id, "[tool call skipped by hook]");
                 continue;
             }
 
@@ -1192,9 +1199,7 @@ impl Agent {
             match self.rate_guard.record(action_type) {
                 RateDecision::Block(reason) => {
                     warn!("Rate limit blocked tool call '{name}': {reason}");
-                    let msg = Message::tool_result(&tool_call.id, format!("Error: {reason}"));
-                    log_message(&msg);
-                    self.persist_message(msg);
+                    self.skip_tool_call(&tool_call.id, &format!("Error: {reason}"));
                     continue;
                 }
                 RateDecision::Warn(reason) => {
@@ -1218,19 +1223,14 @@ impl Agent {
                     match confirm_rx.await {
                         Ok(true) => {}
                         Ok(false) => {
-                            let msg =
-                                Message::tool_result(&tool_call.id, "Operation denied by user.");
-                            log_message(&msg);
-                            self.persist_message(msg);
+                            self.skip_tool_call(&tool_call.id, "Operation denied by user.");
                             continue;
                         }
                         Err(_) => {
-                            let msg = Message::tool_result(
+                            self.skip_tool_call(
                                 &tool_call.id,
                                 "Operation cancelled (no response).",
                             );
-                            log_message(&msg);
-                            self.persist_message(msg);
                             continue;
                         }
                     }
@@ -1257,67 +1257,39 @@ impl Agent {
             // Sanitize tool name for XML embedding to prevent injection
             let safe_name = crate::xml_util::escape_xml_attr(name);
 
-            let msg = match tool_output {
-                ToolOutput::Text(raw_result) => {
-                    let truncated = truncate_output(&raw_result, TOOL_OUTPUT_MAX_TOKENS);
-                    let redacted = if self.config.security.secret_detection {
-                        redact_secrets(&truncated)
-                    } else {
-                        truncated
-                    };
-                    let result = format!(
-                        "<tool_output name=\"{safe_name}\" trust=\"external\">\n{redacted}\n</tool_output>"
-                    );
-                    Self::fire_after_tool_hook(
-                        &mut self.hook_registry,
-                        &self.session.meta.id,
-                        self.turn_count,
-                        name,
-                        &result,
-                    );
-                    let _ = event_tx
-                        .send(AgentEvent::ToolResult {
-                            name: name.clone(),
-                            result: redacted,
-                        })
-                        .await;
-                    Message::tool_result(&tool_call.id, &result)
-                }
-                ToolOutput::Multimodal { text, parts } => {
-                    let truncated = truncate_output(&text, TOOL_OUTPUT_MAX_TOKENS);
-                    let redacted = if self.config.security.secret_detection {
-                        redact_secrets(&truncated)
-                    } else {
-                        truncated
-                    };
-                    let xml_text = format!(
-                        "<tool_output name=\"{safe_name}\" trust=\"external\">\n{redacted}\n</tool_output>"
-                    );
-                    Self::fire_after_tool_hook(
-                        &mut self.hook_registry,
-                        &self.session.meta.id,
-                        self.turn_count,
-                        name,
-                        &xml_text,
-                    );
-                    let _ = event_tx
-                        .send(AgentEvent::ToolResult {
-                            name: name.clone(),
-                            result: redacted,
-                        })
-                        .await;
-                    // Build multimodal message: XML-wrapped text + image parts
-                    let mut msg_parts = vec![ContentPart::Text(xml_text)];
-                    for part in parts {
-                        if !matches!(&part, ContentPart::Text(_)) {
-                            msg_parts.push(part);
-                        }
-                    }
-                    Message::tool_result_multimodal(&tool_call.id, msg_parts)
-                }
+            let (raw_text, extra_parts) = match tool_output {
+                ToolOutput::Text(t) => (t, None),
+                ToolOutput::Multimodal { text, parts } => (text, Some(parts)),
             };
-            log_message(&msg);
-            self.persist_message(msg);
+            let redacted = self.truncate_and_redact(&raw_text);
+            let xml = format!(
+                "<tool_output name=\"{safe_name}\" trust=\"external\">\n{redacted}\n</tool_output>"
+            );
+            Self::fire_after_tool_hook(
+                &mut self.hook_registry,
+                &self.session.meta.id,
+                self.turn_count,
+                name,
+                &xml,
+            );
+            let _ = event_tx
+                .send(AgentEvent::ToolResult {
+                    name: name.clone(),
+                    result: redacted,
+                })
+                .await;
+            let msg = if let Some(parts) = extra_parts {
+                let mut msg_parts = vec![ContentPart::Text(xml)];
+                msg_parts.extend(
+                    parts
+                        .into_iter()
+                        .filter(|p| !matches!(p, ContentPart::Text(_))),
+                );
+                Message::tool_result_multimodal(&tool_call.id, msg_parts)
+            } else {
+                Message::tool_result(&tool_call.id, &xml)
+            };
+            self.log_and_persist(msg);
         }
     }
 
