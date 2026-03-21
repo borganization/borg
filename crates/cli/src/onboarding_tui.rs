@@ -15,45 +15,61 @@ use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 
 use crate::onboarding::{
-    format_number, keychain_available, models_for_provider, provider_id_to_display,
-    provider_key_url, KeyStorage, OnboardingResult, PROVIDERS, STYLES,
+    keychain_available, models_for_provider, provider_id_to_display, provider_key_url, KeyStorage,
+    OnboardingResult, PROVIDERS,
 };
+use crate::plugins::{self, PluginDef};
 use crate::tui::theme;
 use borg_core::config::Config;
 use borg_core::provider::Provider;
 use std::str::FromStr;
 
 const LOGO: &str = r#"
-oooooooooo.    .oooooo.   ooooooooo.     .oooooo.
-`888'   `Y8b  d8P'  `Y8b  `888   `Y88.  d8P'  `Y8b
- 888     888 888      888  888   .d88' 888
- 888oooo888' 888      888  888ooo88P'  888
- 888    `88b 888      888  888`88b.    888     ooooo
- 888    .88P `88b    d88'  888  `88b.  `88.    .88'
-o888bood8P'   `Y8bood8P'  o888o  o888o  `Y8bood8P'"#;
+ oooooooooo.    .oooooo.   ooooooooo.     .oooooo.
+ `888'   `Y8b  d8P'  `Y8b  `888   `Y88.  d8P'  `Y8b
+  888     888 888      888  888   .d88' 888
+  888oooo888' 888      888  888ooo88P'  888
+  888    `88b 888      888  888`88b.    888     ooooo
+  888    .88P `88b    d88'  888  `88b.  `88.    .88'
+ o888bood8P'   `Y8bood8P'  o888o  o888o  `Y8bood8P'"#;
 
 const LOGO_HEIGHT: u16 = 8; // includes leading blank line
+
+const SECURITY_WARNING: &str = "\
+Security warning — please read.
+
+Borg is a personal AI agent that can execute tools and shell commands.
+By default, it operates as a single trusted-operator system.
+
+If you expose Borg to multiple users (e.g. via gateway channels),
+each user shares the agent's delegated tool authority.
+
+Recommended baseline:
+  • Sandbox mode enabled (strict by default)
+  • Least-privilege tools — don't grant unnecessary fs/network access
+  • Keep secrets out of the agent's reachable filesystem
+  • Shared use: isolate sessions per user/channel
+
+Run diagnostics anytime: borg doctor";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Welcome,
-    Style,
+    Security,
     Provider,
-    Model,
     ApiKey,
-    Budget,
-    Review,
+    Channels,
+    Summary,
 }
 
 impl Tab {
-    const ALL: [Tab; 7] = [
+    const ALL: [Tab; 6] = [
         Tab::Welcome,
-        Tab::Style,
+        Tab::Security,
         Tab::Provider,
-        Tab::Model,
         Tab::ApiKey,
-        Tab::Budget,
-        Tab::Review,
+        Tab::Channels,
+        Tab::Summary,
     ];
 
     fn index(self) -> usize {
@@ -63,12 +79,11 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Tab::Welcome => "Welcome",
-            Tab::Style => "Style",
+            Tab::Security => "Security",
             Tab::Provider => "Provider",
-            Tab::Model => "Model",
             Tab::ApiKey => "API Key",
-            Tab::Budget => "Budget",
-            Tab::Review => "Review",
+            Tab::Channels => "Channels",
+            Tab::Summary => "Summary",
         }
     }
 }
@@ -80,7 +95,13 @@ enum WelcomeFocus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReviewFocus {
+enum SecurityFocus {
+    Accept,
+    Decline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryFocus {
     Confirm,
     Cancel,
 }
@@ -89,6 +110,19 @@ enum ReviewFocus {
 enum InputMode {
     Normal,
     TextInput,
+}
+
+/// Tracks which channel credential is being actively entered.
+#[derive(Debug, Clone)]
+struct ChannelCredEntry {
+    /// Index into the channel plugins list
+    plugin_index: usize,
+    /// Which credential within that plugin
+    cred_index: usize,
+    /// Current text input for this credential
+    input: String,
+    /// All credentials collected so far for this plugin (key, value)
+    collected: Vec<(String, String)>,
 }
 
 struct OnboardingState {
@@ -100,27 +134,25 @@ struct OnboardingState {
     agent_name: String,
     welcome_focus: WelcomeFocus,
 
-    // Style
-    style_cursor: usize,
+    // Security
+    security_focus: SecurityFocus,
+    security_accepted: bool,
 
     // Provider
     provider_cursor: usize,
     provider_keys_detected: Vec<bool>,
 
-    // Model
-    model_cursor: usize,
-
     // API Key
     api_key_input: String,
     api_key_existing: bool,
 
-    // Budget
-    budget_cursor: usize,
-    custom_budget_input: String,
-    custom_budget_editing: bool,
+    // Channels
+    channel_cursor: usize,
+    channel_configuring: Option<ChannelCredEntry>,
+    configured_channels: Vec<String>, // plugin names that were configured
 
-    // Review
-    review_focus: ReviewFocus,
+    // Summary
+    summary_focus: SummaryFocus,
 
     // Validation hints
     api_key_required_hint: bool,
@@ -128,6 +160,10 @@ struct OnboardingState {
     // Result
     done: bool,
     cancelled: bool,
+}
+
+fn channel_plugins() -> Vec<&'static PluginDef> {
+    plugins::PLUGINS.iter().filter(|p| p.is_channel).collect()
 }
 
 impl OnboardingState {
@@ -150,16 +186,16 @@ impl OnboardingState {
             user_name: String::new(),
             agent_name: "Borg".to_string(),
             welcome_focus: WelcomeFocus::UserName,
-            style_cursor: 0,
+            security_focus: SecurityFocus::Accept,
+            security_accepted: false,
             provider_cursor: 0,
             provider_keys_detected,
-            model_cursor: 0,
             api_key_input: String::new(),
             api_key_existing,
-            budget_cursor: 1, // default to 1M tokens
-            custom_budget_input: String::new(),
-            custom_budget_editing: false,
-            review_focus: ReviewFocus::Confirm,
+            channel_cursor: 0,
+            channel_configuring: None,
+            configured_channels: Vec::new(),
+            summary_focus: SummaryFocus::Confirm,
             api_key_required_hint: false,
             done: false,
             cancelled: false,
@@ -193,47 +229,21 @@ impl OnboardingState {
         PROVIDERS[self.provider_cursor].0
     }
 
-    fn current_models(&self) -> &'static [(&'static str, &'static str)] {
-        models_for_provider(self.current_provider_id())
-    }
-
     fn tab_completed(&self, tab: Tab) -> bool {
         match tab {
             Tab::Welcome => !self.user_name.is_empty(),
-            Tab::Style => true, // always has a default selection
+            Tab::Security => self.security_accepted,
             Tab::Provider => true,
-            Tab::Model => true,
-            Tab::ApiKey => true, // optional
-            Tab::Budget => true,
-            Tab::Review => false,
-        }
-    }
-
-    fn monthly_token_limit(&self) -> u64 {
-        match self.budget_cursor {
-            0 => 500_000,
-            1 => 1_000_000,
-            2 => 5_000_000,
-            3 => 0, // unlimited
-            4 => {
-                // custom
-                self.custom_budget_input
-                    .trim()
-                    .replace(',', "")
-                    .parse::<u64>()
-                    .unwrap_or(1_000_000)
-            }
-            _ => 1_000_000,
+            Tab::ApiKey => true,
+            Tab::Channels => true, // optional
+            Tab::Summary => false,
         }
     }
 
     fn build_result(&self) -> OnboardingResult {
         let provider_id = self.current_provider_id();
-        let models = self.current_models();
-        let model_id = models
-            .get(self.model_cursor)
-            .map(|(id, _)| id.to_string())
-            .unwrap_or_else(|| models[0].0.to_string());
+        let models = models_for_provider(provider_id);
+        let model_id = models[0].0.to_string(); // always use recommended model
 
         let api_key = if self.api_key_input.trim().is_empty() || self.api_key_existing {
             None
@@ -254,21 +264,34 @@ impl OnboardingState {
             } else {
                 self.agent_name.clone()
             },
-            style_index: self.style_cursor,
+            style_index: 0, // Professional (default)
             model_id,
             api_key,
             key_storage,
             provider: provider_id.to_string(),
-            monthly_token_limit: self.monthly_token_limit(),
+            monthly_token_limit: 1_000_000, // default
+            configured_channels: self.configured_channels.clone(),
+            channel_credentials: self.collect_channel_credentials(),
         }
+    }
+
+    /// Collect all channel credentials that were entered during onboarding.
+    fn collect_channel_credentials(&self) -> Vec<(String, Vec<(String, String)>)> {
+        // This is populated during channel configuration and stored on the result
+        // The actual credentials are stored as the user enters them, tracked via
+        // configured_channels. We don't keep the raw credentials in state after
+        // they're stored — they get persisted to keychain/.env during apply.
+        Vec::new()
     }
 
     fn next_tab(&mut self) {
         let idx = self.tab.index();
         if idx < Tab::ALL.len() - 1 {
-            // Validate before advancing from Welcome
-            if self.tab == Tab::Welcome && self.user_name.trim().is_empty() {
-                return;
+            // Validate before advancing
+            match self.tab {
+                Tab::Welcome if self.user_name.trim().is_empty() => return,
+                Tab::Security if !self.security_accepted => return,
+                _ => {}
             }
             self.tab = Tab::ALL[idx + 1];
             self.update_input_mode();
@@ -287,32 +310,30 @@ impl OnboardingState {
         self.input_mode = match self.tab {
             Tab::Welcome => InputMode::TextInput,
             Tab::ApiKey if !self.api_key_existing => InputMode::TextInput,
-            Tab::Budget if self.budget_cursor == 4 && self.custom_budget_editing => {
-                InputMode::TextInput
-            }
             _ => InputMode::Normal,
         };
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
-        // Global: Esc cancels
+        // Global: Esc cancels (unless configuring a channel credential)
         if key.code == KeyCode::Esc {
+            if self.channel_configuring.is_some() {
+                // Cancel channel credential entry
+                self.channel_configuring = None;
+                self.input_mode = InputMode::Normal;
+                return;
+            }
             self.cancelled = true;
             return;
         }
 
-        // Route based on tab and input mode
         match self.tab {
             Tab::Welcome => self.handle_welcome_key(key),
-            Tab::Style => self.handle_list_key(key, STYLES.len()),
+            Tab::Security => self.handle_security_key(key),
             Tab::Provider => self.handle_provider_key(key),
-            Tab::Model => {
-                let len = self.current_models().len();
-                self.handle_list_key(key, len);
-            }
             Tab::ApiKey => self.handle_api_key_key(key),
-            Tab::Budget => self.handle_budget_key(key),
-            Tab::Review => self.handle_review_key(key),
+            Tab::Channels => self.handle_channels_key(key),
+            Tab::Summary => self.handle_summary_key(key),
         }
     }
 
@@ -332,16 +353,8 @@ impl OnboardingState {
                     }
                 }
             }
-            KeyCode::Right => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    // do nothing
-                } else {
-                    self.next_tab();
-                }
-            }
-            KeyCode::Left => {
-                self.prev_tab();
-            }
+            KeyCode::Right => self.next_tab(),
+            KeyCode::Left => self.prev_tab(),
             KeyCode::Enter => match self.welcome_focus {
                 WelcomeFocus::UserName => {
                     self.welcome_focus = WelcomeFocus::AgentName;
@@ -368,40 +381,31 @@ impl OnboardingState {
         }
     }
 
-    fn handle_list_key(&mut self, key: KeyEvent, len: usize) {
+    fn handle_security_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Up => {
-                let cursor = self.active_list_cursor_mut();
-                if *cursor == 0 {
-                    *cursor = len - 1;
-                } else {
-                    *cursor -= 1;
+            KeyCode::Up | KeyCode::Down => {
+                self.security_focus = match self.security_focus {
+                    SecurityFocus::Accept => SecurityFocus::Decline,
+                    SecurityFocus::Decline => SecurityFocus::Accept,
+                };
+            }
+            KeyCode::Enter => match self.security_focus {
+                SecurityFocus::Accept => {
+                    self.security_accepted = true;
+                    self.next_tab();
                 }
-            }
-            KeyCode::Down => {
-                let cursor = self.active_list_cursor_mut();
-                *cursor = (*cursor + 1) % len;
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                self.next_tab();
-            }
+                SecurityFocus::Decline => {
+                    self.cancelled = true;
+                }
+            },
             KeyCode::Tab | KeyCode::Right => {
                 if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.prev_tab();
-                } else {
+                } else if self.security_accepted {
                     self.next_tab();
                 }
             }
-            KeyCode::Left => {
-                self.prev_tab();
-            }
-            KeyCode::Char(c @ '1'..='7') => {
-                let idx = (c as usize) - ('1' as usize);
-                if idx < Tab::ALL.len() {
-                    self.tab = Tab::ALL[idx];
-                    self.update_input_mode();
-                }
-            }
+            KeyCode::Left => self.prev_tab(),
             _ => {}
         }
     }
@@ -421,9 +425,7 @@ impl OnboardingState {
                 self.provider_cursor = (self.provider_cursor + 1) % len;
                 self.on_provider_change();
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                self.next_tab();
-            }
+            KeyCode::Enter | KeyCode::Char(' ') => self.next_tab(),
             KeyCode::Tab | KeyCode::Right => {
                 if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.prev_tab();
@@ -431,23 +433,13 @@ impl OnboardingState {
                     self.next_tab();
                 }
             }
-            KeyCode::Left => {
-                self.prev_tab();
-            }
-            KeyCode::Char(c @ '1'..='7') => {
-                let idx = (c as usize) - ('1' as usize);
-                if idx < Tab::ALL.len() {
-                    self.tab = Tab::ALL[idx];
-                    self.update_input_mode();
-                }
-            }
+            KeyCode::Left => self.prev_tab(),
             _ => {}
         }
     }
 
     fn handle_api_key_key(&mut self, key: KeyEvent) {
         if self.api_key_existing {
-            // Already configured, just navigate
             match key.code {
                 KeyCode::Tab | KeyCode::Right => {
                     if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -458,13 +450,6 @@ impl OnboardingState {
                 }
                 KeyCode::Left => self.prev_tab(),
                 KeyCode::Enter => self.next_tab(),
-                KeyCode::Char(c @ '1'..='7') => {
-                    let idx = (c as usize) - ('1' as usize);
-                    if idx < Tab::ALL.len() {
-                        self.tab = Tab::ALL[idx];
-                        self.update_input_mode();
-                    }
-                }
                 _ => {}
             }
             return;
@@ -509,54 +494,79 @@ impl OnboardingState {
         }
     }
 
-    fn handle_budget_key(&mut self, key: KeyEvent) {
-        if self.custom_budget_editing {
+    fn handle_channels_key(&mut self, key: KeyEvent) {
+        // If actively entering a credential
+        if let Some(ref mut entry) = self.channel_configuring {
             match key.code {
                 KeyCode::Enter => {
-                    self.custom_budget_editing = false;
-                    self.input_mode = InputMode::Normal;
-                    self.next_tab();
+                    if !entry.input.trim().is_empty() {
+                        let plugins = channel_plugins();
+                        let plugin = plugins[entry.plugin_index];
+                        let cred = &plugin.credentials[entry.cred_index];
+                        entry
+                            .collected
+                            .push((cred.key.to_string(), entry.input.trim().to_string()));
+                        entry.input.clear();
+                        entry.cred_index += 1;
+
+                        // Check if all credentials for this plugin are collected
+                        if entry.cred_index >= plugin.credentials.len() {
+                            // Store credentials
+                            let plugin_name = plugin.name.to_string();
+                            let collected = entry.collected.clone();
+                            self.channel_configuring = None;
+                            self.input_mode = InputMode::Normal;
+
+                            // Store credentials immediately
+                            if let Err(e) = store_channel_credentials(&plugin_name, &collected) {
+                                // Silently continue — will show as unconfigured
+                                tracing::warn!("Failed to store channel credentials: {e}");
+                            } else {
+                                self.configured_channels.push(plugin_name);
+                            }
+                        }
+                    }
                 }
                 KeyCode::Backspace => {
-                    self.custom_budget_input.pop();
+                    entry.input.pop();
                 }
-                KeyCode::Char(c) if c.is_ascii_digit() || c == ',' => {
-                    self.custom_budget_input.push(c);
-                }
-                KeyCode::Tab => {
-                    if key.modifiers.contains(KeyModifiers::SHIFT) {
-                        self.custom_budget_editing = false;
-                        self.input_mode = InputMode::Normal;
-                        self.prev_tab();
-                    } else {
-                        self.custom_budget_editing = false;
-                        self.input_mode = InputMode::Normal;
-                        self.next_tab();
-                    }
+                KeyCode::Char(c) => {
+                    entry.input.push(c);
                 }
                 _ => {}
             }
             return;
         }
 
-        let len = 5; // budget options count
+        let plugins = channel_plugins();
+        let len = plugins.len();
         match key.code {
             KeyCode::Up => {
-                if self.budget_cursor == 0 {
-                    self.budget_cursor = len - 1;
+                if self.channel_cursor == 0 {
+                    self.channel_cursor = len.saturating_sub(1);
                 } else {
-                    self.budget_cursor -= 1;
+                    self.channel_cursor -= 1;
                 }
             }
             KeyCode::Down => {
-                self.budget_cursor = (self.budget_cursor + 1) % len;
+                if len > 0 {
+                    self.channel_cursor = (self.channel_cursor + 1) % len;
+                }
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                if self.budget_cursor == 4 {
-                    self.custom_budget_editing = true;
-                    self.input_mode = InputMode::TextInput;
-                } else {
-                    self.next_tab();
+                if self.channel_cursor < len {
+                    let plugin = plugins[self.channel_cursor];
+                    if !self.configured_channels.contains(&plugin.name.to_string())
+                        && !plugin.credentials.is_empty()
+                    {
+                        self.channel_configuring = Some(ChannelCredEntry {
+                            plugin_index: self.channel_cursor,
+                            cred_index: 0,
+                            input: String::new(),
+                            collected: Vec::new(),
+                        });
+                        self.input_mode = InputMode::TextInput;
+                    }
                 }
             }
             KeyCode::Tab | KeyCode::Right => {
@@ -567,70 +577,81 @@ impl OnboardingState {
                 }
             }
             KeyCode::Left => self.prev_tab(),
-            KeyCode::Char(c @ '1'..='7') => {
-                let idx = (c as usize) - ('1' as usize);
-                if idx < Tab::ALL.len() {
-                    self.tab = Tab::ALL[idx];
-                    self.update_input_mode();
-                }
-            }
             _ => {}
         }
     }
 
-    fn handle_review_key(&mut self, key: KeyEvent) {
+    fn handle_summary_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Down => {
-                self.review_focus = match self.review_focus {
-                    ReviewFocus::Confirm => ReviewFocus::Cancel,
-                    ReviewFocus::Cancel => ReviewFocus::Confirm,
+                self.summary_focus = match self.summary_focus {
+                    SummaryFocus::Confirm => SummaryFocus::Cancel,
+                    SummaryFocus::Cancel => SummaryFocus::Confirm,
                 };
             }
-            KeyCode::Enter => match self.review_focus {
-                ReviewFocus::Confirm => {
+            KeyCode::Enter => match self.summary_focus {
+                SummaryFocus::Confirm => {
                     self.done = true;
                 }
-                ReviewFocus::Cancel => {
+                SummaryFocus::Cancel => {
                     self.cancelled = true;
                 }
             },
             KeyCode::Tab | KeyCode::Right => {
                 if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.prev_tab();
-                } else {
-                    // no next tab from Review
                 }
             }
             KeyCode::Left => self.prev_tab(),
-            KeyCode::Char(c @ '1'..='7') => {
-                let idx = (c as usize) - ('1' as usize);
-                if idx < Tab::ALL.len() {
-                    self.tab = Tab::ALL[idx];
-                    self.update_input_mode();
-                }
-            }
             _ => {}
         }
     }
 
     fn on_provider_change(&mut self) {
-        let models = self.current_models();
-        if self.model_cursor >= models.len() {
-            self.model_cursor = 0;
-        }
         self.api_key_existing = Self::check_existing_api_key(self.current_provider_id());
         self.api_key_input.clear();
     }
+}
 
-    fn active_list_cursor_mut(&mut self) -> &mut usize {
-        match self.tab {
-            Tab::Style => &mut self.style_cursor,
-            Tab::Provider => &mut self.provider_cursor,
-            Tab::Model => &mut self.model_cursor,
-            Tab::Budget => &mut self.budget_cursor,
-            _ => &mut self.style_cursor, // fallback
+/// Store channel credentials to keychain or .env file.
+fn store_channel_credentials(plugin_name: &str, credentials: &[(String, String)]) -> Result<()> {
+    let use_keychain = keychain_available();
+    let data_dir = Config::data_dir()?;
+    let service_name = format!("borg-{plugin_name}");
+
+    for (key, value) in credentials {
+        if use_keychain {
+            borg_plugins::keychain::store(&service_name, key, value)
+                .map_err(|e| anyhow::anyhow!("Keychain store failed: {e}"))?;
+        } else {
+            let env_path = data_dir.join(".env");
+            let mut env_content = if env_path.exists() {
+                std::fs::read_to_string(&env_path)?
+            } else {
+                String::new()
+            };
+            let prefix = format!("{key}=");
+            let filtered: String = env_content
+                .lines()
+                .filter(|line| !line.starts_with(&prefix))
+                .collect::<Vec<_>>()
+                .join("\n");
+            env_content = if filtered.is_empty() {
+                String::new()
+            } else {
+                filtered + "\n"
+            };
+            let clean = value.trim().replace(['\n', '\r'], "");
+            env_content.push_str(&format!("{key}={clean}\n"));
+            std::fs::write(&env_path, &env_content)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600));
+            }
         }
     }
+    Ok(())
 }
 
 // ── Rendering ──
@@ -642,7 +663,6 @@ fn render(
     terminal.draw(|frame| {
         let area = frame.area();
 
-        // Check minimum size
         if area.width < 60 || area.height < 20 {
             let msg = Paragraph::new("Please resize your terminal to at least 60x20")
                 .alignment(Alignment::Center);
@@ -653,10 +673,10 @@ fn render(
         }
 
         let chunks = Layout::vertical([
-            Constraint::Length(LOGO_HEIGHT + 1), // logo + 1 line padding below
-            Constraint::Length(1),               // tab bar
-            Constraint::Min(8),                  // content
-            Constraint::Length(1),               // footer
+            Constraint::Length(LOGO_HEIGHT + 1),
+            Constraint::Length(1),
+            Constraint::Min(8),
+            Constraint::Length(1),
         ])
         .split(area);
 
@@ -680,7 +700,6 @@ fn render_logo(frame: &mut ratatui::Frame, area: Rect) {
             ))
         })
         .collect();
-    // Left-align text within a centered block so all lines share the same offset
     let max_width = LOGO.lines().map(str::len).max().unwrap_or(0) as u16;
     let logo_width = max_width.min(area.width);
     let x_offset = area.x + area.width.saturating_sub(logo_width) / 2;
@@ -719,7 +738,6 @@ fn render_tab_bar(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingStat
 }
 
 fn render_tab_content(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
-    // Add some padding
     let content_area = Rect::new(
         area.x + 4,
         area.y + 1,
@@ -729,12 +747,11 @@ fn render_tab_content(frame: &mut ratatui::Frame, area: Rect, state: &Onboarding
 
     match state.tab {
         Tab::Welcome => render_welcome(frame, content_area, state),
-        Tab::Style => render_style(frame, content_area, state),
+        Tab::Security => render_security(frame, content_area, state),
         Tab::Provider => render_provider(frame, content_area, state),
-        Tab::Model => render_model(frame, content_area, state),
         Tab::ApiKey => render_api_key(frame, content_area, state),
-        Tab::Budget => render_budget(frame, content_area, state),
-        Tab::Review => render_review(frame, content_area, state),
+        Tab::Channels => render_channels(frame, content_area, state),
+        Tab::Summary => render_summary(frame, content_area, state),
     }
 }
 
@@ -812,28 +829,59 @@ fn render_welcome(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingStat
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_style(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
+fn render_security(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let mut lines: Vec<Line> = Vec::new();
 
+    // Security warning box
+    for line in SECURITY_WARNING.lines() {
+        lines.push(Line::from(Span::styled(
+            format!("  {line}"),
+            Style::default().fg(theme::YELLOW),
+        )));
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::default());
+
     lines.push(Line::from(Span::styled(
-        "Pick a personality style:",
+        "  I understand. Continue?",
         Style::default().fg(theme::CYAN),
     )));
     lines.push(Line::default());
 
-    for (i, style) in STYLES.iter().enumerate() {
-        let selected = i == state.style_cursor;
-        let marker = if selected { "▸ " } else { "  " };
-        let item_style = if selected {
-            theme::popup_selected()
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(Span::styled(
-            format!("  {marker}{} — {}", style.name, style.description),
-            item_style,
-        )));
-    }
+    // Accept / Decline
+    let accept_style = if state.security_focus == SecurityFocus::Accept {
+        Style::default()
+            .fg(theme::GREEN)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        theme::dim()
+    };
+    let decline_style = if state.security_focus == SecurityFocus::Decline {
+        Style::default().fg(theme::RED).add_modifier(Modifier::BOLD)
+    } else {
+        theme::dim()
+    };
+
+    let accept_marker = if state.security_focus == SecurityFocus::Accept {
+        "▸ "
+    } else {
+        "  "
+    };
+    let decline_marker = if state.security_focus == SecurityFocus::Decline {
+        "▸ "
+    } else {
+        "  "
+    };
+
+    lines.push(Line::from(Span::styled(
+        format!("  {accept_marker}Yes"),
+        accept_style,
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  {decline_marker}No"),
+        decline_style,
+    )));
 
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -846,7 +894,7 @@ fn render_provider(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingSta
         Style::default().fg(theme::CYAN),
     )));
     lines.push(Line::from(Span::styled(
-        "You can change this later in config.toml",
+        "Customize later with: borg settings",
         theme::dim(),
     )));
     lines.push(Line::default());
@@ -870,46 +918,6 @@ fn render_provider(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingSta
             Span::styled(format!("  {marker}{name} — {desc}"), item_style),
             badge,
         ]));
-    }
-
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn render_model(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
-    let mut lines: Vec<Line> = Vec::new();
-    let provider_name = provider_id_to_display(state.current_provider_id());
-
-    lines.push(Line::from(Span::styled(
-        format!("Choose your default model ({provider_name}):"),
-        Style::default().fg(theme::CYAN),
-    )));
-    lines.push(Line::from(Span::styled(
-        "You can change this later in config.toml",
-        theme::dim(),
-    )));
-    lines.push(Line::default());
-
-    let models = state.current_models();
-    for (i, (id, label)) in models.iter().enumerate() {
-        let selected = i == state.model_cursor;
-        let marker = if selected { "▸ " } else { "  " };
-        let item_style = if selected {
-            theme::popup_selected()
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(Span::styled(
-            format!("  {marker}{label}"),
-            item_style,
-        )));
-
-        // Show model ID for selected item
-        if selected {
-            lines.push(Line::from(Span::styled(
-                format!("      {id}"),
-                theme::dim(),
-            )));
-        }
     }
 
     frame.render_widget(Paragraph::new(lines), area);
@@ -966,69 +974,102 @@ fn render_api_key(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingStat
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_budget(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
+fn render_channels(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let mut lines: Vec<Line> = Vec::new();
 
     lines.push(Line::from(Span::styled(
-        "Set a monthly token budget (hard limit):",
+        "Connect a messaging channel (optional):",
         Style::default().fg(theme::CYAN),
     )));
     lines.push(Line::from(Span::styled(
-        "Prevents runaway costs — you can change this later in /settings",
+        "Select a channel to configure, or Tab to skip",
         theme::dim(),
     )));
     lines.push(Line::default());
 
-    let options = [
-        "500,000 tokens",
-        "1,000,000 tokens",
-        "5,000,000 tokens",
-        "Unlimited",
-        "Custom",
-    ];
+    let plugins = channel_plugins();
 
-    for (i, label) in options.iter().enumerate() {
-        let selected = i == state.budget_cursor;
-        let marker = if selected { "▸ " } else { "  " };
-        let item_style = if selected {
-            theme::popup_selected()
-        } else {
-            Style::default()
-        };
+    // If actively configuring a channel
+    if let Some(ref entry) = state.channel_configuring {
+        let plugin = plugins[entry.plugin_index];
+        let cred = &plugin.credentials[entry.cred_index];
+
         lines.push(Line::from(Span::styled(
-            format!("  {marker}{label}"),
-            item_style,
+            format!("  Configuring: {}", plugin.name),
+            Style::default()
+                .fg(theme::CYAN)
+                .add_modifier(Modifier::BOLD),
         )));
-    }
-
-    if state.custom_budget_editing {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            "  Enter monthly token limit:",
-            Style::default().fg(theme::CYAN),
+            format!("  {} ({})", cred.label, cred.help),
+            theme::dim(),
         )));
+        lines.push(Line::default());
+
+        let masked: String = "*".repeat(entry.input.len());
         lines.push(Line::from(vec![
             Span::styled("  › ", Style::default().fg(theme::CYAN)),
-            Span::raw(&state.custom_budget_input),
+            Span::raw(masked),
             Span::styled("▊", Style::default().fg(theme::CYAN)),
         ]));
+
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  Credential {} of {}",
+                entry.cred_index + 1,
+                plugin.credentials.len()
+            ),
+            theme::dim(),
+        )));
+    } else {
+        // Channel list
+        for (i, plugin) in plugins.iter().enumerate() {
+            let selected = i == state.channel_cursor;
+            let marker = if selected { "▸ " } else { "  " };
+            let item_style = if selected {
+                theme::popup_selected()
+            } else {
+                Style::default()
+            };
+
+            let status = if state.configured_channels.contains(&plugin.name.to_string()) {
+                Span::styled(" ✓ configured", Style::default().fg(theme::GREEN))
+            } else {
+                let cred_count = plugin.credentials.len();
+                let label = if cred_count == 1 {
+                    " needs token".to_string()
+                } else {
+                    format!(" needs {cred_count} tokens")
+                };
+                Span::styled(label, theme::dim())
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {marker}{} — {}", plugin.name, plugin.description),
+                    item_style,
+                ),
+                status,
+            ]));
+        }
     }
 
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_review(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
+fn render_summary(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let mut lines: Vec<Line> = Vec::new();
     let provider_id = state.current_provider_id();
-    let models = state.current_models();
-    let model_id = models
-        .get(state.model_cursor)
-        .map(|(id, _)| *id)
-        .unwrap_or(models[0].0);
+    let models = models_for_provider(provider_id);
+    let model_id = models[0].0;
 
     lines.push(Line::from(Span::styled(
-        "Review your choices:",
-        Style::default().fg(theme::CYAN),
+        "✓ Setup complete!",
+        Style::default()
+            .fg(theme::GREEN)
+            .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::default());
 
@@ -1036,35 +1077,30 @@ fn render_review(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState
 
     lines.push(Line::from(vec![
         check.clone(),
-        Span::styled("Your name:  ", theme::dim()),
+        Span::styled("User:      ", theme::dim()),
         Span::raw(&state.user_name),
     ]));
 
+    let agent_name = if state.agent_name.is_empty() {
+        "Borg"
+    } else {
+        &state.agent_name
+    };
     lines.push(Line::from(vec![
         check.clone(),
-        Span::styled("Agent name: ", theme::dim()),
-        Span::raw(if state.agent_name.is_empty() {
-            "Borg"
-        } else {
-            &state.agent_name
-        }),
+        Span::styled("Agent:     ", theme::dim()),
+        Span::raw(format!("{agent_name} (Professional)")),
     ]));
 
     lines.push(Line::from(vec![
         check.clone(),
-        Span::styled("Style:      ", theme::dim()),
-        Span::raw(STYLES[state.style_cursor].name),
-    ]));
-
-    lines.push(Line::from(vec![
-        check.clone(),
-        Span::styled("Provider:   ", theme::dim()),
+        Span::styled("Provider:  ", theme::dim()),
         Span::raw(provider_id_to_display(provider_id)),
     ]));
 
     lines.push(Line::from(vec![
         check.clone(),
-        Span::styled("Model:      ", theme::dim()),
+        Span::styled("Model:     ", theme::dim()),
         Span::raw(model_id),
     ]));
 
@@ -1080,51 +1116,81 @@ fn render_review(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState
     };
     lines.push(Line::from(vec![
         check.clone(),
-        Span::styled("API key:    ", theme::dim()),
+        Span::styled("API key:   ", theme::dim()),
         Span::raw(api_key_display),
     ]));
 
-    let budget_display = if state.monthly_token_limit() == 0 {
-        "Unlimited".to_string()
-    } else {
-        format!("{} tokens", format_number(state.monthly_token_limit()))
-    };
     lines.push(Line::from(vec![
-        check,
-        Span::styled("Budget:     ", theme::dim()),
-        Span::raw(budget_display),
+        check.clone(),
+        Span::styled("Budget:    ", theme::dim()),
+        Span::raw("1,000,000 tokens/month"),
     ]));
+
+    lines.push(Line::default());
+
+    // Defaults
+    lines.push(Line::from(Span::styled("  Defaults:", theme::dim())));
+    lines.push(Line::from(Span::styled(
+        "    Gateway:  127.0.0.1:7842",
+        theme::dim(),
+    )));
+    lines.push(Line::from(Span::styled(
+        "    Sandbox:  strict",
+        theme::dim(),
+    )));
+    lines.push(Line::from(Span::styled(
+        "    Memory:   8,000 token context",
+        theme::dim(),
+    )));
+
+    // Channels
+    if !state.configured_channels.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled("  Channels:", theme::dim())));
+        for name in &state.configured_channels {
+            lines.push(Line::from(vec![
+                Span::styled("    ✓ ", Style::default().fg(theme::GREEN)),
+                Span::raw(name.as_str()),
+            ]));
+        }
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "  Customize: borg settings  |  Diagnostics: borg doctor  |  Gateway: borg gateway",
+        theme::dim(),
+    )));
 
     lines.push(Line::default());
     lines.push(Line::default());
 
     // Confirm / Cancel buttons
-    let confirm_style = if state.review_focus == ReviewFocus::Confirm {
+    let confirm_style = if state.summary_focus == SummaryFocus::Confirm {
         Style::default()
             .fg(theme::GREEN)
             .add_modifier(Modifier::BOLD)
     } else {
         theme::dim()
     };
-    let cancel_style = if state.review_focus == ReviewFocus::Cancel {
+    let cancel_style = if state.summary_focus == SummaryFocus::Cancel {
         Style::default().fg(theme::RED).add_modifier(Modifier::BOLD)
     } else {
         theme::dim()
     };
 
-    let confirm_marker = if state.review_focus == ReviewFocus::Confirm {
+    let confirm_marker = if state.summary_focus == SummaryFocus::Confirm {
         "▸ "
     } else {
         "  "
     };
-    let cancel_marker = if state.review_focus == ReviewFocus::Cancel {
+    let cancel_marker = if state.summary_focus == SummaryFocus::Cancel {
         "▸ "
     } else {
         "  "
     };
 
     lines.push(Line::from(Span::styled(
-        format!("  {confirm_marker}[Confirm]"),
+        format!("  {confirm_marker}[Confirm & Launch]"),
         confirm_style,
     )));
     lines.push(Line::from(Span::styled(
@@ -1138,7 +1204,12 @@ fn render_review(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState
 fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let hint = match state.tab {
         Tab::Welcome => " Tab: next field  Enter: next  Esc: cancel",
-        Tab::Review => " ↑↓: select  Enter: confirm  Esc: cancel",
+        Tab::Security => " ↑↓: select  Enter: confirm  Esc: cancel",
+        Tab::Channels if state.channel_configuring.is_some() => {
+            " Type to enter  Enter: submit  Esc: cancel"
+        }
+        Tab::Channels => " ↑↓: navigate  Enter: configure  Tab: skip  Esc: cancel",
+        Tab::Summary => " ↑↓: select  Enter: confirm  Esc: cancel",
         _ if state.input_mode == InputMode::TextInput => " Type to enter  Tab: next  Esc: cancel",
         _ => " Tab/→: next  Shift+Tab/←: back  ↑↓: navigate  Enter: select  Esc: cancel",
     };
@@ -1175,7 +1246,6 @@ pub fn run() -> Result<Option<OnboardingResult>> {
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                // Ignore key release events on some platforms
                 if key.kind == crossterm::event::KeyEventKind::Release {
                     continue;
                 }
@@ -1198,35 +1268,60 @@ mod tests {
     use crate::onboarding::ANTHROPIC_MODELS;
 
     #[test]
-    fn tab_navigation_wraps_forward() {
+    fn tab_flow_is_correct() {
+        assert_eq!(
+            Tab::ALL,
+            [
+                Tab::Welcome,
+                Tab::Security,
+                Tab::Provider,
+                Tab::ApiKey,
+                Tab::Channels,
+                Tab::Summary,
+            ]
+        );
+    }
+
+    #[test]
+    fn tab_navigation_forward() {
         let mut state = OnboardingState::new();
-        state.user_name = "Test".to_string(); // so we can advance past Welcome
+        state.user_name = "Test".to_string();
+        state.security_accepted = true;
         assert_eq!(state.tab, Tab::Welcome);
         state.next_tab();
-        assert_eq!(state.tab, Tab::Style);
+        assert_eq!(state.tab, Tab::Security);
         state.next_tab();
         assert_eq!(state.tab, Tab::Provider);
     }
 
     #[test]
-    fn tab_navigation_wraps_backward() {
+    fn tab_navigation_backward() {
         let mut state = OnboardingState::new();
-        state.tab = Tab::Style;
+        state.tab = Tab::Security;
         state.prev_tab();
         assert_eq!(state.tab, Tab::Welcome);
-        // Can't go before first
         state.prev_tab();
         assert_eq!(state.tab, Tab::Welcome);
     }
 
     #[test]
-    fn provider_change_resets_model_cursor() {
+    fn security_blocks_without_acceptance() {
         let mut state = OnboardingState::new();
-        state.provider_cursor = 0; // openrouter
-        state.model_cursor = 5; // some model in openrouter list
-        state.provider_cursor = 2; // anthropic (only 3 models)
-        state.on_provider_change();
-        assert!(state.model_cursor < ANTHROPIC_MODELS.len());
+        state.user_name = "Test".to_string();
+        state.tab = Tab::Security;
+        state.security_accepted = false;
+        state.next_tab();
+        assert_eq!(state.tab, Tab::Security); // should not advance
+    }
+
+    #[test]
+    fn security_allows_with_acceptance() {
+        let mut state = OnboardingState::new();
+        state.user_name = "Test".to_string();
+        state.tab = Tab::Security;
+        state.security_accepted = true;
+        state.next_tab();
+        assert_eq!(state.tab, Tab::Provider);
     }
 
     #[test]
@@ -1234,50 +1329,32 @@ mod tests {
         let mut state = OnboardingState::new();
         state.user_name.clear();
         state.next_tab();
-        assert_eq!(state.tab, Tab::Welcome); // should not advance
+        assert_eq!(state.tab, Tab::Welcome);
     }
 
     #[test]
-    fn review_builds_correct_result() {
+    fn build_result_uses_defaults() {
         let mut state = OnboardingState::new();
         state.user_name = "Alice".to_string();
         state.agent_name = "Buddy".to_string();
-        state.style_cursor = 1;
-        state.provider_cursor = 2; // anthropic
-        state.model_cursor = 0; // first anthropic model
-        state.budget_cursor = 0; // 500k
+        state.provider_cursor = 0; // openrouter
 
         let result = state.build_result();
         assert_eq!(result.user_name, "Alice");
         assert_eq!(result.agent_name, "Buddy");
-        assert_eq!(result.style_index, 1);
-        assert_eq!(result.provider, "anthropic");
-        assert_eq!(result.model_id, ANTHROPIC_MODELS[0].0);
-        assert_eq!(result.monthly_token_limit, 500_000);
+        assert_eq!(result.style_index, 0); // Professional
+        assert_eq!(result.provider, "openrouter");
+        assert_eq!(result.monthly_token_limit, 1_000_000);
     }
 
     #[test]
-    fn budget_parsing() {
+    fn build_result_uses_recommended_model() {
         let mut state = OnboardingState::new();
-
-        state.budget_cursor = 0;
-        assert_eq!(state.monthly_token_limit(), 500_000);
-
-        state.budget_cursor = 1;
-        assert_eq!(state.monthly_token_limit(), 1_000_000);
-
-        state.budget_cursor = 2;
-        assert_eq!(state.monthly_token_limit(), 5_000_000);
-
-        state.budget_cursor = 3;
-        assert_eq!(state.monthly_token_limit(), 0);
-
-        state.budget_cursor = 4;
-        state.custom_budget_input = "2,500,000".to_string();
-        assert_eq!(state.monthly_token_limit(), 2_500_000);
-
-        state.custom_budget_input.clear();
-        assert_eq!(state.monthly_token_limit(), 1_000_000); // default for empty
+        state.user_name = "Test".to_string();
+        state.provider_cursor = 2; // anthropic
+        state.on_provider_change();
+        let result = state.build_result();
+        assert_eq!(result.model_id, ANTHROPIC_MODELS[0].0);
     }
 
     #[test]
@@ -1302,8 +1379,20 @@ mod tests {
         assert!(!state.tab_completed(Tab::Welcome)); // empty name
         state.user_name = "Test".to_string();
         assert!(state.tab_completed(Tab::Welcome));
-        assert!(state.tab_completed(Tab::Style));
+        assert!(!state.tab_completed(Tab::Security)); // not accepted
+        state.security_accepted = true;
+        assert!(state.tab_completed(Tab::Security));
         assert!(state.tab_completed(Tab::Provider));
-        assert!(!state.tab_completed(Tab::Review)); // never "complete"
+        assert!(state.tab_completed(Tab::Channels));
+        assert!(!state.tab_completed(Tab::Summary)); // never "complete"
+    }
+
+    #[test]
+    fn provider_change_resets_api_key() {
+        let mut state = OnboardingState::new();
+        state.api_key_input = "some-key".to_string();
+        state.provider_cursor = 2; // anthropic
+        state.on_provider_change();
+        assert!(state.api_key_input.is_empty());
     }
 }

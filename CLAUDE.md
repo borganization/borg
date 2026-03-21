@@ -33,17 +33,43 @@ Binary name is `borg`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `
 
 All integrations are compiled unconditionally into a single binary. iMessage is macOS-only via `#[cfg(target_os = "macos")]`.
 
+## Installation
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/borganization/borg/main/scripts/install.sh | bash
+```
+
+The installer detects OS/arch, downloads a pre-built binary from GitHub Releases, verifies checksums, installs to `~/.local/bin/`, and runs `borg init` for first-time setup.
+
+Release binaries are built via `.github/workflows/release.yml` on tag push (`v*`) for macOS (x86_64, arm64) and Linux (x86_64, arm64).
+
 ## CLI Commands
 
 - `borg` or `borg chat` — interactive REPL
 - `borg ask "message"` — one-shot query
-- `borg init` — interactive onboarding wizard (name, personality, provider, model selection)
+- `borg --version` — show version
+- `borg init` — interactive onboarding wizard (Welcome → Security → Provider → API Key → Channels → Summary)
 - `borg add <name>` — set up an integration's credentials (e.g. `borg add telegram`)
 - `borg remove <name>` — remove an integration's credentials
 - `borg plugins` — list all integrations with configured/unconfigured status
 - `borg gateway` — start webhook gateway server for messaging channels
 - `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
 - `/plugins` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
+
+## Onboarding
+
+Opinionated QuickStart flow — one streamlined path with sensible defaults:
+
+1. **Welcome** — User name + agent name
+2. **Security** — Security warning acknowledgment (required)
+3. **Provider** — Select LLM provider (OpenRouter, OpenAI, Anthropic, Gemini)
+4. **API Key** — Enter API key (auto-detects existing keys)
+5. **Channels** — Configure messaging channels (Telegram, Slack, Discord, etc.)
+6. **Summary** — Review all settings including defaults, confirm and launch
+
+Defaults applied automatically: Professional personality, recommended model per provider, 1M token/month budget, gateway at 127.0.0.1:7842, strict sandbox. Customize via `borg settings`.
+
+After onboarding, SETUP.md is created with first-conversation instructions so the agent can introduce itself and get to know the user. SETUP.md is injected into the system prompt once, then deleted.
 
 ## Mouse Interaction
 

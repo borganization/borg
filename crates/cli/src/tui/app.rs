@@ -1644,7 +1644,9 @@ mod tests {
     fn mouse_scroll_up_clamped_to_max_scroll() {
         use crossterm::event::MouseEventKind;
         let mut app = setup_app_with_transcript();
-        let max_scroll = app.total_lines.saturating_sub(app.transcript_area.height as usize);
+        let max_scroll = app
+            .total_lines
+            .saturating_sub(app.transcript_area.height as usize);
         app.scroll_offset = max_scroll;
 
         app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 10, 10));
@@ -1672,7 +1674,9 @@ mod tests {
     fn click_scrollbar_top_sets_max_offset() {
         use crossterm::event::{MouseButton, MouseEventKind};
         let mut app = setup_app_with_transcript();
-        let max_scroll = app.total_lines.saturating_sub(app.transcript_area.height as usize);
+        let max_scroll = app
+            .total_lines
+            .saturating_sub(app.transcript_area.height as usize);
         let scrollbar_col = app.transcript_area.x + app.transcript_area.width - 1;
         let top_row = app.transcript_area.y;
 
@@ -1690,11 +1694,7 @@ mod tests {
         let mut app = setup_app_with_transcript();
         app.scroll_offset = 10;
 
-        app.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Left),
-            10,
-            10,
-        ));
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 10));
         assert_eq!(app.scroll_offset, 10);
         assert!(!app.scrollbar_dragging);
     }
@@ -1719,7 +1719,9 @@ mod tests {
             scrollbar_col,
             20,
         ));
-        let max_scroll = app.total_lines.saturating_sub(app.transcript_area.height as usize);
+        let max_scroll = app
+            .total_lines
+            .saturating_sub(app.transcript_area.height as usize);
         let expected = mouse_y_to_scroll_offset(20, 40, max_scroll);
         assert_eq!(app.scroll_offset, expected);
     }
@@ -1730,11 +1732,7 @@ mod tests {
         let mut app = setup_app_with_transcript();
         app.scroll_offset = 10;
 
-        app.handle_mouse(mouse_event(
-            MouseEventKind::Drag(MouseButton::Left),
-            79,
-            20,
-        ));
+        app.handle_mouse(mouse_event(MouseEventKind::Drag(MouseButton::Left), 79, 20));
         assert_eq!(app.scroll_offset, 10);
     }
 
@@ -1744,11 +1742,7 @@ mod tests {
         let mut app = setup_app_with_transcript();
         app.scrollbar_dragging = true;
 
-        app.handle_mouse(mouse_event(
-            MouseEventKind::Up(MouseButton::Left),
-            0,
-            0,
-        ));
+        app.handle_mouse(mouse_event(MouseEventKind::Up(MouseButton::Left), 0, 0));
         assert!(!app.scrollbar_dragging);
     }
 

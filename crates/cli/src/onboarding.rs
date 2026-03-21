@@ -51,6 +51,7 @@ pub(crate) const GEMINI_MODELS: &[(&str, &str)] = &[
 ];
 
 /// Personality style presets.
+#[allow(dead_code)]
 pub(crate) struct PersonalityStyle {
     pub(crate) name: &'static str,
     pub(crate) description: &'static str,
@@ -129,6 +130,10 @@ pub struct OnboardingResult {
     pub key_storage: KeyStorage,
     pub provider: String,
     pub monthly_token_limit: u64,
+    #[allow(dead_code)]
+    pub configured_channels: Vec<String>,
+    #[allow(dead_code)]
+    pub channel_credentials: Vec<(String, Vec<(String, String)>)>,
 }
 
 /// Get the model list for a given provider.
@@ -198,7 +203,29 @@ You are {name}, a helpful AI personal assistant. You belong to {owner_name} and 
     ))
 }
 
+/// Generate SETUP.md content for the agent's first conversation.
+pub fn generate_setup(agent_name: &str, owner_name: &str) -> String {
+    format!(
+        r#"# First Conversation
+
+This is your very first conversation. You have just been set up by {owner_name}.
+You are {agent_name} — a brand new AI personal assistant. Fresh start, no memories yet.
+
+Introduce yourself naturally. Don't be another "Hello! How may I assist you today?" bot.
+
+Things to figure out together:
+- Get to know {owner_name} — what should you call them? What's their timezone?
+- What's your vibe? Be genuine, not corporate. Show some personality.
+- What does {owner_name} need help with? What matters to them?
+- Set the tone for your working relationship.
+
+Be yourself. Be curious. Make this first conversation count.
+"#,
+    )
+}
+
 /// Format a number with comma separators (e.g. 1000000 → "1,000,000").
+#[cfg(test)]
 pub(crate) fn format_number(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();
@@ -314,6 +341,10 @@ max_context_tokens = 4000
 [budget]
 monthly_token_limit = {monthly_token_limit}
 warning_threshold = 0.8
+
+[gateway]
+host = "127.0.0.1"
+port = 7842
 "#,
     ))
 }
@@ -369,6 +400,14 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     } else {
         std::fs::write(&memory_path, "# Memory Index\n\nNo memories yet.\n")?;
         println!("  Created {}", memory_path.display());
+    }
+
+    // Write SETUP.md for first conversation instructions
+    let setup_path = data_dir.join("SETUP.md");
+    if !setup_path.exists() {
+        let setup_content = generate_setup(&result.agent_name, &result.user_name);
+        std::fs::write(&setup_path, &setup_content)?;
+        println!("  Created {}", setup_path.display());
     }
 
     // Store API key based on chosen storage method
