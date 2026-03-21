@@ -19,11 +19,62 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
+use crossterm::event::{Event, EventStream};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
+
+// ============================================================================
+// IMPORTANT: Custom mouse capture — DO NOT replace with EnableMouseCapture!
+// ============================================================================
+// crossterm's EnableMouseCapture enables ?1003h (any-event tracking) which
+// captures ALL mouse events (including movement), breaking native text
+// selection in terminals. We only enable the modes we actually need:
+//   - ?1000h: Normal tracking (button press/release) — for scroll wheel
+//   - ?1002h: Button-event tracking (dragging) — for scrollbar drag
+//   - ?1006h: SGR mouse mode — for coordinates >223
+// This preserves native text selection (click+drag) while still supporting
+// scroll wheel and scrollbar interaction. Shift+click also works as fallback.
+//
+// DO NOT add ?1003h — it will break text selection. This is a recurring
+// regression. See CLAUDE.md "Mouse Interaction" section.
+// ============================================================================
+
+/// Enable mouse capture for scroll wheel and scrollbar only.
+/// Does NOT enable any-event tracking (?1003h) to preserve text selection.
+struct EnableScrollMouseCapture;
+
+impl crossterm::Command for EnableScrollMouseCapture {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        // ?1000h: Normal tracking — button press/release (includes scroll wheel)
+        // ?1002h: Button-event tracking — drag events (for scrollbar)
+        // ?1006h: SGR extended mode — coordinates >223
+        // NOTE: ?1003h (any-event tracking) is intentionally EXCLUDED.
+        // Adding it breaks native text selection. See comment block above.
+        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> std::io::Result<()> {
+        // On Windows, fall back to crossterm's built-in mouse capture
+        crossterm::event::EnableMouseCapture.execute_winapi()
+    }
+}
+
+/// Disable the mouse capture modes enabled by EnableScrollMouseCapture.
+struct DisableScrollMouseCapture;
+
+impl crossterm::Command for DisableScrollMouseCapture {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str("\x1b[?1006l\x1b[?1002l\x1b[?1000l")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> std::io::Result<()> {
+        crossterm::event::DisableMouseCapture.execute_winapi()
+    }
+}
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -133,7 +184,7 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = stdout().execute(DisableMouseCapture);
+        let _ = stdout().execute(DisableScrollMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
     }
@@ -205,7 +256,7 @@ pub async fn run() -> Result<()> {
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
-    stdout().execute(EnableMouseCapture)?;
+    stdout().execute(EnableScrollMouseCapture)?;
 
     // Guard ensures terminal is restored on any exit path (error or normal)
     let _guard = TerminalGuard;
@@ -213,7 +264,7 @@ pub async fn run() -> Result<()> {
     // Install panic hook that restores terminal before printing panic
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        let _ = stdout().execute(DisableMouseCapture);
+        let _ = stdout().execute(DisableScrollMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
         original_hook(info);
@@ -821,5 +872,42 @@ async fn run_event_loop(
             }
             AppAction::Continue => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::Command;
+
+    /// Verify that our custom mouse capture does NOT include ?1003h (any-event
+    /// tracking). ?1003h captures all mouse motion and breaks native text
+    /// selection. This test exists to prevent a recurring regression.
+    #[test]
+    fn enable_scroll_mouse_capture_excludes_any_event_tracking() {
+        let mut buf = String::new();
+        EnableScrollMouseCapture.write_ansi(&mut buf).unwrap();
+
+        // Must include the modes we need
+        assert!(buf.contains("?1000h"), "must enable normal button tracking");
+        assert!(buf.contains("?1002h"), "must enable button-event (drag) tracking");
+        assert!(buf.contains("?1006h"), "must enable SGR extended coordinates");
+
+        // Must NOT include any-event tracking — this breaks text selection
+        assert!(
+            !buf.contains("?1003h"),
+            "MUST NOT enable ?1003h (any-event tracking) — it breaks native text selection"
+        );
+    }
+
+    #[test]
+    fn disable_scroll_mouse_capture_reverses_enable() {
+        let mut buf = String::new();
+        DisableScrollMouseCapture.write_ansi(&mut buf).unwrap();
+
+        assert!(buf.contains("?1000l"), "must disable normal tracking");
+        assert!(buf.contains("?1002l"), "must disable drag tracking");
+        assert!(buf.contains("?1006l"), "must disable SGR mode");
+        assert!(!buf.contains("?1003l"), "must not reference ?1003 at all");
     }
 }
