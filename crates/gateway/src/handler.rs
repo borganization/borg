@@ -170,6 +170,38 @@ pub async fn invoke_agent(
         channel_name, inbound.sender_id, route.matched_by
     );
 
+    // Access control: check sender pairing status
+    {
+        let ch = channel_name.to_string();
+        let sid = inbound.sender_id.clone();
+        let cfg = config.clone();
+        let access = tokio::task::spawn_blocking(move || {
+            let db = Database::open().context("Failed to open database for pairing check")?;
+            borg_core::pairing::check_sender_access(&db, &cfg, &ch, &sid)
+        })
+        .await
+        .context("Pairing check task panicked")??;
+
+        match access {
+            borg_core::pairing::AccessCheckResult::Allowed => {}
+            borg_core::pairing::AccessCheckResult::Challenge { message, .. } => {
+                info!(
+                    "Pairing challenge issued for sender '{}' on channel '{}'",
+                    inbound.sender_id, channel_name
+                );
+                return Ok((message, String::new()));
+            }
+            borg_core::pairing::AccessCheckResult::Denied { reason } => {
+                info!(
+                    "Access denied for sender '{}' on channel '{}': {}",
+                    inbound.sender_id, channel_name, reason
+                );
+                // Return empty response to silently drop the message
+                return Ok((String::new(), String::new()));
+            }
+        }
+    }
+
     if let Some(h) = health {
         h.write().await.record_inbound(channel_name);
     }
