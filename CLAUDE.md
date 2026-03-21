@@ -83,8 +83,12 @@ After onboarding, SETUP.md is created with first-conversation instructions so th
 - Mouse wheel scrolls transcript 3 lines per tick
 - Click scrollbar track to jump to position
 - Drag scrollbar thumb for continuous scrolling
-- Shift+click for native text selection (standard terminal behavior with mouse capture)
+- Native text selection (click+drag) must work — this is critical UX
+- Shift+click also works as fallback for text selection
 - Up/Down arrows navigate composer history and must NOT affect the scrollbar
+
+**CRITICAL — DO NOT REGRESS TEXT SELECTION:**
+The TUI uses a custom `EnableScrollMouseCapture` (in `tui/mod.rs`) that only enables `?1000h` (button tracking), `?1002h` (drag tracking), and `?1006h` (SGR coordinates). It intentionally does NOT enable `?1003h` (any-event tracking). **Never use crossterm's `EnableMouseCapture`** — it enables `?1003h` which captures all mouse events and breaks native text selection. This has regressed twice already. Tests in `app.rs` verify mouse handling only processes scroll and scrollbar events.
 
 ## Plugins
 
