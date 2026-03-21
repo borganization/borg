@@ -90,7 +90,7 @@ pub struct App<'a> {
     /// Accumulated token usage for the current session
     pub session_prompt_tokens: u64,
     pub session_completion_tokens: u64,
-    /// Messages queued by Tab during streaming, auto-submitted FIFO on turn complete
+    /// Messages queued by Enter during streaming, auto-submitted FIFO on turn complete
     pub queued_messages: VecDeque<String>,
     /// Whether the last agent turn ended with an error (pauses queue drain)
     pub last_turn_errored: bool,
@@ -248,15 +248,29 @@ impl<'a> App<'a> {
                     // Pop last queued message back into composer for editing
                     if let Some(msg) = self.queued_messages.pop_back() {
                         self.composer.set_text(&msg);
+                        // Remove the User + System cells that were added when it was queued
+                        let len = self.cells.len();
+                        if len >= 2
+                            && matches!(self.cells[len - 1], HistoryCell::System { .. })
+                            && matches!(self.cells[len - 2], HistoryCell::User { .. })
+                        {
+                            self.cells.truncate(len - 2);
+                        }
                     }
-                } else if key.code == KeyCode::Tab {
+                } else if key.code == KeyCode::Enter {
                     // Queue current composer text to auto-submit after turn completes
                     let text = self.composer.text().trim().to_string();
                     if !text.is_empty() {
+                        // Show the queued message in the transcript immediately
+                        self.cells.push(HistoryCell::User { text: text.clone() });
+                        self.cells.push(HistoryCell::System {
+                            text: format!("[queued — {} in queue]", self.queued_messages.len() + 1),
+                        });
                         self.queued_messages.push_back(text);
                         self.composer.set_text("");
+                        self.auto_scroll = true;
                     }
-                } else if key.code == KeyCode::Enter {
+                } else if key.code == KeyCode::Tab {
                     // No-op during streaming
                 } else {
                     // Pass other keys to composer so user can type ahead
@@ -275,7 +289,7 @@ impl<'a> App<'a> {
                             self.last_turn_errored = false;
                             self.queue_pause_notified = false;
                             if let Some(queued) = self.queued_messages.pop_front() {
-                                return self.handle_submit(&queued);
+                                return self.handle_queued_submit(&queued);
                             }
                             return Ok(AppAction::Continue);
                         }
@@ -439,7 +453,7 @@ impl<'a> App<'a> {
                          Ctrl+L       — Clear screen\n  \
                          Ctrl+D       — Quit (when empty)\n  \
                          Ctrl+G       — Open external editor ($EDITOR)\n  \
-                         Tab          — Queue message while streaming\n  \
+                         Enter        — Queue message while streaming\n  \
                          Alt+Up       — Edit last queued message\n  \
                          Ctrl+C       — Cancel / Quit\n  \
                          Shift+Tab    — Toggle plan mode\n  \
@@ -1249,8 +1263,34 @@ impl<'a> App<'a> {
     }
 
     /// Submit a queued message (called from the event loop when a turn completes).
+    /// The user message was already shown in the transcript when it was queued,
+    /// so we skip the User cell push and only add Separator + Assistant cell.
     pub fn handle_queued_submit(&mut self, input: &str) -> Result<AppAction> {
-        self.handle_submit(input)
+        // Add separator between turns (User cell was already shown when queued)
+        if !self.cells.is_empty() {
+            self.cells.push(HistoryCell::Separator);
+        }
+        self.cells.push(HistoryCell::Assistant {
+            text: String::new(),
+            streaming: true,
+        });
+
+        let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
+        self.event_rx = Some(event_rx);
+
+        let cancel = CancellationToken::new();
+        self.cancel_token = Some(cancel.clone());
+
+        self.state = AppState::Streaming {
+            start: Instant::now(),
+        };
+        self.auto_scroll = true;
+
+        Ok(AppAction::SendMessage {
+            input: input.to_string(),
+            event_tx,
+            cancel,
+        })
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
@@ -1264,9 +1304,9 @@ impl<'a> App<'a> {
             AppState::Streaming { .. } => {
                 let count = self.queued_messages.len();
                 if count > 0 {
-                    format!("esc to cancel  •  tab to queue  •  ({count} queued)")
+                    format!("esc to cancel  •  ({count} queued)")
                 } else {
-                    "esc to cancel  •  tab to queue message".to_string()
+                    "esc to cancel  •  enter to queue".to_string()
                 }
             }
             AppState::AwaitingApproval { .. } => "y to approve  •  n to deny".to_string(),
