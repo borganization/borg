@@ -63,17 +63,25 @@ pub fn handle_list_skills(config: &Config) -> Result<String> {
     }
 }
 
-pub fn handle_apply_skill_patch(args: &serde_json::Value) -> Result<String> {
+/// Apply a patch to a directory, returning a formatted result message.
+fn apply_patch_to(
+    args: &serde_json::Value,
+    base_dir: &std::path::Path,
+    label: &str,
+) -> Result<String> {
     let patch = require_str_param(args, "patch")?;
-    let base_dir = Config::skills_dir()?;
-    std::fs::create_dir_all(&base_dir)?;
-    match apply_patch_to_dir(patch, &base_dir) {
+    std::fs::create_dir_all(base_dir)?;
+    match apply_patch_to_dir(patch, base_dir) {
         Ok(affected) => Ok(format!(
-            "Skill patch applied successfully.\n{}",
+            "{label} patch applied successfully.\n{}",
             affected.format_summary()
         )),
-        Err(e) => Ok(format!("Error applying skill patch: {e}")),
+        Err(e) => Ok(format!("Error applying {label} patch: {e}")),
     }
+}
+
+pub fn handle_apply_skill_patch(args: &serde_json::Value) -> Result<String> {
+    apply_patch_to(args, &Config::skills_dir()?, "Skill")
 }
 
 /// Unified apply_patch handler with `target` parameter.
@@ -87,10 +95,7 @@ pub fn handle_apply_patch_unified(
     let target = args["target"].as_str().unwrap_or("cwd");
 
     match target {
-        "cwd" => {
-            // Delegate to CWD handler (ignores target param)
-            handle_apply_patch(args)
-        }
+        "cwd" => handle_apply_patch(args),
         "tools" => handle_create_tool(args, registry),
         "skills" => handle_apply_skill_patch(args),
         "channels" => handle_create_channel(args),
@@ -130,16 +135,7 @@ pub fn handle_create_tool(args: &serde_json::Value, registry: &mut ToolRegistry)
 }
 
 pub fn handle_create_channel(args: &serde_json::Value) -> Result<String> {
-    let patch = require_str_param(args, "patch")?;
-    let base_dir = Config::channels_dir()?;
-    std::fs::create_dir_all(&base_dir)?;
-    match apply_patch_to_dir(patch, &base_dir) {
-        Ok(affected) => Ok(format!(
-            "Channel patch applied successfully.\n{}",
-            affected.format_summary()
-        )),
-        Err(e) => Ok(format!("Error applying channel patch: {e}")),
-    }
+    apply_patch_to(args, &Config::channels_dir()?, "Channel")
 }
 
 /// Unified list handler: dispatches based on `what` parameter.
