@@ -38,20 +38,7 @@ pub fn load_memory_context(max_tokens: usize) -> Result<String> {
 /// Global MEMORY.md is always loaded regardless of scope.
 #[instrument(skip_all, fields(token_budget = max_tokens, scope = ?scope))]
 pub fn load_memory_context_scoped(max_tokens: usize, scope: Option<&str>) -> Result<String> {
-    let mut parts = Vec::new();
-    let mut estimated_tokens = 0;
-
-    // Load MEMORY.md first (always global)
-    let index_path = memory_index_path()?;
-    try_load_index_file(
-        &index_path,
-        "MEMORY.md",
-        max_tokens,
-        &mut estimated_tokens,
-        &mut parts,
-    )?;
-
-    // Load memory files — from scoped dir if scope is set, otherwise from default memory dir
+    // Resolve the memory directory (scoped or default)
     let mem_dir = if let Some(scope_name) = scope {
         // Validate scope name to prevent path traversal
         if scope_name.contains("..") || scope_name.contains('/') || scope_name.contains('\\') {
@@ -73,21 +60,53 @@ pub fn load_memory_context_scoped(max_tokens: usize, scope: Option<&str>) -> Res
     } else {
         "Memory"
     };
-    load_memory_files_from_dir(
+
+    load_memory_core(
+        max_tokens,
         &mem_dir,
-        label,
+        // Override the default "Memory" label with scope-aware label
+        |dir, _default_label, max, tokens, parts| {
+            load_memory_files_from_dir(dir, label, max, tokens, parts)
+        },
+        load_memory_files_from_dir,
+    )
+}
+
+/// Shared skeleton: load MEMORY.md index, global memory dir, and local project memory.
+fn load_memory_core<F, G>(
+    max_tokens: usize,
+    mem_dir: &std::path::Path,
+    load_global: F,
+    load_local: G,
+) -> Result<String>
+where
+    F: FnOnce(&std::path::Path, &str, usize, &mut usize, &mut Vec<String>) -> Result<()>,
+    G: FnOnce(&std::path::Path, &str, usize, &mut usize, &mut Vec<String>) -> Result<()>,
+{
+    let mut parts = Vec::new();
+    let mut estimated_tokens = 0;
+
+    // Always load MEMORY.md first (global)
+    let index_path = memory_index_path()?;
+    try_load_index_file(
+        &index_path,
+        "MEMORY.md",
         max_tokens,
         &mut estimated_tokens,
         &mut parts,
     )?;
 
-    // Load local project memory from CWD/.borg/memory/ if it exists
-    load_local_memory(
+    // Load global memory files
+    load_global(
+        mem_dir,
+        "Memory",
         max_tokens,
         &mut estimated_tokens,
         &mut parts,
-        load_memory_files_from_dir,
     )?;
+
+    // Load local project memory
+    load_local_memory(max_tokens, &mut estimated_tokens, &mut parts, load_local)?;
 
     if parts.is_empty() {
         Ok(String::new())
@@ -216,45 +235,16 @@ pub fn load_memory_context_ranked(
     ranked_global: &[(String, f32)],
     ranked_local: &[(String, f32)],
 ) -> Result<String> {
-    let mut parts = Vec::new();
-    let mut estimated_tokens = 0;
-
-    // Always load MEMORY.md first (global)
-    let index_path = memory_index_path()?;
-    try_load_index_file(
-        &index_path,
-        "MEMORY.md",
+    load_memory_core(
         max_tokens,
-        &mut estimated_tokens,
-        &mut parts,
-    )?;
-
-    // Load global memory/*.md in ranked order
-    let mem_dir = memory_dir()?;
-    load_memory_files_ranked(
-        &mem_dir,
-        "Memory",
-        ranked_global,
-        max_tokens,
-        &mut estimated_tokens,
-        &mut parts,
-    )?;
-
-    // Load local project memory
-    load_local_memory(
-        max_tokens,
-        &mut estimated_tokens,
-        &mut parts,
+        &memory_dir()?,
+        |dir, label, max, tokens, parts| {
+            load_memory_files_ranked(dir, label, ranked_global, max, tokens, parts)
+        },
         |dir, label, max, tokens, parts| {
             load_memory_files_ranked(dir, label, ranked_local, max, tokens, parts)
         },
-    )?;
-
-    if parts.is_empty() {
-        Ok(String::new())
-    } else {
-        Ok(parts.join("\n\n"))
-    }
+    )
 }
 
 /// Load memory files in ranked order, appending unranked files by mtime at the end.
