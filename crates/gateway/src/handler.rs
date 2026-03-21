@@ -249,6 +249,7 @@ pub async fn invoke_agent(
         channel_name,
         &session_key,
         &session_id,
+        &inbound.sender_id,
     ) {
         if let Err(e) = db.log_channel_message(
             channel_name,

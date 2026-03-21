@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
 use reqwest::Client;
+use serde::Serialize;
 use tracing::warn;
 
 use super::circuit_breaker::CircuitBreaker;
@@ -11,6 +13,7 @@ use super::types::{
     SetMessageReactionRequest, Update, User,
 };
 use crate::chunker;
+use crate::commands::{CommandDef, NativeCommandRegistration};
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 const MESSAGE_CHUNK_SIZE: usize = 4000;
@@ -506,6 +509,55 @@ impl TelegramClient {
                 resp.description.unwrap_or_else(|| "unknown error".into())
             ),
         }
+    }
+
+    /// Register bot commands with Telegram's native menu via `setMyCommands`.
+    pub async fn set_my_commands(&self, commands: &[(&str, &str)]) -> Result<()> {
+        let bot_commands: Vec<BotCommand> = commands
+            .iter()
+            .map(|(name, desc)| BotCommand {
+                command: name.to_string(),
+                description: desc.to_string(),
+            })
+            .collect();
+
+        let body = serde_json::json!({ "commands": bot_commands });
+
+        let resp: ApiResponse<bool> = self
+            .client
+            .post(self.api_url("setMyCommands"))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to call setMyCommands")?
+            .json()
+            .await
+            .context("Failed to parse setMyCommands response")?;
+
+        if !resp.ok {
+            bail!(
+                "setMyCommands failed: {}",
+                resp.description.unwrap_or_else(|| "unknown error".into())
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+struct BotCommand {
+    command: String,
+    description: String,
+}
+
+#[async_trait]
+impl NativeCommandRegistration for TelegramClient {
+    async fn register_commands(&self, commands: &[CommandDef]) -> Result<()> {
+        let pairs: Vec<(&str, &str)> = commands
+            .iter()
+            .map(|c| (c.name, c.description))
+            .collect();
+        self.set_my_commands(&pairs).await
     }
 }
 
