@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -26,6 +26,7 @@ use crate::manifest::ChannelMode;
 use crate::rate_limit::SlidingWindowLimiter;
 use crate::registry::ChannelRegistry;
 use crate::retry::RetryPolicy;
+use crate::session_queue::SessionQueue;
 use crate::slack::api::SlackClient;
 use crate::teams::api::TeamsClient;
 use crate::telegram::api::TelegramClient;
@@ -39,7 +40,7 @@ const MAX_BODY_SIZE: usize = constants::GATEWAY_MAX_BODY_SIZE;
 struct AppState {
     config: Config,
     registry: ChannelRegistry,
-    semaphore: Semaphore,
+    session_queue: SessionQueue,
     request_timeout: Duration,
     health: Arc<RwLock<ChannelHealthRegistry>>,
     rate_limiter: Option<Arc<Mutex<SlidingWindowLimiter>>>,
@@ -252,7 +253,7 @@ impl GatewayServer {
         let state = Arc::new(AppState {
             config: self.config.clone(),
             registry,
-            semaphore: Semaphore::new(gateway_config.max_concurrent),
+            session_queue: SessionQueue::new(gateway_config.max_concurrent),
             request_timeout: Duration::from_millis(gateway_config.request_timeout_ms),
             health: health.clone(),
             rate_limiter,
@@ -674,27 +675,8 @@ async fn webhook_handler(
         }
     }
 
-    // Acquire concurrency permit with brief backpressure window
-    let _permit =
-        match tokio::time::timeout(Duration::from_secs(5), state.semaphore.acquire()).await {
-            Ok(Ok(p)) => p,
-            Ok(Err(_)) => {
-                // Semaphore closed
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    axum::Json(serde_json::json!({ "error": "Server shutting down" })),
-                );
-            }
-            Err(_) => {
-                // Timed out waiting for a permit
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    axum::Json(serde_json::json!({ "error": "Too many concurrent requests" })),
-                );
-            }
-        };
-
-    // Native channel handling
+    // Native channel handling — messages are enqueued to the SessionQueue for
+    // per-session sequential processing with global concurrency control.
     if name == "telegram" {
         if let Some(ref tg_client) = state.telegram_client {
             return handle_telegram_webhook(&state, tg_client, &headers, &body).await;
@@ -739,34 +721,52 @@ async fn webhook_handler(
     }
     let headers_json = serde_json::Value::Object(headers_map);
 
-    // Process with timeout
-    let result = tokio::time::timeout(
-        state.request_timeout,
-        handler::handle_webhook(
-            channel,
-            headers_json,
-            body,
-            &state.config,
-            Some(&state.health),
-        ),
-    )
-    .await;
+    // Script-based channels need the response in the HTTP body, so we use a
+    // oneshot to wait for the result while still routing through the session queue.
+    let session_key = format!("script:{}:{}", name, "default");
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
 
-    match result {
+    let channel = channel.clone();
+    let config = state.config.clone();
+    let health = state.health.clone();
+    let request_timeout = state.request_timeout;
+
+    state
+        .session_queue
+        .enqueue(
+            session_key,
+            Box::pin(async move {
+                let result = tokio::time::timeout(
+                    request_timeout,
+                    handler::handle_webhook(&channel, headers_json, body, &config, Some(&health)),
+                )
+                .await;
+
+                let response = match result {
+                    Ok(Ok(r)) => Ok(r),
+                    Ok(Err(e)) => Err(format!("{e:#}")),
+                    Err(_) => Err("Request timed out".to_string()),
+                };
+                let _ = tx.send(response);
+            }),
+        )
+        .await;
+
+    match rx.await {
         Ok(Ok(response)) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({ "ok": true, "response": response })),
         ),
         Ok(Err(e)) => {
-            warn!("Webhook handler error for '{name}': {e:#}");
+            warn!("Webhook handler error for '{name}': {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({ "error": "Internal server error" })),
             )
         }
         Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            axum::Json(serde_json::json!({ "error": "Request timed out" })),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": "Internal server error" })),
         ),
     }
 }
@@ -779,112 +779,147 @@ async fn handle_telegram_webhook(
     headers: &HeaderMap,
     body: &str,
 ) -> WebhookResponse {
-    let result = tokio::time::timeout(state.request_timeout, async {
-        let parsed = crate::telegram::handle_telegram_webhook(
-            headers,
-            body,
-            state.telegram_secret.as_deref(),
-            &state.telegram_dedup,
-        )
-        .await?;
+    // Verify and parse synchronously — must happen before returning 200
+    let parsed = match crate::telegram::handle_telegram_webhook(
+        headers,
+        body,
+        state.telegram_secret.as_deref(),
+        &state.telegram_dedup,
+    )
+    .await
+    {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            );
+        }
+        Err(e) => {
+            warn!("Telegram webhook error: {e:#}");
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            );
+        }
+    };
 
-        let (mut inbound, audio_ref) = match parsed {
-            Some(pair) => pair,
-            None => return Ok::<_, anyhow::Error>("(skipped)".to_string()),
-        };
+    let (mut inbound, audio_ref) = parsed;
 
-        // Audio transcription: download and transcribe voice/audio messages
-        if let Some(ref audio) = audio_ref {
-            if let Some(transcriber) =
-                borg_core::media_understanding::AudioTranscriber::from_config(&state.config)
+    // Audio transcription must happen before enqueuing (needs the file data)
+    if let Some(ref audio) = audio_ref {
+        if let Some(transcriber) =
+            borg_core::media_understanding::AudioTranscriber::from_config(&state.config)
+        {
+            match async {
+                let file_info = tg_client.get_file(&audio.file_id).await?;
+                let file_path = file_info
+                    .file_path
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("No file_path in getFile response"))?;
+                let bytes = tg_client.download_file(file_path).await?;
+                let filename = file_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("audio.ogg")
+                    .to_string();
+                let lang = state.config.audio.language.as_deref();
+                transcriber
+                    .transcribe(&bytes, &audio.mime_type, &filename, lang)
+                    .await
+            }
+            .await
             {
-                match async {
-                    let file_info = tg_client.get_file(&audio.file_id).await?;
-                    let file_path = file_info
-                        .file_path
-                        .as_deref()
-                        .ok_or_else(|| anyhow::anyhow!("No file_path in getFile response"))?;
-                    let bytes = tg_client.download_file(file_path).await?;
-                    let filename = file_path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("audio.ogg")
-                        .to_string();
-                    let lang = state.config.audio.language.as_deref();
-                    transcriber
-                        .transcribe(&bytes, &audio.mime_type, &filename, lang)
-                        .await
-                }
-                .await
-                {
-                    Ok((transcript, _attempts)) => {
-                        inbound.text = format!("[Voice transcript]: {transcript}");
-                        if state.config.audio.echo_transcript {
-                            let echo_chat_id: i64 = inbound
-                                .channel_id
-                                .as_deref()
-                                .and_then(|id| id.parse().ok())
-                                .unwrap_or(0);
-                            if echo_chat_id != 0 {
-                                let _ = tg_client
-                                    .send_message(echo_chat_id, &transcript, None, None, None)
-                                    .await;
-                            }
+                Ok((transcript, _attempts)) => {
+                    inbound.text = format!("[Voice transcript]: {transcript}");
+                    if state.config.audio.echo_transcript {
+                        let echo_chat_id: i64 = inbound
+                            .channel_id
+                            .as_deref()
+                            .and_then(|id| id.parse().ok())
+                            .unwrap_or(0);
+                        if echo_chat_id != 0 {
+                            let _ = tg_client
+                                .send_message(echo_chat_id, &transcript, None, None, None)
+                                .await;
                         }
                     }
-                    Err(e) => {
-                        warn!("Audio transcription failed: {e}");
-                        // Keep original placeholder text — graceful degradation
-                    }
+                }
+                Err(e) => {
+                    warn!("Audio transcription failed: {e}");
                 }
             }
         }
+    }
 
-        let chat_id: i64 = inbound
-            .channel_id
-            .as_deref()
-            .and_then(|id| id.parse().ok())
-            .ok_or_else(|| anyhow::anyhow!("Missing or invalid chat_id in Telegram update"))?;
+    let chat_id: i64 = match inbound.channel_id.as_deref().and_then(|id| id.parse().ok()) {
+        Some(id) => id,
+        None => {
+            warn!("Missing or invalid chat_id in Telegram update");
+            return (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            );
+        }
+    };
 
-        let thread_id: Option<i64> = inbound.thread_id.as_deref().and_then(|id| id.parse().ok());
-        let reply_to: Option<i64> = inbound.message_id.as_deref().and_then(|id| id.parse().ok());
+    let thread_id: Option<i64> = inbound.thread_id.as_deref().and_then(|id| id.parse().ok());
+    let reply_to: Option<i64> = inbound.message_id.as_deref().and_then(|id| id.parse().ok());
 
-        let _ = tg_client.send_typing(chat_id).await;
+    // Send typing indicator immediately
+    let _ = tg_client.send_typing(chat_id).await;
 
-        let (response_text, _session_id) =
-            handler::invoke_agent("telegram", &inbound, &state.config, Some(&state.health)).await?;
+    // Compute session key and enqueue work for sequential processing
+    let session_key = format!(
+        "telegram:{}:{}",
+        inbound.sender_id,
+        inbound.thread_id.as_deref().unwrap_or("")
+    );
 
-        send_telegram_response(
-            tg_client,
-            chat_id,
-            &response_text,
-            thread_id,
-            reply_to,
-            &state.health,
+    let state = state.clone();
+    let tg_client = tg_client.clone();
+    let work_state = state.clone();
+    state
+        .session_queue
+        .enqueue(
+            session_key,
+            Box::pin(async move {
+                let state = work_state;
+                let result = tokio::time::timeout(state.request_timeout, async {
+                    let (response_text, _session_id) = handler::invoke_agent(
+                        "telegram",
+                        &inbound,
+                        &state.config,
+                        Some(&state.health),
+                    )
+                    .await?;
+
+                    send_telegram_response(
+                        &tg_client,
+                        chat_id,
+                        &response_text,
+                        thread_id,
+                        reply_to,
+                        &state.health,
+                    )
+                    .await;
+
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+
+                if let Err(e) = result {
+                    warn!("Telegram queued work error: {e:?}");
+                }
+            }),
         )
         .await;
 
-        Ok(response_text)
-    })
-    .await;
-
-    match result {
-        Ok(Ok(_)) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "ok": true })),
-        ),
-        Ok(Err(e)) => {
-            warn!("Telegram webhook error: {e:#}");
-            (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            )
-        }
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            axum::Json(serde_json::json!({ "error": "Request timed out" })),
-        ),
-    }
+    // Return 200 immediately — response is sent via Telegram API asynchronously
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "ok": true })),
+    )
 }
 
 async fn handle_slack_webhook(
@@ -924,59 +959,71 @@ async fn handle_slack_webhook(
         crate::slack::SlackWebhookResult::Message(inbound) => inbound,
     };
 
-    let result = tokio::time::timeout(state.request_timeout, async {
-        let channel_id = inbound.channel_id.clone().unwrap_or_default();
-        let thread_ts = inbound.thread_ts.clone();
+    let session_key = format!(
+        "slack:{}:{}",
+        inbound.sender_id,
+        inbound.thread_id.as_deref().unwrap_or("")
+    );
 
-        // Start typing indicator with keepalive (non-fatal, background task)
-        let typing = crate::slack::typing::TypingIndicator::start(
-            slack_client.clone(),
-            channel_id.clone(),
-            thread_ts.clone(),
-            inbound.message_id.clone(),
-        );
+    let state = state.clone();
+    let slack_client = slack_client.clone();
+    let work_state = state.clone();
+    state
+        .session_queue
+        .enqueue(
+            session_key,
+            Box::pin(async move {
+                let state = work_state;
+                let result = tokio::time::timeout(state.request_timeout, async {
+                    let channel_id = inbound.channel_id.clone().unwrap_or_default();
+                    let thread_ts = inbound.thread_ts.clone();
 
-        let (response_text, _session_id) =
-            handler::invoke_agent("slack", &inbound, &state.config, Some(&state.health)).await?;
+                    let typing = crate::slack::typing::TypingIndicator::start(
+                        slack_client.clone(),
+                        channel_id.clone(),
+                        thread_ts.clone(),
+                        inbound.message_id.clone(),
+                    );
 
-        // Stop keepalive, clear thread status, remove reaction
-        typing.stop().await;
+                    let (response_text, _session_id) = handler::invoke_agent(
+                        "slack",
+                        &inbound,
+                        &state.config,
+                        Some(&state.health),
+                    )
+                    .await?;
 
-        if let Err(e) = slack_client
-            .post_message(&channel_id, &response_text, thread_ts.as_deref())
-            .await
-        {
-            warn!("Failed to send Slack response: {e}");
-            state
-                .health
-                .write()
-                .await
-                .record_error("slack", &e.to_string());
-        } else {
-            state.health.write().await.record_outbound("slack");
-        }
+                    typing.stop().await;
 
-        Ok::<_, anyhow::Error>(())
-    })
-    .await;
+                    if let Err(e) = slack_client
+                        .post_message(&channel_id, &response_text, thread_ts.as_deref())
+                        .await
+                    {
+                        warn!("Failed to send Slack response: {e}");
+                        state
+                            .health
+                            .write()
+                            .await
+                            .record_error("slack", &e.to_string());
+                    } else {
+                        state.health.write().await.record_outbound("slack");
+                    }
 
-    match result {
-        Ok(Ok(())) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "ok": true })),
-        ),
-        Ok(Err(e)) => {
-            warn!("Slack agent/send error: {e:#}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": "Internal server error" })),
-            )
-        }
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            axum::Json(serde_json::json!({ "error": "Request timed out" })),
-        ),
-    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+
+                if let Err(e) = result {
+                    warn!("Slack queued work error: {e:?}");
+                }
+            }),
+        )
+        .await;
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "ok": true })),
+    )
 }
 
 async fn handle_twilio_webhook(
@@ -1032,71 +1079,76 @@ async fn handle_twilio_webhook(
     let channel_type = parsed.channel_type;
     let sender = parsed.message.sender_id.clone();
 
-    let result = tokio::time::timeout(state.request_timeout, async {
-        let (response_text, _session_id) = handler::invoke_agent(
-            channel_type.as_str(),
-            &parsed.message,
-            &state.config,
-            Some(&state.health),
+    let session_key = format!("{}:{}", channel_type.as_str(), sender);
+
+    let state = state.clone();
+    let twilio_client = twilio_client.clone();
+    let work_state = state.clone();
+    state
+        .session_queue
+        .enqueue(
+            session_key,
+            Box::pin(async move {
+                let state = work_state;
+                let result = tokio::time::timeout(state.request_timeout, async {
+                    let (response_text, _session_id) = handler::invoke_agent(
+                        channel_type.as_str(),
+                        &parsed.message,
+                        &state.config,
+                        Some(&state.health),
+                    )
+                    .await?;
+
+                    let from_number = match channel_type {
+                        TwilioChannelType::WhatsApp => state.twilio_whatsapp_number.as_deref(),
+                        TwilioChannelType::Sms => state.twilio_phone_number.as_deref(),
+                    };
+
+                    if let Some(from) = from_number {
+                        let send_result = match channel_type {
+                            TwilioChannelType::WhatsApp => {
+                                twilio_client
+                                    .send_whatsapp(from, &sender, &response_text)
+                                    .await
+                            }
+                            TwilioChannelType::Sms => {
+                                twilio_client.send_sms(from, &sender, &response_text).await
+                            }
+                        };
+
+                        if let Err(e) = send_result {
+                            warn!("Failed to send Twilio {channel_type} response: {e}");
+                            state
+                                .health
+                                .write()
+                                .await
+                                .record_error(channel_type.as_str(), &e.to_string());
+                        } else {
+                            state
+                                .health
+                                .write()
+                                .await
+                                .record_outbound(channel_type.as_str());
+                        }
+                    } else {
+                        warn!("No outbound phone number configured for {channel_type}");
+                    }
+
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+
+                if let Err(e) = result {
+                    warn!("Twilio queued work error: {e:?}");
+                }
+            }),
         )
-        .await?;
+        .await;
 
-        let from_number = match channel_type {
-            TwilioChannelType::WhatsApp => state.twilio_whatsapp_number.as_deref(),
-            TwilioChannelType::Sms => state.twilio_phone_number.as_deref(),
-        };
-
-        if let Some(from) = from_number {
-            let send_result = match channel_type {
-                TwilioChannelType::WhatsApp => {
-                    twilio_client
-                        .send_whatsapp(from, &sender, &response_text)
-                        .await
-                }
-                TwilioChannelType::Sms => {
-                    twilio_client.send_sms(from, &sender, &response_text).await
-                }
-            };
-
-            if let Err(e) = send_result {
-                warn!("Failed to send Twilio {channel_type} response: {e}");
-                state
-                    .health
-                    .write()
-                    .await
-                    .record_error(channel_type.as_str(), &e.to_string());
-            } else {
-                state
-                    .health
-                    .write()
-                    .await
-                    .record_outbound(channel_type.as_str());
-            }
-        } else {
-            warn!("No outbound phone number configured for {channel_type}");
-        }
-
-        Ok::<_, anyhow::Error>(())
-    })
-    .await;
-
-    match result {
-        Ok(Ok(())) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "ok": true })),
-        ),
-        Ok(Err(e)) => {
-            warn!("Twilio agent/send error: {e:#}");
-            (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            )
-        }
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            axum::Json(serde_json::json!({ "error": "Request timed out" })),
-        ),
-    }
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "ok": true })),
+    )
 }
 
 /// Send a Telegram response with HTML formatting and plain-text fallback.
@@ -1165,8 +1217,6 @@ async fn handle_discord_webhook_route(
             axum::Json(serde_json::json!({ "ok": true })),
         ),
         DiscordWebhookResult::Message(inbound, interaction) => {
-            let channel_id = inbound.channel_id.clone().unwrap_or_default();
-
             // Send deferred response so Discord doesn't time out
             if let Err(e) = discord_client
                 .create_interaction_response(
@@ -1179,70 +1229,86 @@ async fn handle_discord_webhook_route(
                 warn!("Failed to send Discord deferred response: {e}");
             }
 
-            let result = tokio::time::timeout(state.request_timeout, async {
-                let (response_text, _session_id) =
-                    handler::invoke_agent("discord", &inbound, &state.config, Some(&state.health))
-                        .await?;
+            let session_key = format!(
+                "discord:{}:{}",
+                inbound.sender_id,
+                inbound.channel_id.as_deref().unwrap_or("")
+            );
 
-                // Try to edit the deferred response first
-                if let Some(app_id) = &interaction.application_id {
-                    if let Err(e) = discord_client
-                        .edit_original_response(app_id, &interaction.token, &response_text)
-                        .await
-                    {
-                        warn!("Failed to edit Discord interaction response: {e}");
-                        // Fall back to sending a channel message
-                        if let Err(e2) = discord_client
-                            .send_message(&channel_id, &response_text)
-                            .await
-                        {
-                            warn!("Failed to send Discord channel message: {e2}");
-                            state
-                                .health
-                                .write()
+            let state = state.clone();
+            let discord_client = discord_client.clone();
+            let work_state = state.clone();
+            state
+                .session_queue
+                .enqueue(
+                    session_key,
+                    Box::pin(async move {
+                        let state = work_state;
+                        let channel_id = inbound.channel_id.clone().unwrap_or_default();
+                        let result = tokio::time::timeout(state.request_timeout, async {
+                            let (response_text, _session_id) = handler::invoke_agent(
+                                "discord",
+                                &inbound,
+                                &state.config,
+                                Some(&state.health),
+                            )
+                            .await?;
+
+                            if let Some(app_id) = &interaction.application_id {
+                                if let Err(e) = discord_client
+                                    .edit_original_response(
+                                        app_id,
+                                        &interaction.token,
+                                        &response_text,
+                                    )
+                                    .await
+                                {
+                                    warn!("Failed to edit Discord interaction response: {e}");
+                                    if let Err(e2) = discord_client
+                                        .send_message(&channel_id, &response_text)
+                                        .await
+                                    {
+                                        warn!("Failed to send Discord channel message: {e2}");
+                                        state
+                                            .health
+                                            .write()
+                                            .await
+                                            .record_error("discord", &e2.to_string());
+                                    } else {
+                                        state.health.write().await.record_outbound("discord");
+                                    }
+                                } else {
+                                    state.health.write().await.record_outbound("discord");
+                                }
+                            } else if let Err(e) = discord_client
+                                .send_message(&channel_id, &response_text)
                                 .await
-                                .record_error("discord", &e2.to_string());
-                        } else {
-                            state.health.write().await.record_outbound("discord");
+                            {
+                                warn!("Failed to send Discord message: {e}");
+                                state
+                                    .health
+                                    .write()
+                                    .await
+                                    .record_error("discord", &e.to_string());
+                            } else {
+                                state.health.write().await.record_outbound("discord");
+                            }
+
+                            Ok::<_, anyhow::Error>(())
+                        })
+                        .await;
+
+                        if let Err(e) = result {
+                            warn!("Discord queued work error: {e:?}");
                         }
-                    } else {
-                        state.health.write().await.record_outbound("discord");
-                    }
-                } else if let Err(e) = discord_client
-                    .send_message(&channel_id, &response_text)
-                    .await
-                {
-                    warn!("Failed to send Discord message: {e}");
-                    state
-                        .health
-                        .write()
-                        .await
-                        .record_error("discord", &e.to_string());
-                } else {
-                    state.health.write().await.record_outbound("discord");
-                }
+                    }),
+                )
+                .await;
 
-                Ok::<_, anyhow::Error>(())
-            })
-            .await;
-
-            match result {
-                Ok(Ok(())) => (
-                    StatusCode::OK,
-                    axum::Json(serde_json::json!({ "ok": true })),
-                ),
-                Ok(Err(e)) => {
-                    warn!("Discord agent/send error: {e:#}");
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        axum::Json(serde_json::json!({ "error": "Internal server error" })),
-                    )
-                }
-                Err(_) => (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    axum::Json(serde_json::json!({ "error": "Request timed out" })),
-                ),
-            }
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({ "ok": true })),
+            )
         }
     }
 }
@@ -1287,55 +1353,73 @@ async fn handle_teams_webhook_route(
         }
     };
 
-    let result = tokio::time::timeout(state.request_timeout, async {
-        let (response_text, _session_id) =
-            handler::invoke_agent("teams", &inbound, &state.config, Some(&state.health)).await?;
+    let session_key = format!(
+        "teams:{}:{}",
+        inbound.sender_id,
+        inbound.channel_id.as_deref().unwrap_or("")
+    );
 
-        let service_url = activity
-            .service_url
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("Missing service_url in Teams activity"))?;
-        let conversation_id = activity
-            .conversation
-            .as_ref()
-            .map(|c| c.id.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing conversation in Teams activity"))?;
+    let state = state.clone();
+    let work_state = state.clone();
+    state
+        .session_queue
+        .enqueue(
+            session_key,
+            Box::pin(async move {
+                let state = work_state;
+                let result = tokio::time::timeout(state.request_timeout, async {
+                    let (response_text, _session_id) = handler::invoke_agent(
+                        "teams",
+                        &inbound,
+                        &state.config,
+                        Some(&state.health),
+                    )
+                    .await?;
 
-        if let Err(e) = teams_client
-            .reply_to_activity(service_url, conversation_id, &activity.id, &response_text)
-            .await
-        {
-            warn!("Failed to send Teams reply: {e}");
-            state
-                .health
-                .write()
-                .await
-                .record_error("teams", &e.to_string());
-        } else {
-            state.health.write().await.record_outbound("teams");
-        }
+                    let service_url = activity
+                        .service_url
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("Missing service_url in Teams activity"))?;
+                    let conversation_id = activity
+                        .conversation
+                        .as_ref()
+                        .map(|c| c.id.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("Missing conversation in Teams activity"))?;
 
-        Ok::<_, anyhow::Error>(())
-    })
-    .await;
+                    if let Err(e) = teams_client
+                        .reply_to_activity(
+                            service_url,
+                            conversation_id,
+                            &activity.id,
+                            &response_text,
+                        )
+                        .await
+                    {
+                        warn!("Failed to send Teams reply: {e}");
+                        state
+                            .health
+                            .write()
+                            .await
+                            .record_error("teams", &e.to_string());
+                    } else {
+                        state.health.write().await.record_outbound("teams");
+                    }
 
-    match result {
-        Ok(Ok(())) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "ok": true })),
-        ),
-        Ok(Err(e)) => {
-            warn!("Teams agent/send error: {e:#}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": "Internal server error" })),
-            )
-        }
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            axum::Json(serde_json::json!({ "error": "Request timed out" })),
-        ),
-    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+
+                if let Err(e) = result {
+                    warn!("Teams queued work error: {e:?}");
+                }
+            }),
+        )
+        .await;
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "ok": true })),
+    )
 }
 
 async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> WebhookResponse {
@@ -1363,78 +1447,104 @@ async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> 
     let space_name = inbound.channel_id.clone().unwrap_or_default();
     let thread_name = inbound.thread_id.clone();
 
-    // If we have a REST API client, invoke agent and reply asynchronously
+    // If we have a REST API client, enqueue for async processing
     if let Some(ref gc_client) = state.google_chat_client {
+        let session_key = format!("google-chat:{}:{}", inbound.sender_id, space_name);
+
         let gc_client = gc_client.clone();
-        let config = state.config.clone();
-        let health = state.health.clone();
+        let state = state.clone();
+        let work_state = state.clone();
+        state
+            .session_queue
+            .enqueue(
+                session_key,
+                Box::pin(async move {
+                    let state = work_state;
+                    let result = tokio::time::timeout(state.request_timeout, async {
+                        let (response_text, _session_id) = handler::invoke_agent(
+                            "google-chat",
+                            &inbound,
+                            &state.config,
+                            Some(&state.health),
+                        )
+                        .await?;
 
-        let result = tokio::time::timeout(state.request_timeout, async {
-            let (response_text, _session_id) =
-                handler::invoke_agent("google-chat", &inbound, &config, Some(&health)).await?;
+                        if let Err(e) = gc_client
+                            .send_message(&space_name, &response_text, thread_name.as_deref())
+                            .await
+                        {
+                            warn!("Failed to send Google Chat response: {e}");
+                            state
+                                .health
+                                .write()
+                                .await
+                                .record_error("google-chat", &e.to_string());
+                        } else {
+                            state.health.write().await.record_outbound("google-chat");
+                        }
 
-            if let Err(e) = gc_client
-                .send_message(&space_name, &response_text, thread_name.as_deref())
-                .await
-            {
-                warn!("Failed to send Google Chat response: {e}");
-                health
-                    .write()
-                    .await
-                    .record_error("google-chat", &e.to_string());
-            } else {
-                health.write().await.record_outbound("google-chat");
-            }
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await;
 
-            Ok::<_, anyhow::Error>(())
-        })
-        .await;
+                    if let Err(e) = result {
+                        warn!("Google Chat queued work error: {e:?}");
+                    }
+                }),
+            )
+            .await;
 
-        match result {
-            Ok(Ok(())) => (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            ),
-            Ok(Err(e)) => {
-                warn!("Google Chat agent/send error: {e:#}");
-                (
-                    StatusCode::OK,
-                    axum::Json(serde_json::json!({ "ok": true })),
-                )
-            }
-            Err(_) => (
-                StatusCode::GATEWAY_TIMEOUT,
-                axum::Json(serde_json::json!({ "error": "Request timed out" })),
-            ),
-        }
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "ok": true })),
+        )
     } else {
         // No async client — invoke agent and return synchronous response
-        let result = tokio::time::timeout(state.request_timeout, async {
-            let (response_text, _session_id) =
-                handler::invoke_agent("google-chat", &inbound, &state.config, Some(&state.health))
-                    .await?;
-            state.health.write().await.record_outbound("google-chat");
-            Ok::<_, anyhow::Error>(response_text)
-        })
-        .await;
+        // This path must be synchronous since Google Chat expects the response in the HTTP body
+        let session_key = format!("google-chat:{}:{}", inbound.sender_id, space_name);
+        let state = state.clone();
 
-        match result {
-            Ok(Ok(text)) => (
+        // For sync Google Chat, we still queue but wait for the result
+        let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+        let work_state = state.clone();
+        state
+            .session_queue
+            .enqueue(
+                session_key,
+                Box::pin(async move {
+                    let state = work_state;
+                    let result = tokio::time::timeout(state.request_timeout, async {
+                        let (response_text, _session_id) = handler::invoke_agent(
+                            "google-chat",
+                            &inbound,
+                            &state.config,
+                            Some(&state.health),
+                        )
+                        .await?;
+                        state.health.write().await.record_outbound("google-chat");
+                        Ok::<_, anyhow::Error>(response_text)
+                    })
+                    .await;
+
+                    let text = match result {
+                        Ok(Ok(t)) => Some(t),
+                        _ => None,
+                    };
+                    let _ = tx.send(text);
+                }),
+            )
+            .await;
+
+        match rx.await {
+            Ok(Some(text)) => (
                 StatusCode::OK,
                 axum::Json(serde_json::json!({ "text": text })),
             ),
-            Ok(Err(e)) => {
-                warn!("Google Chat agent error: {e:#}");
-                (
-                    StatusCode::OK,
-                    axum::Json(
-                        serde_json::json!({ "text": "Sorry, I encountered an error processing your message." }),
-                    ),
-                )
-            }
-            Err(_) => (
-                StatusCode::GATEWAY_TIMEOUT,
-                axum::Json(serde_json::json!({ "text": "Request timed out." })),
+            _ => (
+                StatusCode::OK,
+                axum::Json(
+                    serde_json::json!({ "text": "Sorry, I encountered an error processing your message." }),
+                ),
             ),
         }
     }
