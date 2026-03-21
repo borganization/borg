@@ -60,8 +60,11 @@ enum Commands {
     },
     /// List built-in and user-created tools
     Tools,
-    /// List skills with availability status
-    Skills,
+    /// Manage skills
+    Skills {
+        #[command(subcommand)]
+        action: Option<SkillsAction>,
+    },
     /// Set up an integration (e.g. borg add telegram)
     Add {
         /// Integration name
@@ -213,6 +216,22 @@ enum PairingAction {
     },
 }
 
+#[derive(Subcommand)]
+enum SkillsAction {
+    /// Install missing dependencies for a skill
+    Install {
+        /// Skill name
+        name: String,
+    },
+    /// Show detailed info about a skill
+    Info {
+        /// Skill name
+        name: String,
+    },
+    /// Audit all skill dependencies
+    Check,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
@@ -333,7 +352,7 @@ async fn main() -> Result<()> {
             ServiceAction::Status => service::service_status()?,
         },
         Some(Commands::Tools) => run_tools()?,
-        Some(Commands::Skills) => run_skills()?,
+        Some(Commands::Skills { action }) => run_skills(action)?,
         Some(Commands::Add { name }) => plugins::add_plugin(&name)?,
         Some(Commands::Remove { name }) => plugins::remove_plugin(&name)?,
         Some(Commands::Plugins) => plugins::list_plugins()?,
@@ -650,17 +669,52 @@ fn run_tools() -> Result<()> {
     Ok(())
 }
 
-fn run_skills() -> Result<()> {
+fn run_skills(action: Option<SkillsAction>) -> Result<()> {
     let config = borg_core::config::Config::load().unwrap_or_default();
     let creds = config.resolve_credentials();
-    let skills = borg_core::skills::load_all_skills(&creds)?;
 
-    if skills.is_empty() {
-        println!("No skills found.");
-    } else {
-        println!("Skills:");
-        for skill in &skills {
-            println!("  {}", skill.summary_line());
+    match action {
+        None => {
+            let skills = borg_core::skills::load_all_skills(&creds, &config.skills)?;
+            if skills.is_empty() {
+                println!("No skills found.");
+            } else {
+                println!("Skills:");
+                for skill in &skills {
+                    println!("  {}", skill.summary_line());
+                }
+            }
+        }
+        Some(SkillsAction::Info { name }) => {
+            let skills = borg_core::skills::load_all_skills(&creds, &config.skills)?;
+            match skills.iter().find(|s| s.manifest.name == name) {
+                Some(skill) => print!("{}", borg_core::skills::format_skill_info(skill)),
+                None => println!("Skill '{name}' not found."),
+            }
+        }
+        Some(SkillsAction::Check) => {
+            let report = borg_core::skills::check_all_skills(&creds, &config.skills)?;
+            println!("Skills Dependency Check:");
+            println!("{report}");
+        }
+        Some(SkillsAction::Install { name }) => {
+            let skills = borg_core::skills::load_all_skills(&creds, &config.skills)?;
+            match skills.iter().find(|s| s.manifest.name == name) {
+                Some(skill) => {
+                    if skill.manifest.install.is_empty() {
+                        println!("Skill '{name}' has no install specs.");
+                    } else {
+                        println!("Installing dependencies for '{name}':");
+                        let installed = borg_core::skills::install_skill_deps(skill)?;
+                        if installed.is_empty() {
+                            println!("No new dependencies installed.");
+                        } else {
+                            println!("Installed: {}", installed.join(", "));
+                        }
+                    }
+                }
+                None => println!("Skill '{name}' not found."),
+            }
         }
     }
     Ok(())
@@ -999,7 +1053,37 @@ mod tests {
     #[test]
     fn test_parse_skills_command() {
         let cli = Cli::try_parse_from(["borg", "skills"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Skills)));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Skills { action: None })
+        ));
+    }
+
+    #[test]
+    fn test_parse_skills_subcommands() {
+        let cli = Cli::try_parse_from(["borg", "skills", "install", "docker"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Skills {
+                action: Some(SkillsAction::Install { .. })
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["borg", "skills", "info", "github"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Skills {
+                action: Some(SkillsAction::Info { .. })
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["borg", "skills", "check"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Skills {
+                action: Some(SkillsAction::Check)
+            })
+        ));
     }
 
     #[test]
