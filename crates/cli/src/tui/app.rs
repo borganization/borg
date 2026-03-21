@@ -733,6 +733,54 @@ impl<'a> App<'a> {
                 self.push_system_message(report.format());
                 return Ok(AppAction::Continue);
             }
+            "/pairing" => {
+                let mut output = String::from("Sender Pairing\n");
+                output.push_str("────────────────────────────────\n\n");
+                match borg_core::db::Database::open() {
+                    Ok(db) => {
+                        output.push_str("Pending Requests\n");
+                        match db.list_pairings(None) {
+                            Ok(requests) => {
+                                if requests.is_empty() {
+                                    output.push_str("  No pending requests.\n");
+                                } else {
+                                    for r in &requests {
+                                        output.push_str(&format!(
+                                            "  {} | {} | {}\n    → borg pairing approve {} {}\n",
+                                            r.channel_name,
+                                            r.sender_id,
+                                            r.code,
+                                            r.channel_name,
+                                            r.code
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(e) => output.push_str(&format!("  Error: {e}\n")),
+                        }
+                        output.push_str("\nApproved Senders\n");
+                        match db.list_approved_senders(None) {
+                            Ok(senders) => {
+                                if senders.is_empty() {
+                                    output.push_str("  No approved senders.\n");
+                                } else {
+                                    for s in &senders {
+                                        let name = s.display_name.as_deref().unwrap_or("—");
+                                        output.push_str(&format!(
+                                            "  {} | {} | {}\n",
+                                            s.channel_name, s.sender_id, name
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(e) => output.push_str(&format!("  Error: {e}\n")),
+                        }
+                    }
+                    Err(e) => output.push_str(&format!("Database error: {e}\n")),
+                }
+                self.push_system_message(output);
+                return Ok(AppAction::Continue);
+            }
             "/settings" => {
                 self.settings_popup.show(&self.config);
                 return Ok(AppAction::Continue);

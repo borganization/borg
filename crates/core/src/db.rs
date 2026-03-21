@@ -133,6 +133,30 @@ pub struct ChunkData {
     pub end_line: Option<i64>,
 }
 
+/// Pairing request row from SQLite.
+#[derive(Debug, Clone)]
+pub struct PairingRequestRow {
+    pub id: String,
+    pub channel_name: String,
+    pub sender_id: String,
+    pub code: String,
+    pub status: String,
+    pub display_name: Option<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub approved_at: Option<i64>,
+}
+
+/// Approved sender row from SQLite.
+#[derive(Debug, Clone)]
+pub struct ApprovedSenderRow {
+    pub id: i64,
+    pub channel_name: String,
+    pub sender_id: String,
+    pub display_name: Option<String>,
+    pub approved_at: i64,
+}
+
 /// Agent role row from SQLite.
 #[derive(Debug, Clone)]
 pub struct AgentRoleRow {
@@ -216,7 +240,9 @@ impl Database {
         }
         let conn =
             Connection::open(&path).with_context(|| format!("Failed to open DB at {path:?}"))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // WAL pragma returns a result row — use query_row to avoid execute_batch error
+        let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         let db = Self { conn };
         db.run_migrations()?;
         Ok(db)
@@ -225,7 +251,9 @@ impl Database {
     /// Create a Database from an existing connection. Runs migrations.
     /// Useful for testing with in-memory databases.
     pub fn from_connection(conn: Connection) -> Result<Self> {
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // WAL pragma returns a result row — use query_row to avoid execute_batch error
+        let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         let db = Self { conn };
         db.run_migrations()?;
         Ok(db)
@@ -236,7 +264,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 12;
+    const CURRENT_VERSION: u32 = 13;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -284,6 +312,9 @@ impl Database {
         }
         if current < 12 {
             self.migrate_v12()?;
+        }
+        if current < 13 {
+            self.migrate_v13()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -678,6 +709,263 @@ impl Database {
             ",
         )?;
         Ok(())
+    }
+
+    fn migrate_v13(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS pairing_requests (
+                id TEXT PRIMARY KEY,
+                channel_name TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                code TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                display_name TEXT,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                approved_at INTEGER,
+                UNIQUE(channel_name, code)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pairing_channel_sender
+                ON pairing_requests(channel_name, sender_id, status);
+
+            CREATE TABLE IF NOT EXISTS approved_senders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_name TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                display_name TEXT,
+                approved_at INTEGER NOT NULL,
+                pairing_request_id TEXT,
+                UNIQUE(channel_name, sender_id)
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
+    // ── Pairing CRUD ──
+
+    pub fn create_pairing_request(
+        &self,
+        channel_name: &str,
+        sender_id: &str,
+        code: &str,
+        display_name: Option<&str>,
+        ttl_secs: i64,
+    ) -> Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().timestamp();
+        let expires_at = now + ttl_secs;
+        self.conn.execute(
+            "INSERT INTO pairing_requests (id, channel_name, sender_id, code, status, display_name, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7)",
+            params![id, channel_name, sender_id, code, display_name, now, expires_at],
+        )?;
+        Ok(id)
+    }
+
+    fn map_pairing_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairingRequestRow> {
+        Ok(PairingRequestRow {
+            id: row.get(0)?,
+            channel_name: row.get(1)?,
+            sender_id: row.get(2)?,
+            code: row.get(3)?,
+            status: row.get(4)?,
+            display_name: row.get(5)?,
+            created_at: row.get(6)?,
+            expires_at: row.get(7)?,
+            approved_at: row.get(8)?,
+        })
+    }
+
+    fn map_approved_sender_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovedSenderRow> {
+        Ok(ApprovedSenderRow {
+            id: row.get(0)?,
+            channel_name: row.get(1)?,
+            sender_id: row.get(2)?,
+            display_name: row.get(3)?,
+            approved_at: row.get(4)?,
+        })
+    }
+
+    pub fn find_pending_pairing(
+        &self,
+        channel_name: &str,
+        code: &str,
+    ) -> Result<Option<PairingRequestRow>> {
+        let now = chrono::Utc::now().timestamp();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel_name, sender_id, code, status, display_name, created_at, expires_at, approved_at
+             FROM pairing_requests
+             WHERE channel_name = ?1 AND code = ?2 AND status = 'pending' AND expires_at > ?3",
+        )?;
+        let row = stmt
+            .query_row(params![channel_name, code, now], Self::map_pairing_row)
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn find_pending_for_sender(
+        &self,
+        channel_name: &str,
+        sender_id: &str,
+    ) -> Result<Option<PairingRequestRow>> {
+        let now = chrono::Utc::now().timestamp();
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel_name, sender_id, code, status, display_name, created_at, expires_at, approved_at
+             FROM pairing_requests
+             WHERE channel_name = ?1 AND sender_id = ?2 AND status = 'pending' AND expires_at > ?3
+             ORDER BY created_at DESC LIMIT 1",
+        )?;
+        let row = stmt
+            .query_row(params![channel_name, sender_id, now], Self::map_pairing_row)
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn approve_pairing(&self, channel_name: &str, code: &str) -> Result<PairingRequestRow> {
+        let code = code.to_uppercase();
+        let now = chrono::Utc::now().timestamp();
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Find the pending request within the transaction
+        let request = {
+            let mut stmt = tx.prepare(
+                "SELECT id, channel_name, sender_id, code, status, display_name, created_at, expires_at, approved_at
+                 FROM pairing_requests
+                 WHERE channel_name = ?1 AND code = ?2 AND status = 'pending' AND expires_at > ?3",
+            )?;
+            stmt.query_row(params![channel_name, code, now], Self::map_pairing_row)
+                .optional()?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No pending pairing request found for channel '{channel_name}' with code '{code}'"
+                    )
+                })?
+        };
+
+        tx.execute(
+            "UPDATE pairing_requests SET status = 'approved', approved_at = ?1 WHERE id = ?2",
+            params![now, request.id],
+        )?;
+
+        tx.execute(
+            "INSERT INTO approved_senders (channel_name, sender_id, display_name, approved_at, pairing_request_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(channel_name, sender_id) DO UPDATE SET
+                approved_at = ?4, pairing_request_id = ?5",
+            params![
+                request.channel_name,
+                request.sender_id,
+                request.display_name,
+                now,
+                request.id,
+            ],
+        )?;
+
+        tx.commit()?;
+
+        Ok(PairingRequestRow {
+            status: "approved".into(),
+            approved_at: Some(now),
+            ..request
+        })
+    }
+
+    /// Remove expired pending pairing requests.
+    pub fn cleanup_expired_pairings(&self) -> Result<usize> {
+        let now = chrono::Utc::now().timestamp();
+        let deleted = self.conn.execute(
+            "DELETE FROM pairing_requests WHERE status = 'pending' AND expires_at <= ?1",
+            params![now],
+        )?;
+        Ok(deleted)
+    }
+
+    pub fn is_sender_approved(&self, channel_name: &str, sender_id: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM approved_senders WHERE channel_name = ?1 AND sender_id = ?2",
+            params![channel_name, sender_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn revoke_sender(&self, channel_name: &str, sender_id: &str) -> Result<bool> {
+        let changes = self.conn.execute(
+            "DELETE FROM approved_senders WHERE channel_name = ?1 AND sender_id = ?2",
+            params![channel_name, sender_id],
+        )?;
+        Ok(changes > 0)
+    }
+
+    pub fn list_pairings(&self, channel_name: Option<&str>) -> Result<Vec<PairingRequestRow>> {
+        let now = chrono::Utc::now().timestamp();
+        if let Some(ch) = channel_name {
+            self.list_pairings_for_channel(ch, now)
+        } else {
+            self.list_pairings_all(now)
+        }
+    }
+
+    fn list_pairings_for_channel(&self, ch: &str, now: i64) -> Result<Vec<PairingRequestRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel_name, sender_id, code, status, display_name, created_at, expires_at, approved_at
+             FROM pairing_requests
+             WHERE channel_name = ?1 AND status = 'pending' AND expires_at > ?2
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![ch, now], Self::map_pairing_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn list_pairings_all(&self, now: i64) -> Result<Vec<PairingRequestRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel_name, sender_id, code, status, display_name, created_at, expires_at, approved_at
+             FROM pairing_requests
+             WHERE status = 'pending' AND expires_at > ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![now], Self::map_pairing_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn list_approved_senders(
+        &self,
+        channel_name: Option<&str>,
+    ) -> Result<Vec<ApprovedSenderRow>> {
+        if let Some(ch) = channel_name {
+            self.list_approved_senders_for_channel(ch)
+        } else {
+            self.list_approved_senders_all()
+        }
+    }
+
+    fn list_approved_senders_for_channel(&self, ch: &str) -> Result<Vec<ApprovedSenderRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel_name, sender_id, display_name, approved_at
+             FROM approved_senders WHERE channel_name = ?1 ORDER BY approved_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![ch], Self::map_approved_sender_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn list_approved_senders_all(&self) -> Result<Vec<ApprovedSenderRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel_name, sender_id, display_name, approved_at
+             FROM approved_senders ORDER BY approved_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], Self::map_approved_sender_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // ── Embedding CRUD ──
@@ -1840,8 +2128,12 @@ mod tests {
 
     fn test_db() -> Database {
         let conn = Connection::open_in_memory().expect("open in-memory db");
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .expect("pragmas");
+        // WAL mode returns a result row, so use query_row instead of execute_batch
+        let _: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .expect("journal_mode pragma");
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .expect("foreign_keys pragma");
         let db = Database { conn };
         db.run_migrations().expect("migrations");
         db
@@ -3124,5 +3416,229 @@ mod tests {
 
         assert!(db.fts_search("global", "alpha", 10).unwrap().is_empty());
         assert_eq!(db.fts_search("global", "delta", 10).unwrap().len(), 1);
+    }
+
+    // ── Pairing tests ──
+
+    #[test]
+    fn migrate_v13_creates_pairing_tables() {
+        let db = test_db();
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM pairing_requests", [], |r| r.get(0))
+            .expect("pairing_requests table should exist");
+        assert_eq!(count, 0);
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM approved_senders", [], |r| r.get(0))
+            .expect("approved_senders table should exist");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn create_and_find_pairing_request() {
+        let db = test_db();
+        let id = db
+            .create_pairing_request("telegram", "user123", "ABCD1234", None, 3600)
+            .expect("create");
+        assert!(!id.is_empty());
+
+        let found = db
+            .find_pending_pairing("telegram", "ABCD1234")
+            .expect("find")
+            .expect("should exist");
+        assert_eq!(found.channel_name, "telegram");
+        assert_eq!(found.sender_id, "user123");
+        assert_eq!(found.code, "ABCD1234");
+        assert_eq!(found.status, "pending");
+
+        // Not found for wrong channel
+        assert!(db
+            .find_pending_pairing("slack", "ABCD1234")
+            .expect("find")
+            .is_none());
+    }
+
+    #[test]
+    fn find_pending_for_sender_reuses_code() {
+        let db = test_db();
+        db.create_pairing_request("telegram", "user123", "CODE1111", None, 3600)
+            .expect("create");
+
+        let found = db
+            .find_pending_for_sender("telegram", "user123")
+            .expect("find")
+            .expect("should exist");
+        assert_eq!(found.code, "CODE1111");
+    }
+
+    #[test]
+    fn approve_pairing() {
+        let db = test_db();
+        db.create_pairing_request("telegram", "user456", "WXYZ9876", None, 3600)
+            .expect("create");
+
+        let approved = db.approve_pairing("telegram", "WXYZ9876").expect("approve");
+        assert_eq!(approved.sender_id, "user456");
+
+        // Sender should now be approved
+        assert!(db.is_sender_approved("telegram", "user456").expect("check"));
+
+        // Pending request should be gone
+        assert!(db
+            .find_pending_pairing("telegram", "WXYZ9876")
+            .expect("find")
+            .is_none());
+    }
+
+    #[test]
+    fn approve_nonexistent_code_errors() {
+        let db = test_db();
+        let result = db.approve_pairing("telegram", "NOCODE");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn is_sender_approved_false_by_default() {
+        let db = test_db();
+        assert!(!db.is_sender_approved("telegram", "nobody").expect("check"));
+    }
+
+    #[test]
+    fn revoke_sender() {
+        let db = test_db();
+        db.create_pairing_request("telegram", "user789", "REVO1234", None, 3600)
+            .expect("create");
+        db.approve_pairing("telegram", "REVO1234").expect("approve");
+        assert!(db.is_sender_approved("telegram", "user789").expect("check"));
+
+        assert!(db.revoke_sender("telegram", "user789").expect("revoke"));
+        assert!(!db.is_sender_approved("telegram", "user789").expect("check"));
+
+        // Revoking again returns false
+        assert!(!db.revoke_sender("telegram", "user789").expect("revoke"));
+    }
+
+    #[test]
+    fn list_pairings_filters_by_channel() {
+        let db = test_db();
+        db.create_pairing_request("telegram", "u1", "CODE0001", None, 3600)
+            .expect("create");
+        db.create_pairing_request("slack", "u2", "CODE0002", None, 3600)
+            .expect("create");
+
+        let all = db.list_pairings(None).expect("list");
+        assert_eq!(all.len(), 2);
+
+        let tg = db.list_pairings(Some("telegram")).expect("list");
+        assert_eq!(tg.len(), 1);
+        assert_eq!(tg[0].channel_name, "telegram");
+
+        let sl = db.list_pairings(Some("slack")).expect("list");
+        assert_eq!(sl.len(), 1);
+        assert_eq!(sl[0].channel_name, "slack");
+    }
+
+    #[test]
+    fn list_approved_senders_filters_by_channel() {
+        let db = test_db();
+        db.create_pairing_request("telegram", "u1", "APPR0001", None, 3600)
+            .expect("create");
+        db.create_pairing_request("slack", "u2", "APPR0002", None, 3600)
+            .expect("create");
+        db.approve_pairing("telegram", "APPR0001").expect("approve");
+        db.approve_pairing("slack", "APPR0002").expect("approve");
+
+        let all = db.list_approved_senders(None).expect("list");
+        assert_eq!(all.len(), 2);
+
+        let tg = db.list_approved_senders(Some("telegram")).expect("list");
+        assert_eq!(tg.len(), 1);
+        assert_eq!(tg[0].sender_id, "u1");
+    }
+
+    #[test]
+    fn expired_pairing_not_found() {
+        let db = test_db();
+        // Create with TTL of 0 — immediately expired
+        db.create_pairing_request("telegram", "user_exp", "EXPR1234", None, 0)
+            .expect("create");
+
+        // Should not be findable
+        assert!(db
+            .find_pending_pairing("telegram", "EXPR1234")
+            .expect("find")
+            .is_none());
+        assert!(db
+            .find_pending_for_sender("telegram", "user_exp")
+            .expect("find")
+            .is_none());
+
+        // Cannot approve expired code
+        assert!(db.approve_pairing("telegram", "EXPR1234").is_err());
+    }
+
+    #[test]
+    fn approve_pairing_case_insensitive() {
+        let db = test_db();
+        db.create_pairing_request("telegram", "user_ci", "ABCD5678", None, 3600)
+            .expect("create");
+
+        // Approve with lowercase — should still work
+        let approved = db.approve_pairing("telegram", "abcd5678").expect("approve");
+        assert_eq!(approved.sender_id, "user_ci");
+        assert_eq!(approved.status, "approved");
+        assert!(approved.approved_at.is_some());
+    }
+
+    #[test]
+    fn approve_pairing_returns_updated_status() {
+        let db = test_db();
+        db.create_pairing_request("telegram", "user_st", "STAT1234", None, 3600)
+            .expect("create");
+
+        let approved = db.approve_pairing("telegram", "STAT1234").expect("approve");
+        assert_eq!(approved.status, "approved");
+        assert!(approved.approved_at.is_some());
+    }
+
+    #[test]
+    fn cleanup_expired_pairings() {
+        let db = test_db();
+        // Create one expired (TTL=0) and one valid
+        db.create_pairing_request("telegram", "u_exp", "EXP00001", None, 0)
+            .expect("create");
+        db.create_pairing_request("telegram", "u_valid", "VAL00001", None, 3600)
+            .expect("create");
+
+        let cleaned = db.cleanup_expired_pairings().expect("cleanup");
+        assert_eq!(cleaned, 1);
+
+        // Valid one should still be findable
+        assert!(db
+            .find_pending_for_sender("telegram", "u_valid")
+            .expect("find")
+            .is_some());
+    }
+
+    #[test]
+    fn duplicate_sender_approval_is_idempotent() {
+        let db = test_db();
+        db.create_pairing_request("telegram", "u_dup", "DUP00001", None, 3600)
+            .expect("create first");
+        db.approve_pairing("telegram", "DUP00001")
+            .expect("approve first");
+        assert!(db.is_sender_approved("telegram", "u_dup").expect("check"));
+
+        // Create a second request and approve it — should update, not duplicate
+        db.create_pairing_request("telegram", "u_dup", "DUP00002", None, 3600)
+            .expect("create second");
+        db.approve_pairing("telegram", "DUP00002")
+            .expect("approve second");
+
+        // Still only one approved sender row
+        let senders = db.list_approved_senders(Some("telegram")).expect("list");
+        let matching: Vec<_> = senders.iter().filter(|s| s.sender_id == "u_dup").collect();
+        assert_eq!(matching.len(), 1);
     }
 }

@@ -375,6 +375,15 @@ pub struct GatewayConfig {
     /// Optional allowlist of Discord guild IDs. Empty = allow all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discord_guild_allowlist: Option<Vec<String>>,
+    /// Default access policy for direct messages: pairing, open, disabled.
+    #[serde(default)]
+    pub dm_policy: crate::pairing::DmPolicy,
+    /// Per-channel DM policy overrides. Key = channel name.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub channel_policies: std::collections::HashMap<String, crate::pairing::DmPolicy>,
+    /// Pairing code TTL in seconds (default 3600 = 60 minutes).
+    #[serde(default = "default_pairing_ttl")]
+    pub pairing_ttl_secs: i64,
 }
 
 /// Route a gateway channel to specific agent configuration overrides.
@@ -435,8 +444,15 @@ impl Default for GatewayConfig {
             bindings: Vec::new(),
             slack_channel_allowlist: None,
             discord_guild_allowlist: None,
+            dm_policy: crate::pairing::DmPolicy::default(),
+            channel_policies: std::collections::HashMap::new(),
+            pairing_ttl_secs: default_pairing_ttl(),
         }
     }
+}
+
+fn default_pairing_ttl() -> i64 {
+    3600
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
