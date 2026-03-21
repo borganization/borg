@@ -55,6 +55,12 @@ Release binaries are built via `.github/workflows/release.yml` on tag push (`v*`
 - `borg gateway` — start webhook gateway server for messaging channels
 - `borg wake` — trigger an immediate heartbeat check-in (sends wake signal to daemon)
 - `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
+- `borg tasks list` — list all scheduled tasks
+- `borg tasks create` — create a scheduled task (supports `--max-retries`, `--timeout`, `--delivery-channel`, `--delivery-target`)
+- `borg tasks run <id>` — trigger a task to run immediately
+- `borg tasks runs <id>` — show execution history for a task
+- `borg tasks status <id>` — show detailed task status including retry state and delivery config
+- `borg tasks pause/resume/delete <id>` — manage task lifecycle
 - `/plugins` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
 
 ## Onboarding
@@ -110,6 +116,7 @@ System prompt assembled each turn: `IDENTITY.md` + current time + memory context
 | `create_channel` | Create/modify channel integrations in `~/.borg/channels/` via patch DSL |
 | `list_channels` | List all messaging channels with status and webhook paths |
 | `browser` | Headless Chrome automation (navigate, click, type, screenshot, get_text, evaluate_js, close). Requires `browser.enabled = true` |
+| `manage_tasks` | Manage scheduled tasks. Actions: create, list, get, update, pause, resume, cancel, delete, runs, run_now. Supports delivery config and retry settings |
 | `security_audit` | Run host security audit (firewall, ports, SSH, permissions, encryption, updates, services). Requires `security.host_audit = true` |
 
 ## User Tools
@@ -386,6 +393,7 @@ SQLite at `~/.borg/borg.db` with versioned migrations:
 - **V1**: sessions, scheduled_tasks, task_runs, meta, token_usage tables
 - **V2**: messages table (crash recovery), retry_count on scheduled_tasks
 - **V3**: channel_sessions + channel_messages tables (gateway)
+- **V14**: Add retry (max_retries, retry_count, retry_after, last_error), timeout (timeout_ms), and delivery (delivery_channel, delivery_target) columns to `scheduled_tasks`
 - Schema version tracked in `meta` table; migrations run automatically on `Database::open()`
 
 ## Signal Handling & Graceful Shutdown
@@ -397,8 +405,11 @@ SQLite at `~/.borg/borg.db` with versioned migrations:
 ## Daemon & Concurrent Tasks
 
 - Daemon uses `tokio::sync::Semaphore` (capacity from `tasks.max_concurrent`, default 3)
-- Each task spawned as independent tokio task with 5-minute timeout
+- Each task spawned as independent tokio task with per-job timeout (default 300s, configurable via `timeout_ms`)
 - Failed tasks are recorded with error details in `task_runs` table
+- **Retry with backoff**: Transient failures (timeout, rate limit, 5xx, connection errors) are retried up to `max_retries` (default 3) with exponential backoff (30s → 60s → 5m → 15m → 1h). Non-transient errors skip retry.
+- **Result delivery**: Tasks with `delivery_channel` and `delivery_target` send results (or failure notifications) to Telegram, Slack, or Discord after execution.
+- **Missed job catch-up**: On daemon startup, tasks overdue by >7 days are skipped and advanced to next run.
 
 ## Heartbeat
 

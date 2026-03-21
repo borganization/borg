@@ -396,6 +396,10 @@ pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result
                     schedule_expr,
                     timezone,
                     next_run,
+                    max_retries: args["max_retries"].as_i64().map(|v| v as i32),
+                    timeout_ms: args["timeout_ms"].as_i64(),
+                    delivery_channel: args["delivery_channel"].as_str(),
+                    delivery_target: args["delivery_target"].as_str(),
                 }) {
                     Ok(()) => Ok(format!(
                         "Scheduled task created: {task_name} (id: {})",
@@ -504,8 +508,55 @@ pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result
                 Err(e) => Ok(format!("Error opening database: {e}")),
             }
         }
+        "runs" => {
+            let task_id = require_str_param(args, "task_id")?;
+            let limit = args["limit"].as_u64().unwrap_or(5) as usize;
+            match Database::open() {
+                Ok(db) => match db.task_run_history(task_id, limit) {
+                    Ok(runs) if runs.is_empty() => Ok("No runs recorded.".to_string()),
+                    Ok(runs) => {
+                        let mut out = String::new();
+                        for run in &runs {
+                            let when = chrono::DateTime::from_timestamp(run.started_at, 0)
+                                .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                                .unwrap_or_else(|| run.started_at.to_string());
+                            let status = if run.error.is_some() { "FAIL" } else { "OK" };
+                            out.push_str(&format!("  {when} [{status}] {}ms", run.duration_ms));
+                            if let Some(ref e) = run.error {
+                                out.push_str(&format!(
+                                    "\n    Error: {}",
+                                    &e[..e.len().min(200)]
+                                ));
+                            }
+                            out.push('\n');
+                        }
+                        Ok(out)
+                    }
+                    Err(e) => Ok(format!("Error: {e}")),
+                },
+                Err(e) => Ok(format!("Error opening database: {e}")),
+            }
+        }
+        "run_now" => {
+            let task_id = require_str_param(args, "task_id")?;
+            match Database::open() {
+                Ok(db) => match db.get_task_by_id(task_id) {
+                    Ok(Some(_)) => {
+                        let now = chrono::Utc::now().timestamp();
+                        if let Err(e) = db.update_task_next_run(task_id, Some(now)) {
+                            return Ok(format!("Error: {e}"));
+                        }
+                        let _ = db.clear_task_retry(task_id);
+                        Ok(format!("Task {task_id} queued for immediate execution."))
+                    }
+                    Ok(None) => Ok(format!("Task {task_id} not found.")),
+                    Err(e) => Ok(format!("Error: {e}")),
+                },
+                Err(e) => Ok(format!("Error opening database: {e}")),
+            }
+        }
         other => Ok(format!(
-            "Unknown action: {other}. Use: create, list, get, update, pause, resume, cancel, delete."
+            "Unknown action: {other}. Use: create, list, get, update, pause, resume, cancel, delete, runs, run_now."
         )),
     }
 }
@@ -755,7 +806,7 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         defs.push(ToolDefinition::new("web_search", "Search the web and return results with titles, URLs, and snippets.", serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"The search query"}},"required":["query"]})));
     }
 
-    defs.push(ToolDefinition::new("manage_tasks", "Manage scheduled tasks. Actions: create, list, get, update, pause, resume, cancel, delete.", serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["create","list","get","update","pause","resume","cancel","delete"],"description":"Action to perform"},"task_id":{"type":"string","description":"Task ID (required for get/update/pause/resume/cancel/delete)"},"name":{"type":"string","description":"Task name (required for create, optional for update)"},"prompt":{"type":"string","description":"Prompt to execute (required for create, optional for update)"},"schedule_type":{"type":"string","enum":["cron","interval","once"],"description":"Schedule type (required for create, optional for update)"},"schedule_expr":{"type":"string","description":"Cron expression or interval (required for create, optional for update)"},"timezone":{"type":"string","description":"Timezone (default: local)"}},"required":["action"]})));
+    defs.push(ToolDefinition::new("manage_tasks", "Manage scheduled tasks. Actions: create, list, get, update, pause, resume, cancel, delete, runs, run_now.", serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["create","list","get","update","pause","resume","cancel","delete","runs","run_now"],"description":"Action to perform"},"task_id":{"type":"string","description":"Task ID (required for get/update/pause/resume/cancel/delete/runs/run_now)"},"name":{"type":"string","description":"Task name (required for create, optional for update)"},"prompt":{"type":"string","description":"Prompt to execute (required for create, optional for update)"},"schedule_type":{"type":"string","enum":["cron","interval","once"],"description":"Schedule type (required for create, optional for update)"},"schedule_expr":{"type":"string","description":"Cron expression or interval (required for create, optional for update)"},"timezone":{"type":"string","description":"Timezone (default: local)"},"max_retries":{"type":"integer","description":"Max retry attempts for transient failures (default: 3)"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds (default: 300000)"},"delivery_channel":{"type":"string","description":"Channel to deliver results to (telegram, slack, discord)"},"delivery_target":{"type":"string","description":"Target chat/channel ID for delivery"},"limit":{"type":"integer","description":"Number of runs to return (for runs action, default: 5)"}},"required":["action"]})));
 
     if config.browser.enabled {
         defs.push(ToolDefinition::new(

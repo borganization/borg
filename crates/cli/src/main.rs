@@ -137,6 +137,18 @@ enum TasksAction {
         /// Schedule type: cron, interval, or once
         #[arg(long, short = 't', default_value = "cron")]
         r#type: String,
+        /// Max retry attempts for transient failures (default: 3)
+        #[arg(long)]
+        max_retries: Option<i32>,
+        /// Timeout in seconds (default: 300)
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Delivery channel for results (telegram, slack, discord)
+        #[arg(long)]
+        delivery_channel: Option<String>,
+        /// Delivery target (chat_id or channel_id)
+        #[arg(long)]
+        delivery_target: Option<String>,
     },
     /// Delete a scheduled task
     Delete {
@@ -150,6 +162,24 @@ enum TasksAction {
     },
     /// Resume a paused task
     Resume {
+        /// Task ID (or prefix)
+        id: String,
+    },
+    /// Trigger a task to run immediately
+    Run {
+        /// Task ID (or prefix)
+        id: String,
+    },
+    /// Show execution history for a task
+    Runs {
+        /// Task ID (or prefix)
+        id: String,
+        /// Number of runs to show
+        #[arg(long, short, default_value_t = 10)]
+        count: usize,
+    },
+    /// Show detailed task status
+    Status {
         /// Task ID (or prefix)
         id: String,
     },
@@ -323,10 +353,26 @@ async fn main() -> Result<()> {
                 prompt,
                 schedule,
                 r#type,
-            }) => run_tasks_create(&name, &prompt, &schedule, &r#type)?,
+                max_retries,
+                timeout,
+                delivery_channel,
+                delivery_target,
+            }) => run_tasks_create(
+                &name,
+                &prompt,
+                &schedule,
+                &r#type,
+                max_retries,
+                timeout.map(|s| s as i64 * 1000),
+                delivery_channel.as_deref(),
+                delivery_target.as_deref(),
+            )?,
             Some(TasksAction::Delete { id }) => run_tasks_delete(&id)?,
             Some(TasksAction::Pause { id }) => run_tasks_update_status(&id, "paused")?,
             Some(TasksAction::Resume { id }) => run_tasks_update_status(&id, "active")?,
+            Some(TasksAction::Run { id }) => run_tasks_run(&id)?,
+            Some(TasksAction::Runs { id, count }) => run_tasks_runs(&id, count)?,
+            Some(TasksAction::Status { id }) => run_tasks_status(&id)?,
         },
         Some(Commands::Usage) => run_usage()?,
         Some(Commands::Pairing { action }) => match action {
@@ -644,7 +690,17 @@ fn run_tasks_list() -> Result<()> {
     Ok(())
 }
 
-fn run_tasks_create(name: &str, prompt: &str, schedule: &str, schedule_type: &str) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn run_tasks_create(
+    name: &str,
+    prompt: &str,
+    schedule: &str,
+    schedule_type: &str,
+    max_retries: Option<i32>,
+    timeout_ms: Option<i64>,
+    delivery_channel: Option<&str>,
+    delivery_target: Option<&str>,
+) -> Result<()> {
     borg_core::tasks::validate_schedule(schedule_type, schedule)?;
     let next_run = borg_core::tasks::calculate_next_run(schedule_type, schedule)?;
     let id = Uuid::new_v4().to_string();
@@ -659,9 +715,100 @@ fn run_tasks_create(name: &str, prompt: &str, schedule: &str, schedule_type: &st
         schedule_expr: schedule,
         timezone: &tz,
         next_run,
+        max_retries,
+        timeout_ms,
+        delivery_channel,
+        delivery_target,
     })?;
 
     println!("Created task {} ({})", &id[..8.min(id.len())], name);
+    Ok(())
+}
+
+fn run_tasks_run(id: &str) -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    match db.get_task_by_id(id)? {
+        Some(_task) => {
+            let now = chrono::Utc::now().timestamp();
+            db.update_task_next_run(id, Some(now))?;
+            db.clear_task_retry(id)?;
+            println!(
+                "Task {} queued for immediate execution.",
+                &id[..8.min(id.len())]
+            );
+        }
+        None => println!("Task not found: {id}"),
+    }
+    Ok(())
+}
+
+fn run_tasks_runs(id: &str, count: usize) -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    let runs = db.task_run_history(id, count)?;
+    if runs.is_empty() {
+        println!("No runs recorded for task {}", &id[..8.min(id.len())]);
+        return Ok(());
+    }
+    println!("{:<20} {:<8} {:<10} Details", "Time", "Status", "Duration");
+    println!("{}", "-".repeat(70));
+    for run in &runs {
+        let when = chrono::DateTime::from_timestamp(run.started_at, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| run.started_at.to_string());
+        let status = if run.error.is_some() { "FAIL" } else { "OK" };
+        let duration = format!("{}ms", run.duration_ms);
+        let details = run
+            .error
+            .as_deref()
+            .or(run.result.as_deref())
+            .unwrap_or("")
+            .chars()
+            .take(40)
+            .collect::<String>();
+        println!("{when:<20} {status:<8} {duration:<10} {details}");
+    }
+    Ok(())
+}
+
+fn run_tasks_status(id: &str) -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    match db.get_task_by_id(id)? {
+        Some(task) => {
+            println!("{}", borg_core::tasks::format_task(&task));
+            println!("    Max retries: {}", task.max_retries);
+            println!("    Timeout: {}ms", task.timeout_ms);
+            if let Some(ref ch) = task.delivery_channel {
+                println!(
+                    "    Delivery: {} -> {}",
+                    ch,
+                    task.delivery_target.as_deref().unwrap_or("?")
+                );
+            }
+            if task.retry_count > 0 {
+                println!(
+                    "    Retry state: attempt {}/{}",
+                    task.retry_count, task.max_retries
+                );
+                if let Some(ref err) = task.last_error {
+                    println!("    Last error: {}", &err[..err.len().min(100)]);
+                }
+                if let Some(retry_at) = task.retry_after {
+                    let when = chrono::DateTime::from_timestamp(retry_at, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                        .unwrap_or_else(|| retry_at.to_string());
+                    println!("    Next retry: {when}");
+                }
+            }
+            if let Ok(Some(run)) = db.last_task_run(id) {
+                let status = if run.error.is_some() { "error" } else { "ok" };
+                let when = chrono::DateTime::from_timestamp(run.started_at, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                    .unwrap_or_else(|| run.started_at.to_string());
+                println!("    Last run: {status} at {when} ({}ms)", run.duration_ms);
+            }
+        }
+        None => println!("Task not found: {id}"),
+    }
     Ok(())
 }
 
@@ -977,6 +1124,7 @@ mod tests {
                         prompt,
                         schedule,
                         r#type,
+                        ..
                     }),
             }) => {
                 assert_eq!(name, "test");
@@ -1012,6 +1160,7 @@ mod tests {
                         prompt,
                         schedule,
                         r#type,
+                        ..
                     }),
             }) => {
                 assert_eq!(name, "test");
