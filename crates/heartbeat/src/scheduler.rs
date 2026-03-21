@@ -1,42 +1,38 @@
-use anyhow::Result;
-use chrono::{Local, NaiveTime};
+use chrono::NaiveTime;
+use chrono_tz::Tz;
 use cron::Schedule;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, warn};
 
 use borg_core::config::HeartbeatConfig;
-use borg_core::identity::load_identity;
-use borg_core::llm::LlmClient;
-use borg_core::memory::load_memory_context;
-use borg_core::types::Message;
 
 /// Minimum allowed heartbeat interval (60 seconds) to prevent API waste.
 const MIN_INTERVAL_SECS: u64 = 60;
 
-/// Timeout for LLM calls during heartbeat (30 seconds).
-const LLM_TIMEOUT_SECS: u64 = 30;
-
 #[derive(Debug, Clone)]
 pub enum HeartbeatEvent {
+    /// Timer fired — consumer should run a heartbeat agent turn.
+    Fire,
+    /// Heartbeat result to display (sent by consumer after agent turn completes).
     Message(String),
 }
 
+/// Pure timer that emits `Fire` events on schedule. Does not call LLM directly —
+/// the consumer (daemon or TUI) is responsible for running the agent turn.
 pub struct HeartbeatScheduler {
     config: HeartbeatConfig,
-    llm: LlmClient,
-    last_hash: Option<u64>,
+    timezone: Tz,
+    wake_rx: Option<mpsc::Receiver<()>>,
 }
 
 impl HeartbeatScheduler {
-    pub fn new(config: HeartbeatConfig, llm: LlmClient) -> Self {
+    pub fn new(config: HeartbeatConfig, timezone: Tz, wake_rx: mpsc::Receiver<()>) -> Self {
         Self {
             config,
-            llm,
-            last_hash: None,
+            timezone,
+            wake_rx: Some(wake_rx),
         }
     }
 
@@ -48,11 +44,26 @@ impl HeartbeatScheduler {
         }
     }
 
+    /// Receive a wake signal, or pend forever if the channel is closed/absent.
+    async fn recv_wake(&mut self) {
+        match &mut self.wake_rx {
+            Some(rx) => match rx.recv().await {
+                Some(()) => {}
+                None => {
+                    // Sender dropped — disable wake to avoid busy-loop
+                    debug!("Wake channel closed, disabling wake");
+                    self.wake_rx = None;
+                    std::future::pending().await
+                }
+            },
+            None => std::future::pending().await,
+        }
+    }
+
     async fn run_interval(&mut self, tx: mpsc::Sender<HeartbeatEvent>, cancel: CancellationToken) {
         let mut interval =
             parse_interval(&self.config.interval).unwrap_or(std::time::Duration::from_secs(1800));
 
-        // Clamp to minimum interval
         if interval.as_secs() < MIN_INTERVAL_SECS {
             warn!(
                 "Heartbeat interval {}s is below minimum {}s, clamping",
@@ -69,12 +80,22 @@ impl HeartbeatScheduler {
 
         loop {
             tokio::select! {
+                biased;
                 _ = cancel.cancelled() => {
                     info!("Heartbeat scheduler shutting down");
                     return;
                 }
+                _ = self.recv_wake() => {
+                    // Wake signal — fire immediately, skip quiet hours (intentional wake)
+                    debug!("Heartbeat: wake signal received, firing immediately");
+                    let _ = tx.send(HeartbeatEvent::Fire).await;
+                }
                 _ = ticker.tick() => {
-                    self.tick(&tx).await;
+                    if self.is_quiet_hours() {
+                        debug!("Heartbeat: in quiet hours, skipping");
+                        continue;
+                    }
+                    let _ = tx.send(HeartbeatEvent::Fire).await;
                 }
             }
         }
@@ -98,8 +119,8 @@ impl HeartbeatScheduler {
         info!("Heartbeat scheduler started (cron: {cron_expr})");
 
         loop {
-            let now = Local::now();
-            let next = match schedule.upcoming(Local).next() {
+            let now = chrono::Local::now();
+            let next = match schedule.upcoming(chrono::Local).next() {
                 Some(t) => t,
                 None => {
                     warn!("Cron schedule exhausted");
@@ -112,86 +133,22 @@ impl HeartbeatScheduler {
                 .unwrap_or(std::time::Duration::from_secs(60));
 
             tokio::select! {
+                biased;
                 _ = cancel.cancelled() => {
                     info!("Heartbeat scheduler shutting down");
                     return;
                 }
+                _ = self.recv_wake() => {
+                    debug!("Heartbeat: wake signal received, firing immediately");
+                    let _ = tx.send(HeartbeatEvent::Fire).await;
+                }
                 _ = tokio::time::sleep(wait) => {
-                    self.tick(&tx).await;
+                    if self.is_quiet_hours() {
+                        debug!("Heartbeat: in quiet hours, skipping");
+                        continue;
+                    }
+                    let _ = tx.send(HeartbeatEvent::Fire).await;
                 }
-            }
-        }
-    }
-
-    #[instrument(skip_all)]
-    async fn tick(&mut self, tx: &mpsc::Sender<HeartbeatEvent>) {
-        if self.is_quiet_hours() {
-            debug!("Heartbeat: in quiet hours, skipping");
-            return;
-        }
-
-        match self.fire_heartbeat().await {
-            Ok(Some(message)) => {
-                let hash = hash_string(&message);
-                if self.last_hash == Some(hash) {
-                    debug!("Heartbeat: duplicate response, suppressing");
-                    return;
-                }
-                self.last_hash = Some(hash);
-
-                if message.trim().is_empty() {
-                    debug!("Heartbeat: empty response, suppressing");
-                    return;
-                }
-
-                let _ = tx.send(HeartbeatEvent::Message(message)).await;
-            }
-            Ok(None) => {
-                debug!("Heartbeat: no response");
-            }
-            Err(e) => {
-                warn!("Heartbeat error: {e}");
-            }
-        }
-    }
-
-    async fn fire_heartbeat(&self) -> Result<Option<String>> {
-        let identity = match load_identity() {
-            Ok(id) => id,
-            Err(e) => {
-                warn!("Heartbeat: failed to load identity, using default: {e}");
-                String::new()
-            }
-        };
-        let memory = match load_memory_context(4000) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("Heartbeat: failed to load memory context, using default: {e}");
-                String::new()
-            }
-        };
-        let now = Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-
-        let system = format!(
-            "{identity}\n\n# Current Time\n{now}\n\n{memory}\n\n\
-            # Heartbeat Instructions\n\
-            You are checking in on your owner proactively. \
-            If you have something useful, timely, or caring to say, say it briefly. \
-            If you have nothing meaningful to contribute, respond with an empty message. \
-            Keep it short — one or two sentences max."
-        );
-
-        let messages = vec![Message::system(system), Message::user("*heartbeat tick*")];
-
-        let timeout = std::time::Duration::from_secs(LLM_TIMEOUT_SECS);
-        match tokio::time::timeout(timeout, self.llm.chat(&messages, None)).await {
-            Ok(result) => {
-                let response = result?;
-                Ok(response.text_content().map(String::from))
-            }
-            Err(_) => {
-                warn!("Heartbeat: LLM call timed out after {LLM_TIMEOUT_SECS}s");
-                Ok(None)
             }
         }
     }
@@ -214,7 +171,7 @@ impl HeartbeatScheduler {
             return false;
         };
 
-        let now = Local::now().time();
+        let now = chrono::Utc::now().with_timezone(&self.timezone).time();
 
         if start <= end {
             now >= start && now < end
@@ -224,7 +181,7 @@ impl HeartbeatScheduler {
     }
 }
 
-fn parse_interval(s: &str) -> Option<std::time::Duration> {
+pub fn parse_interval(s: &str) -> Option<std::time::Duration> {
     let s = s.trim();
     if let Some(mins) = s.strip_suffix('m') {
         mins.parse::<u64>()
@@ -240,12 +197,6 @@ fn parse_interval(s: &str) -> Option<std::time::Duration> {
     } else {
         s.parse::<u64>().ok().map(std::time::Duration::from_secs)
     }
-}
-
-fn hash_string(s: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
 }
 
 #[cfg(test)]
@@ -288,18 +239,13 @@ mod tests {
         assert!(parse_interval("").is_none());
     }
 
-    #[test]
-    fn hash_string_deterministic() {
-        let h1 = hash_string("hello");
-        let h2 = hash_string("hello");
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn hash_string_different_for_different_inputs() {
-        let h1 = hash_string("hello");
-        let h2 = hash_string("world");
-        assert_ne!(h1, h2);
+    fn test_scheduler(config: HeartbeatConfig, tz: Tz) -> HeartbeatScheduler {
+        let (_tx, rx) = mpsc::channel(1);
+        HeartbeatScheduler {
+            config,
+            timezone: tz,
+            wake_rx: Some(rx),
+        }
     }
 
     #[test]
@@ -310,9 +256,10 @@ mod tests {
             quiet_hours_start: None,
             quiet_hours_end: None,
             cron: None,
+            channels: Vec::new(),
         };
-        let llm = test_scheduler(config);
-        assert!(!llm.is_quiet_hours());
+        let sched = test_scheduler(config, chrono_tz::UTC);
+        assert!(!sched.is_quiet_hours());
     }
 
     #[test]
@@ -323,25 +270,67 @@ mod tests {
             quiet_hours_start: Some("not-a-time".to_string()),
             quiet_hours_end: Some("also-bad".to_string()),
             cron: None,
+            channels: Vec::new(),
         };
-        let sched = test_scheduler(config);
-        // Invalid times should not be treated as quiet hours
+        let sched = test_scheduler(config, chrono_tz::UTC);
         assert!(!sched.is_quiet_hours());
     }
 
-    fn test_scheduler(config: HeartbeatConfig) -> HeartbeatScheduler {
-        HeartbeatScheduler {
-            config,
-            llm: make_test_llm(),
-            last_hash: None,
-        }
+    #[test]
+    fn quiet_hours_uses_timezone() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: Some("00:00".to_string()),
+            quiet_hours_end: Some("06:00".to_string()),
+            cron: None,
+            channels: Vec::new(),
+        };
+        // Verify the timezone field is used and doesn't panic
+        let sched = test_scheduler(config, chrono_tz::US::Eastern);
+        let _ = sched.is_quiet_hours();
     }
 
-    fn make_test_llm() -> LlmClient {
-        use borg_core::config::Config;
-        // Set the env var so LlmClient::new doesn't fail
-        std::env::set_var("OPENROUTER_API_KEY", "test-key");
-        let config = Config::default();
-        LlmClient::new(config).expect("should create LlmClient for testing")
+    #[test]
+    fn default_config_has_quiet_hours() {
+        let config = HeartbeatConfig::default();
+        assert_eq!(config.quiet_hours_start, Some("00:00".to_string()));
+        assert_eq!(config.quiet_hours_end, Some("06:00".to_string()));
+        assert!(config.channels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wake_signal_triggers_fire() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (wake_tx, wake_rx) = mpsc::channel(8);
+        let (fire_tx, mut fire_rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            scheduler.run(fire_tx, cancel_clone).await;
+        });
+
+        // Send wake signal
+        wake_tx.send(()).await.unwrap();
+
+        // Should receive a Fire event
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
+            .await
+            .expect("timed out waiting for Fire event")
+            .expect("channel closed");
+
+        assert!(matches!(event, HeartbeatEvent::Fire));
+
+        cancel.cancel();
     }
 }

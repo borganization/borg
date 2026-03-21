@@ -20,6 +20,14 @@ pub fn memory_index_path() -> Result<PathBuf> {
     Config::memory_index_path()
 }
 
+/// Load the HEARTBEAT.md checklist if it exists and is non-empty.
+pub fn load_heartbeat_checklist() -> Option<String> {
+    let path = Config::data_dir().ok()?.join("HEARTBEAT.md");
+    std::fs::read_to_string(&path)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
 #[instrument(skip_all, fields(token_budget = max_tokens))]
 pub fn load_memory_context(max_tokens: usize) -> Result<String> {
     load_memory_context_scoped(max_tokens, None)

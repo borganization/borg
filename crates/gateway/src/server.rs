@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -60,20 +60,28 @@ struct AppState {
     teams_app_secret: Option<String>,
     google_chat_client: Option<Arc<GoogleChatClient>>,
     google_chat_token: Option<String>,
+    wake_tx: Option<mpsc::Sender<()>>,
 }
 
 pub struct GatewayServer {
     config: Config,
     shutdown: CancellationToken,
     metrics: BorgMetrics,
+    wake_tx: Option<mpsc::Sender<()>>,
 }
 
 impl GatewayServer {
-    pub fn new(config: Config, shutdown: CancellationToken, metrics: BorgMetrics) -> Result<Self> {
+    pub fn new(
+        config: Config,
+        shutdown: CancellationToken,
+        metrics: BorgMetrics,
+        wake_tx: Option<mpsc::Sender<()>>,
+    ) -> Result<Self> {
         Ok(Self {
             config,
             shutdown,
             metrics,
+            wake_tx,
         })
     }
 
@@ -295,12 +303,14 @@ impl GatewayServer {
             teams_app_secret,
             google_chat_client,
             google_chat_token,
+            wake_tx: self.wake_tx,
         });
 
         let app = Router::new()
             .route("/health", get(health_handler))
             .route("/health/channels", get(channel_health_handler))
             .route("/channels", get(list_channels_handler))
+            .route("/internal/wake", post(wake_handler))
             .route("/webhook/{name}", post(webhook_handler))
             .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
             .with_state(state.clone());
@@ -620,6 +630,32 @@ async fn channel_health_handler(State(state): State<Arc<AppState>>) -> impl Into
 async fn list_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let channels = state.registry.list_channels();
     axum::Json(serde_json::json!({ "channels": channels }))
+}
+
+async fn wake_handler(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+) -> impl IntoResponse {
+    // Only allow wake from localhost to prevent unauthorized LLM cost
+    if !addr.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"error": "localhost only"})),
+        );
+    }
+    match &state.wake_tx {
+        Some(tx) => {
+            let _ = tx.send(()).await;
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"status": "ok"})),
+            )
+        }
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "heartbeat not enabled"})),
+        ),
+    }
 }
 
 fn extract_client_ip(

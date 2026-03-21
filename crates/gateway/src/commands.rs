@@ -16,19 +16,84 @@ pub struct CommandDef {
 /// All gateway slash commands. Used for text parsing, /help output, and native
 /// platform menu registration (Telegram setMyCommands, Discord global commands).
 pub const GATEWAY_COMMANDS: &[CommandDef] = &[
-    CommandDef { name: "help",     description: "Show help and available commands",  accepts_args: false, pass_through: false },
-    CommandDef { name: "commands", description: "List all slash commands",           accepts_args: false, pass_through: false },
-    CommandDef { name: "status",   description: "Show current session info",         accepts_args: false, pass_through: false },
-    CommandDef { name: "new",      description: "Start a new session",               accepts_args: false, pass_through: false },
-    CommandDef { name: "reset",    description: "Clear current session messages",    accepts_args: false, pass_through: false },
-    CommandDef { name: "usage",    description: "Show token usage and budget",       accepts_args: false, pass_through: false },
-    CommandDef { name: "skill",    description: "Run a skill by name",               accepts_args: true,  pass_through: true  },
-    CommandDef { name: "skills",   description: "List available skills",             accepts_args: false, pass_through: false },
-    CommandDef { name: "tools",    description: "List installed tools",              accepts_args: false, pass_through: false },
-    CommandDef { name: "whoami",   description: "Show your sender identity",         accepts_args: false, pass_through: false },
-    CommandDef { name: "memory",   description: "Show memory files",                accepts_args: false, pass_through: false },
-    CommandDef { name: "doctor",   description: "Run system diagnostics",           accepts_args: false, pass_through: false },
-    CommandDef { name: "pairing",  description: "Show pairing status",              accepts_args: false, pass_through: false },
+    CommandDef {
+        name: "help",
+        description: "Show help and available commands",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "commands",
+        description: "List all slash commands",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "status",
+        description: "Show current session info",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "new",
+        description: "Start a new session",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "reset",
+        description: "Clear current session messages",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "usage",
+        description: "Show token usage and budget",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "skill",
+        description: "Run a skill by name",
+        accepts_args: true,
+        pass_through: true,
+    },
+    CommandDef {
+        name: "skills",
+        description: "List available skills",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "tools",
+        description: "List installed tools",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "whoami",
+        description: "Show your sender identity",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "memory",
+        description: "Show memory files",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "doctor",
+        description: "Run system diagnostics",
+        accepts_args: false,
+        pass_through: false,
+    },
+    CommandDef {
+        name: "pairing",
+        description: "Show pairing status",
+        accepts_args: false,
+        pass_through: false,
+    },
 ];
 
 /// Trait for platforms that support registering slash commands in native menus.
@@ -130,7 +195,10 @@ fn handle_commands() -> String {
     let mut lines = vec!["Slash commands:".to_string()];
     for cmd in GATEWAY_COMMANDS {
         if cmd.pass_through {
-            lines.push(format!("  /{}  — {} (sent to agent)", cmd.name, cmd.description));
+            lines.push(format!(
+                "  /{}  — {} (sent to agent)",
+                cmd.name, cmd.description
+            ));
         } else {
             lines.push(format!("  /{}  — {}", cmd.name, cmd.description));
         }
@@ -237,7 +305,9 @@ fn handle_tools() -> String {
 }
 
 fn handle_whoami(sender_id: &str, channel_name: &str, db: &Database) -> String {
-    let approved = db.is_sender_approved(channel_name, sender_id).unwrap_or(false);
+    let approved = db
+        .is_sender_approved(channel_name, sender_id)
+        .unwrap_or(false);
     let status = if approved { "Approved" } else { "Not approved" };
     format!("Sender: {sender_id}\nChannel: {channel_name}\nPairing: {status}")
 }
@@ -284,7 +354,9 @@ fn handle_doctor(config: &Config) -> String {
 }
 
 fn handle_pairing(db: &Database, channel_name: &str, sender_id: &str) -> String {
-    let approved = db.is_sender_approved(channel_name, sender_id).unwrap_or(false);
+    let approved = db
+        .is_sender_approved(channel_name, sender_id)
+        .unwrap_or(false);
     if approved {
         return format!("You are approved on channel '{channel_name}'.");
     }
@@ -308,19 +380,52 @@ mod tests {
 
     #[test]
     fn parse_known_commands() {
-        assert!(matches!(Command::parse("/status"), Some((Command::Status, _))));
+        assert!(matches!(
+            Command::parse("/status"),
+            Some((Command::Status, _))
+        ));
         assert!(matches!(Command::parse("/new"), Some((Command::New, _))));
-        assert!(matches!(Command::parse("/reset"), Some((Command::Reset, _))));
-        assert!(matches!(Command::parse("/usage"), Some((Command::Usage, _))));
+        assert!(matches!(
+            Command::parse("/reset"),
+            Some((Command::Reset, _))
+        ));
+        assert!(matches!(
+            Command::parse("/usage"),
+            Some((Command::Usage, _))
+        ));
         assert!(matches!(Command::parse("/help"), Some((Command::Help, _))));
-        assert!(matches!(Command::parse("/commands"), Some((Command::Commands, _))));
-        assert!(matches!(Command::parse("/skills"), Some((Command::Skills, _))));
-        assert!(matches!(Command::parse("/tools"), Some((Command::Tools, _))));
-        assert!(matches!(Command::parse("/whoami"), Some((Command::WhoAmI, _))));
-        assert!(matches!(Command::parse("/memory"), Some((Command::Memory, _))));
-        assert!(matches!(Command::parse("/doctor"), Some((Command::Doctor, _))));
-        assert!(matches!(Command::parse("/pairing"), Some((Command::Pairing, _))));
-        assert!(matches!(Command::parse("/skill"), Some((Command::Skill, _))));
+        assert!(matches!(
+            Command::parse("/commands"),
+            Some((Command::Commands, _))
+        ));
+        assert!(matches!(
+            Command::parse("/skills"),
+            Some((Command::Skills, _))
+        ));
+        assert!(matches!(
+            Command::parse("/tools"),
+            Some((Command::Tools, _))
+        ));
+        assert!(matches!(
+            Command::parse("/whoami"),
+            Some((Command::WhoAmI, _))
+        ));
+        assert!(matches!(
+            Command::parse("/memory"),
+            Some((Command::Memory, _))
+        ));
+        assert!(matches!(
+            Command::parse("/doctor"),
+            Some((Command::Doctor, _))
+        ));
+        assert!(matches!(
+            Command::parse("/pairing"),
+            Some((Command::Pairing, _))
+        ));
+        assert!(matches!(
+            Command::parse("/skill"),
+            Some((Command::Skill, _))
+        ));
     }
 
     #[test]
@@ -346,17 +451,32 @@ mod tests {
 
     #[test]
     fn parse_case_insensitive() {
-        assert!(matches!(Command::parse("/Status"), Some((Command::Status, _))));
+        assert!(matches!(
+            Command::parse("/Status"),
+            Some((Command::Status, _))
+        ));
         assert!(matches!(Command::parse("/HELP"), Some((Command::Help, _))));
         assert!(matches!(Command::parse("/New"), Some((Command::New, _))));
-        assert!(matches!(Command::parse("/SKILLS"), Some((Command::Skills, _))));
+        assert!(matches!(
+            Command::parse("/SKILLS"),
+            Some((Command::Skills, _))
+        ));
     }
 
     #[test]
     fn parse_strips_botname_suffix() {
-        assert!(matches!(Command::parse("/help@MyBorgBot"), Some((Command::Help, _))));
-        assert!(matches!(Command::parse("/status@BotName"), Some((Command::Status, _))));
-        assert!(matches!(Command::parse("/skills@Bot extra"), Some((Command::Skills, _))));
+        assert!(matches!(
+            Command::parse("/help@MyBorgBot"),
+            Some((Command::Help, _))
+        ));
+        assert!(matches!(
+            Command::parse("/status@BotName"),
+            Some((Command::Status, _))
+        ));
+        assert!(matches!(
+            Command::parse("/skills@Bot extra"),
+            Some((Command::Skills, _))
+        ));
     }
 
     #[test]

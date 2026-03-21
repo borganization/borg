@@ -49,7 +49,7 @@ fn spawn_gateway(config: &Config, shutdown: CancellationToken, metrics: BorgMetr
             let gw_shutdown = shutdown.clone();
             let gw_metrics = metrics;
             tokio::spawn(async move {
-                match borg_gateway::GatewayServer::new(gw_config, gw_shutdown, gw_metrics) {
+                match borg_gateway::GatewayServer::new(gw_config, gw_shutdown, gw_metrics, None) {
                     Ok(server) => {
                         if let Err(e) = server.run().await {
                             let msg = e.to_string();
@@ -175,17 +175,22 @@ pub async fn run() -> Result<()> {
     // Start heartbeat if enabled
     let heartbeat_cancel = CancellationToken::new();
     let _heartbeat_guard = heartbeat_cancel.clone().drop_guard();
-    let heartbeat_rx = if config.heartbeat.enabled {
+    let (heartbeat_rx, heartbeat_event_tx) = if config.heartbeat.enabled {
         let (hb_tx, hb_rx) = mpsc::channel::<HeartbeatEvent>(32);
-        let llm = borg_core::llm::LlmClient::new(config.clone())?;
-        let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), llm);
+        // Keep wake_tx alive so the wake_rx channel doesn't close immediately
+        let (wake_tx, wake_rx) = mpsc::channel::<()>(8);
+        let tz = config.user_timezone();
+        let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), tz, wake_rx);
         let hb_cancel = heartbeat_cancel.clone();
+        let hb_tx_clone = hb_tx.clone();
         tokio::spawn(async move {
+            // Move wake_tx into the task to keep it alive for the scheduler's lifetime
+            let _wake_tx = wake_tx;
             scheduler.run(hb_tx, hb_cancel).await;
         });
-        Some(hb_rx)
+        (Some(hb_rx), Some(hb_tx_clone))
     } else {
-        None
+        (None, None)
     };
 
     // Auto-start gateway if enabled and any channels are installed
@@ -217,7 +222,7 @@ pub async fn run() -> Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(config, heartbeat_rx);
+    let mut app = App::new(config, heartbeat_rx, heartbeat_event_tx);
     if let Some((title, count)) = resumed_info {
         app.push_system_message(format!("Resumed session: {title} ({count} messages)"));
     }
@@ -233,6 +238,11 @@ pub async fn run() -> Result<()> {
         &gateway_shutdown,
     )
     .await
+}
+
+/// Delegate to the shared heartbeat turn implementation.
+async fn run_heartbeat_turn(config: &Config) -> Option<String> {
+    crate::service::execute_heartbeat_turn(config).await
 }
 
 /// If the app just became idle and has queued messages, auto-submit the next one.
@@ -301,7 +311,23 @@ async fn run_event_loop(
                     std::future::pending().await
                 }
             } => {
-                app.process_heartbeat(event);
+                match event {
+                    HeartbeatEvent::Fire => {
+                        // Run a heartbeat agent turn in the background
+                        let hb_config = app.config.clone();
+                        let hb_tx_clone = app.heartbeat_event_tx.clone();
+                        tokio::spawn(async move {
+                            if let Some(msg) = run_heartbeat_turn(&hb_config).await {
+                                if let Some(tx) = hb_tx_clone {
+                                    let _ = tx.send(HeartbeatEvent::Message(msg)).await;
+                                }
+                            }
+                        });
+                    }
+                    _ => {
+                        app.process_heartbeat(event);
+                    }
+                }
                 AppAction::Continue
             }
 

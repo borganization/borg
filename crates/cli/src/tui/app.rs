@@ -85,6 +85,7 @@ pub struct App<'a> {
     pub config: Config,
     pub event_rx: Option<mpsc::Receiver<AgentEvent>>,
     pub heartbeat_rx: Option<mpsc::Receiver<HeartbeatEvent>>,
+    pub heartbeat_event_tx: Option<mpsc::Sender<HeartbeatEvent>>,
     pub cancel_token: Option<CancellationToken>,
     auto_scroll: bool,
     /// Accumulated token usage for the current session
@@ -106,7 +107,11 @@ pub struct App<'a> {
 }
 
 impl<'a> App<'a> {
-    pub fn new(config: Config, heartbeat_rx: Option<mpsc::Receiver<HeartbeatEvent>>) -> Self {
+    pub fn new(
+        config: Config,
+        heartbeat_rx: Option<mpsc::Receiver<HeartbeatEvent>>,
+        heartbeat_event_tx: Option<mpsc::Sender<HeartbeatEvent>>,
+    ) -> Self {
         Self {
             cells: Vec::new(),
             state: AppState::Idle,
@@ -119,6 +124,7 @@ impl<'a> App<'a> {
             config,
             event_rx: None,
             heartbeat_rx,
+            heartbeat_event_tx,
             cancel_token: None,
             auto_scroll: true,
             session_prompt_tokens: 0,
@@ -1219,6 +1225,10 @@ impl<'a> App<'a> {
 
     pub fn process_heartbeat(&mut self, event: HeartbeatEvent) {
         match event {
+            HeartbeatEvent::Fire => {
+                // Fire events are handled by the TUI event loop (runs agent turn).
+                // If we receive one here, it means the event loop forwarded it.
+            }
             HeartbeatEvent::Message(msg) => {
                 self.cells.push(HistoryCell::Heartbeat { text: msg });
                 if self.auto_scroll {
@@ -1533,7 +1543,7 @@ mod tests {
 
     fn make_app() -> App<'static> {
         let config = Config::default();
-        App::new(config, None)
+        App::new(config, None, None)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
