@@ -2,6 +2,78 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
+/// Commands allowed in `SecretRef::Exec`. Only well-known credential helpers
+/// are permitted to prevent arbitrary command execution via config compromise.
+const EXEC_ALLOWLIST: &[&str] = &[
+    "security",    // macOS Keychain CLI
+    "secret-tool", // GNOME/freedesktop secret store
+    "pass",        // password-store
+    "op",          // 1Password CLI
+    "gpg",         // GnuPG
+    "gpg2",        // GnuPG v2
+    "age",         // age encryption
+    "gopass",      // gopass
+    "bw",          // Bitwarden CLI
+    "vault",       // HashiCorp Vault
+    "aws",         // AWS CLI (for secrets-manager)
+];
+
+/// Characters forbidden in exec args to prevent shell metacharacter injection.
+/// Characters forbidden in exec args. While `Command::new` does not invoke
+/// a shell (so these are passed literally), we reject them as defense-in-depth
+/// in case the execution mechanism changes.
+const FORBIDDEN_ARG_CHARS: &[char] = &['`', '$', '|', ';', '&', '\n', '\r', '(', ')', '>', '<'];
+
+fn validate_exec_command(command: &str, args: &[String]) -> Result<()> {
+    let basename = std::path::Path::new(command)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(command);
+
+    if !EXEC_ALLOWLIST.contains(&basename) {
+        bail!(
+            "Command '{}' is not in the exec allowlist. Allowed: {}",
+            command,
+            EXEC_ALLOWLIST.join(", ")
+        );
+    }
+
+    for arg in args {
+        if arg.chars().any(|c| FORBIDDEN_ARG_CHARS.contains(&c)) {
+            bail!("Exec argument contains forbidden shell metacharacters: {arg}");
+        }
+    }
+    Ok(())
+}
+
+fn validate_file_path(expanded: &str) -> Result<std::path::PathBuf> {
+    let canonical = std::fs::canonicalize(expanded)
+        .with_context(|| format!("Failed to resolve secret file path: {expanded}"))?;
+
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+
+    let mut trusted = canonical.starts_with(&home);
+
+    // Allow temp directories (needed for tests and tmpfile-based secrets).
+    // Canonicalize temp_dir too since on macOS /var -> /private/var.
+    if !trusted {
+        if let Ok(canon_tmp) = std::fs::canonicalize(std::env::temp_dir()) {
+            trusted = canonical.starts_with(canon_tmp);
+        }
+    }
+
+    if !trusted {
+        bail!(
+            "Secret file path '{}' resolves to '{}' which is outside the home directory",
+            expanded,
+            canonical.display()
+        );
+    }
+
+    Ok(canonical)
+}
+
 /// A reference to a secret value that can be resolved at runtime.
 /// Supports multiple backends: environment variables, files, and external commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +114,8 @@ impl SecretRef {
 
             SecretRef::File { path, key } => {
                 let expanded = shellexpand::tilde(path);
-                let content = std::fs::read_to_string(expanded.as_ref())
+                let canonical = validate_file_path(expanded.as_ref())?;
+                let content = std::fs::read_to_string(&canonical)
                     .with_context(|| format!("Failed to read secret file: {path}"))?;
 
                 match key {
@@ -61,6 +134,8 @@ impl SecretRef {
             }
 
             SecretRef::Exec { command, args } => {
+                validate_exec_command(command, args)?;
+
                 let output = Command::new(command)
                     .args(args)
                     .output()
@@ -141,7 +216,6 @@ pub fn resolve_first(refs: &[SecretRef]) -> Result<(String, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn resolve_env_var() {
@@ -214,22 +288,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_exec_echo() {
+    fn resolve_exec_blocked_command() {
+        // "echo" is not in the exec allowlist
         let sr = SecretRef::Exec {
             command: "echo".to_string(),
             args: vec!["exec-secret-value".to_string()],
         };
-        let val = sr.resolve().expect("should resolve");
-        assert_eq!(val, "exec-secret-value");
-    }
-
-    #[test]
-    fn resolve_exec_failure() {
-        let sr = SecretRef::Exec {
-            command: "false".to_string(),
-            args: vec![],
-        };
-        assert!(sr.resolve().is_err());
+        let err = sr.resolve().unwrap_err();
+        assert!(
+            err.to_string().contains("not in the exec allowlist"),
+            "expected allowlist error, got: {err}"
+        );
     }
 
     #[test]
@@ -238,7 +307,56 @@ mod tests {
             command: "borg_nonexistent_command_12345".to_string(),
             args: vec![],
         };
-        assert!(sr.resolve().is_err());
+        let err = sr.resolve().unwrap_err();
+        assert!(err.to_string().contains("not in the exec allowlist"));
+    }
+
+    #[test]
+    fn exec_metachar_in_args_rejected() {
+        let cases = vec![
+            (
+                "security",
+                vec!["find-generic-password; rm -rf /".to_string()],
+            ),
+            ("pass", vec!["show".to_string(), "$(whoami)".to_string()]),
+            ("op", vec!["`id`".to_string()]),
+            (
+                "gpg",
+                vec!["--decrypt".to_string(), "key\ninjected".to_string()],
+            ),
+            (
+                "vault",
+                vec!["read".to_string(), "secret | cat".to_string()],
+            ),
+        ];
+        for (cmd, args) in cases {
+            let sr = SecretRef::Exec {
+                command: cmd.to_string(),
+                args,
+            };
+            let err = sr.resolve().unwrap_err();
+            assert!(
+                err.to_string().contains("forbidden shell metacharacters"),
+                "expected metachar error for {cmd}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_allowed_by_basename() {
+        // validate_exec_command should accept allowlisted commands
+        assert!(validate_exec_command("security", &[]).is_ok());
+        assert!(validate_exec_command("/usr/bin/security", &[]).is_ok());
+        assert!(validate_exec_command("pass", &["show".to_string(), "email".to_string()]).is_ok());
+        assert!(validate_exec_command("op", &["read".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn exec_blocked_by_basename() {
+        assert!(validate_exec_command("rm", &[]).is_err());
+        assert!(validate_exec_command("curl", &[]).is_err());
+        assert!(validate_exec_command("/bin/sh", &[]).is_err());
+        assert!(validate_exec_command("python3", &[]).is_err());
     }
 
     #[test]
@@ -379,5 +497,49 @@ mod tests {
             account: "borg-nonexistent-test-account-12345".to_string(),
         };
         assert!(sr.resolve().is_err());
+    }
+
+    #[test]
+    fn resolve_file_traversal_rejected() {
+        // /etc/hosts exists on macOS/Linux and is outside home dir
+        let sr = SecretRef::File {
+            path: "/etc/hosts".to_string(),
+            key: None,
+        };
+        let err = sr.resolve().unwrap_err();
+        assert!(
+            err.to_string().contains("outside the home directory"),
+            "expected path traversal error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_file_relative_traversal_rejected() {
+        let sr = SecretRef::File {
+            path: "../../../etc/hosts".to_string(),
+            key: None,
+        };
+        // Either fails to canonicalize or is rejected as outside home
+        assert!(sr.resolve().is_err());
+    }
+
+    #[test]
+    fn resolve_file_in_tempdir_ok() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let file_path = dir.path().join("ok-secret.txt");
+        std::fs::write(&file_path, "temp-secret\n").expect("write");
+
+        let sr = SecretRef::File {
+            path: file_path.to_string_lossy().to_string(),
+            key: None,
+        };
+        let val = sr.resolve().expect("should resolve from temp dir");
+        assert_eq!(val, "temp-secret");
+    }
+
+    #[test]
+    fn validate_file_path_rejects_system_paths() {
+        assert!(validate_file_path("/etc/passwd").is_err());
+        assert!(validate_file_path("/var/log/system.log").is_err());
     }
 }

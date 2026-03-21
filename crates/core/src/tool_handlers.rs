@@ -288,6 +288,7 @@ pub async fn handle_run_shell(
     config: &Config,
     policy: &ExecutionPolicy,
     event_tx: &mpsc::Sender<AgentEvent>,
+    skill_env_allowlist: Option<&std::collections::HashSet<String>>,
 ) -> Result<String> {
     let command = args["command"].as_str().context("Missing 'command'")?;
     let timeout_ms = config.tools.default_timeout_ms;
@@ -318,18 +319,26 @@ pub async fn handle_run_shell(
         }
     }
 
-    let mut resolved_creds = config.resolve_credentials();
-    // Merge per-skill env vars (don't override existing)
+    // Resolve credentials and filter to only those declared by skills
+    let all_creds = config.resolve_credentials();
+    let mut filtered_creds: std::collections::HashMap<String, String> = match skill_env_allowlist {
+        Some(allowlist) => all_creds
+            .into_iter()
+            .filter(|(k, _)| allowlist.contains(k))
+            .collect(),
+        None => all_creds,
+    };
+    // Merge per-skill env vars (these are explicitly configured, always included)
     let skill_env = crate::skills::collect_skill_env(&config.skills);
     for (k, v) in skill_env {
-        resolved_creds.entry(k).or_insert(v);
+        filtered_creds.entry(k).or_insert(v);
     }
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c")
         .arg(command)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    for (key, val) in &resolved_creds {
+    for (key, val) in &filtered_creds {
         cmd.env(key, val);
     }
 

@@ -1856,13 +1856,12 @@ GH_TOKEN = { source = "file", path = "/tmp/token" }
 
     #[test]
     fn resolve_credentials_filters_failures() {
+        let var_name = "BORG_TEST_CRED_GOOD";
+        std::env::set_var(var_name, "good-value");
         let mut cfg = Config::default();
         cfg.credentials.insert(
             "GOOD".to_string(),
-            CredentialValue::Ref(SecretRef::Exec {
-                command: "echo".to_string(),
-                args: vec!["good-value".to_string()],
-            }),
+            CredentialValue::EnvVar(var_name.to_string()),
         );
         cfg.credentials.insert(
             "BAD".to_string(),
@@ -1871,6 +1870,7 @@ GH_TOKEN = { source = "file", path = "/tmp/token" }
         let resolved = cfg.resolve_credentials();
         assert_eq!(resolved.get("GOOD").unwrap(), "good-value");
         assert!(!resolved.contains_key("BAD"));
+        std::env::remove_var(var_name);
     }
 
     #[test]

@@ -1842,8 +1842,14 @@ mod tests {
         // Click in transcript body (not scrollbar) must be a no-op so the
         // terminal can handle native text selection.
         app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 40, 20));
-        assert_eq!(app.scroll_offset, 5, "click in transcript must not change scroll");
-        assert!(!app.scrollbar_dragging, "click in transcript must not start drag");
+        assert_eq!(
+            app.scroll_offset, 5,
+            "click in transcript must not change scroll"
+        );
+        assert!(
+            !app.scrollbar_dragging,
+            "click in transcript must not start drag"
+        );
     }
 
     #[test]
@@ -1854,7 +1860,10 @@ mod tests {
 
         // Drag without prior scrollbar click must be a no-op (text selection).
         app.handle_mouse(mouse_event(MouseEventKind::Drag(MouseButton::Left), 40, 25));
-        assert_eq!(app.scroll_offset, 5, "drag in transcript must not change scroll");
+        assert_eq!(
+            app.scroll_offset, 5,
+            "drag in transcript must not change scroll"
+        );
     }
 
     #[test]
@@ -1875,7 +1884,11 @@ mod tests {
         let mut app = setup_app_with_transcript();
         app.scroll_offset = 5;
 
-        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Right), 40, 20));
+        app.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Right),
+            40,
+            20,
+        ));
         assert_eq!(app.scroll_offset, 5, "right click must not change scroll");
     }
 
@@ -1885,7 +1898,11 @@ mod tests {
         let mut app = setup_app_with_transcript();
         app.scroll_offset = 5;
 
-        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Middle), 40, 20));
+        app.handle_mouse(mouse_event(
+            MouseEventKind::Down(MouseButton::Middle),
+            40,
+            20,
+        ));
         assert_eq!(app.scroll_offset, 5, "middle click must not change scroll");
     }
 
