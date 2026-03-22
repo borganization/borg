@@ -50,6 +50,8 @@ struct AppState {
     telegram_secret: Option<String>,
     slack_client: Option<Arc<SlackClient>>,
     slack_signing_secret: Option<String>,
+    slack_bot_user_id: Option<String>,
+    slack_dedup: Arc<Mutex<crate::slack::dedup::EventDeduplicator>>,
     twilio_client: Option<Arc<TwilioClient>>,
     twilio_auth_token: Option<String>,
     twilio_phone_number: Option<String>,
@@ -167,6 +169,7 @@ impl GatewayServer {
             .resolve_credential_or_env("SLACK_SIGNING_SECRET");
 
         // Initialize native Slack client if token is available
+        let mut slack_bot_user_id: Option<String> = None;
         let slack_client = match slack_token {
             Some(token) => match SlackClient::new(&token) {
                 Ok(client) => match client.auth_test().await {
@@ -176,6 +179,7 @@ impl GatewayServer {
                             resp.user.as_deref().unwrap_or("unknown"),
                             resp.team.as_deref().unwrap_or("unknown"),
                         );
+                        slack_bot_user_id = resp.user_id;
                         Some(Arc::new(client))
                     }
                     Err(e) => {
@@ -190,6 +194,7 @@ impl GatewayServer {
             },
             None => None,
         };
+        let slack_dedup = Arc::new(Mutex::new(crate::slack::dedup::EventDeduplicator::new()));
 
         // Initialize native Twilio client if credentials are available
         let twilio_account_sid = self.config.resolve_credential_or_env("TWILIO_ACCOUNT_SID");
@@ -293,6 +298,8 @@ impl GatewayServer {
             telegram_secret,
             slack_client,
             slack_signing_secret,
+            slack_bot_user_id,
+            slack_dedup,
             twilio_client,
             twilio_auth_token,
             twilio_phone_number,
@@ -743,6 +750,16 @@ async fn webhook_handler(
 
     if name == "slack" {
         if let Some(ref slack_client) = state.slack_client {
+            // Detect slash commands by content-type (form-encoded vs JSON events)
+            let is_form = headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(|ct| ct.contains("application/x-www-form-urlencoded"))
+                .unwrap_or(false);
+
+            if is_form {
+                return handle_slack_slash_command(&state, slack_client, &headers, &body).await;
+            }
             return handle_slack_webhook(&state, slack_client, &headers, &body).await;
         }
     }
@@ -977,18 +994,23 @@ async fn handle_slack_webhook(
     headers: &HeaderMap,
     body: &str,
 ) -> WebhookResponse {
-    let webhook_result = match crate::slack::handle_slack_webhook(
-        headers,
-        body,
-        state.slack_signing_secret.as_deref(),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Slack webhook verification/parse error: {e:#}");
-            return (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(serde_json::json!({ "error": "Unauthorized" })),
-            );
+    let webhook_result = {
+        let mut dedup = state.slack_dedup.lock().await;
+        match crate::slack::handle_slack_webhook(
+            headers,
+            body,
+            state.slack_signing_secret.as_deref(),
+            Some(&mut dedup),
+            state.slack_bot_user_id.as_deref(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Slack webhook verification/parse error: {e:#}");
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({ "error": "Unauthorized" })),
+                );
+            }
         }
     };
 
@@ -1062,6 +1084,86 @@ async fn handle_slack_webhook(
         )
         .await;
 
+    ok_response()
+}
+
+async fn handle_slack_slash_command(
+    state: &Arc<AppState>,
+    slack_client: &Arc<SlackClient>,
+    headers: &HeaderMap,
+    body: &str,
+) -> WebhookResponse {
+    let command_result = match crate::slack::handle_slash_command(
+        headers,
+        body,
+        state.slack_signing_secret.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Slack slash command verification/parse error: {e:#}");
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({ "error": "Unauthorized" })),
+            );
+        }
+    };
+
+    let crate::slack::SlashCommandResult::Command(inbound, response_url) = command_result;
+
+    let session_key = inbound.session_key("slack", "");
+
+    let state = state.clone();
+    let slack_client = slack_client.clone();
+    let work_state = state.clone();
+    state
+        .session_queue
+        .enqueue(
+            session_key,
+            Box::pin(async move {
+                let state = work_state;
+                let result = tokio::time::timeout(state.request_timeout, async {
+                    let (response_text, _session_id) = handler::invoke_agent(
+                        "slack",
+                        &inbound,
+                        &state.config,
+                        Some(&state.health),
+                    )
+                    .await?;
+
+                    // Respond via response_url if available, otherwise post to channel
+                    if let Some(ref url) = response_url {
+                        if let Err(e) = slack_client.respond_to_url(url, &response_text).await {
+                            warn!("Failed to respond to Slack slash command: {e}");
+                            state
+                                .health
+                                .write()
+                                .await
+                                .record_error("slack", &e.to_string());
+                        } else {
+                            state.health.write().await.record_outbound("slack");
+                        }
+                    } else {
+                        let channel_id = inbound.channel_id.clone().unwrap_or_default();
+                        if let Err(e) = slack_client
+                            .post_message(&channel_id, &response_text, None)
+                            .await
+                        {
+                            warn!("Failed to send Slack slash command response: {e}");
+                        }
+                    }
+
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+
+                if let Err(e) = result {
+                    warn!("Slack slash command work error: {e:?}");
+                }
+            }),
+        )
+        .await;
+
+    // Return 200 immediately — Slack requires response within 3 seconds
     ok_response()
 }
 
