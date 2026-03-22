@@ -71,7 +71,11 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 }
 
 impl HistoryCell {
-    pub fn render(&self, width: u16, throbber_state: Option<&ThrobberState>) -> Vec<Line<'static>> {
+    pub fn render(
+        &self,
+        width: u16,
+        _throbber_state: Option<&ThrobberState>,
+    ) -> Vec<Line<'static>> {
         match self {
             HistoryCell::User { text } => {
                 let bg = theme::user_message_style();

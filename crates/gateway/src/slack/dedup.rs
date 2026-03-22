@@ -33,8 +33,8 @@ impl EventDeduplicator {
             }
         }
         let owned = event_id.to_string();
-        self.order.push_back(owned.clone());
-        self.set.insert(owned);
+        self.set.insert(owned.clone());
+        self.order.push_back(owned);
         false
     }
 }
