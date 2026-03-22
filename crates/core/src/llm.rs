@@ -742,8 +742,8 @@ impl LlmClient {
             }
 
             while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim().to_string();
-                buffer = buffer[line_end + 1..].to_string();
+                let line = buffer[..line_end].trim().to_owned();
+                buffer.drain(..line_end + 1);
 
                 if line.is_empty() || line.starts_with(':') {
                     continue;
@@ -971,8 +971,8 @@ impl LlmClient {
             }
 
             while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim().to_string();
-                buffer = buffer[line_end + 1..].to_string();
+                let line = buffer[..line_end].trim().to_owned();
+                buffer.drain(..line_end + 1);
 
                 if line.is_empty() || line.starts_with(':') {
                     continue;
