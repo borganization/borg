@@ -93,6 +93,7 @@ use history::HistoryCell;
 /// Always starts the gateway (native channels are detected via credentials inside GatewayServer).
 fn spawn_gateway(config: &Config, shutdown: CancellationToken, metrics: BorgMetrics) -> bool {
     let gw_config = config.clone();
+    #[allow(clippy::redundant_clone)]
     let gw_shutdown = shutdown.clone();
     let gw_metrics = metrics;
     tokio::spawn(async move {
