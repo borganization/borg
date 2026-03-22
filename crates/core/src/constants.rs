@@ -67,14 +67,26 @@ pub const ECHO_CACHE_ID_TTL: Duration = Duration::from_secs(60);
 pub const SELF_CHAT_CACHE_MAX_ENTRIES: usize = 512;
 pub const SELF_CHAT_CACHE_TTL: Duration = Duration::from_secs(10);
 
-// Rate guard defaults
-pub const RATE_TOOL_CALLS_WARN: u32 = 50;
-pub const RATE_TOOL_CALLS_BLOCK: u32 = 100;
-pub const RATE_SHELL_COMMANDS_WARN: u32 = 20;
-pub const RATE_SHELL_COMMANDS_BLOCK: u32 = 50;
-pub const RATE_FILE_WRITES_WARN: u32 = 15;
-pub const RATE_FILE_WRITES_BLOCK: u32 = 30;
-pub const RATE_MEMORY_WRITES_WARN: u32 = 10;
-pub const RATE_MEMORY_WRITES_BLOCK: u32 = 20;
-pub const RATE_WEB_REQUESTS_WARN: u32 = 20;
-pub const RATE_WEB_REQUESTS_BLOCK: u32 = 50;
+// Rate guard defaults (interactive sessions — generous for long-running tasks)
+pub const RATE_TOOL_CALLS_WARN: u32 = 200;
+pub const RATE_TOOL_CALLS_BLOCK: u32 = 500;
+pub const RATE_SHELL_COMMANDS_WARN: u32 = 100;
+pub const RATE_SHELL_COMMANDS_BLOCK: u32 = 250;
+pub const RATE_FILE_WRITES_WARN: u32 = 50;
+pub const RATE_FILE_WRITES_BLOCK: u32 = 150;
+pub const RATE_MEMORY_WRITES_WARN: u32 = 20;
+pub const RATE_MEMORY_WRITES_BLOCK: u32 = 50;
+pub const RATE_WEB_REQUESTS_WARN: u32 = 50;
+pub const RATE_WEB_REQUESTS_BLOCK: u32 = 150;
+
+// Rate guard defaults (gateway sessions — stricter for external senders)
+pub const GW_RATE_TOOL_CALLS_WARN: u32 = 30;
+pub const GW_RATE_TOOL_CALLS_BLOCK: u32 = 50;
+pub const GW_RATE_SHELL_COMMANDS_WARN: u32 = 10;
+pub const GW_RATE_SHELL_COMMANDS_BLOCK: u32 = 20;
+pub const GW_RATE_FILE_WRITES_WARN: u32 = 10;
+pub const GW_RATE_FILE_WRITES_BLOCK: u32 = 20;
+pub const GW_RATE_MEMORY_WRITES_WARN: u32 = 5;
+pub const GW_RATE_MEMORY_WRITES_BLOCK: u32 = 10;
+pub const GW_RATE_WEB_REQUESTS_WARN: u32 = 10;
+pub const GW_RATE_WEB_REQUESTS_BLOCK: u32 = 25;

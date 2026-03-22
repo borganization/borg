@@ -1305,8 +1305,9 @@ impl Agent {
                 ToolOutput::Multimodal { text, parts } => (text, Some(parts)),
             };
             let redacted = self.truncate_and_redact(&raw_text);
+            let sanitized = crate::xml_util::sanitize_xml_boundaries(&redacted);
             let xml = format!(
-                "<tool_output name=\"{safe_name}\" trust=\"external\">\n{redacted}\n</tool_output>"
+                "<tool_output name=\"{safe_name}\" trust=\"external\">\n{sanitized}\n</tool_output>"
             );
             Self::fire_after_tool_hook(
                 &mut self.hook_registry,

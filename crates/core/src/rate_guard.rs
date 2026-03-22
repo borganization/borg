@@ -96,6 +96,22 @@ impl Default for ActionLimits {
 }
 
 impl ActionLimits {
+    /// Stricter defaults for gateway sessions (external senders).
+    pub fn gateway_defaults() -> Self {
+        Self {
+            tool_calls_warn: constants::GW_RATE_TOOL_CALLS_WARN,
+            tool_calls_block: constants::GW_RATE_TOOL_CALLS_BLOCK,
+            shell_commands_warn: constants::GW_RATE_SHELL_COMMANDS_WARN,
+            shell_commands_block: constants::GW_RATE_SHELL_COMMANDS_BLOCK,
+            file_writes_warn: constants::GW_RATE_FILE_WRITES_WARN,
+            file_writes_block: constants::GW_RATE_FILE_WRITES_BLOCK,
+            memory_writes_warn: constants::GW_RATE_MEMORY_WRITES_WARN,
+            memory_writes_block: constants::GW_RATE_MEMORY_WRITES_BLOCK,
+            web_requests_warn: constants::GW_RATE_WEB_REQUESTS_WARN,
+            web_requests_block: constants::GW_RATE_WEB_REQUESTS_BLOCK,
+        }
+    }
+
     fn limits_for(&self, action: ActionType) -> (u32, u32) {
         match action {
             ActionType::ToolCall => (self.tool_calls_warn, self.tool_calls_block),
@@ -207,16 +223,16 @@ mod tests {
     #[test]
     fn test_default_limits() {
         let limits = ActionLimits::default();
-        assert_eq!(limits.tool_calls_warn, 50);
-        assert_eq!(limits.tool_calls_block, 100);
-        assert_eq!(limits.shell_commands_warn, 20);
-        assert_eq!(limits.shell_commands_block, 50);
-        assert_eq!(limits.file_writes_warn, 15);
-        assert_eq!(limits.file_writes_block, 30);
-        assert_eq!(limits.memory_writes_warn, 10);
-        assert_eq!(limits.memory_writes_block, 20);
-        assert_eq!(limits.web_requests_warn, 20);
-        assert_eq!(limits.web_requests_block, 50);
+        assert_eq!(limits.tool_calls_warn, 200);
+        assert_eq!(limits.tool_calls_block, 500);
+        assert_eq!(limits.shell_commands_warn, 100);
+        assert_eq!(limits.shell_commands_block, 250);
+        assert_eq!(limits.file_writes_warn, 50);
+        assert_eq!(limits.file_writes_block, 150);
+        assert_eq!(limits.memory_writes_warn, 20);
+        assert_eq!(limits.memory_writes_block, 50);
+        assert_eq!(limits.web_requests_warn, 50);
+        assert_eq!(limits.web_requests_block, 150);
     }
 
     #[test]
@@ -335,11 +351,26 @@ mod tests {
     #[test]
     fn test_limits_for_all_action_types() {
         let limits = ActionLimits::default();
-        assert_eq!(limits.limits_for(ActionType::ToolCall), (50, 100));
-        assert_eq!(limits.limits_for(ActionType::ShellCommand), (20, 50));
-        assert_eq!(limits.limits_for(ActionType::FileWrite), (15, 30));
-        assert_eq!(limits.limits_for(ActionType::MemoryWrite), (10, 20));
-        assert_eq!(limits.limits_for(ActionType::WebRequest), (20, 50));
+        assert_eq!(limits.limits_for(ActionType::ToolCall), (200, 500));
+        assert_eq!(limits.limits_for(ActionType::ShellCommand), (100, 250));
+        assert_eq!(limits.limits_for(ActionType::FileWrite), (50, 150));
+        assert_eq!(limits.limits_for(ActionType::MemoryWrite), (20, 50));
+        assert_eq!(limits.limits_for(ActionType::WebRequest), (50, 150));
+    }
+
+    #[test]
+    fn test_gateway_defaults() {
+        let limits = ActionLimits::gateway_defaults();
+        assert_eq!(limits.tool_calls_warn, 30);
+        assert_eq!(limits.tool_calls_block, 50);
+        assert_eq!(limits.shell_commands_warn, 10);
+        assert_eq!(limits.shell_commands_block, 20);
+        assert_eq!(limits.file_writes_warn, 10);
+        assert_eq!(limits.file_writes_block, 20);
+        assert_eq!(limits.memory_writes_warn, 5);
+        assert_eq!(limits.memory_writes_block, 10);
+        assert_eq!(limits.web_requests_warn, 10);
+        assert_eq!(limits.web_requests_block, 25);
     }
 
     #[test]
@@ -352,6 +383,6 @@ tool_calls_block = 10
         assert_eq!(limits.tool_calls_warn, 5);
         assert_eq!(limits.tool_calls_block, 10);
         // Others should be defaults
-        assert_eq!(limits.shell_commands_warn, 20);
+        assert_eq!(limits.shell_commands_warn, 100);
     }
 }
