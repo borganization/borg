@@ -31,6 +31,44 @@ impl fmt::Display for ProbeStatus {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_status_display_ok() {
+        assert_eq!(ProbeStatus::Ok.to_string(), "ok");
+    }
+
+    #[test]
+    fn probe_status_display_no_db() {
+        assert_eq!(ProbeStatus::NoDb.to_string(), "no chat.db found");
+    }
+
+    #[test]
+    fn probe_status_display_no_disk_access() {
+        let s = ProbeStatus::NoDiskAccess.to_string();
+        assert!(s.contains("Full Disk Access"));
+    }
+
+    #[test]
+    fn probe_status_display_query_error() {
+        let s = ProbeStatus::QueryError("table missing".to_string()).to_string();
+        assert!(s.contains("query error"));
+        assert!(s.contains("table missing"));
+    }
+
+    #[test]
+    fn probe_result_fields() {
+        let result = ProbeResult {
+            status: ProbeStatus::Ok,
+            max_rowid: Some(42),
+        };
+        assert!(matches!(result.status, ProbeStatus::Ok));
+        assert_eq!(result.max_rowid, Some(42));
+    }
+}
+
 /// Probe whether chat.db is accessible and return status + max ROWID.
 pub fn probe_imessage() -> ProbeResult {
     let db_path = match dirs::home_dir() {

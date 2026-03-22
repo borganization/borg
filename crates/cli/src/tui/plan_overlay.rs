@@ -5,7 +5,7 @@ use ratatui::Frame;
 
 use super::theme;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlanOption {
     ClearAndProceed,
     ProceedWithContext,
@@ -112,5 +112,62 @@ impl PlanOverlay {
 
         let paragraph = Paragraph::new(lines).block(block);
         frame.render_widget(paragraph, popup_area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_overlay_not_visible() {
+        let overlay = PlanOverlay::new();
+        assert!(!overlay.visible);
+        assert_eq!(overlay.selected(), PlanOption::ClearAndProceed);
+    }
+
+    #[test]
+    fn show_sets_visible_and_context() {
+        let mut overlay = PlanOverlay::new();
+        overlay.show(75, "Borg".to_string());
+        assert!(overlay.visible);
+        assert_eq!(overlay.context_pct, 75);
+        assert_eq!(overlay.agent_name, "Borg");
+        assert_eq!(overlay.selected(), PlanOption::ClearAndProceed);
+    }
+
+    #[test]
+    fn dismiss_hides() {
+        let mut overlay = PlanOverlay::new();
+        overlay.show(50, "Bot".to_string());
+        overlay.dismiss();
+        assert!(!overlay.visible);
+    }
+
+    #[test]
+    fn cycle_wraps_around() {
+        let mut overlay = PlanOverlay::new();
+        assert_eq!(overlay.selected(), PlanOption::ClearAndProceed);
+        overlay.cycle();
+        assert_eq!(overlay.selected(), PlanOption::ProceedWithContext);
+        overlay.cycle();
+        assert_eq!(overlay.selected(), PlanOption::TypeFeedback);
+        overlay.cycle();
+        assert_eq!(overlay.selected(), PlanOption::ClearAndProceed);
+    }
+
+    #[test]
+    fn select_sets_option() {
+        let mut overlay = PlanOverlay::new();
+        overlay.select(PlanOption::TypeFeedback);
+        assert_eq!(overlay.selected(), PlanOption::TypeFeedback);
+    }
+
+    #[test]
+    fn show_resets_selection() {
+        let mut overlay = PlanOverlay::new();
+        overlay.select(PlanOption::TypeFeedback);
+        overlay.show(80, "Agent".to_string());
+        assert_eq!(overlay.selected(), PlanOption::ClearAndProceed);
     }
 }
