@@ -406,7 +406,7 @@ async fn deliver_task_result(
             let token = config.resolve_credential_or_env("SLACK_BOT_TOKEN");
             match token {
                 Some(t) => match borg_gateway::slack::api::SlackClient::new(&t) {
-                    Ok(client) => client.post_message(target, &msg, None).await,
+                    Ok(client) => client.post_message(target, &msg, None).await.map(|_| ()),
                     Err(e) => Err(e),
                 },
                 None => {

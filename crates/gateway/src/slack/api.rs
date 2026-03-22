@@ -5,7 +5,9 @@ use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use tracing::warn;
 
-use super::types::{AuthTestResponse, PostMessageRequest};
+use super::types::{
+    AuthTestResponse, PostMessageRequest, PostMessageResponse, UpdateMessageRequest,
+};
 use crate::chunker;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
@@ -67,18 +69,20 @@ impl SlackClient {
 
     /// Send a message to a Slack channel, automatically chunking at 4000 chars.
     /// Optionally replies in a thread if `thread_ts` is provided.
+    /// Returns the message `ts` of the last chunk sent (useful for later editing).
     pub async fn post_message(
         &self,
         channel: &str,
         text: &str,
         thread_ts: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
+        let mut last_ts = None;
 
         for chunk in &chunks {
-            self.send_single_message(channel, chunk, thread_ts).await?;
+            last_ts = self.send_single_message(channel, chunk, thread_ts).await?;
         }
-        Ok(())
+        Ok(last_ts)
     }
 
     async fn send_single_message(
@@ -86,10 +90,11 @@ impl SlackClient {
         channel: &str,
         text: &str,
         thread_ts: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
+        let converted_text = super::mrkdwn::markdown_to_mrkdwn(text);
         let body = PostMessageRequest {
             channel: channel.to_string(),
-            text: text.to_string(),
+            text: converted_text,
             thread_ts: thread_ts.map(String::from),
             blocks: None,
         };
@@ -111,10 +116,50 @@ impl SlackClient {
         .await?;
 
         let status = resp.status();
-        let resp_body: serde_json::Value = resp
+        let resp_body: PostMessageResponse = resp
             .json()
             .await
             .context("Failed to parse chat.postMessage response")?;
+
+        if resp_body.ok {
+            return Ok(resp_body.ts);
+        }
+
+        let error = resp_body.error.as_deref().unwrap_or("unknown error");
+        bail!("chat.postMessage failed ({}): {}", status.as_u16(), error);
+    }
+
+    /// Edit a previously sent message via `chat.update`.
+    pub async fn update_message(&self, channel: &str, ts: &str, text: &str) -> Result<()> {
+        let converted_text = super::mrkdwn::markdown_to_mrkdwn(text);
+        let body = UpdateMessageRequest {
+            channel: channel.to_string(),
+            ts: ts.to_string(),
+            text: converted_text,
+            blocks: None,
+        };
+
+        let policy = RateLimitPolicy {
+            service_name: "Slack chat.update",
+            ..RateLimitPolicy::default()
+        };
+
+        let resp = send_with_rate_limit_retry(&policy, || async {
+            self.client
+                .post(format!("{SLACK_API_BASE}/chat.update"))
+                .bearer_auth(&self.token)
+                .json(&body)
+                .send()
+                .await
+                .context("Failed to update Slack message")
+        })
+        .await?;
+
+        let status = resp.status();
+        let resp_body: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse chat.update response")?;
 
         if resp_body
             .get("ok")
@@ -129,7 +174,7 @@ impl SlackClient {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown error");
 
-        bail!("chat.postMessage failed ({}): {}", status.as_u16(), error);
+        bail!("chat.update failed ({}): {}", status.as_u16(), error);
     }
 
     /// Set thread typing status via `assistant.threads.setStatus` API.
@@ -265,6 +310,82 @@ impl SlackClient {
         bail!("files.upload failed ({}): {}", status.as_u16(), error);
     }
 
+    /// Respond to a Slack slash command via response_url.
+    ///
+    /// This POSTs JSON to the response_url provided by Slack in the slash command payload.
+    /// No auth token is needed — the URL itself is the credential.
+    /// Only accepts `hooks.slack.com` URLs to prevent SSRF.
+    pub async fn respond_to_url(&self, response_url: &str, text: &str) -> Result<()> {
+        if !response_url.starts_with("https://hooks.slack.com/") {
+            bail!("Refusing to POST to non-Slack response_url");
+        }
+
+        let body = serde_json::json!({
+            "text": text,
+            "response_type": "ephemeral",
+        });
+
+        let resp = self
+            .client
+            .post(response_url)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to POST to Slack response_url")?;
+
+        if !resp.status().is_success() {
+            bail!(
+                "Slack response_url returned status {}",
+                resp.status().as_u16()
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Download a file from Slack using the bot token for authentication.
+    ///
+    /// Slack file URLs (url_private_download) require Bearer token auth.
+    /// Enforces a 25 MB size limit to prevent memory exhaustion.
+    pub async fn download_file(&self, url: &str) -> Result<Vec<u8>> {
+        const MAX_FILE_SIZE: u64 = 25 * 1024 * 1024;
+
+        let resp = self
+            .client
+            .get(url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("Failed to download Slack file")?;
+
+        if !resp.status().is_success() {
+            bail!(
+                "Slack file download failed: HTTP {}",
+                resp.status().as_u16()
+            );
+        }
+
+        if let Some(len) = resp.content_length() {
+            if len > MAX_FILE_SIZE {
+                bail!("Slack file too large: {len} bytes (max {MAX_FILE_SIZE})");
+            }
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .context("Failed to read Slack file bytes")?;
+
+        if bytes.len() as u64 > MAX_FILE_SIZE {
+            bail!(
+                "Slack file too large: {} bytes (max {MAX_FILE_SIZE})",
+                bytes.len()
+            );
+        }
+
+        Ok(bytes.to_vec())
+    }
+
     /// Remove a reaction emoji from a message. Non-fatal on failure.
     pub async fn remove_reaction(&self, channel: &str, message_ts: &str, emoji: &str) {
         let body = serde_json::json!({
@@ -375,5 +496,36 @@ mod tests {
             format!("{SLACK_API_BASE}/files.upload"),
             "https://slack.com/api/files.upload"
         );
+    }
+
+    #[test]
+    fn chat_update_url_construction() {
+        assert_eq!(
+            format!("{SLACK_API_BASE}/chat.update"),
+            "https://slack.com/api/chat.update"
+        );
+    }
+
+    #[test]
+    fn respond_to_url_body_serialization() {
+        let body = serde_json::json!({
+            "text": "Hello from slash command",
+            "response_type": "ephemeral",
+        });
+        assert_eq!(body["text"], "Hello from slash command");
+        assert_eq!(body["response_type"], "ephemeral");
+    }
+
+    #[tokio::test]
+    async fn respond_to_url_rejects_non_slack_domain() {
+        let client = SlackClient::new("xoxb-test").unwrap();
+        let result = client
+            .respond_to_url("https://evil.com/steal", "hello")
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("non-Slack response_url"));
     }
 }
