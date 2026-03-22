@@ -366,8 +366,7 @@ mod tests {
 
         let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
         let cancel_clone = cancel.clone();
-        let handle =
-            tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+        let handle = tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
         // Cancel immediately
         cancel.cancel();

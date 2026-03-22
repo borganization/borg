@@ -421,14 +421,28 @@ impl Agent {
         self.log_and_persist(Message::tool_result(tool_call_id, reason));
     }
 
+    /// Build a HookContext for the current agent state.
+    fn hook_ctx(&self, point: HookPoint, data: HookData) -> HookContext {
+        HookContext {
+            point,
+            session_id: self.session.meta.id.clone(),
+            turn_count: self.turn_count,
+            data,
+        }
+    }
+
+    /// Optionally redact secrets from a string based on config.
+    fn maybe_redact(&self, s: String) -> String {
+        if self.config.security.secret_detection {
+            redact_secrets(&s)
+        } else {
+            s
+        }
+    }
+
     /// Truncate and optionally redact secrets from raw tool output.
     fn truncate_and_redact(&self, raw: &str) -> String {
-        let truncated = truncate_output(raw, TOOL_OUTPUT_MAX_TOKENS);
-        if self.config.security.secret_detection {
-            redact_secrets(&truncated)
-        } else {
-            truncated
-        }
+        self.maybe_redact(truncate_output(raw, TOOL_OUTPUT_MAX_TOKENS))
     }
 
     /// Push a message to history and persist it to SQLite for crash recovery.
@@ -942,12 +956,7 @@ impl Agent {
                     message_count: self.history.len(),
                 }
             };
-            let hook_ctx = HookContext {
-                point: hook_point,
-                session_id: self.session.meta.id.clone(),
-                turn_count: self.turn_count,
-                data: hook_data,
-            };
+            let hook_ctx = self.hook_ctx(hook_point, hook_data);
             if let HookAction::InjectContext(extra) = self.hook_registry.dispatch(&hook_ctx) {
                 system_prompt.push_str("\n\n");
                 system_prompt.push_str(&extra);
@@ -1007,11 +1016,7 @@ impl Agent {
                                     // Best-effort stream-time redaction. Patterns split across
                                     // chunk boundaries won't match here but are caught by the
                                     // post-hoc redaction on the full assembled text.
-                                    let redacted = if self.config.security.secret_detection {
-                                        redact_secrets(&filtered)
-                                    } else {
-                                        filtered
-                                    };
+                                    let redacted = self.maybe_redact(filtered);
                                     let _ = event_tx.send(AgentEvent::TextDelta(redacted)).await;
                                 }
                             }
@@ -1082,37 +1087,29 @@ impl Agent {
 
             // Flush any remaining buffered text from the internal-tag filter
             if let Some(remaining) = tag_filter.flush() {
-                let redacted = if self.config.security.secret_detection {
-                    redact_secrets(&remaining)
-                } else {
-                    remaining
-                };
+                let redacted = self.maybe_redact(remaining);
                 let _ = event_tx.send(AgentEvent::TextDelta(redacted)).await;
             }
             let text_content = tag_filter.full_clean();
 
             // Fire AfterLlmResponse hook
-            let hook_ctx = HookContext {
-                point: HookPoint::AfterLlmResponse,
-                session_id: self.session.meta.id.clone(),
-                turn_count: self.turn_count,
-                data: HookData::LlmResponse {
+            let hook_ctx = self.hook_ctx(
+                HookPoint::AfterLlmResponse,
+                HookData::LlmResponse {
                     has_tool_calls: !tool_calls.is_empty(),
                     text_length: text_content.len(),
                 },
-            };
+            );
             self.hook_registry.dispatch(&hook_ctx);
 
             if tool_calls.is_empty() {
                 // Fire TurnComplete hook
-                let hook_ctx = HookContext {
-                    point: HookPoint::TurnComplete,
-                    session_id: self.session.meta.id.clone(),
-                    turn_count: self.turn_count,
-                    data: HookData::TurnEnd {
+                let hook_ctx = self.hook_ctx(
+                    HookPoint::TurnComplete,
+                    HookData::TurnEnd {
                         total_tool_calls: 0,
                     },
-                };
+                );
                 self.hook_registry.dispatch(&hook_ctx);
 
                 self.log_and_persist(Message::assistant(&text_content));
@@ -1203,15 +1200,13 @@ impl Agent {
             let args = &tool_call.function.arguments;
 
             // Fire BeforeToolCall hook
-            let hook_ctx = HookContext {
-                point: HookPoint::BeforeToolCall,
-                session_id: self.session.meta.id.clone(),
-                turn_count: self.turn_count,
-                data: HookData::ToolCall {
+            let hook_ctx = self.hook_ctx(
+                HookPoint::BeforeToolCall,
+                HookData::ToolCall {
                     name: name.clone(),
                     args: args.clone(),
                 },
-            };
+            );
             if matches!(self.hook_registry.dispatch(&hook_ctx), HookAction::Skip) {
                 self.skip_tool_call(&tool_call.id, "[tool call skipped by hook]");
                 continue;

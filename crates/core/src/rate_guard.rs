@@ -335,26 +335,11 @@ mod tests {
     #[test]
     fn test_limits_for_all_action_types() {
         let limits = ActionLimits::default();
-        assert_eq!(
-            limits.limits_for(ActionType::ToolCall),
-            (50, 100)
-        );
-        assert_eq!(
-            limits.limits_for(ActionType::ShellCommand),
-            (20, 50)
-        );
-        assert_eq!(
-            limits.limits_for(ActionType::FileWrite),
-            (15, 30)
-        );
-        assert_eq!(
-            limits.limits_for(ActionType::MemoryWrite),
-            (10, 20)
-        );
-        assert_eq!(
-            limits.limits_for(ActionType::WebRequest),
-            (20, 50)
-        );
+        assert_eq!(limits.limits_for(ActionType::ToolCall), (50, 100));
+        assert_eq!(limits.limits_for(ActionType::ShellCommand), (20, 50));
+        assert_eq!(limits.limits_for(ActionType::FileWrite), (15, 30));
+        assert_eq!(limits.limits_for(ActionType::MemoryWrite), (10, 20));
+        assert_eq!(limits.limits_for(ActionType::WebRequest), (20, 50));
     }
 
     #[test]

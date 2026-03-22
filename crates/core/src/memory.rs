@@ -171,6 +171,53 @@ where
     Ok(())
 }
 
+/// Collect `.md` files from a directory, sorted by mtime (most recent first).
+fn md_entries_sorted_by_mtime(dir: &std::path::Path) -> Result<Vec<std::fs::DirEntry>> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
+        .collect();
+    entries.sort_by(|a, b| {
+        let time_a = a.metadata().and_then(|m| m.modified()).ok();
+        let time_b = b.metadata().and_then(|m| m.modified()).ok();
+        time_b.cmp(&time_a)
+    });
+    Ok(entries)
+}
+
+/// Try to load a single memory file within the token budget.
+/// Returns `true` if the file was loaded, `false` if it was skipped (budget exceeded).
+fn try_load_memory_file(
+    path: &std::path::Path,
+    label: &str,
+    max_tokens: usize,
+    estimated_tokens: &mut usize,
+    parts: &mut Vec<String>,
+) -> Result<bool> {
+    let content = std::fs::read_to_string(path)?;
+    let tokens = estimate_tokens(&content);
+    if *estimated_tokens + tokens > max_tokens {
+        debug!("Skipping {} (would exceed token budget)", path.display());
+        return Ok(false);
+    }
+    let filename = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let safe_name = escape_xml_attr(&format!("{label}: {filename}"));
+    parts.push(format!(
+        "<memory_file name=\"{safe_name}\">\n{content}\n</memory_file>"
+    ));
+    *estimated_tokens += tokens;
+    debug!(
+        "Loaded {}/{}.md ({tokens} estimated tokens)",
+        path.parent().unwrap_or(path).display(),
+        filename
+    );
+    Ok(true)
+}
+
 fn load_memory_files_from_dir(
     dir: &std::path::Path,
     label: &str,
@@ -182,45 +229,8 @@ fn load_memory_files_from_dir(
         return Ok(());
     }
 
-    let mut entries: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(std::result::Result::ok)
-        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
-        .collect();
-
-    entries.sort_by(|a, b| {
-        let time_a = a.metadata().and_then(|m| m.modified()).ok();
-        let time_b = b.metadata().and_then(|m| m.modified()).ok();
-        time_b.cmp(&time_a)
-    });
-
-    for entry in entries {
-        let content = std::fs::read_to_string(entry.path())?;
-        let tokens = estimate_tokens(&content);
-
-        if *estimated_tokens + tokens > max_tokens {
-            debug!(
-                "Skipping {} (would exceed token budget)",
-                entry.path().display()
-            );
-            continue;
-        }
-
-        let filename = entry
-            .path()
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let safe_name = escape_xml_attr(&format!("{label}: {filename}"));
-        parts.push(format!(
-            "<memory_file name=\"{safe_name}\">\n{content}\n</memory_file>"
-        ));
-        *estimated_tokens += tokens;
-        debug!(
-            "Loaded {}/{}.md ({tokens} estimated tokens)",
-            dir.display(),
-            filename
-        );
+    for entry in md_entries_sorted_by_mtime(dir)? {
+        try_load_memory_file(&entry.path(), label, max_tokens, estimated_tokens, parts)?;
     }
 
     Ok(())
@@ -260,10 +270,9 @@ fn load_memory_files_ranked(
         return Ok(());
     }
 
-    // Collect all .md files in directory
-    let all_files: std::collections::HashSet<String> = std::fs::read_dir(dir)?
-        .filter_map(std::result::Result::ok)
-        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
+    // Collect all .md filenames in directory
+    let all_files: std::collections::HashSet<String> = md_entries_sorted_by_mtime(dir)?
+        .iter()
         .filter_map(|e| {
             e.path()
                 .file_name()
@@ -280,78 +289,24 @@ fn load_memory_files_ranked(
             continue;
         }
         let path = dir.join(filename);
-        if !path.exists() {
-            continue;
+        if try_load_memory_file(&path, label, max_tokens, estimated_tokens, parts)? {
+            loaded.insert(filename.clone());
         }
-        let content = std::fs::read_to_string(&path)?;
-        let tokens = estimate_tokens(&content);
-        if *estimated_tokens + tokens > max_tokens {
-            debug!("Skipping {} (would exceed token budget)", path.display());
-            continue;
-        }
-        let stem = path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let safe_name = escape_xml_attr(&format!("{label}: {stem}"));
-        parts.push(format!(
-            "<memory_file name=\"{safe_name}\">\n{content}\n</memory_file>"
-        ));
-        *estimated_tokens += tokens;
-        loaded.insert(filename.clone());
-        debug!(
-            "Loaded {}/{filename} ({tokens} estimated tokens, ranked)",
-            dir.display()
-        );
     }
 
     // Second: load unranked files by mtime (most recent first)
-    let mut unranked: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(std::result::Result::ok)
-        .filter(|e| {
-            e.path().extension().map(|ext| ext == "md").unwrap_or(false)
-                && !loaded.contains(
-                    &e.path()
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string(),
-                )
-        })
-        .collect();
-    unranked.sort_by(|a, b| {
-        let time_a = a.metadata().and_then(|m| m.modified()).ok();
-        let time_b = b.metadata().and_then(|m| m.modified()).ok();
-        time_b.cmp(&time_a)
-    });
-
+    let unranked = md_entries_sorted_by_mtime(dir)?;
     for entry in unranked {
-        let content = std::fs::read_to_string(entry.path())?;
-        let tokens = estimate_tokens(&content);
-        if *estimated_tokens + tokens > max_tokens {
-            debug!(
-                "Skipping {} (would exceed token budget)",
-                entry.path().display()
-            );
-            continue;
-        }
-        let filename = entry
+        let fname = entry
             .path()
-            .file_stem()
+            .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let safe_name = escape_xml_attr(&format!("{label}: {filename}"));
-        parts.push(format!(
-            "<memory_file name=\"{safe_name}\">\n{content}\n</memory_file>"
-        ));
-        *estimated_tokens += tokens;
-        debug!(
-            "Loaded {}/{}.md ({tokens} estimated tokens, unranked)",
-            dir.display(),
-            filename
-        );
+        if loaded.contains(&fname) {
+            continue;
+        }
+        try_load_memory_file(&entry.path(), label, max_tokens, estimated_tokens, parts)?;
     }
 
     Ok(())
