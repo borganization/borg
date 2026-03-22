@@ -17,6 +17,7 @@ pub mod retry;
 pub mod routing;
 pub mod server;
 pub mod session_queue;
+pub mod signal;
 pub mod slack;
 pub mod teams;
 pub mod telegram;

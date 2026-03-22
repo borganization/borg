@@ -173,6 +173,23 @@ pub static CATALOG: &[PluginDef] = &[
         platform: Platform::All,
         is_native: true,
     },
+    PluginDef {
+        id: "messaging/signal",
+        name: "Signal",
+        category: Category::Messaging,
+        kind: PluginKind::Channel,
+        description: "Signal Messenger via signal-cli daemon",
+        required_credentials: &[CredentialSpec {
+            key: "SIGNAL_ACCOUNT",
+            label: "Phone Number (e.g., +1234567890)",
+            help_url: "https://github.com/AsamK/signal-cli",
+            is_optional: false,
+        }],
+        required_bins: &["signal-cli"],
+        templates: &[],
+        platform: Platform::All,
+        is_native: true,
+    },
     // Template-based plugins
     PluginDef {
         id: "messaging/whatsapp",
@@ -523,17 +540,22 @@ mod tests {
 
     #[test]
     fn native_plugins_have_credentials_and_no_bins() {
+        // Signal is native (Rust code) but requires an external signal-cli daemon
+        const NATIVE_WITH_BINS: &[&str] = &["messaging/signal"];
+
         for entry in CATALOG.iter().filter(|e| e.is_native) {
             assert!(
                 !entry.required_credentials.is_empty(),
                 "native {} should have credentials",
                 entry.id
             );
-            assert!(
-                entry.required_bins.is_empty(),
-                "native {} should have no required bins",
-                entry.id
-            );
+            if !NATIVE_WITH_BINS.contains(&entry.id) {
+                assert!(
+                    entry.required_bins.is_empty(),
+                    "native {} should have no required bins",
+                    entry.id
+                );
+            }
         }
     }
 

@@ -27,6 +27,7 @@ use crate::rate_limit::SlidingWindowLimiter;
 use crate::registry::ChannelRegistry;
 use crate::retry::RetryPolicy;
 use crate::session_queue::SessionQueue;
+use crate::signal::api::SignalClient;
 use crate::slack::api::SlackClient;
 use crate::slack::dedup::EventDeduplicator;
 use crate::teams::api::TeamsClient;
@@ -282,6 +283,41 @@ impl GatewayServer {
             None => None,
         };
 
+        // Initialize native Signal client if account is configured
+        let signal_account = self.config.resolve_credential_or_env("SIGNAL_ACCOUNT");
+        let signal_client = match signal_account {
+            Some(ref account) => {
+                let host = self
+                    .config
+                    .gateway
+                    .signal_cli_host
+                    .as_deref()
+                    .unwrap_or("localhost");
+                let port = self.config.gateway.signal_cli_port.unwrap_or(8080);
+                let base_url = format!("http://{host}:{port}");
+                match SignalClient::new(&base_url, account) {
+                    Ok(client) => match client.probe().await {
+                        Ok(version) => {
+                            info!(
+                                "Signal native integration active (account: {}, daemon: v{})",
+                                account, version
+                            );
+                            Some(Arc::new(client))
+                        }
+                        Err(e) => {
+                            warn!("SIGNAL_ACCOUNT set but signal-cli daemon not reachable: {e}");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        warn!("Failed to create Signal client: {e}");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
         let state = Arc::new(AppState {
             config: self.config.clone(),
             registry,
@@ -417,6 +453,57 @@ impl GatewayServer {
                     .await;
                 });
             }
+        }
+
+        // Spawn Signal SSE inbound loop
+        if let Some(ref sig_client) = signal_client {
+            info!("Starting Signal SSE inbound loop");
+            let sse_client = sig_client.clone();
+            let sse_config = self.config.clone();
+            let sse_health = health.clone();
+            let sse_shutdown = self.shutdown.clone();
+
+            let callback: crate::signal::sse::SseCallback =
+                Arc::new(move |inbound, recipient, group_id| {
+                    let config = sse_config.clone();
+                    let health = sse_health.clone();
+                    let client = sse_client.clone();
+                    Box::pin(async move {
+                        // Send typing indicator
+                        let _ = client
+                            .send_typing(Some(&recipient), group_id.as_deref())
+                            .await;
+
+                        match handler::invoke_agent("signal", &inbound, &config, Some(&health))
+                            .await
+                        {
+                            Ok((response_text, _)) => {
+                                let send_result = if let Some(ref gid) = group_id {
+                                    client.send_group_message(gid, &response_text).await
+                                } else {
+                                    client.send_message(&recipient, &response_text).await
+                                };
+                                if let Err(e) = send_result {
+                                    warn!("Failed to send Signal response: {e}");
+                                }
+                                // Send read receipt for the original message
+                                if let Some(ref mid) = inbound.message_id {
+                                    if let Ok(ts) = mid.parse::<i64>() {
+                                        let _ = client.send_read_receipt(&recipient, &[ts]).await;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Agent error in Signal SSE mode: {e}");
+                            }
+                        }
+                    })
+                });
+
+            let sig_sse_client = sig_client.clone();
+            tokio::spawn(async move {
+                crate::signal::sse::run_sse_loop(sig_sse_client, callback, sse_shutdown).await;
+            });
         }
 
         // Spawn poll loops for poll-mode channels
