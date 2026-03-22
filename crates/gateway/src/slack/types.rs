@@ -83,6 +83,67 @@ pub struct SlashCommandPayload {
     pub trigger_id: Option<String>,
 }
 
+/// Slack interactive payload (Block Kit buttons, select menus, modals).
+/// Sent as `application/x-www-form-urlencoded` with a `payload` JSON field.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InteractionPayload {
+    #[serde(rename = "type")]
+    pub interaction_type: String,
+    pub user: InteractionUser,
+    pub channel: Option<InteractionChannel>,
+    pub actions: Option<Vec<BlockAction>>,
+    pub trigger_id: Option<String>,
+    pub response_url: Option<String>,
+    pub view: Option<ViewPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InteractionUser {
+    pub id: String,
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InteractionChannel {
+    pub id: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlockAction {
+    pub action_id: String,
+    #[serde(rename = "type")]
+    pub action_type: Option<String>,
+    pub value: Option<String>,
+    pub block_id: Option<String>,
+    pub selected_option: Option<SelectedOption>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SelectedOption {
+    pub value: String,
+    pub text: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ViewPayload {
+    pub callback_id: Option<String>,
+    pub state: Option<ViewState>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ViewState {
+    pub values: std::collections::HashMap<String, std::collections::HashMap<String, ActionValue>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionValue {
+    #[serde(rename = "type")]
+    pub action_type: Option<String>,
+    pub value: Option<String>,
+    pub selected_option: Option<SelectedOption>,
+}
+
 /// Generic Slack Web API response.
 #[derive(Debug, Deserialize)]
 pub struct ApiResponse<T> {
@@ -423,5 +484,104 @@ mod tests {
         assert_eq!(payload.team_id.as_deref(), Some("T789"));
         assert!(payload.response_url.is_some());
         assert_eq!(payload.trigger_id.as_deref(), Some("tr1"));
+    }
+
+    // ── Interactive payload tests ──
+
+    #[test]
+    fn deserialize_block_actions_payload() {
+        let json = r#"{
+            "type": "block_actions",
+            "user": { "id": "U123", "username": "alice" },
+            "channel": { "id": "C456", "name": "general" },
+            "trigger_id": "tr1",
+            "response_url": "https://hooks.slack.com/actions/T123/456/abc",
+            "actions": [
+                {
+                    "action_id": "approve_btn",
+                    "type": "button",
+                    "value": "approved",
+                    "block_id": "block_1"
+                }
+            ]
+        }"#;
+
+        let payload: InteractionPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.interaction_type, "block_actions");
+        assert_eq!(payload.user.id, "U123");
+        assert_eq!(payload.user.username.as_deref(), Some("alice"));
+        assert_eq!(payload.channel.as_ref().unwrap().id, "C456");
+        assert!(payload.response_url.is_some());
+        let actions = payload.actions.unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_id, "approve_btn");
+        assert_eq!(actions[0].value.as_deref(), Some("approved"));
+    }
+
+    #[test]
+    fn deserialize_select_menu_action() {
+        let json = r#"{
+            "type": "block_actions",
+            "user": { "id": "U123" },
+            "actions": [
+                {
+                    "action_id": "priority_select",
+                    "type": "static_select",
+                    "block_id": "block_2",
+                    "selected_option": {
+                        "value": "high",
+                        "text": { "type": "plain_text", "text": "High" }
+                    }
+                }
+            ]
+        }"#;
+
+        let payload: InteractionPayload = serde_json::from_str(json).unwrap();
+        let actions = payload.actions.unwrap();
+        assert!(actions[0].value.is_none());
+        let opt = actions[0].selected_option.as_ref().unwrap();
+        assert_eq!(opt.value, "high");
+    }
+
+    #[test]
+    fn deserialize_view_submission() {
+        let json = r#"{
+            "type": "view_submission",
+            "user": { "id": "U123" },
+            "view": {
+                "callback_id": "feedback_form",
+                "state": {
+                    "values": {
+                        "block_1": {
+                            "input_1": {
+                                "type": "plain_text_input",
+                                "value": "Great product!"
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let payload: InteractionPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.interaction_type, "view_submission");
+        let view = payload.view.unwrap();
+        assert_eq!(view.callback_id.as_deref(), Some("feedback_form"));
+        let state = view.state.unwrap();
+        let val = &state.values["block_1"]["input_1"];
+        assert_eq!(val.value.as_deref(), Some("Great product!"));
+    }
+
+    #[test]
+    fn deserialize_interaction_no_channel() {
+        let json = r#"{
+            "type": "view_submission",
+            "user": { "id": "U123" },
+            "view": { "callback_id": "test" }
+        }"#;
+
+        let payload: InteractionPayload = serde_json::from_str(json).unwrap();
+        assert!(payload.channel.is_none());
+        assert!(payload.actions.is_none());
     }
 }
