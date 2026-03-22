@@ -1,0 +1,247 @@
+/// Convert standard Markdown to Slack mrkdwn format.
+///
+/// Conversions:
+/// - `**bold**` / `__bold__` → `*bold*`
+/// - `[text](url)` → `<url|text>`
+/// - `# Header` → `*Header*`
+/// - Code blocks (``` and `) are preserved (Slack uses the same syntax)
+pub fn markdown_to_mrkdwn(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut in_code_block = false;
+
+    for line in text.lines() {
+        let mut in_inline_code = false;
+        if !result.is_empty() {
+            result.push('\n');
+        }
+
+        // Toggle fenced code blocks
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            result.push_str(line);
+            continue;
+        }
+
+        // Don't convert inside code blocks
+        if in_code_block {
+            result.push_str(line);
+            continue;
+        }
+
+        // Convert headers: `# Header` → `*Header*`
+        if let Some(header_text) = strip_header(line) {
+            result.push('*');
+            result.push_str(header_text.trim());
+            result.push('*');
+            continue;
+        }
+
+        // Process inline formatting character by character
+        let chars: Vec<char> = line.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+
+        while i < len {
+            // Skip inline code spans
+            if chars[i] == '`' {
+                in_inline_code = !in_inline_code;
+                result.push('`');
+                i += 1;
+                continue;
+            }
+
+            if in_inline_code {
+                result.push(chars[i]);
+                i += 1;
+                continue;
+            }
+
+            // Bold: **text** → *text*
+            if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+                if let Some(end) = find_closing(&chars, i + 2, ['*', '*']) {
+                    result.push('*');
+                    let inner: String = chars[i + 2..end].iter().collect();
+                    result.push_str(&inner);
+                    result.push('*');
+                    i = end + 2;
+                    continue;
+                }
+            }
+
+            // Bold: __text__ → *text*
+            if i + 1 < len && chars[i] == '_' && chars[i + 1] == '_' {
+                if let Some(end) = find_closing(&chars, i + 2, ['_', '_']) {
+                    result.push('*');
+                    let inner: String = chars[i + 2..end].iter().collect();
+                    result.push_str(&inner);
+                    result.push('*');
+                    i = end + 2;
+                    continue;
+                }
+            }
+
+            // Links: [text](url) → <url|text>
+            if chars[i] == '[' {
+                if let Some((link_text, url, end)) = parse_markdown_link(&chars, i) {
+                    result.push('<');
+                    result.push_str(&url);
+                    result.push('|');
+                    result.push_str(&link_text);
+                    result.push('>');
+                    i = end;
+                    continue;
+                }
+            }
+
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    result
+}
+
+/// Strip markdown header prefix (# through ######) and return the text.
+fn strip_header(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("###### ") {
+        Some(rest)
+    } else if let Some(rest) = trimmed.strip_prefix("##### ") {
+        Some(rest)
+    } else if let Some(rest) = trimmed.strip_prefix("#### ") {
+        Some(rest)
+    } else if let Some(rest) = trimmed.strip_prefix("### ") {
+        Some(rest)
+    } else if let Some(rest) = trimmed.strip_prefix("## ") {
+        Some(rest)
+    } else if let Some(rest) = trimmed.strip_prefix("# ") {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
+/// Find closing delimiter (two-char sequences like ** or __).
+fn find_closing(chars: &[char], start: usize, delim: [char; 2]) -> Option<usize> {
+    let len = chars.len();
+    let mut i = start;
+    while i + 1 < len {
+        if chars[i] == delim[0] && chars[i + 1] == delim[1] {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse a markdown link `[text](url)` starting at position `start`.
+/// Returns (link_text, url, end_position) where end_position is after the closing `)`.
+fn parse_markdown_link(chars: &[char], start: usize) -> Option<(String, String, usize)> {
+    // Find closing ]
+    let mut i = start + 1;
+    let len = chars.len();
+    while i < len && chars[i] != ']' {
+        i += 1;
+    }
+    if i >= len {
+        return None;
+    }
+    let link_text: String = chars[start + 1..i].iter().collect();
+
+    // Expect ( immediately after ]
+    i += 1;
+    if i >= len || chars[i] != '(' {
+        return None;
+    }
+
+    // Find closing )
+    let url_start = i + 1;
+    while i < len && chars[i] != ')' {
+        i += 1;
+    }
+    if i >= len {
+        return None;
+    }
+    let url: String = chars[url_start..i].iter().collect();
+
+    Some((link_text, url, i + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bold_double_asterisk() {
+        assert_eq!(markdown_to_mrkdwn("**hello**"), "*hello*");
+    }
+
+    #[test]
+    fn bold_double_underscore() {
+        assert_eq!(markdown_to_mrkdwn("__hello__"), "*hello*");
+    }
+
+    #[test]
+    fn link_conversion() {
+        assert_eq!(
+            markdown_to_mrkdwn("[click here](https://example.com)"),
+            "<https://example.com|click here>"
+        );
+    }
+
+    #[test]
+    fn header_conversion() {
+        assert_eq!(markdown_to_mrkdwn("# Title"), "*Title*");
+        assert_eq!(markdown_to_mrkdwn("## Subtitle"), "*Subtitle*");
+        assert_eq!(markdown_to_mrkdwn("### Section"), "*Section*");
+    }
+
+    #[test]
+    fn code_block_preserved() {
+        let input = "```\n**not bold**\n```";
+        assert_eq!(markdown_to_mrkdwn(input), input);
+    }
+
+    #[test]
+    fn inline_code_preserved() {
+        assert_eq!(markdown_to_mrkdwn("`**not bold**`"), "`**not bold**`");
+    }
+
+    #[test]
+    fn mixed_content() {
+        assert_eq!(
+            markdown_to_mrkdwn("This is **bold** and [link](https://x.com)"),
+            "This is *bold* and <https://x.com|link>"
+        );
+    }
+
+    #[test]
+    fn plain_text_unchanged() {
+        assert_eq!(markdown_to_mrkdwn("hello world"), "hello world");
+    }
+
+    #[test]
+    fn multiline_preserved() {
+        let input = "line 1\nline 2\nline 3";
+        assert_eq!(markdown_to_mrkdwn(input), input);
+    }
+
+    #[test]
+    fn unmatched_bold_preserved() {
+        assert_eq!(markdown_to_mrkdwn("**unclosed"), "**unclosed");
+    }
+
+    #[test]
+    fn empty_string() {
+        assert_eq!(markdown_to_mrkdwn(""), "");
+    }
+
+    #[test]
+    fn bold_then_link() {
+        // Bold and link side by side (not nested)
+        assert_eq!(
+            markdown_to_mrkdwn("**bold** and [link](https://x.com)"),
+            "*bold* and <https://x.com|link>"
+        );
+    }
+}
