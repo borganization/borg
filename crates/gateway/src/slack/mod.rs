@@ -26,7 +26,7 @@ pub enum SlackWebhookResult {
     /// URL verification challenge — return this string as the HTTP response.
     Challenge(String),
     /// A parsed inbound message ready for agent processing.
-    Message(InboundMessage),
+    Message(Box<InboundMessage>),
     /// Event was recognized but should be skipped (bot message, non-text, etc.).
     Skip,
 }
@@ -65,7 +65,7 @@ pub async fn handle_slack_webhook(
             }
 
             match parse::parse_event(&callback, bot_user_id, echo_cache).await {
-                Some(msg) => Ok(SlackWebhookResult::Message(msg)),
+                Some(msg) => Ok(SlackWebhookResult::Message(Box::new(msg))),
                 None => Ok(SlackWebhookResult::Skip),
             }
         }

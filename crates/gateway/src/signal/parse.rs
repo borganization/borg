@@ -101,6 +101,11 @@ pub fn parse_envelope(envelope: &SignalEnvelope, own_account: &str) -> Option<In
             "source_uuid": env.source_uuid,
             "timestamp": env.timestamp,
         }),
+        peer_kind: if data_msg.group_info.is_some() {
+            Some("group".to_string())
+        } else {
+            Some("direct".to_string())
+        },
     })
 }
 

@@ -64,6 +64,10 @@ struct AppState {
     google_chat_client: Option<Arc<GoogleChatClient>>,
     google_chat_token: Option<String>,
     wake_tx: Option<mpsc::Sender<()>>,
+    /// Telegram bot @username for group mention activation.
+    telegram_bot_username: Option<String>,
+    /// Slack bot user ID for group mention activation (e.g. "U123ABC").
+    slack_bot_user_id: Option<String>,
 }
 
 pub struct GatewayServer {
@@ -118,7 +122,7 @@ impl GatewayServer {
             .resolve_credential_or_env("TELEGRAM_WEBHOOK_SECRET");
 
         // Initialize native Telegram client if token is available
-        let telegram_client = match telegram_token {
+        let (telegram_client, telegram_bot_username) = match telegram_token {
             Some(token) => {
                 let client = TelegramClient::new(&token)?;
                 match client.get_me().await {
@@ -127,6 +131,7 @@ impl GatewayServer {
                             "Telegram native integration active (bot: @{})",
                             me.username.as_deref().unwrap_or(&me.first_name)
                         );
+                        let bot_username = me.username.clone();
 
                         // Set webhook if public_url is configured
                         if let Some(ref url) = self.config.gateway.public_url {
@@ -151,15 +156,15 @@ impl GatewayServer {
                             }
                         }
 
-                        Some(Arc::new(client))
+                        (Some(Arc::new(client)), bot_username)
                     }
                     Err(e) => {
                         warn!("TELEGRAM_BOT_TOKEN set but getMe failed: {e}");
-                        None
+                        (None, None)
                     }
                 }
             }
-            None => None,
+            None => (None, None),
         };
 
         let telegram_dedup = Arc::new(Mutex::new(UpdateDeduplicator::new()));
@@ -170,7 +175,7 @@ impl GatewayServer {
             .resolve_credential_or_env("SLACK_SIGNING_SECRET");
 
         // Initialize native Slack client if token is available
-        let slack_client = match slack_token {
+        let (slack_client, slack_bot_user_id) = match slack_token {
             Some(token) => match SlackClient::new(&token) {
                 Ok(mut client) => match client.auth_test().await {
                     Ok(resp) => {
@@ -179,19 +184,20 @@ impl GatewayServer {
                             resp.user.as_deref().unwrap_or("unknown"),
                             resp.team.as_deref().unwrap_or("unknown"),
                         );
-                        Some(Arc::new(client))
+                        let bot_uid = client.bot_user_id().map(String::from);
+                        (Some(Arc::new(client)), bot_uid)
                     }
                     Err(e) => {
                         warn!("SLACK_BOT_TOKEN set but auth.test failed: {e}");
-                        None
+                        (None, None)
                     }
                 },
                 Err(e) => {
                     warn!("Failed to create Slack HTTP client: {e}");
-                    None
+                    (None, None)
                 }
             },
-            None => None,
+            None => (None, None),
         };
 
         // Initialize native Twilio client if credentials are available
@@ -343,6 +349,8 @@ impl GatewayServer {
             google_chat_client,
             google_chat_token,
             wake_tx: self.wake_tx,
+            telegram_bot_username: telegram_bot_username.clone(),
+            slack_bot_user_id,
         });
 
         let app = Router::new()
@@ -401,12 +409,14 @@ impl GatewayServer {
                 let poll_shutdown = self.shutdown.clone();
                 let poll_config = self.config.clone();
                 let poll_health = health.clone();
+                let poll_bot_username = telegram_bot_username.clone();
 
                 let callback: crate::telegram::polling::PollCallback =
                     Arc::new(move |inbound, chat_id| {
                         let config = poll_config.clone();
                         let health = poll_health.clone();
                         let tg = poll_client.clone();
+                        let bot_mention = poll_bot_username.as_deref().map(|u| format!("@{u}"));
                         Box::pin(async move {
                             let _ = tg.send_typing(chat_id).await;
 
@@ -421,6 +431,7 @@ impl GatewayServer {
                                 &inbound,
                                 &config,
                                 Some(&health),
+                                bot_mention.as_deref(),
                             )
                             .await
                             {
@@ -474,8 +485,14 @@ impl GatewayServer {
                             .send_typing(Some(&recipient), group_id.as_deref())
                             .await;
 
-                        match handler::invoke_agent("signal", &inbound, &config, Some(&health))
-                            .await
+                        match handler::invoke_agent(
+                            "signal",
+                            &inbound,
+                            &config,
+                            Some(&health),
+                            None,
+                        )
+                        .await
                         {
                             Ok((response_text, _)) => {
                                 let send_result = if let Some(ref gid) = group_id {
@@ -1029,11 +1046,16 @@ async fn handle_telegram_webhook(
             Box::pin(async move {
                 let state = work_state;
                 let result = tokio::time::timeout(state.request_timeout, async {
+                    let tg_bot_mention = state
+                        .telegram_bot_username
+                        .as_deref()
+                        .map(|u| format!("@{u}"));
                     let (response_text, _session_id) = handler::invoke_agent(
                         "telegram",
                         &inbound,
                         &state.config,
                         Some(&state.health),
+                        tg_bot_mention.as_deref(),
                     )
                     .await?;
 
@@ -1098,7 +1120,7 @@ async fn handle_slack_webhook(
         crate::slack::SlackWebhookResult::Skip => {
             return ok_response();
         }
-        crate::slack::SlackWebhookResult::Message(inbound) => inbound,
+        crate::slack::SlackWebhookResult::Message(inbound) => *inbound,
     };
 
     // Ack reaction — immediate visual feedback (fire-and-forget)
@@ -1185,15 +1207,24 @@ async fn handle_slack_webhook(
                         inbound.message_id.clone(),
                     );
 
+                    let slack_mention = state
+                        .slack_bot_user_id
+                        .as_deref()
+                        .map(|id| format!("<@{id}>"));
                     let (response_text, _session_id) = handler::invoke_agent(
                         "slack",
                         &inbound,
                         &state.config,
                         Some(&state.health),
+                        slack_mention.as_deref(),
                     )
                     .await?;
 
                     typing.stop().await;
+
+                    if response_text.trim().is_empty() {
+                        return Ok::<_, anyhow::Error>(());
+                    }
 
                     // Convert markdown to Slack mrkdwn
                     let formatted = crate::slack::format::markdown_to_mrkdwn(&response_text);
@@ -1291,6 +1322,7 @@ async fn slack_command_handler(
         attachments: Vec::new(),
         reaction: None,
         metadata: serde_json::Value::Null,
+        peer_kind: None,
     };
 
     let session_key = inbound.session_key("slack", "command");
@@ -1306,11 +1338,16 @@ async fn slack_command_handler(
                 let result = tokio::time::timeout(state.request_timeout, async {
                     let channel_id = payload.channel_id.clone();
 
+                    let slack_mention = state
+                        .slack_bot_user_id
+                        .as_deref()
+                        .map(|id| format!("<@{id}>"));
                     let (response_text, _session_id) = handler::invoke_agent(
                         "slack",
                         &inbound,
                         &state.config,
                         Some(&state.health),
+                        slack_mention.as_deref(),
                     )
                     .await?;
 
@@ -1412,6 +1449,7 @@ async fn handle_twilio_webhook(
                         &parsed.message,
                         &state.config,
                         Some(&state.health),
+                        None,
                     )
                     .await?;
 
@@ -1473,6 +1511,9 @@ async fn send_telegram_response(
     reply_to: Option<i64>,
     health: &Arc<RwLock<ChannelHealthRegistry>>,
 ) {
+    if response_text.trim().is_empty() {
+        return;
+    }
     let html = crate::telegram::format::markdown_to_telegram_html(response_text);
 
     if let Err(e) = client
@@ -1558,6 +1599,7 @@ async fn handle_discord_webhook_route(
                                 &inbound,
                                 &state.config,
                                 Some(&state.health),
+                                None,
                             )
                             .await?;
 
@@ -1670,6 +1712,7 @@ async fn handle_teams_webhook_route(
                         &inbound,
                         &state.config,
                         Some(&state.health),
+                        None,
                     )
                     .await?;
 
@@ -1754,6 +1797,7 @@ async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> 
                             &inbound,
                             &state.config,
                             Some(&state.health),
+                            None,
                         )
                         .await?;
 
@@ -1804,6 +1848,7 @@ async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> 
                             &inbound,
                             &state.config,
                             Some(&state.health),
+                            None,
                         )
                         .await?;
                         state.health.write().await.record_outbound("google-chat");

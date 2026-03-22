@@ -44,6 +44,17 @@ pub fn parse_activity(activity: &Activity) -> Option<InboundMessage> {
         attachments: Vec::new(),
         reaction: None,
         metadata: serde_json::Value::Null,
+        peer_kind: activity
+            .conversation
+            .as_ref()
+            .and_then(|c| c.is_group)
+            .map(|g| {
+                if g {
+                    "group".to_string()
+                } else {
+                    "direct".to_string()
+                }
+            }),
     })
 }
 
