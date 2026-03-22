@@ -75,6 +75,13 @@ pub struct InboundMessage {
     pub metadata: serde_json::Value,
 }
 
+impl InboundMessage {
+    /// Build a session key for queue routing: `channel:sender:sub`.
+    pub fn session_key(&self, channel: &str, sub: &str) -> String {
+        format!("{}:{}:{}", channel, self.sender_id, sub)
+    }
+}
+
 /// Process a webhook request for a channel end-to-end.
 pub async fn handle_webhook(
     channel: &RegisteredChannel,
