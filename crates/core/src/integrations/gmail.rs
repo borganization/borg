@@ -163,7 +163,11 @@ fn build_raw_message(
     let mut raw = String::new();
     raw.push_str("MIME-Version: 1.0\r\n");
     for (name, value) in headers {
-        if value.contains('\r') || value.contains('\n') {
+        if name.contains('\r')
+            || name.contains('\n')
+            || value.contains('\r')
+            || value.contains('\n')
+        {
             return Err(format!("Invalid '{name}': contains newline characters"));
         }
         raw.push_str(&format!("{name}: {value}\r\n"));
@@ -293,6 +297,10 @@ async fn search_emails(client: &Client, token: &str, args: &Value) -> Result<Str
             let mut summaries = Vec::new();
             for msg in msgs {
                 if let Some(id) = msg["id"].as_str() {
+                    let id = match validate_resource_id(id, "message_id") {
+                        Ok(id) => id,
+                        Err(_) => continue,
+                    };
                     if let Ok(meta) = send_json(
                         client
                             .get(format!("{API_BASE}/messages/{id}"))
@@ -371,7 +379,9 @@ async fn reply_email(client: &Client, token: &str, args: &Value) -> Result<Strin
     let orig_subject = extract_header(&orig, "Subject").unwrap_or_default();
     let thread_id = orig["threadId"].as_str().unwrap_or("");
 
-    let reply_subject = if orig_subject.len() >= 4 && orig_subject[..4].eq_ignore_ascii_case("re: ")
+    let reply_subject = if orig_subject
+        .get(..4)
+        .is_some_and(|s| s.eq_ignore_ascii_case("re: "))
     {
         orig_subject
     } else {
@@ -434,7 +444,9 @@ async fn forward_email(client: &Client, token: &str, args: &Value) -> Result<Str
         extract_header(&orig, "Subject").unwrap_or_else(|| "(no subject)".to_string());
     let orig_body = extract_body_text(&orig["payload"]);
 
-    let fwd_subject = if orig_subject.len() >= 5 && orig_subject[..5].eq_ignore_ascii_case("fwd: ")
+    let fwd_subject = if orig_subject
+        .get(..5)
+        .is_some_and(|s| s.eq_ignore_ascii_case("fwd: "))
     {
         orig_subject.clone()
     } else {
@@ -511,7 +523,7 @@ async fn create_draft(client: &Client, token: &str, args: &Value) -> Result<Stri
 }
 
 async fn list_drafts(client: &Client, token: &str, args: &Value) -> Result<String, String> {
-    let limit = args["limit"].as_u64().unwrap_or(10);
+    let limit = args["limit"].as_u64().unwrap_or(10).min(50);
 
     let result: Value = send_json(
         client
@@ -927,10 +939,9 @@ mod tests {
 
     #[test]
     fn test_reply_subject_prefix_case_insensitive() {
-        // Simulate the prefix logic used in reply_email
         let check = |subject: &str| -> String {
             let s = subject.to_string();
-            if s.len() >= 4 && s[..4].eq_ignore_ascii_case("re: ") {
+            if s.get(..4).map_or(false, |p| p.eq_ignore_ascii_case("re: ")) {
                 s
             } else {
                 format!("Re: {s}")
@@ -941,13 +952,17 @@ mod tests {
         assert_eq!(check("re: Hello"), "re: Hello");
         assert_eq!(check("Hello"), "Re: Hello");
         assert_eq!(check(""), "Re: ");
+        // Non-ASCII subject must not panic
+        assert_eq!(check("日本語"), "Re: 日本語");
     }
 
     #[test]
     fn test_forward_subject_prefix_case_insensitive() {
         let check = |subject: &str| -> String {
             let s = subject.to_string();
-            if s.len() >= 5 && s[..5].eq_ignore_ascii_case("fwd: ") {
+            if s.get(..5)
+                .map_or(false, |p| p.eq_ignore_ascii_case("fwd: "))
+            {
                 s
             } else {
                 format!("Fwd: {s}")
@@ -957,6 +972,8 @@ mod tests {
         assert_eq!(check("FWD: Hello"), "FWD: Hello");
         assert_eq!(check("fwd: Hello"), "fwd: Hello");
         assert_eq!(check("Hello"), "Fwd: Hello");
+        // Non-ASCII subject must not panic
+        assert_eq!(check("日本語"), "Fwd: 日本語");
     }
 
     #[test]
