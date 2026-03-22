@@ -120,6 +120,12 @@ const SETTINGS: &[SettingEntry] = &[
         category: "Security",
     },
     SettingEntry {
+        key: "security.hitl_dangerous_ops",
+        label: "Confirm dangerous ops",
+        kind: SettingKind::Bool,
+        category: "Security",
+    },
+    SettingEntry {
         key: "budget.monthly_token_limit",
         label: "Monthly token limit",
         kind: SettingKind::Uint,

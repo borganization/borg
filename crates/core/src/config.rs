@@ -508,7 +508,7 @@ pub struct SecurityConfig {
 }
 
 fn default_hitl_dangerous_ops() -> bool {
-    true
+    false
 }
 
 fn default_gateway_action_limits() -> crate::rate_guard::ActionLimits {
@@ -707,7 +707,7 @@ impl Default for SecurityConfig {
                 "private_key".into(),
             ],
             host_audit: true,
-            hitl_dangerous_ops: true,
+            hitl_dangerous_ops: false,
             action_limits: crate::rate_guard::ActionLimits::default(),
             gateway_action_limits: crate::rate_guard::ActionLimits::gateway_defaults(),
         }
@@ -952,6 +952,13 @@ impl Config {
                     .with_context(|| "Invalid bool for secret_detection")?;
                 self.security.secret_detection = v;
                 Ok(format!("security.secret_detection = {v}"))
+            }
+            "security.hitl_dangerous_ops" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for hitl_dangerous_ops")?;
+                self.security.hitl_dangerous_ops = v;
+                Ok(format!("security.hitl_dangerous_ops = {v}"))
             }
             "security.host_audit" => {
                 let v: bool = value
@@ -1381,6 +1388,20 @@ agent_name = "Buddy"
         cfg.apply_setting("security.secret_detection", "false")
             .unwrap();
         assert!(!cfg.security.secret_detection);
+    }
+
+    #[test]
+    fn default_hitl_dangerous_ops_is_false() {
+        let cfg = Config::default();
+        assert!(!cfg.security.hitl_dangerous_ops);
+    }
+
+    #[test]
+    fn apply_setting_hitl_dangerous_ops() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("security.hitl_dangerous_ops", "true")
+            .unwrap();
+        assert!(cfg.security.hitl_dangerous_ops);
     }
 
     #[test]
