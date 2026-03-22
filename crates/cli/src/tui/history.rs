@@ -78,8 +78,9 @@ impl HistoryCell {
                 let prefix_style =
                     bg.add_modifier(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::DIM);
                 let mention_style = theme::file_mention_style();
+                let w = width as usize;
                 let mut lines = Vec::new();
-                lines.push(Line::from("").style(bg));
+                lines.push(Line::from(Span::styled(" ".repeat(w), bg)).style(bg));
                 for (i, line) in text.lines().enumerate() {
                     let prefix = if i == 0 {
                         Span::styled(format!("{} ", theme::CHEVRON), prefix_style)
@@ -89,9 +90,16 @@ impl HistoryCell {
                     let spans = parse_at_mentions(line, bg, mention_style);
                     let mut all_spans = vec![prefix];
                     all_spans.extend(spans);
+                    let content_width: usize = all_spans
+                        .iter()
+                        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                        .sum();
+                    if content_width < w {
+                        all_spans.push(Span::styled(" ".repeat(w - content_width), bg));
+                    }
                     lines.push(Line::from(all_spans).style(bg));
                 }
-                lines.push(Line::from("").style(bg));
+                lines.push(Line::from(Span::styled(" ".repeat(w), bg)).style(bg));
                 lines
             }
             HistoryCell::Assistant { text, streaming } => {
