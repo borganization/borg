@@ -415,6 +415,12 @@ pub struct GatewayConfig {
     /// Pairing code TTL in seconds (default 3600 = 60 minutes).
     #[serde(default = "default_pairing_ttl")]
     pub pairing_ttl_secs: i64,
+    /// signal-cli daemon host (default "localhost").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_cli_host: Option<String>,
+    /// signal-cli daemon port (default 8080).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_cli_port: Option<u16>,
 }
 
 /// Route a gateway channel to specific agent configuration overrides.
@@ -478,6 +484,8 @@ impl Default for GatewayConfig {
             dm_policy: crate::pairing::DmPolicy::default(),
             channel_policies: std::collections::HashMap::new(),
             pairing_ttl_secs: default_pairing_ttl(),
+            signal_cli_host: None,
+            signal_cli_port: None,
         }
     }
 }
@@ -1165,6 +1173,7 @@ impl Config {
             "TWILIO_ACCOUNT_SID",
             "TEAMS_APP_ID",
             "GOOGLE_CHAT_SERVICE_TOKEN",
+            "SIGNAL_ACCOUNT",
         ];
         NATIVE_KEYS
             .iter()
@@ -1191,6 +1200,11 @@ impl Config {
                 "google-chat",
                 "Google Chat (native)",
                 "GOOGLE_CHAT_SERVICE_TOKEN",
+            ),
+            (
+                "signal",
+                "Signal Messenger (native via signal-cli)",
+                "SIGNAL_ACCOUNT",
             ),
         ];
         NATIVE_CHANNELS

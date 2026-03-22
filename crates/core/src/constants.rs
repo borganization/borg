@@ -61,6 +61,15 @@ pub const TELEGRAM_BACKOFF_FACTOR: f64 = 1.8;
 pub const TELEGRAM_JITTER_FRACTION: f64 = 0.25;
 pub const TELEGRAM_STALL_TIMEOUT: Duration = Duration::from_secs(90);
 
+// Signal SSE backoff parameters
+pub const SIGNAL_SSE_MIN_BACKOFF: Duration = Duration::from_secs(1);
+pub const SIGNAL_SSE_MAX_BACKOFF: Duration = Duration::from_secs(30);
+pub const SIGNAL_SSE_BACKOFF_FACTOR: f64 = 2.0;
+pub const SIGNAL_SSE_JITTER_FRACTION: f64 = 0.2;
+pub const SIGNAL_SSE_STALL_TIMEOUT: Duration = Duration::from_secs(120);
+pub const SIGNAL_MESSAGE_CHUNK_SIZE: usize = 4000;
+pub const SIGNAL_RPC_TIMEOUT_SECS: u64 = 10;
+
 // Gateway retry defaults
 pub const RETRY_MAX_RETRIES: u32 = 5;
 pub const RETRY_INITIAL_DELAY_MS: u64 = 5000;
