@@ -57,6 +57,17 @@ pub fn parse_event(event: &ChatEvent) -> Option<InboundMessage> {
         attachments: Vec::new(),
         reaction: None,
         metadata: serde_json::Value::Null,
+        peer_kind: event
+            .space
+            .as_ref()
+            .and_then(|s| s.space_type.as_deref())
+            .map(|t| {
+                if t == "DM" {
+                    "direct".to_string()
+                } else {
+                    "group".to_string()
+                }
+            }),
     })
 }
 

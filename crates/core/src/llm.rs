@@ -173,6 +173,9 @@ struct ChatRequest {
     temperature: f32,
     max_tokens: u32,
     stream: bool,
+    /// OpenAI o-series reasoning effort: "low", "medium", "high".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -680,6 +683,12 @@ impl LlmClient {
         cancel: &CancellationToken,
     ) -> std::result::Result<(), LlmError> {
         let model = self.provider.normalize_model(&self.config.llm.model);
+        let reasoning_effort = self
+            .config
+            .llm
+            .thinking
+            .openai_reasoning_effort()
+            .map(String::from);
         let request = ChatRequest {
             model: model.clone(),
             messages: messages.to_vec(),
@@ -687,6 +696,7 @@ impl LlmClient {
             temperature: self.config.llm.temperature,
             max_tokens: self.config.llm.max_tokens,
             stream: true,
+            reasoning_effort,
         };
 
         debug!(
@@ -817,6 +827,12 @@ impl LlmClient {
         tools: Option<&[ToolDefinition]>,
     ) -> Result<Message> {
         let model = self.provider.normalize_model(&self.config.llm.model);
+        let reasoning_effort = self
+            .config
+            .llm
+            .thinking
+            .openai_reasoning_effort()
+            .map(String::from);
         let request = ChatRequest {
             model,
             messages: messages.to_vec(),
@@ -824,6 +840,7 @@ impl LlmClient {
             temperature: self.config.llm.temperature,
             max_tokens: self.config.llm.max_tokens,
             stream: false,
+            reasoning_effort,
         };
 
         let response = self
@@ -890,12 +907,27 @@ impl LlmClient {
                 .collect()
         });
 
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": self.config.llm.max_tokens,
-            "temperature": self.config.llm.temperature,
-            "stream": stream,
-        });
+        let mut body = if let Some(budget) = self.config.llm.thinking.budget_tokens() {
+            // When thinking is enabled: omit temperature (Anthropic requirement),
+            // ensure max_tokens accommodates both thinking budget and response.
+            let max_tokens = self.config.llm.max_tokens.max(budget + 1024);
+            serde_json::json!({
+                "model": model,
+                "max_tokens": max_tokens,
+                "stream": stream,
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": budget
+                }
+            })
+        } else {
+            serde_json::json!({
+                "model": model,
+                "max_tokens": self.config.llm.max_tokens,
+                "temperature": self.config.llm.temperature,
+                "stream": stream,
+            })
+        };
 
         if let Some(sys) = system_text {
             body["system"] = serde_json::json!(sys);
@@ -1791,5 +1823,88 @@ mod tests {
             client.effective_base_url(),
             "http://localhost:11434/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn anthropic_request_thinking_off_includes_temperature() {
+        let mut config = Config::default();
+        config.llm.provider = Some("anthropic".to_string());
+        config.llm.api_key_env = "ANTHROPIC_API_KEY".to_string();
+        config.llm.model = "claude-sonnet-4-20250514".to_string();
+        config.llm.thinking = crate::config::ThinkingLevel::Off;
+        std::env::set_var("ANTHROPIC_API_KEY", "test-key");
+        let client = LlmClient::new(config).expect("should create client");
+
+        let messages = vec![Message::user("hi")];
+        let body = client.build_anthropic_request(&messages, None, false);
+
+        assert!(
+            body.get("temperature").is_some(),
+            "temperature should be present when thinking is off"
+        );
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking field should not be present when off"
+        );
+        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn anthropic_request_thinking_enabled_omits_temperature() {
+        let mut config = Config::default();
+        config.llm.provider = Some("anthropic".to_string());
+        config.llm.api_key_env = "ANTHROPIC_API_KEY".to_string();
+        config.llm.model = "claude-sonnet-4-20250514".to_string();
+        config.llm.thinking = crate::config::ThinkingLevel::High;
+        std::env::set_var("ANTHROPIC_API_KEY", "test-key");
+        let client = LlmClient::new(config).expect("should create client");
+
+        let messages = vec![Message::user("hi")];
+        let body = client.build_anthropic_request(&messages, None, false);
+
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be omitted when thinking is enabled"
+        );
+        let thinking = body
+            .get("thinking")
+            .expect("thinking field should be present");
+        assert_eq!(thinking["type"], "enabled");
+        assert_eq!(thinking["budget_tokens"], 16384);
+
+        // max_tokens should be at least budget + 1024
+        let max_tokens = body["max_tokens"].as_u64().unwrap();
+        assert!(max_tokens >= 16384 + 1024);
+        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn openai_request_includes_reasoning_effort() {
+        let request = ChatRequest {
+            model: "o3".to_string(),
+            messages: vec![Message::user("test")],
+            tools: None,
+            temperature: 0.7,
+            max_tokens: 4096,
+            stream: false,
+            reasoning_effort: Some("high".to_string()),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn openai_request_omits_reasoning_effort_when_none() {
+        let request = ChatRequest {
+            model: "gpt-4.1".to_string(),
+            messages: vec![Message::user("test")],
+            tools: None,
+            temperature: 0.7,
+            max_tokens: 4096,
+            stream: false,
+            reasoning_effort: None,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json.get("reasoning_effort").is_none());
     }
 }

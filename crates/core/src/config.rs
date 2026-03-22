@@ -141,6 +141,53 @@ pub struct LlmConfig {
     /// Provider-level failover chain (tried in order when primary provider fails).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback: Vec<LlmFallback>,
+    /// Extended thinking level: off, low, medium, high, xhigh.
+    /// Enables native thinking for supported providers (Anthropic, OpenAI o-series).
+    #[serde(default)]
+    pub thinking: ThinkingLevel,
+}
+
+/// Extended thinking level for supported LLM providers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel {
+    #[default]
+    Off,
+    /// 1024 budget tokens (Anthropic) / low effort (OpenAI)
+    Low,
+    /// 4096 budget tokens (Anthropic) / medium effort (OpenAI)
+    Medium,
+    /// 16384 budget tokens (Anthropic) / high effort (OpenAI)
+    High,
+    /// 32768 budget tokens (Anthropic) / high effort (OpenAI)
+    Xhigh,
+}
+
+impl ThinkingLevel {
+    /// Budget tokens for Anthropic's thinking parameter. Returns `None` when thinking is off.
+    pub fn budget_tokens(&self) -> Option<u32> {
+        match self {
+            Self::Off => None,
+            Self::Low => Some(1024),
+            Self::Medium => Some(4096),
+            Self::High => Some(16384),
+            Self::Xhigh => Some(32768),
+        }
+    }
+
+    /// Reasoning effort string for OpenAI o-series models. Returns `None` when thinking is off.
+    pub fn openai_reasoning_effort(&self) -> Option<&str> {
+        match self {
+            Self::Off => None,
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High | Self::Xhigh => Some("high"),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        *self != Self::Off
+    }
 }
 
 /// A fallback provider configuration for provider-level failover.
@@ -421,6 +468,21 @@ pub struct GatewayConfig {
     /// signal-cli daemon port (default 8080).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal_cli_port: Option<u16>,
+    /// Default activation mode for group chats (default: Mention).
+    /// DMs always activate regardless of this setting.
+    #[serde(default)]
+    pub group_activation: ActivationMode,
+}
+
+/// Activation mode for group chats.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ActivationMode {
+    /// Bot responds to every message in groups.
+    Always,
+    /// Bot only responds when @mentioned in groups.
+    #[default]
+    Mention,
 }
 
 /// Route a gateway channel to specific agent configuration overrides.
@@ -458,6 +520,12 @@ pub struct GatewayBinding {
     /// Per-binding fallback providers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback: Vec<LlmFallback>,
+    /// Activation mode override for this binding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation: Option<ActivationMode>,
+    /// Extended thinking level override for this binding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingLevel>,
 }
 
 fn default_rate_limit() -> u32 {
@@ -486,6 +554,7 @@ impl Default for GatewayConfig {
             pairing_ttl_secs: default_pairing_ttl(),
             signal_cli_host: None,
             signal_cli_port: None,
+            group_activation: ActivationMode::default(),
         }
     }
 }
@@ -614,6 +683,7 @@ impl Default for LlmConfig {
             request_timeout_ms: 60000,
             base_url: None,
             fallback: Vec::new(),
+            thinking: ThinkingLevel::Off,
         }
     }
 }
@@ -2603,5 +2673,64 @@ base_url = "https://proxy.example.com/v1/chat/completions"
         let channels = cfg.detected_native_channels();
         assert!(channels.iter().any(|(name, _)| *name == "slack"));
         std::env::remove_var("SLACK_BOT_TOKEN");
+    }
+
+    #[test]
+    fn thinking_level_defaults_to_off() {
+        let cfg = Config::default();
+        assert_eq!(cfg.llm.thinking, ThinkingLevel::Off);
+        assert!(cfg.llm.thinking.budget_tokens().is_none());
+        assert!(cfg.llm.thinking.openai_reasoning_effort().is_none());
+        assert!(!cfg.llm.thinking.is_enabled());
+    }
+
+    #[test]
+    fn thinking_level_budget_tokens() {
+        assert_eq!(ThinkingLevel::Low.budget_tokens(), Some(1024));
+        assert_eq!(ThinkingLevel::Medium.budget_tokens(), Some(4096));
+        assert_eq!(ThinkingLevel::High.budget_tokens(), Some(16384));
+        assert_eq!(ThinkingLevel::Xhigh.budget_tokens(), Some(32768));
+    }
+
+    #[test]
+    fn thinking_level_openai_reasoning_effort() {
+        assert_eq!(ThinkingLevel::Low.openai_reasoning_effort(), Some("low"));
+        assert_eq!(
+            ThinkingLevel::Medium.openai_reasoning_effort(),
+            Some("medium")
+        );
+        assert_eq!(ThinkingLevel::High.openai_reasoning_effort(), Some("high"));
+        assert_eq!(ThinkingLevel::Xhigh.openai_reasoning_effort(), Some("high"));
+    }
+
+    #[test]
+    fn thinking_level_serde_roundtrip() {
+        let level: ThinkingLevel = serde_json::from_str(r#""high""#).unwrap();
+        assert_eq!(level, ThinkingLevel::High);
+        let json = serde_json::to_string(&level).unwrap();
+        assert_eq!(json, r#""high""#);
+    }
+
+    #[test]
+    fn parse_thinking_level_in_config_toml() {
+        let toml_str = r#"
+            [llm]
+            model = "claude-sonnet-4"
+            thinking = "medium"
+        "#;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        f.write_all(toml_str.as_bytes()).unwrap();
+
+        let cfg = Config::load_from(&config_path).unwrap();
+        assert_eq!(cfg.llm.thinking, ThinkingLevel::Medium);
+        assert_eq!(cfg.llm.thinking.budget_tokens(), Some(4096));
+    }
+
+    #[test]
+    fn group_activation_defaults_to_mention() {
+        let cfg = Config::default();
+        assert_eq!(cfg.gateway.group_activation, ActivationMode::Mention);
     }
 }

@@ -115,6 +115,7 @@ async fn monitor_loop(
                                         attachments: Vec::new(),
                                         reaction: None,
                                         metadata: serde_json::Value::Null,
+                                        peer_kind: Some("direct".to_string()),
                                     };
 
                                     match handler::handle_polled_message(

@@ -1,4 +1,4 @@
-use borg_core::config::{Config, GatewayBinding};
+use borg_core::config::{ActivationMode, Config, GatewayBinding};
 use tracing::debug;
 
 /// Result of route resolution for a gateway message.
@@ -13,6 +13,8 @@ pub struct ResolvedRoute {
     pub identity_path: Option<String>,
     /// Human-readable match descriptor.
     pub matched_by: String,
+    /// Activation mode from binding override.
+    pub activation: Option<ActivationMode>,
 }
 
 /// Resolve which gateway binding (if any) matches the given channel context.
@@ -106,6 +108,7 @@ fn default_route(config: &Config) -> ResolvedRoute {
         memory_scope: None,
         identity_path: None,
         matched_by: "default".to_string(),
+        activation: None,
     }
 }
 
@@ -134,6 +137,7 @@ fn apply_binding(
         memory_scope: binding.memory_scope.clone(),
         identity_path: binding.identity.clone(),
         matched_by: matched_by.to_string(),
+        activation: binding.activation.clone(),
     }
 }
 
@@ -159,6 +163,9 @@ fn apply_binding_overrides(config: &mut Config, binding: &GatewayBinding) {
     }
     if let Some(ref scope) = binding.memory_scope {
         config.memory.memory_scope = Some(scope.clone());
+    }
+    if let Some(ref thinking) = binding.thinking {
+        config.llm.thinking = thinking.clone();
     }
     if let Some(ref identity) = binding.identity {
         // Validate identity path to prevent traversal outside data dir
@@ -224,6 +231,8 @@ mod tests {
             identity: None,
             memory_scope: Some("work".to_string()),
             fallback: Vec::new(),
+            activation: None,
+            thinking: None,
         });
 
         let route = resolve_route(&config, "telegram", "user1", None);
@@ -249,6 +258,8 @@ mod tests {
             identity: None,
             memory_scope: None,
             fallback: Vec::new(),
+            activation: None,
+            thinking: None,
         });
 
         let route = resolve_route(&config, "slack", "U12345678", None);
@@ -271,6 +282,8 @@ mod tests {
             identity: None,
             memory_scope: Some("team".to_string()),
             fallback: Vec::new(),
+            activation: None,
+            thinking: None,
         });
 
         let route = resolve_route(&config, "discord", "user1", Some("group"));
@@ -294,6 +307,8 @@ mod tests {
             identity: None,
             memory_scope: None,
             fallback: Vec::new(),
+            activation: None,
+            thinking: None,
         });
         // Tier 2: channel+sender
         config.gateway.bindings.push(GatewayBinding {
@@ -308,6 +323,8 @@ mod tests {
             identity: None,
             memory_scope: None,
             fallback: Vec::new(),
+            activation: None,
+            thinking: None,
         });
 
         let route = resolve_route(&config, "telegram", "user1", None);
@@ -331,6 +348,8 @@ mod tests {
             identity: None,
             memory_scope: None,
             fallback: Vec::new(),
+            activation: None,
+            thinking: None,
         });
 
         let route = resolve_route(&config, "telegram", "user1", None);
@@ -352,6 +371,8 @@ mod tests {
             identity: None,
             memory_scope: None,
             fallback: Vec::new(),
+            activation: None,
+            thinking: None,
         });
         config.gateway.bindings.push(GatewayBinding {
             channel: "telegram".to_string(),
@@ -365,6 +386,8 @@ mod tests {
             identity: None,
             memory_scope: None,
             fallback: Vec::new(),
+            activation: None,
+            thinking: None,
         });
 
         let route = resolve_route(&config, "telegram", "user1", None);
@@ -386,10 +409,66 @@ mod tests {
             identity: None,
             memory_scope: None,
             fallback: Vec::new(),
+            activation: None,
+            thinking: None,
         });
 
         let route = resolve_route(&config, "telegram", "user1", None);
         assert!(route.binding_id.starts_with("bind:"));
         assert!(route.binding_id.contains("telegram"));
+    }
+
+    #[test]
+    fn activation_propagates_from_binding() {
+        let mut config = Config::default();
+        config.gateway.bindings.push(GatewayBinding {
+            channel: "telegram".to_string(),
+            sender: None,
+            peer_kind: None,
+            provider: None,
+            model: None,
+            api_key_env: None,
+            temperature: None,
+            max_tokens: None,
+            identity: None,
+            memory_scope: None,
+            fallback: Vec::new(),
+            activation: Some(ActivationMode::Always),
+            thinking: None,
+        });
+
+        let route = resolve_route(&config, "telegram", "user1", None);
+        assert_eq!(route.activation, Some(ActivationMode::Always));
+    }
+
+    #[test]
+    fn thinking_override_propagates_from_binding() {
+        use borg_core::config::ThinkingLevel;
+        let mut config = Config::default();
+        config.gateway.bindings.push(GatewayBinding {
+            channel: "telegram".to_string(),
+            sender: None,
+            peer_kind: None,
+            provider: None,
+            model: None,
+            api_key_env: None,
+            temperature: None,
+            max_tokens: None,
+            identity: None,
+            memory_scope: None,
+            fallback: Vec::new(),
+            activation: None,
+            thinking: Some(ThinkingLevel::High),
+        });
+
+        let route = resolve_route(&config, "telegram", "user1", None);
+        assert_eq!(route.config.llm.thinking, ThinkingLevel::High);
+    }
+
+    #[test]
+    fn default_route_has_no_activation() {
+        let config = Config::default();
+        let route = resolve_route(&config, "unknown", "user1", None);
+        assert!(route.activation.is_none());
     }
 }

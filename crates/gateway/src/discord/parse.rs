@@ -43,6 +43,11 @@ pub fn parse_interaction(interaction: &Interaction) -> Option<InboundMessage> {
         attachments: Vec::new(),
         reaction: None,
         metadata: serde_json::Value::Null,
+        peer_kind: if interaction.guild_id.is_some() {
+            Some("group".to_string())
+        } else {
+            Some("direct".to_string())
+        },
     })
 }
 

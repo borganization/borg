@@ -79,6 +79,12 @@ pub async fn parse_event(
         })
         .unwrap_or_default();
 
+    let peer_kind = match event.channel_type.as_deref() {
+        Some("im") => Some("direct".to_string()),
+        Some("channel") | Some("group") | Some("mpim") => Some("group".to_string()),
+        _ => None,
+    };
+
     Some(InboundMessage {
         sender_id: sender_id.to_string(),
         text: text.to_string(),
@@ -88,7 +94,10 @@ pub async fn parse_event(
         thread_ts: event.thread_ts.clone(),
         attachments,
         reaction: None,
-        metadata: serde_json::Value::Null,
+        metadata: serde_json::json!({
+            "event_type": event.event_type,
+        }),
+        peer_kind,
     })
 }
 
@@ -243,6 +252,29 @@ mod tests {
         event.subtype = Some("channel_join".to_string());
         let cb = make_event(event);
         assert!(parse_event(&cb, None, None).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn channel_type_channel_is_group_peer_kind() {
+        let cb = make_event(make_slack_event("message"));
+        let msg = parse_event(&cb, None, None).await.unwrap();
+        assert_eq!(msg.peer_kind.as_deref(), Some("group"));
+    }
+
+    #[tokio::test]
+    async fn channel_type_im_is_direct_peer_kind() {
+        let mut event = make_slack_event("message");
+        event.channel_type = Some("im".to_string());
+        let cb = make_event(event);
+        let msg = parse_event(&cb, None, None).await.unwrap();
+        assert_eq!(msg.peer_kind.as_deref(), Some("direct"));
+    }
+
+    #[tokio::test]
+    async fn app_mention_stores_event_type_metadata() {
+        let cb = make_event(make_slack_event("app_mention"));
+        let msg = parse_event(&cb, None, None).await.unwrap();
+        assert_eq!(msg.metadata["event_type"], "app_mention");
     }
 
     #[tokio::test]

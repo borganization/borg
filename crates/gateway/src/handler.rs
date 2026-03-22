@@ -73,6 +73,9 @@ pub struct InboundMessage {
     /// Platform-specific metadata escape hatch.
     #[serde(default)]
     pub metadata: serde_json::Value,
+    /// Whether this message is from a direct or group context.
+    #[serde(default)]
+    pub peer_kind: Option<String>,
 }
 
 impl InboundMessage {
@@ -176,21 +179,94 @@ fn build_retry_policy(channel: &RegisteredChannel) -> RetryPolicy {
     policy
 }
 
+/// Determine if the bot should respond to this message based on activation mode.
+///
+/// Returns `(should_respond, cleaned_text)` where `cleaned_text` has the @mention stripped
+/// if the bot was mentioned in a group with mention-only activation.
+pub fn check_activation(
+    text: &str,
+    peer_kind: Option<&str>,
+    route: &crate::routing::ResolvedRoute,
+    config: &Config,
+    bot_identifier: Option<&str>,
+) -> (bool, String) {
+    let is_group = peer_kind == Some("group");
+
+    // DMs always activate
+    if !is_group {
+        return (true, text.to_string());
+    }
+
+    // Determine activation mode: binding override > global default
+    let activation = route
+        .activation
+        .as_ref()
+        .unwrap_or(&config.gateway.group_activation);
+
+    match activation {
+        borg_core::config::ActivationMode::Mention => {
+            if let Some(bot_id) = bot_identifier {
+                // Case-insensitive search for the bot mention
+                let lower_text = text.to_lowercase();
+                let lower_bot = bot_id.to_lowercase();
+                if let Some(pos) = lower_text.find(&lower_bot) {
+                    // Strip mention from original text at the found position
+                    let cleaned = format!("{}{}", &text[..pos], &text[pos + bot_id.len()..])
+                        .trim()
+                        .to_string();
+                    // If stripping left empty text, still activate with original
+                    if cleaned.is_empty() {
+                        return (true, text.to_string());
+                    }
+                    (true, cleaned)
+                } else {
+                    (false, text.to_string())
+                }
+            } else {
+                // No bot identifier known, fall back to always
+                (true, text.to_string())
+            }
+        }
+        borg_core::config::ActivationMode::Always => (true, text.to_string()),
+    }
+}
+
 /// Invoke the agent with an inbound message and return the response text and session ID.
 ///
 /// This is the shared core: session resolution, agent creation, message dispatch, response collection.
 /// Used by both script-based channels and native integrations (e.g. Telegram).
 ///
 /// Applies gateway routing to select per-channel/sender agent configuration overrides.
+///
+/// `bot_identifier` is the platform-specific mention string (e.g. `@botname` for Telegram,
+/// `<@U123>` for Slack) used for group chat activation filtering.
 pub async fn invoke_agent(
     channel_name: &str,
     inbound: &InboundMessage,
     config: &Config,
     health: Option<&Arc<RwLock<ChannelHealthRegistry>>>,
+    bot_identifier: Option<&str>,
 ) -> Result<(String, String)> {
     // Resolve gateway routing (per-channel/sender config overrides)
-    let route = crate::routing::resolve_route(config, channel_name, &inbound.sender_id, None);
+    let route = crate::routing::resolve_route(
+        config,
+        channel_name,
+        &inbound.sender_id,
+        inbound.peer_kind.as_deref(),
+    );
     let config = &route.config;
+
+    // Check group activation mode before any processing
+    let (should_respond, cleaned_text) = check_activation(
+        &inbound.text,
+        inbound.peer_kind.as_deref(),
+        &route,
+        config,
+        bot_identifier,
+    );
+    if !should_respond {
+        return Ok((String::new(), String::new()));
+    }
 
     info!(
         "Channel '{}' received message from '{}' (route: {})",
@@ -268,7 +344,7 @@ pub async fn invoke_agent(
         warn!("Failed to log inbound message for channel '{channel_name}': {e}");
     }
 
-    // Check for slash commands before creating agent
+    // Check for slash commands before creating agent (use original text for commands)
     if let Some(response) = crate::commands::try_handle_command(
         &inbound.text,
         &db,
@@ -308,12 +384,12 @@ pub async fn invoke_agent(
 
     // Scan full text for injection BEFORE truncation so patterns spanning
     // the truncation boundary are still detected.
-    let injection_level = scan_for_injection(&inbound.text);
+    let injection_level = scan_for_injection(&cleaned_text);
 
     // Truncate inbound text to prevent excessive LLM token consumption
     const MAX_INBOUND_TEXT_BYTES: usize = 32 * 1024; // 32 KB
-    let text = if inbound.text.len() > MAX_INBOUND_TEXT_BYTES {
-        let mut truncated = inbound.text.clone();
+    let text = if cleaned_text.len() > MAX_INBOUND_TEXT_BYTES {
+        let mut truncated = cleaned_text.clone();
         truncated.truncate(MAX_INBOUND_TEXT_BYTES);
         // Ensure we don't split a multi-byte char
         while !truncated.is_char_boundary(truncated.len()) {
@@ -321,13 +397,13 @@ pub async fn invoke_agent(
         }
         warn!(
             "Truncated inbound message from {} bytes to {} bytes for channel '{}'",
-            inbound.text.len(),
+            cleaned_text.len(),
             truncated.len(),
             channel_name
         );
         truncated
     } else {
-        inbound.text.clone()
+        cleaned_text
     };
 
     // Apply injection wrapping using the pre-truncation scan result
@@ -481,7 +557,8 @@ async fn process_message(
 ) -> Result<String> {
     let channel_name = &channel.manifest.name;
 
-    let (response_text, _session_id) = invoke_agent(channel_name, &inbound, config, health).await?;
+    let (response_text, _session_id) =
+        invoke_agent(channel_name, &inbound, config, health, None).await?;
 
     // Prepare auth tokens (resolve from credential store, falling back to env vars)
     let token = channel
@@ -574,6 +651,12 @@ async fn process_message(
     }
 
     Ok(response_text)
+}
+
+fn record_delivery_failure_sync(db: &Database, delivery_id: &str, error: &str) {
+    if let Err(db_err) = db.mark_failed(delivery_id, error, None) {
+        warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
+    }
 }
 
 #[cfg(test)]
@@ -732,10 +815,109 @@ mod tests {
             Some("attachment".to_string())
         );
     }
-}
 
-fn record_delivery_failure_sync(db: &Database, delivery_id: &str, error: &str) {
-    if let Err(db_err) = db.mark_failed(delivery_id, error, None) {
-        warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
+    fn default_route() -> crate::routing::ResolvedRoute {
+        let config = Config::default();
+        crate::routing::ResolvedRoute {
+            config,
+            binding_id: "default".to_string(),
+            memory_scope: None,
+            identity_path: None,
+            matched_by: "default".to_string(),
+            activation: None,
+        }
+    }
+
+    #[test]
+    fn dm_always_activates() {
+        let route = default_route();
+        let config = Config::default();
+        let (activate, text) =
+            check_activation("hello", Some("direct"), &route, &config, Some("@bot"));
+        assert!(activate);
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn dm_activates_even_with_mention_mode() {
+        let mut route = default_route();
+        route.activation = Some(borg_core::config::ActivationMode::Mention);
+        let config = Config::default();
+        let (activate, _) =
+            check_activation("hello", Some("direct"), &route, &config, Some("@bot"));
+        assert!(activate);
+    }
+
+    #[test]
+    fn group_mention_mode_activates_when_mentioned() {
+        let route = default_route();
+        let mut config = Config::default();
+        config.gateway.group_activation = borg_core::config::ActivationMode::Mention;
+        let (activate, text) = check_activation(
+            "@mybot help me",
+            Some("group"),
+            &route,
+            &config,
+            Some("@mybot"),
+        );
+        assert!(activate);
+        assert_eq!(text, "help me");
+    }
+
+    #[test]
+    fn group_mention_mode_skips_when_not_mentioned() {
+        let route = default_route();
+        let mut config = Config::default();
+        config.gateway.group_activation = borg_core::config::ActivationMode::Mention;
+        let (activate, _) = check_activation(
+            "hello everyone",
+            Some("group"),
+            &route,
+            &config,
+            Some("@mybot"),
+        );
+        assert!(!activate);
+    }
+
+    #[test]
+    fn group_always_mode_activates() {
+        let route = default_route();
+        let mut config = Config::default();
+        config.gateway.group_activation = borg_core::config::ActivationMode::Always;
+        let (activate, text) =
+            check_activation("hello", Some("group"), &route, &config, Some("@bot"));
+        assert!(activate);
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn group_no_bot_identifier_falls_back_to_always() {
+        let route = default_route();
+        let mut config = Config::default();
+        config.gateway.group_activation = borg_core::config::ActivationMode::Mention;
+        let (activate, _) = check_activation("hello", Some("group"), &route, &config, None);
+        assert!(activate);
+    }
+
+    #[test]
+    fn binding_activation_overrides_global() {
+        let mut route = default_route();
+        route.activation = Some(borg_core::config::ActivationMode::Always);
+        let mut config = Config::default();
+        config.gateway.group_activation = borg_core::config::ActivationMode::Mention;
+        let (activate, _) = check_activation("hello", Some("group"), &route, &config, Some("@bot"));
+        assert!(activate);
+    }
+
+    #[test]
+    fn mention_only_text_still_activates() {
+        let route = default_route();
+        let mut config = Config::default();
+        config.gateway.group_activation = borg_core::config::ActivationMode::Mention;
+        let (activate, text) =
+            check_activation("@mybot", Some("group"), &route, &config, Some("@mybot"));
+        assert!(activate);
+        // When only the mention remains, we return original text
+        assert_eq!(text, "@mybot");
     }
 }

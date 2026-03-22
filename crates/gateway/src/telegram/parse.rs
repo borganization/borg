@@ -75,6 +75,12 @@ pub fn parse_update(update: &Update) -> Option<(InboundMessage, Option<TelegramA
         let thread_id = msg.message_thread_id.map(|t| t.to_string());
         let message_id = Some(msg.message_id.to_string());
 
+        let peer_kind = match msg.chat.chat_type.as_str() {
+            "private" => Some("direct".to_string()),
+            "group" | "supergroup" | "channel" => Some("group".to_string()),
+            _ => None,
+        };
+
         return Some((
             InboundMessage {
                 sender_id,
@@ -86,6 +92,7 @@ pub fn parse_update(update: &Update) -> Option<(InboundMessage, Option<TelegramA
                 attachments: Vec::new(),
                 reaction: None,
                 metadata: serde_json::Value::Null,
+                peer_kind,
             },
             audio_ref,
         ));
@@ -106,6 +113,14 @@ pub fn parse_update(update: &Update) -> Option<(InboundMessage, Option<TelegramA
             .map(|t| t.to_string());
         let message_id = cb.message.as_ref().map(|m| m.message_id.to_string());
 
+        let peer_kind = cb
+            .message
+            .as_ref()
+            .map(|m| match m.chat.chat_type.as_str() {
+                "private" => "direct".to_string(),
+                _ => "group".to_string(),
+            });
+
         return Some((
             InboundMessage {
                 sender_id: cb.from.id.to_string(),
@@ -117,6 +132,7 @@ pub fn parse_update(update: &Update) -> Option<(InboundMessage, Option<TelegramA
                 attachments: Vec::new(),
                 reaction: None,
                 metadata: serde_json::Value::Null,
+                peer_kind,
             },
             None,
         ));
@@ -441,6 +457,33 @@ mod tests {
         let (msg, _) = parse_update(&update).unwrap();
         assert_eq!(msg.sender_id, "42");
         assert_eq!(msg.channel_id.as_deref(), Some("-100123"));
+    }
+
+    #[test]
+    fn private_chat_is_direct_peer_kind() {
+        let update = text_update("hello");
+        let (msg, _) = parse_update(&update).unwrap();
+        assert_eq!(msg.peer_kind.as_deref(), Some("direct"));
+    }
+
+    #[test]
+    fn group_chat_is_group_peer_kind() {
+        let update: Update = serde_json::from_str(
+            r#"{
+                "update_id": 20,
+                "message": {
+                    "message_id": 1,
+                    "from": { "id": 42, "first_name": "Alice", "is_bot": false },
+                    "chat": { "id": -100123, "type": "supergroup" },
+                    "date": 1700000000,
+                    "text": "hello group"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (msg, _) = parse_update(&update).unwrap();
+        assert_eq!(msg.peer_kind.as_deref(), Some("group"));
     }
 
     #[test]
