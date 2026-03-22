@@ -325,9 +325,7 @@ impl SlackClient {
         // Check Content-Length before buffering to prevent memory exhaustion
         if let Some(content_length) = resp.content_length() {
             if content_length as usize > MAX_FILE_DOWNLOAD {
-                bail!(
-                    "Slack file too large ({content_length} bytes, max {MAX_FILE_DOWNLOAD})"
-                );
+                bail!("Slack file too large ({content_length} bytes, max {MAX_FILE_DOWNLOAD})");
             }
         }
 
