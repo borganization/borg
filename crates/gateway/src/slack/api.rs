@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
+use tokio::sync::Mutex;
 use tracing::warn;
 
-use super::types::{
-    AuthTestResponse, PostMessageRequest, PostMessageResponse, UpdateMessageRequest,
-};
+use super::echo::EchoCache;
+use super::types::{AuthTestResponse, PostMessageRequest};
 use crate::chunker;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
@@ -21,12 +21,17 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const TYPING_CB_FAILURE_THRESHOLD: u32 = 2;
 const TYPING_CB_SUSPENSION_SECS: u64 = 60;
 
+/// Max file download size for Slack attachments.
+const MAX_FILE_DOWNLOAD: usize = borg_core::constants::SLACK_MAX_FILE_SIZE;
+
 /// A client for the Slack Web API.
 #[derive(Clone)]
 pub struct SlackClient {
     client: Client,
     token: String,
     circuit_breaker: Arc<CircuitBreaker>,
+    bot_user_id: Option<String>,
+    echo_cache: Arc<Mutex<EchoCache>>,
 }
 
 impl SlackClient {
@@ -41,11 +46,24 @@ impl SlackClient {
                 TYPING_CB_FAILURE_THRESHOLD,
                 TYPING_CB_SUSPENSION_SECS,
             )),
+            bot_user_id: None,
+            echo_cache: Arc::new(Mutex::new(EchoCache::new())),
         })
     }
 
+    /// The bot's own user ID (set after `auth_test`).
+    pub fn bot_user_id(&self) -> Option<&str> {
+        self.bot_user_id.as_deref()
+    }
+
+    /// Reference to the echo cache for inbound filtering.
+    pub fn echo_cache(&self) -> &Arc<Mutex<EchoCache>> {
+        &self.echo_cache
+    }
+
     /// Validate the bot token by calling `auth.test`.
-    pub async fn auth_test(&self) -> Result<AuthTestResponse> {
+    /// Stores the bot's user_id for echo detection.
+    pub async fn auth_test(&mut self) -> Result<AuthTestResponse> {
         let resp: AuthTestResponse = self
             .client
             .post(format!("{SLACK_API_BASE}/auth.test"))
@@ -64,25 +82,29 @@ impl SlackClient {
             );
         }
 
+        self.bot_user_id = resp.user_id.clone();
+
         Ok(resp)
     }
 
     /// Send a message to a Slack channel, automatically chunking at 4000 chars.
     /// Optionally replies in a thread if `thread_ts` is provided.
-    /// Returns the message `ts` of the last chunk sent (useful for later editing).
+    /// Records sent text in echo cache for self-message detection.
     pub async fn post_message(
         &self,
         channel: &str,
         text: &str,
         thread_ts: Option<&str>,
-    ) -> Result<Option<String>> {
+    ) -> Result<()> {
         let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
-        let mut last_ts = None;
 
         for chunk in &chunks {
-            last_ts = self.send_single_message(channel, chunk, thread_ts).await?;
+            self.send_single_message(channel, chunk, thread_ts).await?;
         }
-        Ok(last_ts)
+
+        // Record full text in echo cache after successful send
+        self.echo_cache.lock().await.remember(text);
+        Ok(())
     }
 
     async fn send_single_message(
@@ -90,11 +112,10 @@ impl SlackClient {
         channel: &str,
         text: &str,
         thread_ts: Option<&str>,
-    ) -> Result<Option<String>> {
-        let converted_text = super::mrkdwn::markdown_to_mrkdwn(text);
+    ) -> Result<()> {
         let body = PostMessageRequest {
             channel: channel.to_string(),
-            text: converted_text,
+            text: text.to_string(),
             thread_ts: thread_ts.map(String::from),
             blocks: None,
         };
@@ -116,50 +137,10 @@ impl SlackClient {
         .await?;
 
         let status = resp.status();
-        let resp_body: PostMessageResponse = resp
-            .json()
-            .await
-            .context("Failed to parse chat.postMessage response")?;
-
-        if resp_body.ok {
-            return Ok(resp_body.ts);
-        }
-
-        let error = resp_body.error.as_deref().unwrap_or("unknown error");
-        bail!("chat.postMessage failed ({}): {}", status.as_u16(), error);
-    }
-
-    /// Edit a previously sent message via `chat.update`.
-    pub async fn update_message(&self, channel: &str, ts: &str, text: &str) -> Result<()> {
-        let converted_text = super::mrkdwn::markdown_to_mrkdwn(text);
-        let body = UpdateMessageRequest {
-            channel: channel.to_string(),
-            ts: ts.to_string(),
-            text: converted_text,
-            blocks: None,
-        };
-
-        let policy = RateLimitPolicy {
-            service_name: "Slack chat.update",
-            ..RateLimitPolicy::default()
-        };
-
-        let resp = send_with_rate_limit_retry(&policy, || async {
-            self.client
-                .post(format!("{SLACK_API_BASE}/chat.update"))
-                .bearer_auth(&self.token)
-                .json(&body)
-                .send()
-                .await
-                .context("Failed to update Slack message")
-        })
-        .await?;
-
-        let status = resp.status();
         let resp_body: serde_json::Value = resp
             .json()
             .await
-            .context("Failed to parse chat.update response")?;
+            .context("Failed to parse chat.postMessage response")?;
 
         if resp_body
             .get("ok")
@@ -174,7 +155,20 @@ impl SlackClient {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown error");
 
-        bail!("chat.update failed ({}): {}", status.as_u16(), error);
+        let hint = match error {
+            "channel_not_found" => " — bot may not be added to this channel",
+            "not_in_channel" => " — invite the bot to the channel first",
+            "invalid_auth" => " — check SLACK_BOT_TOKEN",
+            "account_inactive" => " — bot token has been revoked",
+            "token_revoked" => " — bot token has been revoked",
+            "missing_scope" => " — bot token is missing required OAuth scopes",
+            _ => "",
+        };
+
+        bail!(
+            "chat.postMessage failed ({}): {error}{hint}",
+            status.as_u16()
+        );
     }
 
     /// Set thread typing status via `assistant.threads.setStatus` API.
@@ -310,45 +304,15 @@ impl SlackClient {
         bail!("files.upload failed ({}): {}", status.as_u16(), error);
     }
 
-    /// Respond to a Slack slash command via response_url.
-    ///
-    /// This POSTs JSON to the response_url provided by Slack in the slash command payload.
-    /// No auth token is needed — the URL itself is the credential.
-    /// Only accepts `hooks.slack.com` URLs to prevent SSRF.
-    pub async fn respond_to_url(&self, response_url: &str, text: &str) -> Result<()> {
-        if !response_url.starts_with("https://hooks.slack.com/") {
-            bail!("Refusing to POST to non-Slack response_url");
+    /// Download a file from Slack using `url_private` with Bearer auth.
+    /// Returns the file bytes and content-type.
+    /// Rejects files larger than the configured max size.
+    /// Only downloads from `files.slack.com` to prevent SSRF.
+    pub async fn download_file(&self, url: &str) -> Result<(Vec<u8>, String)> {
+        // Validate URL domain to prevent SSRF
+        if !url.starts_with("https://files.slack.com/") {
+            bail!("Refusing to download file from non-Slack domain");
         }
-
-        let body = serde_json::json!({
-            "text": text,
-            "response_type": "ephemeral",
-        });
-
-        let resp = self
-            .client
-            .post(response_url)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to POST to Slack response_url")?;
-
-        if !resp.status().is_success() {
-            bail!(
-                "Slack response_url returned status {}",
-                resp.status().as_u16()
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Download a file from Slack using the bot token for authentication.
-    ///
-    /// Slack file URLs (url_private_download) require Bearer token auth.
-    /// Enforces a 25 MB size limit to prevent memory exhaustion.
-    pub async fn download_file(&self, url: &str) -> Result<Vec<u8>> {
-        const MAX_FILE_SIZE: u64 = 25 * 1024 * 1024;
 
         let resp = self
             .client
@@ -358,32 +322,87 @@ impl SlackClient {
             .await
             .context("Failed to download Slack file")?;
 
-        if !resp.status().is_success() {
-            bail!(
-                "Slack file download failed: HTTP {}",
-                resp.status().as_u16()
-            );
-        }
-
-        if let Some(len) = resp.content_length() {
-            if len > MAX_FILE_SIZE {
-                bail!("Slack file too large: {len} bytes (max {MAX_FILE_SIZE})");
+        // Check Content-Length before buffering to prevent memory exhaustion
+        if let Some(content_length) = resp.content_length() {
+            if content_length as usize > MAX_FILE_DOWNLOAD {
+                bail!(
+                    "Slack file too large ({content_length} bytes, max {MAX_FILE_DOWNLOAD})"
+                );
             }
         }
+
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
 
         let bytes = resp
             .bytes()
             .await
             .context("Failed to read Slack file bytes")?;
 
-        if bytes.len() as u64 > MAX_FILE_SIZE {
+        if bytes.len() > MAX_FILE_DOWNLOAD {
             bail!(
-                "Slack file too large: {} bytes (max {MAX_FILE_SIZE})",
-                bytes.len()
+                "Slack file too large ({} bytes, max {})",
+                bytes.len(),
+                MAX_FILE_DOWNLOAD
             );
         }
 
-        Ok(bytes.to_vec())
+        Ok((bytes.to_vec(), content_type))
+    }
+
+    /// Fetch recent messages from a Slack channel via `conversations.history`.
+    pub async fn conversations_history(
+        &self,
+        channel: &str,
+        limit: u32,
+    ) -> Result<Vec<HistoryMessage>> {
+        let resp = self
+            .client
+            .get(format!("{SLACK_API_BASE}/conversations.history"))
+            .bearer_auth(&self.token)
+            .query(&[("channel", channel), ("limit", &limit.to_string())])
+            .send()
+            .await
+            .context("Failed to call conversations.history")?;
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse conversations.history response")?;
+
+        if !body
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            let error = body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            bail!("conversations.history failed: {error}");
+        }
+
+        let messages = body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| {
+                        Some(HistoryMessage {
+                            user: m.get("user")?.as_str()?.to_string(),
+                            text: m.get("text")?.as_str()?.to_string(),
+                            ts: m.get("ts")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(messages)
     }
 
     /// Remove a reaction emoji from a message. Non-fatal on failure.
@@ -406,6 +425,14 @@ impl SlackClient {
             warn!("reactions.remove failed: {e}");
         }
     }
+}
+
+/// A message from `conversations.history` for channel context injection.
+#[derive(Debug, Clone)]
+pub struct HistoryMessage {
+    pub user: String,
+    pub text: String,
+    pub ts: String,
 }
 
 #[cfg(test)]
@@ -496,36 +523,5 @@ mod tests {
             format!("{SLACK_API_BASE}/files.upload"),
             "https://slack.com/api/files.upload"
         );
-    }
-
-    #[test]
-    fn chat_update_url_construction() {
-        assert_eq!(
-            format!("{SLACK_API_BASE}/chat.update"),
-            "https://slack.com/api/chat.update"
-        );
-    }
-
-    #[test]
-    fn respond_to_url_body_serialization() {
-        let body = serde_json::json!({
-            "text": "Hello from slash command",
-            "response_type": "ephemeral",
-        });
-        assert_eq!(body["text"], "Hello from slash command");
-        assert_eq!(body["response_type"], "ephemeral");
-    }
-
-    #[tokio::test]
-    async fn respond_to_url_rejects_non_slack_domain() {
-        let client = SlackClient::new("xoxb-test").unwrap();
-        let result = client
-            .respond_to_url("https://evil.com/steal", "hello")
-            .await;
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("non-Slack response_url"));
     }
 }

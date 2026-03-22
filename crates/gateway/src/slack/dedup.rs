@@ -33,8 +33,8 @@ impl EventDeduplicator {
             }
         }
         let owned = event_id.to_string();
-        self.set.insert(owned.clone());
-        self.order.push_back(owned);
+        self.order.push_back(owned.clone());
+        self.set.insert(owned);
         false
     }
 }
@@ -78,25 +78,25 @@ mod tests {
             capacity: 3,
         };
 
-        assert!(!dedup.is_duplicate("Ev001"));
-        assert!(!dedup.is_duplicate("Ev002"));
-        assert!(!dedup.is_duplicate("Ev003"));
-        // Capacity full — next insert evicts Ev001
-        assert!(!dedup.is_duplicate("Ev004"));
-        // Ev001 was evicted, no longer detected as duplicate
-        assert!(!dedup.is_duplicate("Ev001"));
-        // After adding Ev004, order is [Ev002,Ev003,Ev004]. Adding Ev001 evicts Ev002
-        assert!(!dedup.is_duplicate("Ev002"));
+        assert!(!dedup.is_duplicate("Ev1"));
+        assert!(!dedup.is_duplicate("Ev2"));
+        assert!(!dedup.is_duplicate("Ev3"));
+        // Capacity full — next insert evicts Ev1
+        assert!(!dedup.is_duplicate("Ev4"));
+        // Ev1 was evicted, no longer detected as duplicate
+        assert!(!dedup.is_duplicate("Ev1"));
+        // Ev2 was evicted by Ev1's re-insertion
+        assert!(!dedup.is_duplicate("Ev2"));
     }
 
     #[test]
     fn duplicate_after_many_inserts() {
         let mut dedup = EventDeduplicator::new();
         for i in 1..=500 {
-            assert!(!dedup.is_duplicate(&format!("Ev{i:04}")));
+            assert!(!dedup.is_duplicate(&format!("Ev{i}")));
         }
-        // All 500 should still be in the buffer (capacity=1000)
-        assert!(dedup.is_duplicate("Ev0001"));
-        assert!(dedup.is_duplicate("Ev0500"));
+        // All 500 should still be in the buffer (capacity=5000)
+        assert!(dedup.is_duplicate("Ev1"));
+        assert!(dedup.is_duplicate("Ev500"));
     }
 }

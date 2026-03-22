@@ -32,7 +32,13 @@ pub const TELEGRAM_CIRCUIT_SUSPENSION_SECS: u64 = 300;
 pub const TELEGRAM_DEDUP_CAPACITY: usize = 1000;
 
 /// Capacity of the Slack event deduplicator.
-pub const SLACK_DEDUP_CAPACITY: usize = 1000;
+pub const SLACK_DEDUP_CAPACITY: usize = 5000;
+
+/// Capacity of the Slack echo cache (recently sent message hashes).
+pub const SLACK_ECHO_CACHE_CAPACITY: usize = 100;
+
+/// Max file download size for Slack attachments (50 MB).
+pub const SLACK_MAX_FILE_SIZE: usize = 50 * 1024 * 1024;
 
 /// Max characters shown as tool result preview in REPL.
 pub const TOOL_RESULT_PREVIEW_CHARS: usize = 200;
