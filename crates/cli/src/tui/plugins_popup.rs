@@ -504,8 +504,9 @@ mod tests {
         let tmp = std::env::temp_dir().join("borg-plugins-test-toggle");
         popup.show(&tmp);
 
-        // All items start unselected (since nothing is installed in temp dir)
-        assert!(!popup.items[0].is_selected);
+        // Force initial state regardless of host env/keychain
+        popup.items[0].is_installed = false;
+        popup.items[0].is_selected = false;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -724,9 +725,6 @@ mod tests {
     fn native_plugin_credential_input_flow() {
         let mut popup = PluginsPopup::new();
         let tmp = std::env::temp_dir().join("borg-plugins-test-native-cred");
-        unsafe {
-            std::env::remove_var("TELEGRAM_BOT_TOKEN");
-        }
         popup.show(&tmp);
 
         let telegram_idx = popup
@@ -734,6 +732,10 @@ mod tests {
             .iter()
             .position(|i| i.def.id == "messaging/telegram")
             .expect("Telegram should be in catalog");
+
+        // Force initial state regardless of host env/keychain
+        popup.items[telegram_idx].is_installed = false;
+        popup.items[telegram_idx].is_selected = false;
         popup.cursor = telegram_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
