@@ -133,7 +133,7 @@ pub struct ViewPayload {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ViewState {
-    pub values: std::collections::HashMap<String, std::collections::HashMap<String, ActionValue>>,
+    pub values: std::collections::BTreeMap<String, std::collections::BTreeMap<String, ActionValue>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
