@@ -673,17 +673,6 @@ mod tests {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false));
     }
-}
-
-fn record_delivery_failure_sync(db: &Database, delivery_id: &str, error: &str) {
-    if let Err(db_err) = db.mark_failed(delivery_id, error, None) {
-        warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn sanitize_filename_strips_path_traversal() {
@@ -732,5 +721,11 @@ mod tests {
             sanitize_filename(&Some("file\0name.txt".to_string())),
             Some("attachment".to_string())
         );
+    }
+}
+
+fn record_delivery_failure_sync(db: &Database, delivery_id: &str, error: &str) {
+    if let Err(db_err) = db.mark_failed(delivery_id, error, None) {
+        warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
     }
 }
