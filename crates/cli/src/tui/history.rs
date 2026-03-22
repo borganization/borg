@@ -1,5 +1,5 @@
 use ratatui::text::{Line, Span};
-use throbber_widgets_tui::{Throbber, ThrobberState, BRAILLE_EIGHT};
+use throbber_widgets_tui::ThrobberState;
 
 use super::markdown;
 use super::theme;
@@ -96,17 +96,7 @@ impl HistoryCell {
             }
             HistoryCell::Assistant { text, streaming } => {
                 let mut lines = if text.is_empty() && *streaming {
-                    if let Some(state) = throbber_state {
-                        let throbber = Throbber::default()
-                            .throbber_set(BRAILLE_EIGHT)
-                            .throbber_style(theme::dim());
-                        vec![Line::from(throbber.to_symbol_span(state))]
-                    } else {
-                        vec![Line::from(Span::styled(
-                            format!("{} ...", theme::BULLET),
-                            theme::dim(),
-                        ))]
-                    }
+                    vec![]
                 } else {
                     let prefix_span = Span::styled(format!("{} ", theme::BULLET), theme::dim());
                     let md_lines = markdown::render_markdown(text, width.saturating_sub(2));
