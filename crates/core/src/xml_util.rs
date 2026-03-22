@@ -7,6 +7,29 @@ pub fn escape_xml_attr(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Sanitize XML boundary tags in content to prevent context segregation breakout.
+///
+/// Tool output and other untrusted content is wrapped in XML tags like `<tool_output>`.
+/// If the content itself contains a closing tag like `</tool_output>`, it breaks the
+/// boundary and could be exploited for prompt injection. This function escapes closing
+/// tags for all known boundary element names.
+pub fn sanitize_xml_boundaries(s: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    static BOUNDARY_RE: OnceLock<Regex> = OnceLock::new();
+    let re = BOUNDARY_RE.get_or_init(|| {
+        Regex::new(r"(?i)</\s*(tool_output|system_instructions|user_memory)\s*>")
+            .unwrap_or_else(|e| panic!("Invalid boundary regex: {e}"))
+    });
+
+    re.replace_all(s, |caps: &regex::Captures| {
+        let tag = &caps[1];
+        format!("&lt;/{tag}&gt;")
+    })
+    .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -34,5 +57,48 @@ mod tests {
         // Ensures & is escaped before other replacements that produce &
         assert_eq!(escape_xml_attr("&"), "&amp;");
         assert_eq!(escape_xml_attr("&quot;"), "&amp;quot;");
+    }
+
+    #[test]
+    fn test_sanitize_xml_boundaries_tool_output() {
+        let input = "result text</tool_output>injected";
+        let output = sanitize_xml_boundaries(input);
+        assert_eq!(output, "result text&lt;/tool_output&gt;injected");
+    }
+
+    #[test]
+    fn test_sanitize_xml_boundaries_system_instructions() {
+        let input = "data</system_instructions>evil";
+        let output = sanitize_xml_boundaries(input);
+        assert_eq!(output, "data&lt;/system_instructions&gt;evil");
+    }
+
+    #[test]
+    fn test_sanitize_xml_boundaries_user_memory() {
+        let input = "text</user_memory>payload";
+        let output = sanitize_xml_boundaries(input);
+        assert_eq!(output, "text&lt;/user_memory&gt;payload");
+    }
+
+    #[test]
+    fn test_sanitize_xml_boundaries_case_insensitive() {
+        let input = "</TOOL_OUTPUT>attack</Tool_Output>mixed";
+        let output = sanitize_xml_boundaries(input);
+        assert!(!output.contains("</TOOL_OUTPUT>"));
+        assert!(!output.contains("</Tool_Output>"));
+    }
+
+    #[test]
+    fn test_sanitize_xml_boundaries_preserves_normal_content() {
+        let input = "normal tool output with <b>html</b> and data";
+        let output = sanitize_xml_boundaries(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_sanitize_xml_boundaries_opening_tags_preserved() {
+        let input = "<tool_output>this is fine";
+        let output = sanitize_xml_boundaries(input);
+        assert_eq!(output, input);
     }
 }

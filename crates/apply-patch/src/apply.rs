@@ -5,6 +5,10 @@ use tracing::{debug, info};
 use crate::parser::{Hunk, Patch, PatchOperation};
 use crate::seek_sequence::seek_sequence;
 
+/// Maximum size (in bytes) for any single file created or modified by a patch.
+/// Prevents disk exhaustion from LLM-generated oversized patches.
+const MAX_PATCH_FILE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+
 /// Categorized list of files affected by a patch application.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AffectedPaths {
@@ -141,6 +145,13 @@ fn apply_patch_inner(
     for op in &patch.operations {
         match op {
             PatchOperation::AddFile { path, content } => {
+                if content.len() > MAX_PATCH_FILE_SIZE {
+                    bail!(
+                        "File '{path}' exceeds maximum size ({} bytes > {} bytes)",
+                        content.len(),
+                        MAX_PATCH_FILE_SIZE
+                    );
+                }
                 let full_path = base_dir.join(path);
                 // Snapshot existing file if it exists (overwrite case)
                 if full_path.exists() {
@@ -174,6 +185,14 @@ fn apply_patch_inner(
                 snapshots.push((path.clone(), FileSnapshot::Existed(original.clone())));
 
                 let content = apply_hunks(&original, hunks, path)?;
+
+                if content.len() > MAX_PATCH_FILE_SIZE {
+                    bail!(
+                        "Updated file '{path}' exceeds maximum size ({} bytes > {} bytes)",
+                        content.len(),
+                        MAX_PATCH_FILE_SIZE
+                    );
+                }
 
                 if let Some(dest) = move_to {
                     // Move/rename: write to destination, delete original
@@ -945,5 +964,56 @@ mod tests {
         assert!(paths.deleted.is_empty());
         assert!(paths.moved.is_empty());
         assert!(paths.format_summary().is_empty());
+    }
+
+    #[test]
+    fn test_add_file_exceeds_size_limit() {
+        let dir = TempDir::new().unwrap();
+        let oversized = "x".repeat(MAX_PATCH_FILE_SIZE + 1);
+        let patch = make_patch(vec![PatchOperation::AddFile {
+            path: "big.txt".to_string(),
+            content: oversized,
+        }]);
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("exceeds maximum size"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_update_file_exceeds_size_limit() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "small\n").unwrap();
+        let big_replacement = "x".repeat(MAX_PATCH_FILE_SIZE + 1);
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "f.txt".to_string(),
+            move_to: None,
+            hunks: vec![simple_hunk("small", &big_replacement)],
+        }]);
+        let result = apply_patch(&patch, dir.path());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("exceeds maximum size"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_file_within_size_limit() {
+        let dir = TempDir::new().unwrap();
+        // Just under the limit should succeed
+        let content = "x".repeat(MAX_PATCH_FILE_SIZE);
+        let patch = make_patch(vec![PatchOperation::AddFile {
+            path: "ok.txt".to_string(),
+            content: content.clone(),
+        }]);
+        let affected = apply_patch(&patch, dir.path()).unwrap();
+        assert_eq!(affected.added, vec!["ok.txt"]);
+        let read = std::fs::read_to_string(dir.path().join("ok.txt")).unwrap();
+        assert_eq!(read.len(), MAX_PATCH_FILE_SIZE);
     }
 }

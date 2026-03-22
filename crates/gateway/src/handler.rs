@@ -291,8 +291,10 @@ pub async fn invoke_agent(
         return Ok((response, session_id));
     }
 
-    // Create Agent, load session, send message
-    let mut agent = Agent::new(config.clone(), borg_core::telemetry::BorgMetrics::noop())
+    // Create Agent with gateway-specific (stricter) rate limits
+    let mut gw_config = config.clone();
+    gw_config.security.action_limits = gw_config.security.gateway_action_limits.clone();
+    let mut agent = Agent::new(gw_config, borg_core::telemetry::BorgMetrics::noop())
         .context("Failed to create agent")?;
 
     if let Err(e) = agent.load_session(&session_id) {
@@ -454,12 +456,13 @@ pub async fn invoke_agent(
         response_text = "(no response)".to_string();
     }
 
-    // Log outbound message
+    // Log outbound message (redact secrets before DB persistence)
+    let redacted_response = borg_core::secrets::redact_secrets(&response_text);
     if let Err(e) = db.log_channel_message(
         channel_name,
         &inbound.sender_id,
         "outbound",
-        Some(&response_text),
+        Some(&redacted_response),
         None,
         Some(&session_id),
     ) {
