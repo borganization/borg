@@ -181,3 +181,138 @@ fn flush_line(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
         lines.push(Line::from(std::mem::take(spans)));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_of(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plain_text_single_line() {
+        let lines = render_markdown("Hello world", 80);
+        let texts = text_of(&lines);
+        assert_eq!(texts, vec!["Hello world"]);
+    }
+
+    #[test]
+    fn heading_levels() {
+        let lines = render_markdown("# H1\n## H2\n### H3", 80);
+        // Each heading followed by blank line
+        let texts = text_of(&lines);
+        assert!(texts.contains(&"H1".to_string()));
+        assert!(texts.contains(&"H2".to_string()));
+        assert!(texts.contains(&"H3".to_string()));
+        // H1 should be bold+underlined
+        let h1_line = &lines[0];
+        let style = h1_line.spans[0].style;
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn inline_code() {
+        let lines = render_markdown("Use `foo` here", 80);
+        let texts = text_of(&lines);
+        assert_eq!(texts[0], "Use `foo` here");
+    }
+
+    #[test]
+    fn code_block() {
+        let lines = render_markdown("```\nlet x = 1;\nlet y = 2;\n```", 80);
+        let texts = text_of(&lines);
+        assert!(texts.iter().any(|t| t.contains("let x = 1;")));
+        assert!(texts.iter().any(|t| t.contains("let y = 2;")));
+    }
+
+    #[test]
+    fn unordered_list() {
+        let lines = render_markdown("- one\n- two\n- three", 80);
+        let texts = text_of(&lines);
+        assert!(texts.iter().any(|t| t.contains("- one")));
+        assert!(texts.iter().any(|t| t.contains("- two")));
+    }
+
+    #[test]
+    fn ordered_list() {
+        let lines = render_markdown("1. first\n2. second", 80);
+        let texts = text_of(&lines);
+        assert!(texts.iter().any(|t| t.contains("1. first")));
+        assert!(texts.iter().any(|t| t.contains("2. second")));
+    }
+
+    #[test]
+    fn bold_and_italic() {
+        let lines = render_markdown("**bold** and *italic*", 80);
+        // Find spans with bold/italic modifiers
+        let all_spans: Vec<&Span> = lines.iter().flat_map(|l| &l.spans).collect();
+        let bold_span = all_spans.iter().find(|s| s.content.as_ref() == "bold");
+        assert!(bold_span.is_some());
+        assert!(bold_span
+            .unwrap()
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        let italic_span = all_spans.iter().find(|s| s.content.as_ref() == "italic");
+        assert!(italic_span.is_some());
+        assert!(italic_span
+            .unwrap()
+            .style
+            .add_modifier
+            .contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn strikethrough() {
+        let lines = render_markdown("~~deleted~~", 80);
+        let all_spans: Vec<&Span> = lines.iter().flat_map(|l| &l.spans).collect();
+        let struck = all_spans.iter().find(|s| s.content.as_ref() == "deleted");
+        assert!(struck.is_some());
+        assert!(struck
+            .unwrap()
+            .style
+            .add_modifier
+            .contains(Modifier::CROSSED_OUT));
+    }
+
+    #[test]
+    fn horizontal_rule() {
+        let lines = render_markdown("above\n\n---\n\nbelow", 80);
+        let texts = text_of(&lines);
+        // Rule should contain repeated ─
+        assert!(texts.iter().any(|t| t.contains("─")));
+    }
+
+    #[test]
+    fn blockquote() {
+        let lines = render_markdown("> quoted text", 80);
+        let texts = text_of(&lines);
+        assert!(texts.iter().any(|t| t.contains("│ ")));
+        assert!(texts.iter().any(|t| t.contains("quoted text")));
+    }
+
+    #[test]
+    fn empty_input() {
+        let lines = render_markdown("", 80);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn trailing_empty_lines_removed() {
+        let lines = render_markdown("hello\n\n\n", 80);
+        // Should not end with empty lines
+        if let Some(last) = lines.last() {
+            assert!(!last.spans.is_empty());
+        }
+    }
+}

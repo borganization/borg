@@ -271,6 +271,7 @@ impl SettingsPopup {
                 format!("{}", config.conversation.max_transcript_chars)
             }
             "security.secret_detection" => format!("{}", config.security.secret_detection),
+            "security.hitl_dangerous_ops" => format!("{}", config.security.hitl_dangerous_ops),
             "budget.monthly_token_limit" => format!("{}", config.budget.monthly_token_limit),
             "budget.warning_threshold" => format!("{}", config.budget.warning_threshold),
             "gateway.max_body_size" => format!("{}", config.gateway.max_body_size),
@@ -827,7 +828,7 @@ mod tests {
     #[test]
     fn all_settings_covered() {
         let popup = SettingsPopup::new();
-        assert_eq!(popup.entries.len(), 22);
+        assert_eq!(popup.entries.len(), 23);
 
         let cfg = Config::default();
         for entry in popup.entries {

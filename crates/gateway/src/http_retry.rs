@@ -65,3 +65,73 @@ where
         tokio::time::sleep(Duration::from_secs(capped)).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock_response(status: u16) -> reqwest::Response {
+        reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(status)
+                .body("")
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn default_policy() {
+        let policy = RateLimitPolicy::default();
+        assert_eq!(policy.max_retries, 5);
+        assert_eq!(policy.max_retry_after_secs, 300);
+        assert_eq!(policy.service_name, "API");
+    }
+
+    #[tokio::test]
+    async fn non_429_returns_immediately() {
+        let policy = RateLimitPolicy {
+            max_retries: 3,
+            max_retry_after_secs: 60,
+            service_name: "Test",
+        };
+        let resp = send_with_rate_limit_retry(&policy, || async { Ok(mock_response(200)) })
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn returns_non_429_error_status() {
+        let policy = RateLimitPolicy::default();
+        let resp = send_with_rate_limit_retry(&policy, || async { Ok(mock_response(500)) })
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 500);
+    }
+
+    #[tokio::test]
+    async fn exhausts_retries_on_429() {
+        let policy = RateLimitPolicy {
+            max_retries: 0,
+            max_retry_after_secs: 1,
+            service_name: "Test",
+        };
+        let result = send_with_rate_limit_retry(&policy, || async { Ok(mock_response(429)) }).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("rate limited"));
+    }
+
+    #[tokio::test]
+    async fn request_error_propagated() {
+        let policy = RateLimitPolicy::default();
+        let result = send_with_rate_limit_retry(&policy, || async {
+            Err(anyhow::anyhow!("connection refused"))
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("connection refused"));
+    }
+}

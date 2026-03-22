@@ -427,3 +427,223 @@ fn parse_at_mentions(
 
     spans
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Style;
+
+    #[test]
+    fn truncate_str_ascii() {
+        assert_eq!(truncate_str("hello", 3), "hel");
+        assert_eq!(truncate_str("hello", 10), "hello");
+        assert_eq!(truncate_str("hello", 5), "hello");
+        assert_eq!(truncate_str("", 5), "");
+    }
+
+    #[test]
+    fn truncate_str_multibyte() {
+        // '€' is 3 bytes in UTF-8
+        let s = "€€€";
+        assert_eq!(s.len(), 9);
+        // Truncate at 4 bytes: can only fit 1 '€' (3 bytes), bytes 4-5 are mid-char
+        assert_eq!(truncate_str(s, 4), "€");
+        assert_eq!(truncate_str(s, 6), "€€");
+        assert_eq!(truncate_str(s, 3), "€");
+        assert_eq!(truncate_str(s, 1), "");
+    }
+
+    #[test]
+    fn parse_at_mentions_basic() {
+        let normal = Style::default();
+        let mention = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
+        let spans = parse_at_mentions("hello @file.rs world", normal, mention);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content.as_ref(), "hello ");
+        assert_eq!(spans[1].content.as_ref(), "@file.rs");
+        assert_eq!(spans[2].content.as_ref(), " world");
+        assert_eq!(spans[1].style, mention);
+    }
+
+    #[test]
+    fn parse_at_mentions_no_mention() {
+        let normal = Style::default();
+        let mention = Style::default();
+        let spans = parse_at_mentions("no mentions here", normal, mention);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "no mentions here");
+    }
+
+    #[test]
+    fn parse_at_mentions_email_not_mention() {
+        let normal = Style::default();
+        let mention = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
+        let spans = parse_at_mentions("user@example.com", normal, mention);
+        // '@' preceded by non-space, so not a mention
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), "user@");
+        assert_eq!(spans[1].content.as_ref(), "example.com");
+    }
+
+    #[test]
+    fn parse_at_mentions_at_start() {
+        let normal = Style::default();
+        let mention = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
+        let spans = parse_at_mentions("@path rest", normal, mention);
+        assert_eq!(spans[0].content.as_ref(), "@path");
+        assert_eq!(spans[0].style, mention);
+    }
+
+    #[test]
+    fn parse_at_mentions_bare_at() {
+        let normal = Style::default();
+        let mention = Style::default();
+        let spans = parse_at_mentions("@ alone", normal, mention);
+        assert_eq!(spans[0].content.as_ref(), "@");
+        assert_eq!(spans[1].content.as_ref(), " alone");
+    }
+
+    #[test]
+    fn render_user_cell() {
+        let cell = HistoryCell::User {
+            text: "hello".to_string(),
+        };
+        let lines = cell.render(40, None);
+        // Should have top padding, content, bottom padding
+        assert!(lines.len() >= 3);
+    }
+
+    #[test]
+    fn render_assistant_streaming() {
+        let cell = HistoryCell::Assistant {
+            text: "partial".to_string(),
+            streaming: true,
+        };
+        let lines = cell.render(40, None);
+        // Last line should be the cursor block
+        let last = &lines[lines.len() - 1];
+        let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('▊'));
+    }
+
+    #[test]
+    fn render_assistant_not_streaming() {
+        let cell = HistoryCell::Assistant {
+            text: "done".to_string(),
+            streaming: false,
+        };
+        let lines = cell.render(40, None);
+        let last = &lines[lines.len() - 1];
+        // Last line should be empty (separator)
+        assert!(last.spans.is_empty());
+    }
+
+    #[test]
+    fn render_tool_start_patch_summary() {
+        let cell = HistoryCell::ToolStart {
+            name: "apply_patch".to_string(),
+            args: "*** Add File: a.rs\n*** Update File: b.rs".to_string(),
+            completed: true,
+            start_time: None,
+        };
+        let lines = cell.render(80, None);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("(2 file(s))"));
+    }
+
+    #[test]
+    fn render_tool_start_truncates_long_args() {
+        let cell = HistoryCell::ToolStart {
+            name: "run_shell".to_string(),
+            args: "a".repeat(100),
+            completed: false,
+            start_time: None,
+        };
+        let lines = cell.render(80, None);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("..."));
+    }
+
+    #[test]
+    fn render_tool_result_truncates_output() {
+        let output = (0..10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cell = HistoryCell::ToolResult {
+            name: "test".to_string(),
+            output,
+            is_error: false,
+            duration_ms: Some(1500),
+        };
+        let lines = cell.render(80, None);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("+5 more lines"));
+        assert!(all_text.contains("1.5s"));
+    }
+
+    #[test]
+    fn render_separator() {
+        let cell = HistoryCell::Separator;
+        let lines = cell.render(60, None);
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn render_thinking_empty() {
+        let cell = HistoryCell::Thinking {
+            text: String::new(),
+        };
+        let lines = cell.render(40, None);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn render_thinking_content() {
+        let cell = HistoryCell::Thinking {
+            text: "pondering".to_string(),
+        };
+        let lines = cell.render(40, None);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("thinking"));
+        assert!(all_text.contains("pondering"));
+    }
+
+    #[test]
+    fn render_heartbeat() {
+        let cell = HistoryCell::Heartbeat {
+            text: "check-in".to_string(),
+        };
+        let lines = cell.render(40, None);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[heartbeat]"));
+        assert!(text.contains("check-in"));
+    }
+
+    #[test]
+    fn render_tool_streaming_truncates() {
+        let tool_lines: Vec<(String, bool)> = (0..12)
+            .map(|i| (format!("output line {i}"), i % 3 == 0))
+            .collect();
+        let cell = HistoryCell::ToolStreaming {
+            name: "test".to_string(),
+            lines: tool_lines,
+        };
+        let rendered = cell.render(80, None);
+        let all_text: String = rendered
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        // Should show "lines above" indicator for truncated lines
+        assert!(all_text.contains("lines above"));
+    }
+}

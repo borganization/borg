@@ -880,3 +880,60 @@ fn find_binary_path() -> Result<String> {
 
     anyhow::bail!("Could not determine binary path")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launchd_template_substitution() {
+        let content = LAUNCHD_PLIST_TEMPLATE
+            .replace("{{BINARY_PATH}}", "/usr/local/bin/borg")
+            .replace("{{LOG_DIR}}", "/tmp/logs")
+            .replace("{{HOME}}", "/Users/test");
+
+        assert!(content.contains("<string>/usr/local/bin/borg</string>"));
+        assert!(content.contains("<string>/tmp/logs/daemon.log</string>"));
+        assert!(content.contains("<string>/Users/test</string>"));
+        assert!(!content.contains("{{"));
+    }
+
+    #[test]
+    fn systemd_template_substitution() {
+        let content = SYSTEMD_UNIT_TEMPLATE
+            .replace("{{BINARY_PATH}}", "/usr/local/bin/borg")
+            .replace("{{HOME}}", "/home/test");
+
+        assert!(content.contains("ExecStart=/usr/local/bin/borg daemon"));
+        assert!(content.contains("Environment=HOME=/home/test"));
+        assert!(!content.contains("{{"));
+    }
+
+    #[test]
+    fn launchd_plist_is_valid_xml_structure() {
+        let content = LAUNCHD_PLIST_TEMPLATE
+            .replace("{{BINARY_PATH}}", "/bin/borg")
+            .replace("{{LOG_DIR}}", "/tmp")
+            .replace("{{HOME}}", "/home");
+
+        assert!(content.starts_with("<?xml"));
+        assert!(content.contains("<plist version=\"1.0\">"));
+        assert!(content.contains("</plist>"));
+        assert!(content.contains("<key>Label</key>"));
+        assert!(content.contains(&format!("<string>{LAUNCHD_LABEL}</string>")));
+    }
+
+    #[test]
+    fn systemd_unit_has_required_sections() {
+        assert!(SYSTEMD_UNIT_TEMPLATE.contains("[Unit]"));
+        assert!(SYSTEMD_UNIT_TEMPLATE.contains("[Service]"));
+        assert!(SYSTEMD_UNIT_TEMPLATE.contains("[Install]"));
+        assert!(SYSTEMD_UNIT_TEMPLATE.contains("WantedBy=default.target"));
+        assert!(SYSTEMD_UNIT_TEMPLATE.contains("Restart=on-failure"));
+    }
+
+    #[test]
+    fn launchd_label_constant() {
+        assert_eq!(LAUNCHD_LABEL, "com.borg.daemon");
+    }
+}
