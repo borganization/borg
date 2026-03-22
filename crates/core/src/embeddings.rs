@@ -1,9 +1,13 @@
 use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
+use std::sync::LazyLock;
 use tracing::debug;
 
 use crate::config::{Config, EmbeddingsConfig};
 use crate::db::{ChunkData, Database};
+
+/// Shared HTTP client for all embedding API calls (connection pooling + keep-alive).
+static EMBEDDING_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 /// Resolved embedding provider with endpoint, key, model, and dimension.
 #[derive(Debug, Clone)]
@@ -234,8 +238,7 @@ pub async fn embed_memory_file(
         }
     }
 
-    let client = reqwest::Client::new();
-    let embedding = generate_embedding(&client, &provider, content).await?;
+    let embedding = generate_embedding(&EMBEDDING_CLIENT, &provider, content).await?;
     let bytes = embedding_to_bytes(&embedding);
 
     db.upsert_embedding(
@@ -262,8 +265,7 @@ pub async fn generate_query_embedding(
         Some(p) => p,
         None => bail!("No embedding provider available"),
     };
-    let client = reqwest::Client::new();
-    let embedding = generate_embedding(&client, &provider, query).await?;
+    let embedding = generate_embedding(&EMBEDDING_CLIENT, &provider, query).await?;
     Ok((provider, embedding))
 }
 
@@ -348,7 +350,6 @@ pub async fn embed_memory_file_chunked(
         .map(|c| (c.chunk_index, c.content_hash.clone()))
         .collect();
 
-    let client = reqwest::Client::new();
     let mut chunk_data = Vec::new();
 
     for (i, chunk) in chunks.iter().enumerate() {
@@ -362,7 +363,7 @@ pub async fn embed_memory_file_chunked(
             .unwrap_or(true);
 
         let embedding = if needs_embedding {
-            match generate_embedding(&client, &provider, &chunk.content).await {
+            match generate_embedding(&EMBEDDING_CLIENT, &provider, &chunk.content).await {
                 Ok(emb) => Some(embedding_to_bytes(&emb)),
                 Err(e) => {
                     debug!("Failed to embed chunk {i} of {filename}: {e}");

@@ -270,8 +270,9 @@ fn load_memory_files_ranked(
         return Ok(());
     }
 
-    // Collect all .md filenames in directory
-    let all_files: std::collections::HashSet<String> = md_entries_sorted_by_mtime(dir)?
+    // Read directory once, reuse for both ranked and unranked passes
+    let entries = md_entries_sorted_by_mtime(dir)?;
+    let all_files: std::collections::HashSet<String> = entries
         .iter()
         .filter_map(|e| {
             e.path()
@@ -295,8 +296,7 @@ fn load_memory_files_ranked(
     }
 
     // Second: load unranked files by mtime (most recent first)
-    let unranked = md_entries_sorted_by_mtime(dir)?;
-    for entry in unranked {
+    for entry in &entries {
         let fname = entry
             .path()
             .file_name()
