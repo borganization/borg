@@ -20,7 +20,7 @@ pub struct EventCallback {
     pub event: SlackEvent,
 }
 
-/// Inner Slack event (message or app_mention).
+/// Inner Slack event (message, app_mention, reaction_added, etc.).
 #[derive(Debug, Clone, Deserialize)]
 pub struct SlackEvent {
     #[serde(rename = "type")]
@@ -33,6 +33,31 @@ pub struct SlackEvent {
     pub channel: Option<String>,
     pub channel_type: Option<String>,
     pub bot_id: Option<String>,
+    /// Files attached to the message (images, documents, etc.).
+    #[serde(default)]
+    pub files: Vec<SlackFile>,
+    /// Reaction emoji name (for reaction_added/reaction_removed events).
+    pub reaction: Option<String>,
+    /// The item that was reacted to (for reaction events).
+    pub item: Option<ReactionItem>,
+}
+
+/// A file attached to a Slack message.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SlackFile {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub mimetype: Option<String>,
+    pub filetype: Option<String>,
+    pub url_private_download: Option<String>,
+    pub size: Option<u64>,
+}
+
+/// The item a reaction was applied to.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactionItem {
+    pub channel: Option<String>,
+    pub ts: Option<String>,
 }
 
 /// Response from Slack `auth.test` API.
@@ -53,6 +78,25 @@ pub struct PostMessageRequest {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_ts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<serde_json::Value>>,
+}
+
+/// Response from `chat.postMessage` API — captures the message timestamp.
+#[derive(Debug, Deserialize)]
+pub struct PostMessageResponse {
+    pub ok: bool,
+    pub ts: Option<String>,
+    pub channel: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Request body for `chat.update` (edit a previously sent message).
+#[derive(Debug, Serialize)]
+pub struct UpdateMessageRequest {
+    pub channel: String,
+    pub ts: String,
+    pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<serde_json::Value>>,
 }
@@ -346,5 +390,154 @@ mod tests {
         assert_eq!(payload.team_id.as_deref(), Some("T789"));
         assert!(payload.response_url.is_some());
         assert_eq!(payload.trigger_id.as_deref(), Some("tr1"));
+    }
+
+    // ── File and reaction type tests ──────────────────────────────────
+
+    #[test]
+    fn deserialize_event_with_files() {
+        let json = r#"{
+            "type": "event_callback",
+            "token": "tok",
+            "team_id": "T123",
+            "event_id": "Ev123",
+            "event": {
+                "type": "message",
+                "user": "U456",
+                "text": "check this",
+                "ts": "1234567890.123456",
+                "channel": "C789",
+                "files": [
+                    {
+                        "id": "F123",
+                        "name": "photo.png",
+                        "mimetype": "image/png",
+                        "filetype": "png",
+                        "url_private_download": "https://files.slack.com/photo.png",
+                        "size": 2048
+                    }
+                ]
+            }
+        }"#;
+
+        let envelope: SlackEnvelope = serde_json::from_str(json).unwrap();
+        match envelope {
+            SlackEnvelope::EventCallback(cb) => {
+                assert_eq!(cb.event.files.len(), 1);
+                assert_eq!(cb.event.files[0].name.as_deref(), Some("photo.png"));
+                assert_eq!(cb.event.files[0].mimetype.as_deref(), Some("image/png"));
+                assert_eq!(cb.event.files[0].size, Some(2048));
+            }
+            _ => panic!("expected EventCallback"),
+        }
+    }
+
+    #[test]
+    fn deserialize_event_without_files() {
+        let json = r#"{
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "user": "U456",
+                "text": "no files"
+            }
+        }"#;
+
+        let envelope: SlackEnvelope = serde_json::from_str(json).unwrap();
+        match envelope {
+            SlackEnvelope::EventCallback(cb) => {
+                assert!(cb.event.files.is_empty());
+            }
+            _ => panic!("expected EventCallback"),
+        }
+    }
+
+    #[test]
+    fn deserialize_reaction_added_event() {
+        let json = r#"{
+            "type": "event_callback",
+            "token": "tok",
+            "team_id": "T123",
+            "event_id": "Ev789",
+            "event": {
+                "type": "reaction_added",
+                "user": "U456",
+                "reaction": "thumbsup",
+                "item": {
+                    "channel": "C789",
+                    "ts": "1234567890.123456"
+                }
+            }
+        }"#;
+
+        let envelope: SlackEnvelope = serde_json::from_str(json).unwrap();
+        match envelope {
+            SlackEnvelope::EventCallback(cb) => {
+                assert_eq!(cb.event.event_type, "reaction_added");
+                assert_eq!(cb.event.reaction.as_deref(), Some("thumbsup"));
+                let item = cb.event.item.as_ref().unwrap();
+                assert_eq!(item.channel.as_deref(), Some("C789"));
+                assert_eq!(item.ts.as_deref(), Some("1234567890.123456"));
+            }
+            _ => panic!("expected EventCallback"),
+        }
+    }
+
+    #[test]
+    fn deserialize_slack_file_minimal() {
+        let json = r#"{"id": "F123"}"#;
+        let file: SlackFile = serde_json::from_str(json).unwrap();
+        assert_eq!(file.id.as_deref(), Some("F123"));
+        assert!(file.name.is_none());
+        assert!(file.mimetype.is_none());
+        assert!(file.url_private_download.is_none());
+        assert!(file.size.is_none());
+    }
+
+    // ── Message editing types ─────────────────────────────────────────
+
+    #[test]
+    fn deserialize_post_message_response_with_ts() {
+        let json = r#"{"ok": true, "ts": "1234567890.123456", "channel": "C789"}"#;
+        let resp: PostMessageResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.ok);
+        assert_eq!(resp.ts.as_deref(), Some("1234567890.123456"));
+        assert_eq!(resp.channel.as_deref(), Some("C789"));
+    }
+
+    #[test]
+    fn deserialize_post_message_response_error() {
+        let json = r#"{"ok": false, "error": "channel_not_found"}"#;
+        let resp: PostMessageResponse = serde_json::from_str(json).unwrap();
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_deref(), Some("channel_not_found"));
+        assert!(resp.ts.is_none());
+    }
+
+    #[test]
+    fn serialize_update_message_request() {
+        let req = UpdateMessageRequest {
+            channel: "C789".into(),
+            ts: "1234567890.123456".into(),
+            text: "updated text".into(),
+            blocks: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["channel"], "C789");
+        assert_eq!(json["ts"], "1234567890.123456");
+        assert_eq!(json["text"], "updated text");
+        assert!(json.get("blocks").is_none());
+    }
+
+    #[test]
+    fn serialize_update_message_request_with_blocks() {
+        let req = UpdateMessageRequest {
+            channel: "C789".into(),
+            ts: "1234567890.123456".into(),
+            text: "fallback".into(),
+            blocks: Some(vec![serde_json::json!({"type": "section"})]),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["blocks"].as_array().unwrap().len(), 1);
     }
 }

@@ -31,6 +31,9 @@ pub const TELEGRAM_CIRCUIT_SUSPENSION_SECS: u64 = 300;
 /// Capacity of the Telegram update deduplicator.
 pub const TELEGRAM_DEDUP_CAPACITY: usize = 1000;
 
+/// Capacity of the Slack event deduplicator.
+pub const SLACK_DEDUP_CAPACITY: usize = 1000;
+
 /// Max characters shown as tool result preview in REPL.
 pub const TOOL_RESULT_PREVIEW_CHARS: usize = 200;
 
