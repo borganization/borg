@@ -503,10 +503,16 @@ pub struct SecurityConfig {
     pub hitl_dangerous_ops: bool,
     #[serde(default)]
     pub action_limits: crate::rate_guard::ActionLimits,
+    #[serde(default = "default_gateway_action_limits")]
+    pub gateway_action_limits: crate::rate_guard::ActionLimits,
 }
 
 fn default_hitl_dangerous_ops() -> bool {
     true
+}
+
+fn default_gateway_action_limits() -> crate::rate_guard::ActionLimits {
+    crate::rate_guard::ActionLimits::gateway_defaults()
 }
 
 /// Single transcription provider entry (cloud API or local CLI).
@@ -703,6 +709,7 @@ impl Default for SecurityConfig {
             host_audit: true,
             hitl_dangerous_ops: true,
             action_limits: crate::rate_guard::ActionLimits::default(),
+            gateway_action_limits: crate::rate_guard::ActionLimits::gateway_defaults(),
         }
     }
 }
