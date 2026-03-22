@@ -831,6 +831,13 @@ async fn webhook_handler(
 
 type WebhookResponse = (StatusCode, axum::Json<serde_json::Value>);
 
+fn ok_response() -> WebhookResponse {
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "ok": true })),
+    )
+}
+
 async fn handle_telegram_webhook(
     state: &Arc<AppState>,
     tg_client: &Arc<TelegramClient>,
@@ -848,17 +855,11 @@ async fn handle_telegram_webhook(
     {
         Ok(Some(pair)) => pair,
         Ok(None) => {
-            return (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            );
+            return ok_response();
         }
         Err(e) => {
             warn!("Telegram webhook error: {e:#}");
-            return (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            );
+            return ok_response();
         }
     };
 
@@ -914,10 +915,7 @@ async fn handle_telegram_webhook(
         Some(id) => id,
         None => {
             warn!("Missing or invalid chat_id in Telegram update");
-            return (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            );
+            return ok_response();
         }
     };
 
@@ -928,11 +926,7 @@ async fn handle_telegram_webhook(
     let _ = tg_client.send_typing(chat_id).await;
 
     // Compute session key and enqueue work for sequential processing
-    let session_key = format!(
-        "telegram:{}:{}",
-        inbound.sender_id,
-        inbound.thread_id.as_deref().unwrap_or("")
-    );
+    let session_key = inbound.session_key("telegram", inbound.thread_id.as_deref().unwrap_or(""));
 
     let state = state.clone();
     let tg_client = tg_client.clone();
@@ -974,10 +968,7 @@ async fn handle_telegram_webhook(
         .await;
 
     // Return 200 immediately — response is sent via Telegram API asynchronously
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "ok": true })),
-    )
+    ok_response()
 }
 
 async fn handle_slack_webhook(
@@ -1009,19 +1000,12 @@ async fn handle_slack_webhook(
             );
         }
         crate::slack::SlackWebhookResult::Skip => {
-            return (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            );
+            return ok_response();
         }
         crate::slack::SlackWebhookResult::Message(inbound) => inbound,
     };
 
-    let session_key = format!(
-        "slack:{}:{}",
-        inbound.sender_id,
-        inbound.thread_id.as_deref().unwrap_or("")
-    );
+    let session_key = inbound.session_key("slack", inbound.thread_id.as_deref().unwrap_or(""));
 
     let state = state.clone();
     let slack_client = slack_client.clone();
@@ -1078,10 +1062,7 @@ async fn handle_slack_webhook(
         )
         .await;
 
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "ok": true })),
-    )
+    ok_response()
 }
 
 async fn handle_twilio_webhook(
@@ -1127,10 +1108,7 @@ async fn handle_twilio_webhook(
         Err(e) => {
             warn!("Failed to parse Twilio webhook: {e}");
             // Twilio expects 200 even on parse errors to avoid retries
-            return (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            );
+            return ok_response();
         }
     };
 
@@ -1203,10 +1181,7 @@ async fn handle_twilio_webhook(
         )
         .await;
 
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "ok": true })),
-    )
+    ok_response()
 }
 
 /// Send a Telegram response with HTML formatting and plain-text fallback.
@@ -1270,10 +1245,7 @@ async fn handle_discord_webhook_route(
             StatusCode::OK,
             axum::Json(serde_json::to_value(response).unwrap_or_default()),
         ),
-        DiscordWebhookResult::Skip => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "ok": true })),
-        ),
+        DiscordWebhookResult::Skip => ok_response(),
         DiscordWebhookResult::Message(inbound, interaction) => {
             // Send deferred response so Discord doesn't time out
             if let Err(e) = discord_client
@@ -1287,11 +1259,8 @@ async fn handle_discord_webhook_route(
                 warn!("Failed to send Discord deferred response: {e}");
             }
 
-            let session_key = format!(
-                "discord:{}:{}",
-                inbound.sender_id,
-                inbound.channel_id.as_deref().unwrap_or("")
-            );
+            let session_key =
+                inbound.session_key("discord", inbound.channel_id.as_deref().unwrap_or(""));
 
             let state = state.clone();
             let discord_client = discord_client.clone();
@@ -1363,10 +1332,7 @@ async fn handle_discord_webhook_route(
                 )
                 .await;
 
-            (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            )
+            ok_response()
         }
     }
 }
@@ -1394,10 +1360,7 @@ async fn handle_teams_webhook_route(
     let (inbound, activity) = match parsed {
         Some(pair) => pair,
         None => {
-            return (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            );
+            return ok_response();
         }
     };
 
@@ -1411,11 +1374,7 @@ async fn handle_teams_webhook_route(
         }
     };
 
-    let session_key = format!(
-        "teams:{}:{}",
-        inbound.sender_id,
-        inbound.channel_id.as_deref().unwrap_or("")
-    );
+    let session_key = inbound.session_key("teams", inbound.channel_id.as_deref().unwrap_or(""));
 
     let state = state.clone();
     let work_state = state.clone();
@@ -1474,10 +1433,7 @@ async fn handle_teams_webhook_route(
         )
         .await;
 
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "ok": true })),
-    )
+    ok_response()
 }
 
 async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> WebhookResponse {
@@ -1487,18 +1443,12 @@ async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> 
     ) {
         Ok(Some(msg)) => msg,
         Ok(None) => {
-            return (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            );
+            return ok_response();
         }
         Err(e) => {
             warn!("Google Chat webhook error: {e:#}");
             // Return 200 to avoid retries from Google
-            return (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            );
+            return ok_response();
         }
     };
 
@@ -1507,7 +1457,7 @@ async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> 
 
     // If we have a REST API client, enqueue for async processing
     if let Some(ref gc_client) = state.google_chat_client {
-        let session_key = format!("google-chat:{}:{}", inbound.sender_id, space_name);
+        let session_key = inbound.session_key("google-chat", &space_name);
 
         let gc_client = gc_client.clone();
         let state = state.clone();
@@ -1552,14 +1502,11 @@ async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> 
             )
             .await;
 
-        (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "ok": true })),
-        )
+        ok_response()
     } else {
         // No async client — invoke agent and return synchronous response
         // This path must be synchronous since Google Chat expects the response in the HTTP body
-        let session_key = format!("google-chat:{}:{}", inbound.sender_id, space_name);
+        let session_key = inbound.session_key("google-chat", &space_name);
         let state = state.clone();
 
         // For sync Google Chat, we still queue but wait for the result

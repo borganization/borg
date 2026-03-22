@@ -1160,10 +1160,18 @@ impl Config {
     /// Returns a list of detected native channels with their names and descriptions.
     pub fn detected_native_channels(&self) -> Vec<(&'static str, &'static str)> {
         const NATIVE_CHANNELS: &[(&str, &str, &str)] = &[
-            ("telegram", "Telegram Bot API (native)", "TELEGRAM_BOT_TOKEN"),
+            (
+                "telegram",
+                "Telegram Bot API (native)",
+                "TELEGRAM_BOT_TOKEN",
+            ),
             ("slack", "Slack Bot API (native)", "SLACK_BOT_TOKEN"),
             ("discord", "Discord Bot (native)", "DISCORD_BOT_TOKEN"),
-            ("twilio", "Twilio SMS/WhatsApp (native)", "TWILIO_ACCOUNT_SID"),
+            (
+                "twilio",
+                "Twilio SMS/WhatsApp (native)",
+                "TWILIO_ACCOUNT_SID",
+            ),
             ("teams", "Microsoft Teams (native)", "TEAMS_APP_ID"),
             (
                 "google-chat",

@@ -389,6 +389,17 @@ pub async fn handle_web_search(args: &serde_json::Value, config: &Config) -> Res
     }
 }
 
+/// Open the database and run a callback, formatting the open error if it fails.
+fn with_db<F>(f: F) -> Result<String>
+where
+    F: FnOnce(&Database) -> Result<String>,
+{
+    match Database::open() {
+        Ok(db) => f(&db),
+        Err(e) => Ok(format!("Error opening database: {e}")),
+    }
+}
+
 pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result<String> {
     let action = require_str_param(args, "action")?;
     match action {
@@ -406,64 +417,55 @@ pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result
                 Err(e) => return Ok(format!("Error: Invalid schedule: {e}")),
             };
             let id = uuid::Uuid::new_v4().to_string();
-            match Database::open() {
-                Ok(db) => match db.create_task(&crate::db::NewTask {
-                    id: &id,
-                    name: task_name,
-                    prompt,
-                    schedule_type,
-                    schedule_expr,
-                    timezone,
-                    next_run,
-                    max_retries: args["max_retries"].as_i64().map(|v| v as i32),
-                    timeout_ms: args["timeout_ms"].as_i64(),
-                    delivery_channel: args["delivery_channel"].as_str(),
-                    delivery_target: args["delivery_target"].as_str(),
-                }) {
-                    Ok(()) => Ok(format!(
-                        "Scheduled task created: {task_name} (id: {})",
-                        &id[..8]
-                    )),
-                    Err(e) => Ok(format!("Error creating task: {e}")),
-                },
-                Err(e) => Ok(format!("Error opening database: {e}")),
-            }
+            with_db(|db| match db.create_task(&crate::db::NewTask {
+                id: &id,
+                name: task_name,
+                prompt,
+                schedule_type,
+                schedule_expr,
+                timezone,
+                next_run,
+                max_retries: args["max_retries"].as_i64().map(|v| v as i32),
+                timeout_ms: args["timeout_ms"].as_i64(),
+                delivery_channel: args["delivery_channel"].as_str(),
+                delivery_target: args["delivery_target"].as_str(),
+            }) {
+                Ok(()) => Ok(format!(
+                    "Scheduled task created: {task_name} (id: {})",
+                    &id[..8]
+                )),
+                Err(e) => Ok(format!("Error creating task: {e}")),
+            })
         }
-        "list" => match Database::open() {
-            Ok(db) => match db.list_tasks() {
-                Ok(tl) if tl.is_empty() => Ok("No scheduled tasks.".to_string()),
-                Ok(tl) => Ok(tl
-                    .iter()
-                    .map(tasks::format_task)
-                    .collect::<Vec<_>>()
-                    .join("\n\n")),
-                Err(e) => Ok(format!("Error listing tasks: {e}")),
-            },
-            Err(e) => Ok(format!("Error opening database: {e}")),
-        },
+        "list" => with_db(|db| match db.list_tasks() {
+            Ok(tl) if tl.is_empty() => Ok("No scheduled tasks.".to_string()),
+            Ok(tl) => Ok(tl
+                .iter()
+                .map(tasks::format_task)
+                .collect::<Vec<_>>()
+                .join("\n\n")),
+            Err(e) => Ok(format!("Error listing tasks: {e}")),
+        }),
         "get" => {
             let task_id = require_str_param(args, "task_id")?;
-            match Database::open() {
-                Ok(db) => match db.get_task_by_id(task_id) {
-                    Ok(Some(task)) => {
-                        let mut output = tasks::format_task(&task);
-                        if let Ok(Some(run)) = db.last_task_run(task_id) {
-                            let status = if run.error.is_some() { "error" } else { "ok" };
-                            let when = chrono::DateTime::from_timestamp(run.started_at, 0)
-                                .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                                .unwrap_or_else(|| run.started_at.to_string());
-                            output.push_str(&format!(
-                                "\n    Last run: {status} at {when} ({} ms)",
-                                run.duration_ms
-                            ));
-                        }
-                        Ok(output)
+            with_db(|db| match db.get_task_by_id(task_id) {
+                Ok(Some(task)) => {
+                    let mut output = tasks::format_task(&task);
+                    if let Ok(Some(run)) = db.last_task_run(task_id) {
+                        let status = if run.error.is_some() { "error" } else { "ok" };
+                        let when = chrono::DateTime::from_timestamp(run.started_at, 0)
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                            .unwrap_or_else(|| run.started_at.to_string());
+                        output.push_str(&format!(
+                            "\n    Last run: {status} at {when} ({} ms)",
+                            run.duration_ms
+                        ));
                     }
-                    Ok(None) => Ok(format!("Task {task_id} not found.")),
-                    Err(e) => Ok(format!("Error: {e}")),
-                },
-                Err(e) => Ok(format!("Error opening database: {e}")),
-            }
+                    Ok(output)
+                }
+                Ok(None) => Ok(format!("Task {task_id} not found.")),
+                Err(e) => Ok(format!("Error: {e}")),
+            })
         }
         "update" => {
             let task_id = require_str_param(args, "task_id")?;
@@ -480,29 +482,27 @@ pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result
                     return Ok(format!("Error: Invalid schedule: {e}"));
                 }
             } else if let Some(expr) = update.schedule_expr {
-                match Database::open() {
-                    Ok(db) => match db.get_task_by_id(task_id) {
-                        Ok(Some(existing)) => {
-                            if let Err(e) =
-                                tasks::validate_schedule(&existing.schedule_type, expr)
-                            {
-                                return Ok(format!("Error: Invalid schedule: {e}"));
-                            }
+                let validation = with_db(|db| match db.get_task_by_id(task_id) {
+                    Ok(Some(existing)) => {
+                        if let Err(e) =
+                            tasks::validate_schedule(&existing.schedule_type, expr)
+                        {
+                            return Ok(format!("Error: Invalid schedule: {e}"));
                         }
-                        Ok(None) => return Ok(format!("Task {task_id} not found.")),
-                        Err(e) => return Ok(format!("Error: {e}")),
-                    },
-                    Err(e) => return Ok(format!("Error opening database: {e}")),
+                        Ok(String::new())
+                    }
+                    Ok(None) => Ok(format!("Task {task_id} not found.")),
+                    Err(e) => Ok(format!("Error: {e}")),
+                })?;
+                if !validation.is_empty() {
+                    return Ok(validation);
                 }
             }
-            match Database::open() {
-                Ok(db) => match db.update_task(task_id, &update) {
-                    Ok(true) => Ok(format!("Task {task_id} updated.")),
-                    Ok(false) => Ok(format!("Task {task_id} not found.")),
-                    Err(e) => Ok(format!("Error: {e}")),
-                },
-                Err(e) => Ok(format!("Error opening database: {e}")),
-            }
+            with_db(|db| match db.update_task(task_id, &update) {
+                Ok(true) => Ok(format!("Task {task_id} updated.")),
+                Ok(false) => Ok(format!("Task {task_id} not found.")),
+                Err(e) => Ok(format!("Error: {e}")),
+            })
         }
         "pause" => {
             let task_id = require_str_param(args, "task_id")?;
@@ -518,61 +518,52 @@ pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result
         }
         "delete" => {
             let task_id = require_str_param(args, "task_id")?;
-            match Database::open() {
-                Ok(db) => match db.delete_task(task_id) {
-                    Ok(true) => Ok(format!("Task {task_id} deleted.")),
-                    Ok(false) => Ok(format!("Task {task_id} not found.")),
-                    Err(e) => Ok(format!("Error: {e}")),
-                },
-                Err(e) => Ok(format!("Error opening database: {e}")),
-            }
+            with_db(|db| match db.delete_task(task_id) {
+                Ok(true) => Ok(format!("Task {task_id} deleted.")),
+                Ok(false) => Ok(format!("Task {task_id} not found.")),
+                Err(e) => Ok(format!("Error: {e}")),
+            })
         }
         "runs" => {
             let task_id = require_str_param(args, "task_id")?;
             let limit = args["limit"].as_u64().unwrap_or(5) as usize;
-            match Database::open() {
-                Ok(db) => match db.task_run_history(task_id, limit) {
-                    Ok(runs) if runs.is_empty() => Ok("No runs recorded.".to_string()),
-                    Ok(runs) => {
-                        let mut out = String::new();
-                        for run in &runs {
-                            let when = chrono::DateTime::from_timestamp(run.started_at, 0)
-                                .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                                .unwrap_or_else(|| run.started_at.to_string());
-                            let status = if run.error.is_some() { "FAIL" } else { "OK" };
-                            out.push_str(&format!("  {when} [{status}] {}ms", run.duration_ms));
-                            if let Some(ref e) = run.error {
-                                out.push_str(&format!(
-                                    "\n    Error: {}",
-                                    &e[..e.len().min(200)]
-                                ));
-                            }
-                            out.push('\n');
+            with_db(|db| match db.task_run_history(task_id, limit) {
+                Ok(runs) if runs.is_empty() => Ok("No runs recorded.".to_string()),
+                Ok(runs) => {
+                    let mut out = String::new();
+                    for run in &runs {
+                        let when = chrono::DateTime::from_timestamp(run.started_at, 0)
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                            .unwrap_or_else(|| run.started_at.to_string());
+                        let status = if run.error.is_some() { "FAIL" } else { "OK" };
+                        out.push_str(&format!("  {when} [{status}] {}ms", run.duration_ms));
+                        if let Some(ref e) = run.error {
+                            out.push_str(&format!(
+                                "\n    Error: {}",
+                                &e[..e.len().min(200)]
+                            ));
                         }
-                        Ok(out)
+                        out.push('\n');
                     }
-                    Err(e) => Ok(format!("Error: {e}")),
-                },
-                Err(e) => Ok(format!("Error opening database: {e}")),
-            }
+                    Ok(out)
+                }
+                Err(e) => Ok(format!("Error: {e}")),
+            })
         }
         "run_now" => {
             let task_id = require_str_param(args, "task_id")?;
-            match Database::open() {
-                Ok(db) => match db.get_task_by_id(task_id) {
-                    Ok(Some(_)) => {
-                        let now = chrono::Utc::now().timestamp();
-                        if let Err(e) = db.update_task_next_run(task_id, Some(now)) {
-                            return Ok(format!("Error: {e}"));
-                        }
-                        let _ = db.clear_task_retry(task_id);
-                        Ok(format!("Task {task_id} queued for immediate execution."))
+            with_db(|db| match db.get_task_by_id(task_id) {
+                Ok(Some(_)) => {
+                    let now = chrono::Utc::now().timestamp();
+                    if let Err(e) = db.update_task_next_run(task_id, Some(now)) {
+                        return Ok(format!("Error: {e}"));
                     }
-                    Ok(None) => Ok(format!("Task {task_id} not found.")),
-                    Err(e) => Ok(format!("Error: {e}")),
-                },
-                Err(e) => Ok(format!("Error opening database: {e}")),
-            }
+                    let _ = db.clear_task_retry(task_id);
+                    Ok(format!("Task {task_id} queued for immediate execution."))
+                }
+                Ok(None) => Ok(format!("Task {task_id} not found.")),
+                Err(e) => Ok(format!("Error: {e}")),
+            })
         }
         other => Ok(format!(
             "Unknown action: {other}. Use: create, list, get, update, pause, resume, cancel, delete, runs, run_now."
@@ -678,14 +669,11 @@ pub async fn handle_user_tool(
 }
 
 pub fn update_task_status(task_id: &str, status: &str, verb: &str) -> Result<String> {
-    match Database::open() {
-        Ok(db) => match db.update_task_status(task_id, status) {
-            Ok(true) => Ok(format!("Task {task_id} {verb}.")),
-            Ok(false) => Ok(format!("Task {task_id} not found.")),
-            Err(e) => Ok(format!("Error: {e}")),
-        },
-        Err(e) => Ok(format!("Error opening database: {e}")),
-    }
+    with_db(|db| match db.update_task_status(task_id, status) {
+        Ok(true) => Ok(format!("Task {task_id} {verb}.")),
+        Ok(false) => Ok(format!("Task {task_id} not found.")),
+        Err(e) => Ok(format!("Error: {e}")),
+    })
 }
 
 pub async fn handle_browser(
@@ -726,28 +714,27 @@ pub async fn handle_browser(
     let browser = session.as_ref().context("Browser session not available")?;
     let timeout = Duration::from_millis(config.browser.timeout_ms);
 
+    /// Wrap a browser action result into a ToolOutput.
+    fn browser_result(result: anyhow::Result<String>) -> Result<ToolOutput> {
+        match result {
+            Ok(msg) => Ok(ToolOutput::Text(msg)),
+            Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
+        }
+    }
+
     match action {
         "navigate" => {
             let url = require_str_param(args, "url")?;
-            match browser.navigate(url, timeout).await {
-                Ok(msg) => Ok(ToolOutput::Text(msg)),
-                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
-            }
+            browser_result(browser.navigate(url, timeout).await)
         }
         "click" => {
             let selector = require_str_param(args, "selector")?;
-            match browser.click(selector, timeout).await {
-                Ok(msg) => Ok(ToolOutput::Text(msg)),
-                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
-            }
+            browser_result(browser.click(selector, timeout).await)
         }
         "type" => {
             let selector = require_str_param(args, "selector")?;
             let text = require_str_param(args, "text")?;
-            match browser.type_text(selector, text, timeout).await {
-                Ok(msg) => Ok(ToolOutput::Text(msg)),
-                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
-            }
+            browser_result(browser.type_text(selector, text, timeout).await)
         }
         "screenshot" => {
             let selector = args.get("selector").and_then(|v| v.as_str());
@@ -791,17 +778,11 @@ pub async fn handle_browser(
         }
         "get_text" => {
             let selector = args.get("selector").and_then(|v| v.as_str());
-            match browser.get_text(selector, timeout).await {
-                Ok(text) => Ok(ToolOutput::Text(text)),
-                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
-            }
+            browser_result(browser.get_text(selector, timeout).await)
         }
         "evaluate_js" => {
             let expression = require_str_param(args, "expression")?;
-            match browser.evaluate_js(expression, timeout).await {
-                Ok(result) => Ok(ToolOutput::Text(result)),
-                Err(e) => Ok(ToolOutput::Text(format!("Error: {e}"))),
-            }
+            browser_result(browser.evaluate_js(expression, timeout).await)
         }
         _ => Ok(ToolOutput::Text(format!(
             "Unknown browser action: {action}"
