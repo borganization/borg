@@ -267,6 +267,8 @@ pub struct Agent {
     browser_session: Option<crate::browser::BrowserSession>,
     config_rx: Option<tokio::sync::watch::Receiver<Config>>,
     db: Mutex<Option<Database>>,
+    /// Cached skills context string, invalidated on config reload.
+    cached_skills_context: Option<String>,
 }
 
 impl Agent {
@@ -312,6 +314,7 @@ impl Agent {
             browser_session: None,
             config_rx: None,
             db: Mutex::new(db),
+            cached_skills_context: None,
         })
     }
 
@@ -325,6 +328,10 @@ impl Agent {
         self.policy = new_config.policy.clone();
         self.rate_guard
             .update_limits(new_config.security.action_limits.clone());
+        self.cached_skills_context = None; // invalidate on config change
+        let resolved_creds = new_config.resolve_credentials();
+        self.skill_env_allowlist =
+            crate::skills::collect_required_env_vars(&resolved_creds, &new_config.skills);
         self.config = new_config;
     }
 
@@ -377,6 +384,7 @@ impl Agent {
             browser_session: None,
             config_rx: None,
             db: Mutex::new(db),
+            cached_skills_context: None,
         })
     }
 
@@ -581,12 +589,17 @@ impl Agent {
         system.push_str("\n<memory_recall>\nWhen answering questions about prior work, past decisions, dates, people, preferences, todos, or anything previously discussed, use the memory_search tool to look up relevant context. Auto-loaded memory above may not contain all relevant information.\n</memory_recall>\n");
 
         if self.config.skills.enabled {
-            let resolved_creds = self.config.resolve_credentials();
-            let skills = load_skills_context(
-                self.config.skills.max_context_tokens,
-                &resolved_creds,
-                &self.config.skills,
-            )?;
+            let skills = match &self.cached_skills_context {
+                Some(cached) => cached.clone(),
+                None => {
+                    let resolved_creds = self.config.resolve_credentials();
+                    load_skills_context(
+                        self.config.skills.max_context_tokens,
+                        &resolved_creds,
+                        &self.config.skills,
+                    )?
+                }
+            };
             if !skills.is_empty() {
                 system.push_str(&format!(
                     "\n<skills trust=\"verified\">\n{skills}\n</skills>\n"
@@ -930,6 +943,19 @@ impl Agent {
                 compact_history(&mut self.history, max_hist, &compaction_llm).await;
             }
 
+            // Warm skills cache on first iteration (avoids re-parsing every turn)
+            if self.cached_skills_context.is_none() && self.config.skills.enabled {
+                let resolved_creds = self.config.resolve_credentials();
+                match load_skills_context(
+                    self.config.skills.max_context_tokens,
+                    &resolved_creds,
+                    &self.config.skills,
+                ) {
+                    Ok(ctx) => self.cached_skills_context = Some(ctx),
+                    Err(e) => warn!("Failed to load skills context: {e}"),
+                }
+            }
+
             let mut system_prompt = self.build_system_prompt().await?;
             let tool_defs = self.build_tool_definitions();
 
@@ -974,7 +1000,6 @@ impl Agent {
             let llm_start = Instant::now();
             self.metrics.llm_requests.add(1, &[]);
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
-            let messages_clone = messages.clone();
             let tools_clone = tools.map(<[ToolDefinition]>::to_vec);
             let cancel_clone = cancel.clone();
             let stream_handle = {
@@ -982,7 +1007,7 @@ impl Agent {
                 tokio::spawn(async move {
                     if let Err(e) = llm_client
                         .stream_chat_with_cancel(
-                            &messages_clone,
+                            &messages,
                             tools_clone.as_deref(),
                             stream_tx,
                             cancel_clone,
