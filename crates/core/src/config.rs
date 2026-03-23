@@ -810,6 +810,9 @@ impl Default for TasksConfig {
 
 impl Config {
     pub fn data_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("BORG_DATA_DIR") {
+            return Ok(PathBuf::from(dir));
+        }
         Ok(dirs::home_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
             .join(".borg"))

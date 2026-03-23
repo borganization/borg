@@ -29,9 +29,13 @@ pub struct ManifestRegistry<M: Clone> {
 
 impl<M: ManifestItem + Clone> ManifestRegistry<M> {
     pub fn new() -> Result<Self> {
-        let base_dir = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-            .join(".borg")
+        let base_dir = std::env::var("BORG_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|_| {
+                dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))
+                    .map(|h| h.join(".borg"))
+            })?
             .join(M::SUBDIR);
 
         let mut registry = Self {
