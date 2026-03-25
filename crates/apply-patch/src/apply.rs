@@ -282,18 +282,38 @@ fn apply_hunks(content: &str, hunks: &[Hunk], file_path: &str) -> Result<String>
             cursor
         };
 
-        if let Some(idx) = seek_sequence(
+        let mut found = seek_sequence(
             &content_lines,
             &search_lines,
             search_start,
             hunk.is_end_of_file,
-        ) {
-            let new_lines: Vec<String> = hunk.replace.lines().map(String::from).collect();
-            cursor = idx + search_lines.len();
+        );
+
+        // Trailing empty line retry: when split('\n') produces a trailing empty
+        // string that doesn't exist in content.lines(), retry without it.
+        let mut effective_search = search_lines.as_slice();
+        let new_lines_vec: Vec<String> = hunk.replace.lines().map(String::from).collect();
+        let mut effective_new = new_lines_vec.as_slice();
+
+        if found.is_none() && effective_search.last().is_some_and(String::is_empty) {
+            effective_search = &search_lines[..search_lines.len() - 1];
+            if effective_new.last().is_some_and(String::is_empty) {
+                effective_new = &new_lines_vec[..new_lines_vec.len() - 1];
+            }
+            found = seek_sequence(
+                &content_lines,
+                effective_search,
+                search_start,
+                hunk.is_end_of_file,
+            );
+        }
+
+        if let Some(idx) = found {
+            cursor = idx + effective_search.len();
             replacements.push(Replacement {
                 start_idx: idx,
-                old_line_count: search_lines.len(),
-                new_lines,
+                old_line_count: effective_search.len(),
+                new_lines: effective_new.to_vec(),
             });
         } else {
             bail!(
@@ -1015,5 +1035,73 @@ mod tests {
         assert_eq!(affected.added, vec!["ok.txt"]);
         let read = std::fs::read_to_string(dir.path().join("ok.txt")).unwrap();
         assert_eq!(read.len(), MAX_PATCH_FILE_SIZE);
+    }
+
+    #[test]
+    fn trailing_empty_line_retry() {
+        let dir = TempDir::new().unwrap();
+        // File ends with newline — content.lines() won't produce trailing empty
+        std::fs::write(dir.path().join("f.txt"), "aaa\nbbb\n").unwrap();
+
+        // Search pattern that split('\n') would produce: ["bbb", ""]
+        // This trailing empty should be retried without.
+        let patch = make_patch(vec![PatchOperation::UpdateFile {
+            path: "f.txt".to_string(),
+            move_to: None,
+            hunks: vec![Hunk {
+                context_hint: None,
+                search: "bbb\n".to_string(), // produces ["bbb", ""] via lines+split
+                replace: "BBB\n".to_string(),
+                is_end_of_file: false,
+                source_line: 1,
+            }],
+        }]);
+        apply_patch(&patch, dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        assert!(
+            content.contains("BBB"),
+            "trailing empty line retry should match"
+        );
+    }
+
+    #[test]
+    fn end_to_end_heredoc_patch() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("main.py"), "x = 1\ny = 2\n").unwrap();
+
+        let patch_text = "<<'EOF'\n\
+*** Begin Patch\n\
+*** Update File: main.py\n\
+@@\n\
+-x = 1\n\
++x = 10\n\
+*** End Patch\n\
+EOF";
+
+        let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        assert_eq!(affected.modified, vec!["main.py"]);
+        let content = std::fs::read_to_string(dir.path().join("main.py")).unwrap();
+        assert!(content.contains("x = 10"));
+        assert!(!content.contains("x = 1\n"));
+    }
+
+    #[test]
+    fn end_to_end_first_chunk_without_at() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("f.py"), "import os\nx = 1\n").unwrap();
+
+        let patch_text = "\
+*** Begin Patch
+*** Update File: f.py
+ import os
+-x = 1
++x = 2
+*** End Patch";
+
+        let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        assert_eq!(affected.modified, vec!["f.py"]);
+        let content = std::fs::read_to_string(dir.path().join("f.py")).unwrap();
+        assert!(content.contains("x = 2"));
+        assert!(!content.contains("x = 1"));
     }
 }
