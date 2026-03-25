@@ -48,6 +48,74 @@ const UPDATE_FILE_MARKER: &str = "*** Update File: ";
 const MOVE_TO_MARKER: &str = "*** Move to: ";
 const EOF_MARKER: &str = "*** End of File";
 
+/// Check if a line starts with a diff prefix (` `, `+`, or `-`).
+fn is_diff_prefix(line: &str) -> bool {
+    matches!(line.as_bytes().first(), Some(b' ' | b'+' | b'-'))
+}
+
+/// Collect diff lines starting at `lines[*i]`. Each line must start with
+/// ` ` (context), `+` (add), or `-` (remove). Empty lines are treated as
+/// empty context. Stops at a non-diff line or `*** End of File` marker.
+/// Returns `(search_lines, replace_lines, is_end_of_file)`.
+fn collect_diff_lines<'a>(lines: &[&'a str], i: &mut usize) -> (Vec<&'a str>, Vec<&'a str>, bool) {
+    let mut search_lines = Vec::new();
+    let mut replace_lines = Vec::new();
+    let mut is_end_of_file = false;
+
+    while *i < lines.len() {
+        let l = lines[*i];
+
+        if l.trim() == EOF_MARKER {
+            is_end_of_file = true;
+            *i += 1;
+            break;
+        }
+
+        if let Some(removed) = l.strip_prefix('-') {
+            search_lines.push(removed);
+        } else if let Some(added) = l.strip_prefix('+') {
+            replace_lines.push(added);
+        } else if let Some(context) = l.strip_prefix(' ') {
+            search_lines.push(context);
+            replace_lines.push(context);
+        } else if l.is_empty() {
+            search_lines.push(l);
+            replace_lines.push(l);
+        } else {
+            break;
+        }
+        *i += 1;
+    }
+
+    (search_lines, replace_lines, is_end_of_file)
+}
+
+/// Strip heredoc wrapping (`<<'EOF'...EOF`) that LLMs sometimes produce.
+/// Supports any delimiter word (EOF, PATCH, END, etc.) with optional single or double quotes.
+/// Returns the original lines unchanged if no valid heredoc wrapper is detected.
+fn strip_heredoc_wrapper(lines: Vec<&str>) -> Vec<&str> {
+    if lines.len() < 4 {
+        return lines;
+    }
+    let first = lines.first().map(|l| l.trim()).unwrap_or("");
+    let last = lines.last().map(|l| l.trim()).unwrap_or("");
+    if let Some(rest) = first.strip_prefix("<<") {
+        // Strip matching quotes ('' or ""), reject mismatched quotes
+        let delim = if let Some(inner) = rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+        {
+            inner
+        } else if let Some(inner) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            inner
+        } else {
+            rest
+        };
+        if !delim.is_empty() && last == delim {
+            return lines[1..lines.len() - 1].to_vec();
+        }
+    }
+    lines
+}
+
 /// Parse a patch string into a structured `Patch`.
 ///
 /// The format follows the codex apply-patch DSL:
@@ -76,6 +144,10 @@ const EOF_MARKER: &str = "*** End of File";
 /// - Delete File has no body.
 pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
     let lines: Vec<&str> = input.lines().collect();
+
+    // Heredoc tolerance: strip <<'EOF'...EOF wrapping that LLMs sometimes emit.
+    let lines = strip_heredoc_wrapper(lines);
+
     let mut operations = Vec::new();
     let mut i = 0;
 
@@ -129,6 +201,7 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
                     "Empty file path in Update File".to_string(),
                 ));
             }
+            let update_line_number = i + 1; // 1-based, for error messages
             i += 1;
 
             // Check for optional *** Move to: line
@@ -171,38 +244,8 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
                     };
 
                     i += 1;
-                    let mut search_lines = Vec::new();
-                    let mut replace_lines = Vec::new();
-                    let mut is_end_of_file = false;
-
-                    // Collect diff lines: must start with ' ', '-', or '+'
-                    while i < lines.len() {
-                        let l = lines[i];
-
-                        // Check for *** End of File marker
-                        if l.trim() == EOF_MARKER {
-                            is_end_of_file = true;
-                            i += 1;
-                            break;
-                        }
-
-                        if let Some(removed) = l.strip_prefix('-') {
-                            search_lines.push(removed);
-                        } else if let Some(added) = l.strip_prefix('+') {
-                            replace_lines.push(added);
-                        } else if let Some(context) = l.strip_prefix(' ') {
-                            search_lines.push(context);
-                            replace_lines.push(context);
-                        } else if l.is_empty() {
-                            // Treat empty line as empty context
-                            search_lines.push(l);
-                            replace_lines.push(l);
-                        } else {
-                            // Line doesn't have a diff prefix — terminates this chunk
-                            break;
-                        }
-                        i += 1;
-                    }
+                    let (search_lines, replace_lines, is_end_of_file) =
+                        collect_diff_lines(&lines, &mut i);
 
                     hunks.push(Hunk {
                         context_hint,
@@ -211,10 +254,32 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
                         is_end_of_file,
                         source_line: hunk_source_line,
                     });
+                } else if hunks.is_empty() && is_diff_prefix(lines[i]) {
+                    // First chunk without @@ header — allow diff lines directly
+                    // (LLMs sometimes omit the @@ marker on the first chunk)
+                    let hunk_source_line = i + 1;
+                    let (search_lines, replace_lines, is_end_of_file) =
+                        collect_diff_lines(&lines, &mut i);
+
+                    hunks.push(Hunk {
+                        context_hint: None,
+                        search: search_lines.join("\n"),
+                        replace: replace_lines.join("\n"),
+                        is_end_of_file,
+                        source_line: hunk_source_line,
+                    });
                 } else {
-                    // Non-@@ non-blank line — skip (shouldn't happen in well-formed input)
-                    i += 1;
+                    // Non-@@ non-blank line — terminates the UpdateFile block
+                    break;
                 }
+            }
+
+            // Reject empty UpdateFile (no hunks and no move) — likely a malformed patch
+            if hunks.is_empty() && move_to.is_none() {
+                return Err(ParseError::InvalidHunk {
+                    message: format!("Update file hunk for path '{path}' is empty"),
+                    line_number: update_line_number,
+                });
             }
 
             operations.push(PatchOperation::UpdateFile {
@@ -783,6 +848,190 @@ mod tests {
         match &patch.operations[0] {
             PatchOperation::UpdateFile { move_to, .. } => {
                 assert!(move_to.is_none());
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    // ── Heredoc tolerance ──
+
+    #[test]
+    fn parse_heredoc_wrapped_patch() {
+        let input = "<<'EOF'\n\
+*** Begin Patch\n\
+*** Add File: test.txt\n\
++hello\n\
+*** End Patch\n\
+EOF";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 1);
+        match &patch.operations[0] {
+            PatchOperation::AddFile { path, content } => {
+                assert_eq!(path, "test.txt");
+                assert_eq!(content, "hello");
+            }
+            other => panic!("Expected AddFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_heredoc_unquoted() {
+        let input = "<<EOF\n\
+*** Begin Patch\n\
+*** Add File: test.txt\n\
++hello\n\
+*** End Patch\n\
+EOF";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 1);
+    }
+
+    #[test]
+    fn parse_heredoc_double_quoted() {
+        let input = "<<\"EOF\"\n\
+*** Begin Patch\n\
+*** Add File: test.txt\n\
++hello\n\
+*** End Patch\n\
+EOF";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 1);
+    }
+
+    #[test]
+    fn parse_heredoc_mismatched_not_stripped() {
+        // Mismatched quotes should NOT trigger heredoc stripping.
+        // The inner patch content may still parse due to Borg's lenient parser,
+        // but the heredoc lines themselves are not consumed as valid operations.
+        // Use content that would fail without proper stripping: no Begin/End inside.
+        let input = "<<\"EOF'\n\
++hello\n\
+EOF";
+        let result = parse_patch(input);
+        // Without heredoc stripping, "<<\"EOF'" and "EOF" are not valid operations,
+        // and "+hello" alone is not recognized outside an AddFile block.
+        assert!(result.is_err());
+    }
+
+    // ── First chunk without @@ header ──
+
+    #[test]
+    fn parse_first_chunk_without_at_header() {
+        let input = "\
+*** Begin Patch
+*** Update File: file.py
+ import foo
++bar
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert_eq!(hunks.len(), 1);
+                assert!(hunks[0].context_hint.is_none());
+                assert!(hunks[0].search.contains("import foo"));
+                assert!(hunks[0].replace.contains("import foo"));
+                assert!(hunks[0].replace.contains("bar"));
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_second_chunk_requires_at_header() {
+        // Second chunk without @@ should terminate the UpdateFile, not be parsed as diff
+        let input = "\
+*** Begin Patch
+*** Update File: file.py
+@@
+-old
++new
+not_a_diff_line
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert_eq!(
+                    hunks.len(),
+                    1,
+                    "second non-@@ block should not create a hunk"
+                );
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    // ── Empty update rejection ──
+
+    #[test]
+    fn parse_empty_update_rejected() {
+        let input = "\
+*** Begin Patch
+*** Update File: test.py
+*** End Patch";
+        let result = parse_patch(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("empty"),
+            "expected 'empty' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_move_only_allowed() {
+        let input = "\
+*** Begin Patch
+*** Update File: old.txt
+*** Move to: new.txt
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile {
+                path,
+                move_to,
+                hunks,
+            } => {
+                assert_eq!(path, "old.txt");
+                assert_eq!(move_to.as_deref(), Some("new.txt"));
+                assert!(hunks.is_empty());
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_heredoc_with_eof_in_content() {
+        // Content that itself contains "EOF" should not confuse heredoc stripping
+        let input = "<<'EOF'\n*** Begin Patch\n*** Add File: t.txt\n+EOF\n*** End Patch\nEOF";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::AddFile { content, .. } => assert_eq!(content, "EOF"),
+            other => panic!("Expected AddFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_heredoc_custom_delimiter() {
+        // LLMs sometimes use PATCH or END instead of EOF
+        let input = "<<'PATCH'\n*** Begin Patch\n*** Add File: t.txt\n+hi\n*** End Patch\nPATCH";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 1);
+    }
+
+    #[test]
+    fn parse_first_chunk_pure_deletion_without_at() {
+        let input = "\
+*** Begin Patch
+*** Update File: file.py
+-old_line
+-another_old
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert_eq!(hunks.len(), 1);
+                assert_eq!(hunks[0].search, "old_line\nanother_old");
+                assert!(hunks[0].replace.is_empty());
             }
             other => panic!("Expected UpdateFile, got {:?}", other),
         }
