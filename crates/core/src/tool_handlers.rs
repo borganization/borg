@@ -1216,8 +1216,12 @@ mod tests {
         assert!(output.contains("No matching memories found"));
     }
 
+    /// Mutex to prevent env-var–mutating channel tests from racing each other.
+    static CHANNEL_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn list_channels_includes_native_telegram() {
+        let _lock = CHANNEL_ENV_MUTEX.lock().unwrap();
         std::env::set_var("TELEGRAM_BOT_TOKEN", "test-token-for-list-test");
         let config = Config::default();
         let result = handle_list_channels(&config).unwrap();
@@ -1234,6 +1238,7 @@ mod tests {
 
     #[test]
     fn list_channels_no_native_when_no_credentials() {
+        let _lock = CHANNEL_ENV_MUTEX.lock().unwrap();
         let keys = [
             "TELEGRAM_BOT_TOKEN",
             "SLACK_BOT_TOKEN",

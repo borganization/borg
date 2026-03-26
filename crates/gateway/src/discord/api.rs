@@ -193,6 +193,32 @@ impl DiscordClient {
         Ok(())
     }
 
+    /// Trigger a typing indicator in a channel.
+    /// POST /channels/{channel_id}/typing
+    pub async fn trigger_typing_indicator(&self, channel_id: &str) -> Result<()> {
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/typing");
+        let token = self.token.clone();
+        let client = self.client.clone();
+
+        self.send_with_retry(move || {
+            let client = client.clone();
+            let url = url.clone();
+            let token = token.clone();
+            async move {
+                client
+                    .post(&url)
+                    .header("Authorization", format!("Bot {token}"))
+                    .header("Content-Length", "0")
+                    .send()
+                    .await
+                    .context("Discord API request failed")
+            }
+        })
+        .await?;
+
+        Ok(())
+    }
+
     /// Add a reaction to a message.
     pub async fn add_reaction(
         &self,

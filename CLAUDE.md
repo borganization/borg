@@ -29,7 +29,7 @@ cargo fmt --check
 cargo clippy -- -D warnings
 ```
 
-Binary name is `borg`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or a running Ollama instance at runtime (see `.env.example`).
+Binary name is `borg`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, or a running Ollama instance at runtime (see `.env.example`).
 
 All integrations are compiled unconditionally into a single binary. iMessage is macOS-only via `#[cfg(target_os = "macos")]`.
 
@@ -178,7 +178,7 @@ Used by `apply_patch` to create/modify/delete files. Follows the codex apply-pat
 
 ```toml
 [llm]
-provider = "openrouter"             # openrouter | openai | anthropic | gemini | ollama (auto-detected if omitted)
+provider = "openrouter"             # openrouter | openai | anthropic | gemini | deepseek | groq | ollama (auto-detected if omitted)
 api_key_env = "OPENROUTER_API_KEY"
 model = "anthropic/claude-sonnet-4"
 temperature = 0.7

@@ -418,7 +418,10 @@ impl GatewayServer {
                         let tg = poll_client.clone();
                         let bot_mention = poll_bot_username.as_deref().map(|u| format!("@{u}"));
                         Box::pin(async move {
-                            let _ = tg.send_typing(chat_id).await;
+                            let typing = crate::telegram::typing::TypingIndicator::start(
+                                tg.clone(),
+                                chat_id,
+                            );
 
                             // Extract thread/reply IDs before passing inbound to invoke_agent
                             let thread_id: Option<i64> =
@@ -436,6 +439,7 @@ impl GatewayServer {
                             .await
                             {
                                 Ok((response_text, _)) => {
+                                    typing.stop().await;
                                     send_telegram_response(
                                         &tg,
                                         chat_id,
@@ -447,6 +451,7 @@ impl GatewayServer {
                                     .await;
                                 }
                                 Err(e) => {
+                                    typing.stop().await;
                                     warn!("Agent error in Telegram poll mode: {e}");
                                 }
                             }
@@ -1030,8 +1035,8 @@ async fn handle_telegram_webhook(
     let thread_id: Option<i64> = inbound.thread_id.as_deref().and_then(|id| id.parse().ok());
     let reply_to: Option<i64> = inbound.message_id.as_deref().and_then(|id| id.parse().ok());
 
-    // Send typing indicator immediately
-    let _ = tg_client.send_typing(chat_id).await;
+    // Start typing indicator with keepalive
+    let typing = crate::telegram::typing::TypingIndicator::start(tg_client.clone(), chat_id);
 
     // Compute session key and enqueue work for sequential processing
     let session_key = inbound.session_key("telegram", inbound.thread_id.as_deref().unwrap_or(""));
@@ -1058,6 +1063,9 @@ async fn handle_telegram_webhook(
                         tg_bot_mention.as_deref(),
                     )
                     .await?;
+
+                    // Stop typing indicator before sending response
+                    typing.stop().await;
 
                     send_telegram_response(
                         &tg_client,
@@ -1593,6 +1601,11 @@ async fn handle_discord_webhook_route(
                     Box::pin(async move {
                         let state = work_state;
                         let channel_id = inbound.channel_id.clone().unwrap_or_default();
+                        // Start typing indicator for the channel
+                        let typing = crate::discord::typing::TypingIndicator::start(
+                            discord_client.clone(),
+                            channel_id.clone(),
+                        );
                         let result = tokio::time::timeout(state.request_timeout, async {
                             let (response_text, _session_id) = handler::invoke_agent(
                                 "discord",
@@ -1602,6 +1615,9 @@ async fn handle_discord_webhook_route(
                                 None,
                             )
                             .await?;
+
+                            // Stop typing before sending response
+                            typing.stop().await;
 
                             if let Some(app_id) = &interaction.application_id {
                                 if let Err(e) = discord_client

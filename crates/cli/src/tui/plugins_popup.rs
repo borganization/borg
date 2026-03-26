@@ -718,7 +718,7 @@ mod tests {
         popup.show(&tmp);
 
         let native_count = popup.items.iter().filter(|i| i.def.is_native).count();
-        assert_eq!(native_count, 5);
+        assert_eq!(native_count, 6);
     }
 
     #[test]

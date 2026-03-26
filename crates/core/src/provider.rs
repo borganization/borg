@@ -13,6 +13,8 @@ pub enum Provider {
     OpenAi,
     Anthropic,
     Gemini,
+    DeepSeek,
+    Groq,
     Ollama,
 }
 
@@ -23,6 +25,8 @@ const DETECT_ORDER: &[Provider] = &[
     Provider::OpenAi,
     Provider::Anthropic,
     Provider::Gemini,
+    Provider::DeepSeek,
+    Provider::Groq,
 ];
 
 impl Provider {
@@ -35,6 +39,8 @@ impl Provider {
             Provider::Gemini => {
                 "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
             }
+            Provider::DeepSeek => "https://api.deepseek.com/v1/chat/completions",
+            Provider::Groq => "https://api.groq.com/openai/v1/chat/completions",
             Provider::Ollama => "http://localhost:11434/v1/chat/completions",
         }
     }
@@ -46,6 +52,8 @@ impl Provider {
             Provider::OpenAi => "OPENAI_API_KEY",
             Provider::Anthropic => "ANTHROPIC_API_KEY",
             Provider::Gemini => "GEMINI_API_KEY",
+            Provider::DeepSeek => "DEEPSEEK_API_KEY",
+            Provider::Groq => "GROQ_API_KEY",
             Provider::Ollama => "OLLAMA_HOST",
         }
     }
@@ -86,7 +94,7 @@ impl Provider {
                 headers.insert("x-api-key", val);
                 headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
             }
-            Provider::OpenAi | Provider::Gemini => {
+            Provider::OpenAi | Provider::Gemini | Provider::DeepSeek | Provider::Groq => {
                 let bearer = format!("Bearer {api_key}");
                 let val = HeaderValue::from_str(&bearer)
                     .context("API key contains invalid characters for HTTP headers")?;
@@ -133,6 +141,8 @@ impl Provider {
                 .unwrap_or(model)
                 .to_string(),
             Provider::Gemini => model.strip_prefix("google/").unwrap_or(model).to_string(),
+            Provider::DeepSeek => model.strip_prefix("deepseek/").unwrap_or(model).to_string(),
+            Provider::Groq => model.strip_prefix("groq/").unwrap_or(model).to_string(),
             Provider::Ollama => model.to_string(),
         }
     }
@@ -161,6 +171,10 @@ impl Provider {
             Provider::Gemini => true,
             // For OpenRouter, default to true; let the underlying model reject if unsupported
             Provider::OpenRouter => true,
+            // DeepSeek: only VL models support vision
+            Provider::DeepSeek => m.contains("vl"),
+            // Groq: only known vision models
+            Provider::Groq => m.contains("vision") || m.contains("llava"),
             // Ollama: only known vision models
             Provider::Ollama => {
                 m.contains("llava") || m.contains("vision") || m.contains("moondream")
@@ -175,6 +189,8 @@ impl Provider {
             Provider::OpenAi => "openai",
             Provider::Anthropic => "anthropic",
             Provider::Gemini => "gemini",
+            Provider::DeepSeek => "deepseek",
+            Provider::Groq => "groq",
             Provider::Ollama => "ollama",
         }
     }
@@ -214,9 +230,11 @@ impl FromStr for Provider {
             "openai" => Ok(Provider::OpenAi),
             "anthropic" => Ok(Provider::Anthropic),
             "gemini" => Ok(Provider::Gemini),
+            "deepseek" => Ok(Provider::DeepSeek),
+            "groq" => Ok(Provider::Groq),
             "ollama" => Ok(Provider::Ollama),
             _ => {
-                bail!("Unknown provider: {s}. Valid options: openrouter, openai, anthropic, gemini, ollama")
+                bail!("Unknown provider: {s}. Valid options: openrouter, openai, anthropic, gemini, deepseek, groq, ollama")
             }
         }
     }
@@ -251,6 +269,10 @@ mod tests {
             Provider::Anthropic
         );
         assert_eq!(Provider::from_str("Gemini").unwrap(), Provider::Gemini);
+        assert_eq!(Provider::from_str("DeepSeek").unwrap(), Provider::DeepSeek);
+        assert_eq!(Provider::from_str("DEEPSEEK").unwrap(), Provider::DeepSeek);
+        assert_eq!(Provider::from_str("Groq").unwrap(), Provider::Groq);
+        assert_eq!(Provider::from_str("GROQ").unwrap(), Provider::Groq);
         assert_eq!(Provider::from_str("Ollama").unwrap(), Provider::Ollama);
         assert_eq!(Provider::from_str("OLLAMA").unwrap(), Provider::Ollama);
     }
@@ -279,6 +301,14 @@ mod tests {
             Provider::Gemini.normalize_model("google/gemini-2.5-pro"),
             "gemini-2.5-pro"
         );
+        assert_eq!(
+            Provider::DeepSeek.normalize_model("deepseek/deepseek-chat"),
+            "deepseek-chat"
+        );
+        assert_eq!(
+            Provider::Groq.normalize_model("groq/llama-3.3-70b-versatile"),
+            "llama-3.3-70b-versatile"
+        );
         // OpenRouter keeps the full path
         assert_eq!(
             Provider::OpenRouter.normalize_model("anthropic/claude-sonnet-4"),
@@ -295,6 +325,14 @@ mod tests {
             Provider::Anthropic.normalize_model("claude-sonnet-4"),
             "claude-sonnet-4"
         );
+        assert_eq!(
+            Provider::DeepSeek.normalize_model("deepseek-chat"),
+            "deepseek-chat"
+        );
+        assert_eq!(
+            Provider::Groq.normalize_model("llama-3.3-70b-versatile"),
+            "llama-3.3-70b-versatile"
+        );
     }
 
     #[test]
@@ -302,6 +340,8 @@ mod tests {
         assert!(Provider::OpenRouter.is_openai_compatible());
         assert!(Provider::OpenAi.is_openai_compatible());
         assert!(Provider::Gemini.is_openai_compatible());
+        assert!(Provider::DeepSeek.is_openai_compatible());
+        assert!(Provider::Groq.is_openai_compatible());
         assert!(Provider::Ollama.is_openai_compatible());
         assert!(!Provider::Anthropic.is_openai_compatible());
     }
@@ -372,7 +412,46 @@ mod tests {
         assert!(Provider::OpenAi.requires_api_key());
         assert!(Provider::Anthropic.requires_api_key());
         assert!(Provider::Gemini.requires_api_key());
+        assert!(Provider::DeepSeek.requires_api_key());
+        assert!(Provider::Groq.requires_api_key());
         assert!(!Provider::Ollama.requires_api_key());
+    }
+
+    #[test]
+    fn build_headers_deepseek_bearer() {
+        let headers = Provider::DeepSeek.build_headers("sk-test").unwrap();
+        assert!(headers
+            .get("Authorization")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("Bearer"));
+    }
+
+    #[test]
+    fn build_headers_groq_bearer() {
+        let headers = Provider::Groq.build_headers("gsk-test").unwrap();
+        assert!(headers
+            .get("Authorization")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("Bearer"));
+    }
+
+    #[test]
+    fn deepseek_supports_vision() {
+        assert!(Provider::DeepSeek.supports_vision("deepseek-vl-7b"));
+        assert!(!Provider::DeepSeek.supports_vision("deepseek-chat"));
+        assert!(!Provider::DeepSeek.supports_vision("deepseek-reasoner"));
+    }
+
+    #[test]
+    fn groq_supports_vision() {
+        assert!(Provider::Groq.supports_vision("llava-v1.5-7b-4096-preview"));
+        assert!(Provider::Groq.supports_vision("some-vision-model"));
+        assert!(!Provider::Groq.supports_vision("llama-3.3-70b-versatile"));
+        assert!(!Provider::Groq.supports_vision("mixtral-8x7b-32768"));
     }
 
     #[test]

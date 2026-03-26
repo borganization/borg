@@ -21,6 +21,8 @@ pub(crate) const PROVIDERS: &[(&str, &str, &str)] = &[
     ("openai", "OpenAI", "GPT models directly"),
     ("anthropic", "Anthropic", "Claude models directly"),
     ("gemini", "Gemini", "Google Gemini models directly"),
+    ("deepseek", "DeepSeek", "Cost-effective, strong at coding"),
+    ("groq", "Groq", "Ultra-fast inference"),
     ("ollama", "Ollama", "Run models locally (no API key)"),
 ];
 
@@ -52,6 +54,21 @@ pub(crate) const GEMINI_MODELS: &[(&str, &str)] = &[
     ("gemini-2.5-flash", "Gemini 2.5 Flash (fast)"),
 ];
 
+pub(crate) const DEEPSEEK_MODELS: &[(&str, &str)] = &[
+    ("deepseek-chat", "DeepSeek Chat (recommended)"),
+    ("deepseek-reasoner", "DeepSeek Reasoner (reasoning)"),
+];
+
+pub(crate) const GROQ_MODELS: &[(&str, &str)] = &[
+    (
+        "llama-3.3-70b-versatile",
+        "Llama 3.3 70B Versatile (recommended)",
+    ),
+    ("llama-3.1-8b-instant", "Llama 3.1 8B Instant (fastest)"),
+    ("gemma2-9b-it", "Gemma 2 9B IT"),
+    ("mixtral-8x7b-32768", "Mixtral 8x7B (large context)"),
+];
+
 pub(crate) const OLLAMA_MODELS: &[(&str, &str)] = &[
     ("llama3.3", "Llama 3.3 70B (recommended)"),
     ("qwen2.5", "Qwen 2.5 (versatile)"),
@@ -75,6 +92,8 @@ pub(crate) fn models_for_provider(provider_id: &str) -> &'static [(&'static str,
         "openai" => OPENAI_MODELS,
         "anthropic" => ANTHROPIC_MODELS,
         "gemini" => GEMINI_MODELS,
+        "deepseek" => DEEPSEEK_MODELS,
+        "groq" => GROQ_MODELS,
         "ollama" => OLLAMA_MODELS,
         _ => OPENROUTER_MODELS,
     }
@@ -521,6 +540,50 @@ mod tests {
     fn models_for_provider_ollama() {
         let models = models_for_provider("ollama");
         assert_eq!(models.len(), OLLAMA_MODELS.len());
+    }
+
+    #[test]
+    fn generate_config_deepseek_provider() {
+        let config =
+            generate_config("deepseek-chat", "deepseek", "User", "Agent", false).expect("valid");
+        assert!(config.contains("provider = \"deepseek\""));
+        assert!(config.contains("api_key_env = \"DEEPSEEK_API_KEY\""));
+    }
+
+    #[test]
+    fn generate_config_groq_provider() {
+        let config = generate_config("llama-3.3-70b-versatile", "groq", "User", "Agent", false)
+            .expect("valid");
+        assert!(config.contains("provider = \"groq\""));
+        assert!(config.contains("api_key_env = \"GROQ_API_KEY\""));
+    }
+
+    #[test]
+    fn deepseek_models_non_empty() {
+        assert!(!DEEPSEEK_MODELS.is_empty());
+        for (id, _) in DEEPSEEK_MODELS {
+            assert!(validate_model_id(id).is_ok(), "invalid model id: {id}");
+        }
+    }
+
+    #[test]
+    fn groq_models_non_empty() {
+        assert!(!GROQ_MODELS.is_empty());
+        for (id, _) in GROQ_MODELS {
+            assert!(validate_model_id(id).is_ok(), "invalid model id: {id}");
+        }
+    }
+
+    #[test]
+    fn models_for_provider_deepseek() {
+        let models = models_for_provider("deepseek");
+        assert_eq!(models.len(), DEEPSEEK_MODELS.len());
+    }
+
+    #[test]
+    fn models_for_provider_groq() {
+        let models = models_for_provider("groq");
+        assert_eq!(models.len(), GROQ_MODELS.len());
     }
 
     #[test]
