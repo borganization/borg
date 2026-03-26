@@ -37,6 +37,8 @@ sha1 = "0.10"
 serde_urlencoded = "0.7"
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["std"] }
+url = "2"
+scraper = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

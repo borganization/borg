@@ -68,6 +68,10 @@ struct AppState {
     telegram_bot_username: Option<String>,
     /// Slack bot user ID for group mention activation (e.g. "U123ABC").
     slack_bot_user_id: Option<String>,
+    /// Auto-reply state (shared across handlers).
+    auto_reply_state: crate::auto_reply::SharedAutoReplyState,
+    /// TTS synthesizer for auto voice replies.
+    tts_synthesizer: Option<Arc<borg_core::tts::TtsSynthesizer>>,
 }
 
 pub struct GatewayServer {
@@ -351,6 +355,14 @@ impl GatewayServer {
             wake_tx: self.wake_tx,
             telegram_bot_username: telegram_bot_username.clone(),
             slack_bot_user_id,
+            auto_reply_state: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::auto_reply::AutoReplyState::default(),
+            )),
+            tts_synthesizer: if self.config.tts.enabled && self.config.tts.auto_mode {
+                borg_core::tts::TtsSynthesizer::from_config(&self.config).map(Arc::new)
+            } else {
+                None
+            },
         });
 
         let app = Router::new()
@@ -358,6 +370,8 @@ impl GatewayServer {
             .route("/health/channels", get(channel_health_handler))
             .route("/channels", get(list_channels_handler))
             .route("/internal/wake", post(wake_handler))
+            .route("/internal/away", post(away_handler))
+            .route("/internal/available", post(available_handler))
             .route("/webhook/slack/command", post(slack_command_handler))
             .route("/webhook/{name}", post(webhook_handler))
             .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
@@ -410,9 +424,11 @@ impl GatewayServer {
                 let poll_config = self.config.clone();
                 let poll_health = health.clone();
                 let poll_bot_username = telegram_bot_username.clone();
+                let poll_tts = state.tts_synthesizer.clone();
 
                 let callback: crate::telegram::polling::PollCallback =
                     Arc::new(move |inbound, chat_id| {
+                        let poll_tts = poll_tts.clone();
                         let config = poll_config.clone();
                         let health = poll_health.clone();
                         let tg = poll_client.clone();
@@ -447,6 +463,7 @@ impl GatewayServer {
                                         thread_id,
                                         reply_to,
                                         &health,
+                                        poll_tts.as_deref(),
                                     )
                                     .await;
                                 }
@@ -771,6 +788,55 @@ async fn wake_handler(
     }
 }
 
+/// Set the agent to "away" mode. Only localhost.
+async fn away_handler(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    body: String,
+) -> impl IntoResponse {
+    if !addr.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"error": "localhost only"})),
+        );
+    }
+    let message = if body.trim().is_empty() {
+        state.config.gateway.auto_reply.away_message.clone()
+    } else {
+        // Try to parse JSON body for {"message": "..."}, fall back to raw text
+        serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("message")?.as_str().map(String::from))
+            .unwrap_or_else(|| body.trim().to_string())
+    };
+    *state.auto_reply_state.write().await =
+        crate::auto_reply::AutoReplyState::Away(message.clone());
+    info!("Auto-reply set to away: {message}");
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"status": "away", "message": message})),
+    )
+}
+
+/// Set the agent back to "available" mode. Only localhost.
+async fn available_handler(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+) -> impl IntoResponse {
+    if !addr.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"error": "localhost only"})),
+        );
+    }
+    *state.auto_reply_state.write().await = crate::auto_reply::AutoReplyState::Available;
+    info!("Auto-reply set to available");
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"status": "available"})),
+    )
+}
+
 fn extract_client_ip(
     headers: &HeaderMap,
     connect_info: &ConnectInfo<std::net::SocketAddr>,
@@ -1074,6 +1140,7 @@ async fn handle_telegram_webhook(
                         thread_id,
                         reply_to,
                         &state.health,
+                        state.tts_synthesizer.as_deref(),
                     )
                     .await;
 
@@ -1518,10 +1585,12 @@ async fn send_telegram_response(
     thread_id: Option<i64>,
     reply_to: Option<i64>,
     health: &Arc<RwLock<ChannelHealthRegistry>>,
+    tts_synthesizer: Option<&borg_core::tts::TtsSynthesizer>,
 ) {
     if response_text.trim().is_empty() {
         return;
     }
+
     let html = crate::telegram::format::markdown_to_telegram_html(response_text);
 
     if let Err(e) = client
@@ -1543,6 +1612,25 @@ async fn send_telegram_response(
         }
     } else {
         health.write().await.record_outbound("telegram");
+    }
+
+    // Auto-TTS: synthesize and send voice message after text
+    if let Some(synth) = tts_synthesizer {
+        let tts_text = borg_core::tts::truncate_for_tts(response_text, 4096);
+        match synth
+            .synthesize(&tts_text, None, Some(borg_core::tts::AudioFormat::Opus))
+            .await
+        {
+            Ok((audio_bytes, _, _)) => {
+                if let Err(e) = client
+                    .send_voice(chat_id, &audio_bytes, None, thread_id, None)
+                    .await
+                {
+                    warn!("Failed to send TTS voice message: {e}");
+                }
+            }
+            Err(e) => warn!("TTS synthesis failed: {e}"),
+        }
     }
 }
 

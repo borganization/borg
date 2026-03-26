@@ -506,6 +506,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "rusqlite",
+ "scraper",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -518,6 +519,7 @@ dependencies = [
  "toml",
  "tower 0.5.3",
  "tracing",
+ "url",
  "uuid",
  "which 7.0.3",
 ]

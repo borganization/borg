@@ -265,6 +265,7 @@ pub struct Agent {
     skill_env_allowlist: std::collections::HashSet<String>,
     metrics: BorgMetrics,
     browser_session: Option<crate::browser::BrowserSession>,
+    tts_synthesizer: Option<crate::tts::TtsSynthesizer>,
     config_rx: Option<tokio::sync::watch::Receiver<Config>>,
     db: Mutex<Option<Database>>,
     /// Cached skills context string, invalidated on config reload.
@@ -297,6 +298,7 @@ impl Agent {
         let resolved_creds = config.resolve_credentials();
         let skill_env_allowlist =
             crate::skills::collect_required_env_vars(&resolved_creds, &config.skills);
+        let tts_synthesizer = crate::tts::TtsSynthesizer::from_config(&config);
         Ok(Self {
             config,
             history: Vec::new(),
@@ -310,6 +312,7 @@ impl Agent {
             spawn_depth: 0,
             tools_filter: None,
             skill_env_allowlist,
+            tts_synthesizer,
             metrics,
             browser_session: None,
             config_rx: None,
@@ -367,6 +370,7 @@ impl Agent {
         let resolved_creds = config.resolve_credentials();
         let skill_env_allowlist =
             crate::skills::collect_required_env_vars(&resolved_creds, &config.skills);
+        let tts_synthesizer = crate::tts::TtsSynthesizer::from_config(&config);
         Ok(Self {
             config,
             history: Vec::new(),
@@ -380,6 +384,7 @@ impl Agent {
             spawn_depth,
             tools_filter,
             skill_env_allowlist,
+            tts_synthesizer,
             metrics,
             browser_session: None,
             config_rx: None,
@@ -1528,6 +1533,16 @@ impl Agent {
                 )
                 .await;
             }
+            "generate_image" => tool_handlers::handle_generate_image(&args, &self.config).await,
+            "text_to_speech" => {
+                if let Some(ref synth) = self.tts_synthesizer {
+                    return Ok(tool_handlers::handle_text_to_speech(&args, synth).await);
+                }
+                Ok(
+                    "TTS is not configured. Enable it via: borg settings set tts.enabled true"
+                        .into(),
+                )
+            }
             "spawn_agent" => {
                 if let Some(ref mut ctrl) = self.agent_control {
                     let history = if args["fork_context"].as_bool().unwrap_or(false) {
@@ -1891,7 +1906,9 @@ fn classify_action(tool_name: &str) -> ActionType {
         }
         "write_memory" => ActionType::MemoryWrite,
         "memory_search" | "read_memory" => ActionType::ToolCall,
-        "web_fetch" | "web_search" | "browser" => ActionType::WebRequest,
+        "web_fetch" | "web_search" | "browser" | "text_to_speech" | "generate_image" => {
+            ActionType::WebRequest
+        }
         _ => ActionType::ToolCall,
     }
 }

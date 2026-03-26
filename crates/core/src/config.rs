@@ -74,7 +74,11 @@ pub struct Config {
     #[serde(default)]
     pub audio: AudioConfig,
     #[serde(default)]
+    pub tts: TtsConfig,
+    #[serde(default)]
     pub media: MediaConfig,
+    #[serde(default)]
+    pub image_gen: ImageGenConfig,
     #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
     /// Transient identity override (not serialized). Set by gateway routing.
@@ -472,6 +476,12 @@ pub struct GatewayConfig {
     /// DMs always activate regardless of this setting.
     #[serde(default)]
     pub group_activation: ActivationMode,
+    /// Auto-reply configuration for when the agent is away.
+    #[serde(default)]
+    pub auto_reply: AutoReplyConfig,
+    /// Link understanding: auto-extract and fetch URLs from inbound messages.
+    #[serde(default)]
+    pub link_understanding: LinkUnderstandingConfig,
 }
 
 /// Activation mode for group chats.
@@ -555,12 +565,61 @@ impl Default for GatewayConfig {
             signal_cli_host: None,
             signal_cli_port: None,
             group_activation: ActivationMode::default(),
+            auto_reply: AutoReplyConfig::default(),
+            link_understanding: LinkUnderstandingConfig::default(),
         }
     }
 }
 
 fn default_pairing_ttl() -> i64 {
     3600
+}
+
+/// Auto-reply configuration for when the agent is unavailable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoReplyConfig {
+    /// Enable the auto-reply subsystem.
+    pub enabled: bool,
+    /// Default message sent when the agent is in "away" mode.
+    pub away_message: String,
+    /// Whether to queue inbound messages during away mode for later processing.
+    pub queue_messages: bool,
+}
+
+impl Default for AutoReplyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            away_message: "I'm currently away and will respond when I'm back.".into(),
+            queue_messages: true,
+        }
+    }
+}
+
+/// Link understanding: auto-extract URLs from inbound messages and inject content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LinkUnderstandingConfig {
+    /// Enable automatic link content extraction.
+    pub enabled: bool,
+    /// Max number of links to fetch per message.
+    pub max_links: usize,
+    /// Max characters to extract per link.
+    pub max_chars_per_link: usize,
+    /// HTTP timeout in milliseconds for link fetching.
+    pub timeout_ms: u64,
+}
+
+impl Default for LinkUnderstandingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_links: 3,
+            max_chars_per_link: 5000,
+            timeout_ms: 10_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -646,6 +705,59 @@ impl Default for AudioConfig {
     }
 }
 
+/// Single TTS provider entry in the fallback chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TtsModelConfig {
+    /// Provider name: "openai", "elevenlabs".
+    pub provider: String,
+    /// Model name (e.g. "tts-1", "tts-1-hd", "eleven_multilingual_v2").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Voice identifier (e.g. "alloy", "nova", or ElevenLabs voice ID).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    /// Override API key env var for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Per-provider timeout override in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Text-to-speech configuration with multi-provider fallback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TtsConfig {
+    pub enabled: bool,
+    /// Ordered fallback chain of TTS providers.
+    #[serde(default)]
+    pub models: Vec<TtsModelConfig>,
+    /// Default voice name/ID.
+    pub default_voice: String,
+    /// Default output format (mp3, opus, aac, flac, wav).
+    pub default_format: String,
+    /// Maximum input text length in characters.
+    pub max_text_length: usize,
+    /// Default timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Auto-TTS mode: convert all gateway responses to voice.
+    pub auto_mode: bool,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            models: Vec::new(),
+            default_voice: "alloy".into(),
+            default_format: "mp3".into(),
+            max_text_length: 4096,
+            timeout_ms: 30_000,
+            auto_mode: false,
+        }
+    }
+}
+
 /// Image compression and media processing configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -664,6 +776,34 @@ impl Default for MediaConfig {
             max_image_bytes: 6 * 1024 * 1024,
             compression_enabled: true,
             max_dimension_px: 2048,
+        }
+    }
+}
+
+/// Image generation configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageGenConfig {
+    /// Enable image generation tools.
+    pub enabled: bool,
+    /// Provider override: "openai" | "fal". Auto-detects from API keys if omitted.
+    pub provider: Option<String>,
+    /// Model override (e.g. "dall-e-3", "fal-ai/flux/schnell").
+    pub model: Option<String>,
+    /// API key env var override.
+    pub api_key_env: Option<String>,
+    /// Default image size.
+    pub default_size: String,
+}
+
+impl Default for ImageGenConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: None,
+            model: None,
+            api_key_env: None,
+            default_size: "1024x1024".into(),
         }
     }
 }
@@ -1079,13 +1219,43 @@ impl Config {
                 self.browser.headless = v;
                 Ok(format!("browser.headless = {v}"))
             }
+            "tts.enabled" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for tts.enabled")?;
+                self.tts.enabled = v;
+                Ok(format!("tts.enabled = {v}"))
+            }
+            "tts.auto_mode" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for tts.auto_mode")?;
+                self.tts.auto_mode = v;
+                Ok(format!("tts.auto_mode = {v}"))
+            }
+            "tts.default_voice" => {
+                self.tts.default_voice = value.to_string();
+                Ok(format!("tts.default_voice = {value}"))
+            }
+            "tts.default_format" => {
+                let allowed = ["mp3", "opus", "aac", "flac", "wav"];
+                if !allowed.contains(&value) {
+                    anyhow::bail!(
+                        "Invalid format: {value}. Allowed: {}",
+                        allowed.join(", ")
+                    );
+                }
+                self.tts.default_format = value.to_string();
+                Ok(format!("tts.default_format = {value}"))
+            }
             _ => anyhow::bail!(
                 "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
                  sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled, \
                  skills.max_context_tokens, conversation.max_iterations, conversation.show_thinking, \
                  security.secret_detection, security.host_audit, \
                  budget.monthly_token_limit, budget.warning_threshold, \
-                 browser.enabled, browser.headless"
+                 browser.enabled, browser.headless, \
+                 tts.enabled, tts.auto_mode, tts.default_voice, tts.default_format"
             ),
         }
     }
@@ -2234,6 +2404,85 @@ startup_timeout_ms = 20000
         assert!(display.contains("browser.enabled"));
         assert!(display.contains("browser.headless"));
         assert!(!display.contains("browser.cdp_port"));
+    }
+
+    #[test]
+    fn tts_config_defaults() {
+        let cfg = TtsConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.models.is_empty());
+        assert_eq!(cfg.default_voice, "alloy");
+        assert_eq!(cfg.default_format, "mp3");
+        assert_eq!(cfg.max_text_length, 4096);
+        assert_eq!(cfg.timeout_ms, 30_000);
+        assert!(!cfg.auto_mode);
+    }
+
+    #[test]
+    fn apply_setting_tts_enabled() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("tts.enabled", "true").unwrap();
+        assert!(cfg.tts.enabled);
+    }
+
+    #[test]
+    fn apply_setting_tts_auto_mode() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("tts.auto_mode", "true").unwrap();
+        assert!(cfg.tts.auto_mode);
+    }
+
+    #[test]
+    fn apply_setting_tts_default_voice() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("tts.default_voice", "nova").unwrap();
+        assert_eq!(cfg.tts.default_voice, "nova");
+    }
+
+    #[test]
+    fn apply_setting_tts_default_format() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("tts.default_format", "opus").unwrap();
+        assert_eq!(cfg.tts.default_format, "opus");
+    }
+
+    #[test]
+    fn apply_setting_tts_default_format_invalid() {
+        let mut cfg = Config::default();
+        assert!(cfg.apply_setting("tts.default_format", "ogg").is_err());
+    }
+
+    #[test]
+    fn parse_tts_config() {
+        let toml_str = r#"
+[tts]
+enabled = true
+default_voice = "nova"
+default_format = "opus"
+auto_mode = true
+
+[[tts.models]]
+provider = "openai"
+model = "tts-1"
+
+[[tts.models]]
+provider = "elevenlabs"
+voice = "21m00Tcm4TlvDq8ikWAM"
+api_key_env = "ELEVENLABS_API_KEY"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.tts.enabled);
+        assert!(config.tts.auto_mode);
+        assert_eq!(config.tts.default_voice, "nova");
+        assert_eq!(config.tts.default_format, "opus");
+        assert_eq!(config.tts.models.len(), 2);
+        assert_eq!(config.tts.models[0].provider, "openai");
+        assert_eq!(config.tts.models[0].model.as_deref(), Some("tts-1"));
+        assert_eq!(config.tts.models[1].provider, "elevenlabs");
+        assert_eq!(
+            config.tts.models[1].voice.as_deref(),
+            Some("21m00Tcm4TlvDq8ikWAM")
+        );
     }
 
     #[test]
