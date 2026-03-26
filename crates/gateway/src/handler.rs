@@ -247,6 +247,18 @@ pub async fn invoke_agent(
     health: Option<&Arc<RwLock<ChannelHealthRegistry>>>,
     bot_identifier: Option<&str>,
 ) -> Result<(String, String)> {
+    invoke_agent_with_auto_reply(channel_name, inbound, config, health, bot_identifier, None).await
+}
+
+/// Like `invoke_agent` but accepts an optional auto-reply state for away-mode checks.
+pub async fn invoke_agent_with_auto_reply(
+    channel_name: &str,
+    inbound: &InboundMessage,
+    config: &Config,
+    health: Option<&Arc<RwLock<ChannelHealthRegistry>>>,
+    bot_identifier: Option<&str>,
+    auto_reply_state: Option<&crate::auto_reply::SharedAutoReplyState>,
+) -> Result<(String, String)> {
     // Resolve gateway routing (per-channel/sender config overrides)
     let route = crate::routing::resolve_route(
         config,
@@ -266,6 +278,19 @@ pub async fn invoke_agent(
     );
     if !should_respond {
         return Ok((String::new(), String::new()));
+    }
+
+    // Auto-reply check: if agent is away, return the away message immediately
+    if let Some(ar_state) = auto_reply_state {
+        if let Some(reply) =
+            crate::auto_reply::check_auto_reply(ar_state, &config.gateway.auto_reply).await
+        {
+            info!(
+                "Auto-reply for '{}' on channel '{}': away",
+                inbound.sender_id, channel_name
+            );
+            return Ok((reply, String::new()));
+        }
     }
 
     info!(
@@ -381,6 +406,25 @@ pub async fn invoke_agent(
     }
 
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
+
+    // Link understanding: augment message with fetched URL content
+    let cleaned_text = if config.gateway.link_understanding.enabled {
+        let (augmented, fetched) = crate::link_understanding::augment_with_links(
+            &cleaned_text,
+            &config.gateway.link_understanding,
+        )
+        .await;
+        if !fetched.is_empty() {
+            info!(
+                "Link understanding: fetched {} URL(s) for channel '{}'",
+                fetched.len(),
+                channel_name
+            );
+        }
+        augmented
+    } else {
+        cleaned_text
+    };
 
     // Scan full text for injection BEFORE truncation so patterns spanning
     // the truncation boundary are still detected.

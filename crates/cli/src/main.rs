@@ -94,6 +94,13 @@ enum Commands {
     },
     /// Trigger an immediate heartbeat check-in
     Wake,
+    /// Set the agent to away mode (auto-replies to messages)
+    Away {
+        /// Custom away message (uses config default if omitted)
+        message: Option<String>,
+    },
+    /// Set the agent back to available mode (stops auto-replying)
+    Available,
     /// Permanently delete all Borg data and uninstall the service
     Uninstall,
 }
@@ -399,6 +406,8 @@ async fn main() -> Result<()> {
             None => run_pairing_list(None)?,
         },
         Some(Commands::Wake) => run_wake().await?,
+        Some(Commands::Away { message }) => run_away(message).await?,
+        Some(Commands::Available) => run_available().await?,
         Some(Commands::Uninstall) => run_uninstall()?,
     }
 
@@ -432,6 +441,58 @@ async fn run_wake() -> Result<()> {
         Err(_) => {
             println!("Could not reach daemon. Is it running?");
             println!("Start it with: borg service start");
+        }
+    }
+    Ok(())
+}
+
+async fn run_away(message: Option<String>) -> Result<()> {
+    let config = borg_core::config::Config::load()?;
+    let url = format!(
+        "http://{}:{}/internal/away",
+        config.gateway.host, config.gateway.port
+    );
+    let client = reqwest::Client::new();
+    let mut req = client.post(&url).timeout(std::time::Duration::from_secs(5));
+    if let Some(msg) = &message {
+        req = req
+            .header("Content-Type", "application/json")
+            .body(serde_json::json!({"message": msg}).to_string());
+    }
+    match req.send().await {
+        Ok(r) if r.status().is_success() => {
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            let msg = body
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(default)");
+            println!("Agent set to away: {msg}");
+        }
+        Ok(r) => println!("Away failed: {}", r.status()),
+        Err(_) => {
+            println!("Could not reach gateway. Is it running?");
+        }
+    }
+    Ok(())
+}
+
+async fn run_available() -> Result<()> {
+    let config = borg_core::config::Config::load()?;
+    let url = format!(
+        "http://{}:{}/internal/available",
+        config.gateway.host, config.gateway.port
+    );
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => println!("Agent set to available."),
+        Ok(r) => println!("Available failed: {}", r.status()),
+        Err(_) => {
+            println!("Could not reach gateway. Is it running?");
         }
     }
     Ok(())

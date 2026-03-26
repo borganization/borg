@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -625,6 +626,99 @@ pub fn handle_security_audit(args: &serde_json::Value, config: &Config) -> Resul
     Ok(report.format())
 }
 
+pub async fn handle_generate_image(args: &serde_json::Value, config: &Config) -> Result<String> {
+    if !config.image_gen.enabled {
+        return Ok(
+            "Image generation is disabled. Enable it in config: image_gen.enabled = true"
+                .to_string(),
+        );
+    }
+
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if prompt.is_empty() {
+        return Ok("Error: prompt is required".to_string());
+    }
+
+    let count = args
+        .get("count")
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| n as u32);
+    let size = args.get("size").and_then(serde_json::Value::as_str);
+
+    let provider = match crate::image_gen::ImageGenProvider::from_config(&config.image_gen) {
+        Some(p) => p,
+        None => {
+            return Ok(
+                "No image generation provider available. Set OPENAI_API_KEY or FAL_KEY environment variable, or configure [image_gen] in config.toml"
+                    .to_string(),
+            );
+        }
+    };
+
+    match crate::image_gen::generate_image(&provider, prompt, size, count).await {
+        Ok(results) if results.is_empty() => Ok("Image generation returned no results".to_string()),
+        Ok(results) => {
+            let count = results.len();
+            let mut output = format!("Generated {count} image(s).\n");
+            for (i, img) in results.iter().enumerate() {
+                if let Some(ref revised) = img.revised_prompt {
+                    output.push_str(&format!("Image {}: revised prompt: {revised}\n", i + 1));
+                }
+                // Truncate base64 for text output — full data available for channel delivery
+                let preview_len = img.base64_data.len().min(100);
+                output.push_str(&format!(
+                    "Image {}: {} bytes (base64: {}...)\n",
+                    i + 1,
+                    img.base64_data.len() * 3 / 4, // approximate decoded size
+                    &img.base64_data[..preview_len]
+                ));
+            }
+            Ok(output)
+        }
+        Err(e) => Ok(format!("Image generation failed: {e}")),
+    }
+}
+
+pub async fn handle_text_to_speech(
+    args: &serde_json::Value,
+    synthesizer: &crate::tts::TtsSynthesizer,
+) -> ToolOutput {
+    let text = match require_str_param(args, "text") {
+        Ok(t) => t,
+        Err(e) => return ToolOutput::Text(format!("Error: {e}")),
+    };
+    let voice = args.get("voice").and_then(|v| v.as_str());
+    let format = args
+        .get("format")
+        .and_then(|v| v.as_str())
+        .and_then(crate::tts::AudioFormat::from_str_lossy);
+
+    match synthesizer.synthesize(text, voice, format).await {
+        Ok((audio_bytes, fmt, _attempts)) => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&audio_bytes);
+            ToolOutput::Multimodal {
+                text: format!(
+                    "Generated {} audio ({} bytes, {})",
+                    fmt.extension(),
+                    audio_bytes.len(),
+                    fmt.mime_type()
+                ),
+                parts: vec![ContentPart::AudioBase64 {
+                    media: MediaData {
+                        mime_type: fmt.mime_type().to_string(),
+                        data: b64,
+                        filename: Some(format!("speech.{}", fmt.extension())),
+                    },
+                }],
+            }
+        }
+        Err(e) => ToolOutput::Text(format!("TTS error: {e}")),
+    }
+}
+
 pub async fn handle_user_tool(
     name: &str,
     args_json: &str,
@@ -830,6 +924,57 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         ));
     }
 
+    if config.tts.enabled {
+        defs.push(ToolDefinition::new(
+            "text_to_speech",
+            "Convert text to speech audio. Returns base64-encoded audio data. Use for voice messages, audio responses, or accessibility.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Text to convert to speech (max 4096 characters)"
+                    },
+                    "voice": {
+                        "type": "string",
+                        "description": "Voice name/ID (optional, uses default if omitted)"
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["mp3", "opus", "aac", "flac", "wav"],
+                        "description": "Audio output format (optional, default: mp3)"
+                    }
+                },
+                "required": ["text"]
+            }),
+        ));
+    }
+
+    if config.image_gen.enabled {
+        defs.push(ToolDefinition::new(
+            "generate_image",
+            "Generate images from a text description using AI. Returns base64-encoded image data.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Text description of the image to generate"
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of images to generate (1-4, default: 1)"
+                    },
+                    "size": {
+                        "type": "string",
+                        "description": "Image size (e.g. 1024x1024, 1792x1024, 1024x1792)"
+                    }
+                },
+                "required": ["prompt"]
+            }),
+        ));
+    }
+
     if config.security.host_audit {
         defs.push(ToolDefinition::new(
             "security_audit",
@@ -941,6 +1086,23 @@ mod tests {
         let defs = core_tool_definitions(&config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert!(names.contains(&"browser"));
+    }
+
+    #[test]
+    fn core_tool_definitions_excludes_tts_when_disabled() {
+        let config = Config::default();
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(!names.contains(&"text_to_speech"));
+    }
+
+    #[test]
+    fn core_tool_definitions_includes_tts_when_enabled() {
+        let mut config = Config::default();
+        config.tts.enabled = true;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"text_to_speech"));
     }
 
     #[test]

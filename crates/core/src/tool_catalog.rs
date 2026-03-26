@@ -50,7 +50,7 @@ impl ToolGroup {
             Self::Web => &["web_fetch", "web_search"],
             Self::Ui => &["browser"],
             Self::Scheduling => &["manage_tasks"],
-            Self::Media => &["read_pdf"],
+            Self::Media => &["read_pdf", "generate_image"],
             Self::Security => &["security_audit"],
             Self::Integration => &["gmail", "outlook", "google_calendar", "notion", "linear"],
             Self::Agents => &[
@@ -143,7 +143,7 @@ pub fn tool_group(name: &str) -> Option<ToolGroup> {
         "web_fetch" | "web_search" => Some(ToolGroup::Web),
         "browser" => Some(ToolGroup::Ui),
         "manage_tasks" => Some(ToolGroup::Scheduling),
-        "read_pdf" => Some(ToolGroup::Media),
+        "read_pdf" | "generate_image" => Some(ToolGroup::Media),
         "security_audit" => Some(ToolGroup::Security),
         "gmail" | "outlook" | "google_calendar" | "notion" | "linear" => {
             Some(ToolGroup::Integration)

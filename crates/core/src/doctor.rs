@@ -166,6 +166,9 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
     // Agent config checks
     check_agents(config, &mut checks);
 
+    // Config security posture checks
+    check_config_security(config, &mut checks);
+
     // Host security checks
     if config.security.host_audit {
         crate::host_audit::run_host_security_checks(&mut checks);
@@ -849,6 +852,152 @@ fn check_embeddings(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
     }
 }
 
+fn check_config_security(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
+    use crate::pairing::DmPolicy;
+
+    // DM policy
+    match config.gateway.dm_policy {
+        DmPolicy::Open => {
+            checks.push(DiagnosticCheck::warn(
+                "Security",
+                "DM policy",
+                "set to \"open\" — all senders can interact without approval. Set to \"pairing\" for access control",
+            ));
+        }
+        DmPolicy::Pairing => {
+            checks.push(DiagnosticCheck::pass("Security", "DM policy (pairing)"));
+        }
+        DmPolicy::Disabled => {
+            checks.push(DiagnosticCheck::pass("Security", "DM policy (disabled)"));
+        }
+    }
+
+    // Per-channel open policies
+    let open_channels: Vec<&String> = config
+        .gateway
+        .channel_policies
+        .iter()
+        .filter(|(_, policy)| matches!(policy, DmPolicy::Open))
+        .map(|(name, _)| name)
+        .collect();
+    if open_channels.is_empty() {
+        checks.push(DiagnosticCheck::pass(
+            "Security",
+            "channel policies (no open overrides)",
+        ));
+    } else {
+        checks.push(DiagnosticCheck::warn(
+            "Security",
+            "channel policies",
+            format!(
+                "open DM policy on: {}. Consider \"pairing\" for untrusted channels",
+                open_channels
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+
+    // Sandbox
+    if !config.sandbox.enabled {
+        checks.push(DiagnosticCheck::warn(
+            "Security",
+            "sandbox",
+            "disabled — user tools run without isolation. Set sandbox.enabled = true",
+        ));
+    } else if config.sandbox.mode == "permissive" {
+        checks.push(DiagnosticCheck::warn(
+            "Security",
+            "sandbox mode",
+            "set to \"permissive\" — weaker isolation. Consider \"strict\"",
+        ));
+    } else {
+        checks.push(DiagnosticCheck::pass(
+            "Security",
+            "sandbox enabled (strict)",
+        ));
+    }
+
+    // Secret detection
+    if !config.security.secret_detection {
+        checks.push(DiagnosticCheck::warn(
+            "Security",
+            "secret detection",
+            "disabled — API keys and tokens may leak in tool output. Set security.secret_detection = true",
+        ));
+    } else {
+        checks.push(DiagnosticCheck::pass(
+            "Security",
+            "secret detection enabled",
+        ));
+    }
+
+    // Blocked paths
+    if config.security.blocked_paths.is_empty() {
+        checks.push(DiagnosticCheck::warn(
+            "Security",
+            "blocked paths",
+            "empty — sensitive directories (.ssh, .aws, .gnupg) are not protected. Add entries to security.blocked_paths",
+        ));
+    } else {
+        checks.push(DiagnosticCheck::pass(
+            "Security",
+            format!(
+                "blocked paths ({} entries)",
+                config.security.blocked_paths.len()
+            ),
+        ));
+    }
+
+    // Rate limits
+    let limits = &config.security.action_limits;
+    if limits.tool_calls_block > 1000
+        || limits.shell_commands_block > 500
+        || limits.file_writes_block > 300
+    {
+        checks.push(DiagnosticCheck::warn(
+            "Security",
+            "rate limits",
+            "block thresholds are very high — consider lowering for tighter safety bounds",
+        ));
+    } else {
+        checks.push(DiagnosticCheck::pass(
+            "Security",
+            "rate limits within bounds",
+        ));
+    }
+
+    // Browser no-sandbox
+    if config.browser.enabled && config.browser.no_sandbox {
+        checks.push(DiagnosticCheck::warn(
+            "Security",
+            "browser sandbox",
+            "Chrome --no-sandbox is enabled — browser runs without isolation. Set browser.no_sandbox = false",
+        ));
+    } else if config.browser.enabled {
+        checks.push(DiagnosticCheck::pass("Security", "browser sandbox enabled"));
+    }
+
+    // Budget unlimited
+    if config.budget.monthly_token_limit == 0 {
+        checks.push(DiagnosticCheck::warn(
+            "Security",
+            "budget",
+            "unlimited (monthly_token_limit = 0) — no spend cap. Set a limit to prevent runaway usage",
+        ));
+    } else {
+        checks.push(DiagnosticCheck::pass(
+            "Security",
+            format!(
+                "budget capped ({} tokens/month)",
+                config.budget.monthly_token_limit
+            ),
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,5 +1119,122 @@ mod tests {
         assert_eq!(checks.len(), 1);
         assert!(matches!(checks[0].status, CheckStatus::Warn(_)));
         assert_eq!(checks[0].category, "Browser");
+    }
+
+    #[test]
+    fn config_security_secure_defaults_all_pass() {
+        let config = Config::default();
+        let mut checks = Vec::new();
+        check_config_security(&config, &mut checks);
+        // All checks should be in the Security category
+        assert!(checks.iter().all(|c| c.category == "Security"));
+        // Default config is secure — no warnings expected
+        let warns: Vec<_> = checks
+            .iter()
+            .filter(|c| matches!(c.status, CheckStatus::Warn(_)))
+            .collect();
+        assert!(
+            warns.is_empty(),
+            "Secure defaults should produce no warnings: {warns:?}"
+        );
+    }
+
+    #[test]
+    fn config_security_open_dm_policy_warns() {
+        let mut config = Config::default();
+        config.gateway.dm_policy = crate::pairing::DmPolicy::Open;
+        let mut checks = Vec::new();
+        check_config_security(&config, &mut checks);
+        let dm_check = checks.iter().find(|c| c.name == "DM policy").unwrap();
+        assert!(matches!(dm_check.status, CheckStatus::Warn(_)));
+    }
+
+    #[test]
+    fn config_security_sandbox_disabled_warns() {
+        let mut config = Config::default();
+        config.sandbox.enabled = false;
+        let mut checks = Vec::new();
+        check_config_security(&config, &mut checks);
+        let sandbox_check = checks.iter().find(|c| c.name == "sandbox").unwrap();
+        assert!(matches!(sandbox_check.status, CheckStatus::Warn(_)));
+    }
+
+    #[test]
+    fn config_security_secret_detection_off_warns() {
+        let mut config = Config::default();
+        config.security.secret_detection = false;
+        let mut checks = Vec::new();
+        check_config_security(&config, &mut checks);
+        let check = checks
+            .iter()
+            .find(|c| c.name == "secret detection")
+            .unwrap();
+        assert!(matches!(check.status, CheckStatus::Warn(_)));
+    }
+
+    #[test]
+    fn config_security_empty_blocked_paths_warns() {
+        let mut config = Config::default();
+        config.security.blocked_paths.clear();
+        let mut checks = Vec::new();
+        check_config_security(&config, &mut checks);
+        let check = checks.iter().find(|c| c.name == "blocked paths").unwrap();
+        assert!(matches!(check.status, CheckStatus::Warn(_)));
+    }
+
+    #[test]
+    fn config_security_browser_no_sandbox_warns() {
+        let mut config = Config::default();
+        config.browser.enabled = true;
+        config.browser.no_sandbox = true;
+        let mut checks = Vec::new();
+        check_config_security(&config, &mut checks);
+        let check = checks.iter().find(|c| c.name == "browser sandbox").unwrap();
+        assert!(matches!(check.status, CheckStatus::Warn(_)));
+    }
+
+    #[test]
+    fn config_security_open_channel_policy_warns() {
+        let mut config = Config::default();
+        config
+            .gateway
+            .channel_policies
+            .insert("telegram".into(), crate::pairing::DmPolicy::Open);
+        let mut checks = Vec::new();
+        check_config_security(&config, &mut checks);
+        let check = checks
+            .iter()
+            .find(|c| c.name == "channel policies")
+            .unwrap();
+        assert!(matches!(check.status, CheckStatus::Warn(ref msg) if msg.contains("telegram")));
+    }
+
+    #[test]
+    fn config_security_high_rate_limits_warns() {
+        let mut config = Config::default();
+        config.security.action_limits.tool_calls_block = 1500;
+        let mut checks = Vec::new();
+        check_config_security(&config, &mut checks);
+        let check = checks.iter().find(|c| c.name == "rate limits").unwrap();
+        assert!(matches!(check.status, CheckStatus::Warn(_)));
+    }
+
+    #[test]
+    fn config_security_budget_set_passes() {
+        let mut config = Config::default();
+        config.budget.monthly_token_limit = 1_000_000;
+        let mut checks = Vec::new();
+        check_config_security(&config, &mut checks);
+        let check = checks.iter().find(|c| c.name.contains("budget")).unwrap();
+        assert!(matches!(check.status, CheckStatus::Pass));
+    }
+
+    #[test]
+    fn run_diagnostics_includes_security_category() {
+        let config = Config::default();
+        let report = run_diagnostics(&config);
+        let categories: std::collections::HashSet<&str> =
+            report.checks.iter().map(|c| c.category).collect();
+        assert!(categories.contains("Security"));
     }
 }
