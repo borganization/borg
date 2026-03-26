@@ -796,7 +796,7 @@ impl Default for WebConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            search_provider: "duckduckgo".into(),
+            search_provider: "auto".into(),
             search_api_key_env: None,
         }
     }
@@ -1510,7 +1510,7 @@ agent_name = "Buddy"
     fn default_web_config_values() {
         let cfg = WebConfig::default();
         assert!(cfg.enabled);
-        assert_eq!(cfg.search_provider, "duckduckgo");
+        assert_eq!(cfg.search_provider, "auto");
         assert!(cfg.search_api_key_env.is_none());
     }
 
@@ -1584,7 +1584,7 @@ enabled = false
 "#;
         let cfg: Config = toml::from_str(toml_str).expect("should parse");
         assert!(!cfg.web.enabled);
-        assert_eq!(cfg.web.search_provider, "duckduckgo");
+        assert_eq!(cfg.web.search_provider, "auto");
         assert!(cfg.web.search_api_key_env.is_none());
     }
 

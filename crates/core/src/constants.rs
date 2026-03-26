@@ -16,6 +16,10 @@ pub const COMPACTION_MARKER_TOKENS: usize = 200;
 /// Max characters from the transcript sent to the LLM summarizer.
 pub const MAX_TRANSCRIPT_CHARS: usize = 4000;
 
+/// Safety margin for compaction trigger: compact at 85% of budget to leave
+/// headroom for the next LLM response. Value is a fraction (0.0–1.0).
+pub const COMPACTION_SAFETY_MARGIN: f64 = 0.85;
+
 /// Max body size for gateway webhook requests (2 MB).
 pub const GATEWAY_MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
 

@@ -1,6 +1,7 @@
 pub mod api;
 pub mod parse;
 pub mod types;
+pub mod typing;
 pub mod verify;
 
 use anyhow::Result;

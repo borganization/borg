@@ -6,6 +6,7 @@ pub mod format;
 pub mod parse;
 pub mod polling;
 pub mod types;
+pub mod typing;
 pub mod verify;
 
 use anyhow::Result;
