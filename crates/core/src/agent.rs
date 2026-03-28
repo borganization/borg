@@ -1512,7 +1512,7 @@ impl Agent {
                 if let Some(result) =
                     crate::integrations::dispatch_tool_call(name, &args, &self.config).await
                 {
-                    return result.map(ToolOutput::Text).map_err(|e| anyhow::anyhow!(e));
+                    return result.map(ToolOutput::Text);
                 }
 
                 if let Some(block_msg) = check_tool_integrity(name) {

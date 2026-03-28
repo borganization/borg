@@ -1,3 +1,4 @@
+use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 
@@ -43,7 +44,7 @@ pub fn tool_definition() -> ToolDefinition {
     )
 }
 
-pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String> {
+pub async fn handle(arguments: &Value, config: &Config) -> Result<String> {
     let (client, token, action) =
         super::resolve_credential_and_action(arguments, config, "GMAIL_API_KEY")?;
 
@@ -60,7 +61,7 @@ pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String
         "modify_labels" => modify_labels(&client, &token, arguments).await,
         "trash" => trash_email(&client, &token, arguments).await,
         "get_thread" => get_thread(&client, &token, arguments).await,
-        _ => Err(format!("Unknown action: {action}")),
+        _ => bail!("Unknown action: {action}"),
     }
 }
 
@@ -73,13 +74,13 @@ fn base64_url_encode(data: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
 }
 
-fn base64_url_decode(data: &str) -> Result<String, String> {
+fn base64_url_decode(data: &str) -> Result<String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(data)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(data))
-        .map_err(|e| format!("base64 decode error: {e}"))?;
-    String::from_utf8(bytes).map_err(|e| format!("UTF-8 decode error: {e}"))
+        .context("base64 decode error")?;
+    String::from_utf8(bytes).context("UTF-8 decode error")
 }
 
 fn extract_header(message: &Value, name: &str) -> Option<String> {
@@ -152,13 +153,9 @@ fn extract_body_text_inner(payload: &Value, depth: u8) -> String {
 
 /// Build an RFC2822 raw message and return it base64url-encoded.
 /// Validates that no header value or content_type contains \r or \n (header injection prevention).
-fn build_raw_message(
-    headers: &[(&str, &str)],
-    body: &str,
-    content_type: &str,
-) -> Result<String, String> {
+fn build_raw_message(headers: &[(&str, &str)], body: &str, content_type: &str) -> Result<String> {
     if content_type.contains('\r') || content_type.contains('\n') {
-        return Err("Invalid content type: contains newline characters".to_string());
+        bail!("Invalid content type: contains newline characters");
     }
     let mut raw = String::new();
     raw.push_str("MIME-Version: 1.0\r\n");
@@ -168,7 +165,7 @@ fn build_raw_message(
             || value.contains('\r')
             || value.contains('\n')
         {
-            return Err(format!("Invalid '{name}': contains newline characters"));
+            bail!("Invalid '{name}': contains newline characters");
         }
         raw.push_str(&format!("{name}: {value}\r\n"));
     }
@@ -179,11 +176,7 @@ fn build_raw_message(
 }
 
 /// Fetch a message with full format (headers + body) for reply/forward.
-async fn fetch_message_full(
-    client: &Client,
-    token: &str,
-    message_id: &str,
-) -> Result<Value, String> {
+async fn fetch_message_full(client: &Client, token: &str, message_id: &str) -> Result<Value> {
     let message_id = validate_resource_id(message_id, "message_id")?;
     send_json(
         client
@@ -199,7 +192,7 @@ async fn fetch_message_full(
 // Actions
 // ---------------------------------------------------------------------------
 
-async fn send_email(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn send_email(client: &Client, token: &str, args: &Value) -> Result<String> {
     let to = require_str(args, "to")?;
     let subject = args["subject"].as_str().unwrap_or("(no subject)");
     let body_text = args["body"].as_str().unwrap_or("");
@@ -269,7 +262,7 @@ async fn send_email(client: &Client, token: &str, args: &Value) -> Result<String
     ))
 }
 
-async fn search_emails(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn search_emails(client: &Client, token: &str, args: &Value) -> Result<String> {
     let query = require_str(args, "query")?;
     let limit = args["limit"].as_u64().unwrap_or(10).min(50);
     let page_token = args["page_token"].as_str();
@@ -340,7 +333,7 @@ async fn search_emails(client: &Client, token: &str, args: &Value) -> Result<Str
     }
 }
 
-async fn read_email(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn read_email(client: &Client, token: &str, args: &Value) -> Result<String> {
     let message_id = require_str(args, "message_id")?;
     let result = fetch_message_full(client, token, message_id).await?;
 
@@ -368,7 +361,7 @@ async fn read_email(client: &Client, token: &str, args: &Value) -> Result<String
     Ok(output)
 }
 
-async fn reply_email(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn reply_email(client: &Client, token: &str, args: &Value) -> Result<String> {
     let message_id = require_str(args, "message_id")?;
     let body_text = args["body"].as_str().unwrap_or("");
     let body_html = args["body_html"].as_str();
@@ -430,7 +423,7 @@ async fn reply_email(client: &Client, token: &str, args: &Value) -> Result<Strin
     ))
 }
 
-async fn forward_email(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn forward_email(client: &Client, token: &str, args: &Value) -> Result<String> {
     let message_id = require_str(args, "message_id")?;
     let to = require_str(args, "to")?;
     let additional_body = args["body"].as_str().unwrap_or("");
@@ -483,7 +476,7 @@ async fn forward_email(client: &Client, token: &str, args: &Value) -> Result<Str
     ))
 }
 
-async fn create_draft(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn create_draft(client: &Client, token: &str, args: &Value) -> Result<String> {
     let to = require_str(args, "to")?;
     let subject = args["subject"].as_str().unwrap_or("(no subject)");
     let body_text = args["body"].as_str().unwrap_or("");
@@ -522,7 +515,7 @@ async fn create_draft(client: &Client, token: &str, args: &Value) -> Result<Stri
     ))
 }
 
-async fn list_drafts(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn list_drafts(client: &Client, token: &str, args: &Value) -> Result<String> {
     let limit = args["limit"].as_u64().unwrap_or(10).min(50);
 
     let result: Value = send_json(
@@ -546,7 +539,7 @@ async fn list_drafts(client: &Client, token: &str, args: &Value) -> Result<Strin
     ))
 }
 
-async fn send_draft(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn send_draft(client: &Client, token: &str, args: &Value) -> Result<String> {
     let draft_id = require_str(args, "draft_id")?;
     let draft_id = validate_resource_id(draft_id, "draft_id")?;
 
@@ -565,7 +558,7 @@ async fn send_draft(client: &Client, token: &str, args: &Value) -> Result<String
     ))
 }
 
-async fn list_labels(client: &Client, token: &str) -> Result<String, String> {
+async fn list_labels(client: &Client, token: &str) -> Result<String> {
     let result: Value = send_json(
         client.get(format!("{API_BASE}/labels")).bearer_auth(token),
         "Gmail",
@@ -585,7 +578,7 @@ async fn list_labels(client: &Client, token: &str) -> Result<String, String> {
     ))
 }
 
-async fn modify_labels(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn modify_labels(client: &Client, token: &str, args: &Value) -> Result<String> {
     let message_id = require_str(args, "message_id")?;
     let message_id = validate_resource_id(message_id, "message_id")?;
 
@@ -599,7 +592,7 @@ async fn modify_labels(client: &Client, token: &str, args: &Value) -> Result<Str
         .unwrap_or_default();
 
     if add.is_empty() && remove.is_empty() {
-        return Err("At least one of 'add_labels' or 'remove_labels' must be provided".to_string());
+        bail!("At least one of 'add_labels' or 'remove_labels' must be provided");
     }
 
     send_json(
@@ -627,7 +620,7 @@ async fn modify_labels(client: &Client, token: &str, args: &Value) -> Result<Str
     ))
 }
 
-async fn trash_email(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn trash_email(client: &Client, token: &str, args: &Value) -> Result<String> {
     let message_id = require_str(args, "message_id")?;
     let message_id = validate_resource_id(message_id, "message_id")?;
 
@@ -642,7 +635,7 @@ async fn trash_email(client: &Client, token: &str, args: &Value) -> Result<Strin
     Ok(format!("Message {message_id} moved to trash."))
 }
 
-async fn get_thread(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn get_thread(client: &Client, token: &str, args: &Value) -> Result<String> {
     let thread_id = require_str(args, "thread_id")?;
     let thread_id = validate_resource_id(thread_id, "thread_id")?;
 
@@ -888,7 +881,7 @@ mod tests {
             "text/plain",
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("newline"));
+        assert!(result.unwrap_err().to_string().contains("newline"));
 
         let result = build_raw_message(
             &[
@@ -921,7 +914,7 @@ mod tests {
             "text/plain\r\nX-Injected: true",
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("newline"));
+        assert!(result.unwrap_err().to_string().contains("newline"));
     }
 
     #[test]

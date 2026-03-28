@@ -1,3 +1,4 @@
+use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 
@@ -33,7 +34,7 @@ pub fn tool_definition() -> ToolDefinition {
     )
 }
 
-pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String> {
+pub async fn handle(arguments: &Value, config: &Config) -> Result<String> {
     let (client, token, action) =
         super::resolve_credential_and_action(arguments, config, "NOTION_API_KEY")?;
 
@@ -42,7 +43,7 @@ pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String
         "create_page" => create_page(&client, &token, arguments).await,
         "read_page" => read_page(&client, &token, arguments).await,
         "query_db" => query_database(&client, &token, arguments).await,
-        _ => Err(format!("Unknown action: {action}")),
+        _ => bail!("Unknown action: {action}"),
     }
 }
 
@@ -59,7 +60,7 @@ fn notion_request(
         .header("Notion-Version", NOTION_VERSION)
 }
 
-async fn search(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn search(client: &Client, token: &str, args: &Value) -> Result<String> {
     let query = args["query"].as_str().unwrap_or("");
 
     let result: Value = send_json(
@@ -87,7 +88,7 @@ async fn search(client: &Client, token: &str, args: &Value) -> Result<String, St
     ))
 }
 
-async fn create_page(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn create_page(client: &Client, token: &str, args: &Value) -> Result<String> {
     let title = require_str(args, "title")?;
     let content = args["content"].as_str().unwrap_or("");
     let parent_id = require_str(args, "parent_id")?;
@@ -128,7 +129,7 @@ async fn create_page(client: &Client, token: &str, args: &Value) -> Result<Strin
     Ok(format!("Page created: {title} (id: {id}, url: {url})"))
 }
 
-async fn read_page(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn read_page(client: &Client, token: &str, args: &Value) -> Result<String> {
     let page_id = require_str(args, "page_id")?;
     let page_id = validate_resource_id(page_id, "page_id")?;
 
@@ -160,7 +161,7 @@ async fn read_page(client: &Client, token: &str, args: &Value) -> Result<String,
 
     let mut content = String::new();
     if let Ok(resp) = blocks_resp {
-        let blocks: Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
+        let blocks: Value = resp.json().await.context("Parse error")?;
         if let Some(results) = blocks["results"].as_array() {
             for block in results {
                 if let Some(text) = extract_block_text(block) {
@@ -174,7 +175,7 @@ async fn read_page(client: &Client, token: &str, args: &Value) -> Result<String,
     Ok(format!("# {title}\n\n{content}"))
 }
 
-async fn query_database(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn query_database(client: &Client, token: &str, args: &Value) -> Result<String> {
     let database_id = require_str(args, "database_id")?;
     let database_id = validate_resource_id(database_id, "database_id")?;
 
