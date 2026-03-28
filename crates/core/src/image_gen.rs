@@ -240,7 +240,9 @@ async fn generate_fal(
     count: u32,
 ) -> Result<Vec<ImageResult>> {
     validate_model_name(&provider.model)?;
-    let client = Client::new();
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .build()?;
 
     // Parse size to width/height
     let (width, height) = parse_size(size.unwrap_or("1024x1024"));
@@ -322,9 +324,16 @@ async fn generate_fal(
 
     let result: FalResultResponse = result_resp.json().await?;
 
-    // Download images — no auth header on CDN URLs, with size cap
+    // Download images — no auth header on CDN URLs, with size cap and domain validation
     let mut images = Vec::new();
     for fal_img in result.images {
+        if !is_fal_domain(&fal_img.url) {
+            warn!(
+                "Skipping FAL image with untrusted CDN URL: {}",
+                fal_img.url
+            );
+            continue;
+        }
         match client.get(&fal_img.url).send().await {
             Ok(img_resp) if img_resp.status().is_success() => {
                 let bytes = img_resp.bytes().await?;

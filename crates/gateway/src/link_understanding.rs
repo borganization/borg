@@ -85,6 +85,14 @@ pub async fn fetch_link_content(url: &str, max_chars: usize, timeout_ms: u64) ->
 
     // Cap response body to prevent memory exhaustion
     const MAX_BODY_BYTES: usize = 2 * 1024 * 1024; // 2 MB
+
+    // Early rejection via Content-Length header (before downloading)
+    if let Some(cl) = resp.content_length() {
+        if cl > MAX_BODY_BYTES as u64 {
+            anyhow::bail!("Response too large (Content-Length: {cl} bytes)");
+        }
+    }
+
     let bytes = resp.bytes().await?;
     if bytes.len() > MAX_BODY_BYTES {
         anyhow::bail!("Response too large ({} bytes)", bytes.len());
