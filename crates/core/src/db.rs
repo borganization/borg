@@ -275,7 +275,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 14;
+    const CURRENT_VERSION: u32 = 15;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -329,6 +329,9 @@ impl Database {
         }
         if current < 14 {
             self.migrate_v14()?;
+        }
+        if current < 15 {
+            self.migrate_v15()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -780,6 +783,36 @@ impl Database {
         }
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_tasks_retry ON scheduled_tasks(status, retry_after);",
+        )?;
+        Ok(())
+    }
+
+    /// V15: Seed default scheduled tasks (monthly security audit)
+    fn migrate_v15(&self) -> Result<()> {
+        self.seed_default_tasks()?;
+        Ok(())
+    }
+
+    /// Create built-in default tasks. Uses INSERT OR IGNORE with a fixed ID to be idempotent.
+    fn seed_default_tasks(&self) -> Result<()> {
+        const SECURITY_AUDIT_TASK_ID: &str = "00000000-0000-4000-8000-5ec041700001";
+        const SECURITY_AUDIT_CRON: &str = "0 0 9 1 * *";
+        let next_run = crate::tasks::calculate_next_run("cron", SECURITY_AUDIT_CRON)?;
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO scheduled_tasks
+             (id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at, max_retries, timeout_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, 3, 300000)",
+            params![
+                SECURITY_AUDIT_TASK_ID,
+                "Monthly Security Audit",
+                "Run a full security audit and report findings. Check firewall, open ports, SSH config, file permissions, disk encryption, OS updates, and running services.",
+                "cron",
+                SECURITY_AUDIT_CRON,
+                "local",
+                next_run,
+                now,
+            ],
         )?;
         Ok(())
     }
@@ -2253,7 +2286,8 @@ mod tests {
         .expect("create task 2");
 
         let tasks = db.list_tasks().expect("list");
-        assert_eq!(tasks.len(), 2);
+        // +1 for the seeded Monthly Security Audit task
+        assert_eq!(tasks.len(), 3);
     }
 
     #[test]
@@ -2307,13 +2341,13 @@ mod tests {
         .expect("create");
 
         assert!(db.update_task_status("t1", "paused").expect("update"));
-        let tasks = db.list_tasks().expect("list");
-        assert_eq!(tasks[0].status, "paused");
+        let task = db.get_task_by_id("t1").expect("get").expect("found");
+        assert_eq!(task.status, "paused");
 
         db.update_task_next_run("t1", Some(999))
             .expect("update next_run");
-        let tasks = db.list_tasks().expect("list");
-        assert_eq!(tasks[0].next_run, Some(999));
+        let task = db.get_task_by_id("t1").expect("get").expect("found");
+        assert_eq!(task.next_run, Some(999));
     }
 
     #[test]
@@ -3863,5 +3897,41 @@ mod tests {
         let due = db.get_due_tasks(100).expect("due");
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, "t1");
+    }
+
+    #[test]
+    fn seed_default_tasks_creates_security_audit() {
+        let db = test_db();
+        // seed_default_tasks is called during migrate_v15 which runs in test_db(),
+        // so the task should already exist
+        let task = db
+            .get_task_by_id("00000000-0000-4000-8000-5ec041700001")
+            .expect("get")
+            .expect("task should exist");
+        assert_eq!(task.name, "Monthly Security Audit");
+        assert_eq!(task.schedule_type, "cron");
+        assert_eq!(task.schedule_expr, "0 0 9 1 * *");
+        assert_eq!(task.timezone, "local");
+        assert_eq!(task.status, "active");
+        assert_eq!(task.max_retries, 3);
+        assert_eq!(task.timeout_ms, 300_000);
+        assert!(task.next_run.is_some());
+        assert!(task.prompt.contains("security audit"));
+    }
+
+    #[test]
+    fn seed_default_tasks_is_idempotent() {
+        let db = test_db();
+        // Already seeded by migration; call again explicitly
+        db.seed_default_tasks().expect("second seed should succeed");
+        let tasks = db.list_tasks().expect("list");
+        let audit_count = tasks
+            .iter()
+            .filter(|t| t.id == "00000000-0000-4000-8000-5ec041700001")
+            .count();
+        assert_eq!(
+            audit_count, 1,
+            "should have exactly one security audit task"
+        );
     }
 }
