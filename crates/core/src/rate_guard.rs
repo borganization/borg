@@ -415,4 +415,85 @@ tool_calls_block = 10
         // Others should be defaults
         assert_eq!(limits.shell_commands_warn, 100);
     }
+
+    #[test]
+    fn test_validate_thresholds_valid_does_not_panic() {
+        let limits = ActionLimits::default();
+        // Should not panic — all warn < block
+        limits.validate_thresholds();
+    }
+
+    #[test]
+    fn test_validate_thresholds_inverted_does_not_panic() {
+        let limits = ActionLimits {
+            tool_calls_warn: 100,
+            tool_calls_block: 50, // warn >= block
+            ..Default::default()
+        };
+        // Should not panic — only logs a warning
+        limits.validate_thresholds();
+    }
+
+    #[test]
+    fn test_validate_thresholds_equal_does_not_panic() {
+        let limits = ActionLimits {
+            shell_commands_warn: 20,
+            shell_commands_block: 20, // warn == block
+            ..Default::default()
+        };
+        limits.validate_thresholds();
+    }
+
+    #[test]
+    fn test_saturating_add_at_max() {
+        let limits = ActionLimits {
+            tool_calls_warn: u32::MAX - 1,
+            tool_calls_block: u32::MAX,
+            ..Default::default()
+        };
+        let mut guard = SessionRateGuard::new(limits);
+        // Fill up to u32::MAX - 2 to get Allow
+        guard.counters.insert(ActionType::ToolCall, u32::MAX - 2);
+        // Next should warn at MAX-1
+        match guard.record(ActionType::ToolCall) {
+            RateDecision::Warn(_) => {}
+            other => panic!("Expected Warn, got {other:?}"),
+        }
+        // Next should block at MAX
+        match guard.record(ActionType::ToolCall) {
+            RateDecision::Block(_) => {}
+            other => panic!("Expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_all_action_types_independent() {
+        let limits = ActionLimits {
+            tool_calls_warn: 1,
+            tool_calls_block: 2,
+            shell_commands_warn: 1,
+            shell_commands_block: 2,
+            file_writes_warn: 1,
+            file_writes_block: 2,
+            memory_writes_warn: 1,
+            memory_writes_block: 2,
+            web_requests_warn: 1,
+            web_requests_block: 2,
+        };
+        let mut guard = SessionRateGuard::new(limits);
+
+        // Record one of each — all should warn at 1
+        for action in [
+            ActionType::ToolCall,
+            ActionType::ShellCommand,
+            ActionType::FileWrite,
+            ActionType::MemoryWrite,
+            ActionType::WebRequest,
+        ] {
+            match guard.record(action) {
+                RateDecision::Warn(_) => {}
+                other => panic!("Expected Warn for {action:?}, got {other:?}"),
+            }
+        }
+    }
 }

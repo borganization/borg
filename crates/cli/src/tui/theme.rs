@@ -109,3 +109,115 @@ pub fn user_message_style() -> Style {
         None => Style::default(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- format_elapsed --
+
+    #[test]
+    fn format_elapsed_seconds() {
+        assert_eq!(format_elapsed(0), "0s");
+        assert_eq!(format_elapsed(1), "1s");
+        assert_eq!(format_elapsed(59), "59s");
+    }
+
+    #[test]
+    fn format_elapsed_minutes() {
+        assert_eq!(format_elapsed(60), "1m");
+        assert_eq!(format_elapsed(61), "1m 1s");
+        assert_eq!(format_elapsed(90), "1m 30s");
+        assert_eq!(format_elapsed(120), "2m");
+        assert_eq!(format_elapsed(3599), "59m 59s");
+    }
+
+    #[test]
+    fn format_elapsed_hours() {
+        assert_eq!(format_elapsed(3600), "1h");
+        assert_eq!(format_elapsed(3660), "1h 1m");
+        assert_eq!(format_elapsed(7200), "2h");
+        assert_eq!(format_elapsed(7260), "2h 1m");
+        assert_eq!(format_elapsed(86400), "24h");
+    }
+
+    // -- style functions return expected modifiers/colors --
+
+    #[test]
+    fn bold_has_bold_modifier() {
+        let style = bold();
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn dim_has_dim_white_fg() {
+        let style = dim();
+        assert_eq!(style.fg, Some(DIM_WHITE));
+    }
+
+    #[test]
+    fn code_style_has_cyan_fg() {
+        assert_eq!(code_style().fg, Some(CYAN));
+    }
+
+    #[test]
+    fn tool_style_has_yellow_fg() {
+        assert_eq!(tool_style().fg, Some(YELLOW));
+    }
+
+    #[test]
+    fn success_style_has_green_fg() {
+        assert_eq!(success_style().fg, Some(GREEN));
+    }
+
+    #[test]
+    fn error_style_has_red_fg() {
+        assert_eq!(error_style().fg, Some(RED));
+    }
+
+    #[test]
+    fn tool_bullet_active_is_bold_green() {
+        let style = tool_bullet_active();
+        assert_eq!(style.fg, Some(TOOL_ACTIVE_GREEN));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn tool_bullet_done_matches_dim() {
+        assert_eq!(tool_bullet_done(), dim());
+    }
+
+    #[test]
+    fn popup_selected_has_bg_and_fg() {
+        let style = popup_selected();
+        assert!(style.bg.is_some());
+        assert_eq!(style.fg, Some(Color::White));
+    }
+
+    #[test]
+    fn file_mention_style_is_underlined_cyan() {
+        let style = file_mention_style();
+        assert_eq!(style.fg, Some(CYAN));
+        assert!(style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn check_style_is_bold_green() {
+        let style = check_style();
+        assert_eq!(style.fg, Some(TOOL_ACTIVE_GREEN));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn cross_style_is_bold_red() {
+        let style = cross_style();
+        assert_eq!(style.fg, Some(RED));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn thinking_border_has_gray_fg() {
+        let style = thinking_border_style();
+        assert_eq!(style.fg, Some(Color::Rgb(80, 80, 80)));
+    }
+}

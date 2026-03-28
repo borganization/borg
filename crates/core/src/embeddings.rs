@@ -705,4 +705,103 @@ mod tests {
             .1;
         assert!((a_score - 0.9).abs() < 1e-6);
     }
+
+    // -- EmbeddingProvider::from_config --
+
+    #[test]
+    fn from_config_disabled_returns_none() {
+        let config = EmbeddingsConfig {
+            enabled: false,
+            provider: Some("openai".to_string()),
+            ..Default::default()
+        };
+        assert!(EmbeddingProvider::from_config(&config).is_none());
+    }
+
+    #[test]
+    fn from_config_unknown_provider_returns_none() {
+        let config = EmbeddingsConfig {
+            enabled: true,
+            provider: Some("unknownprovider".to_string()),
+            api_key_env: Some("FAKE_KEY_FOR_TEST_XYZ".to_string()),
+            ..Default::default()
+        };
+        // Even if the env var exists, unknown provider has no endpoint
+        assert!(EmbeddingProvider::from_config(&config).is_none());
+    }
+
+    #[test]
+    fn from_config_no_api_key_returns_none() {
+        let config = EmbeddingsConfig {
+            enabled: true,
+            provider: Some("openai".to_string()),
+            api_key_env: Some("NONEXISTENT_EMBEDDING_KEY_ABC123".to_string()),
+            ..Default::default()
+        };
+        assert!(EmbeddingProvider::from_config(&config).is_none());
+    }
+
+    // -- default_env_var --
+
+    #[test]
+    fn default_env_var_known_providers() {
+        assert_eq!(default_env_var("openai"), "OPENAI_API_KEY");
+        assert_eq!(default_env_var("openrouter"), "OPENROUTER_API_KEY");
+        assert_eq!(default_env_var("gemini"), "GEMINI_API_KEY");
+    }
+
+    #[test]
+    fn default_env_var_unknown_falls_back() {
+        assert_eq!(default_env_var("somethingelse"), "OPENAI_API_KEY");
+    }
+
+    // -- config_fingerprint --
+
+    #[test]
+    fn config_fingerprint_deterministic() {
+        let config = EmbeddingsConfig {
+            enabled: true,
+            provider: Some("openai".to_string()),
+            ..Default::default()
+        };
+        let fp1 = config_fingerprint(&config);
+        let fp2 = config_fingerprint(&config);
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn config_fingerprint_changes_with_enabled() {
+        let c1 = EmbeddingsConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let c2 = EmbeddingsConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        assert_ne!(config_fingerprint(&c1), config_fingerprint(&c2));
+    }
+
+    // -- bytes_to_embedding edge case --
+
+    #[test]
+    fn bytes_to_embedding_unaligned_returns_empty() {
+        let result = bytes_to_embedding(&[1, 2, 3]); // 3 bytes, not aligned to 4
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn bytes_to_embedding_empty() {
+        let result = bytes_to_embedding(&[]);
+        assert!(result.is_empty());
+    }
+
+    // -- cosine_similarity edge case --
+
+    #[test]
+    fn cosine_similarity_zero_vector() {
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 2.0, 3.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
 }
