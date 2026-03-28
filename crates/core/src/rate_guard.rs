@@ -144,7 +144,7 @@ impl SessionRateGuard {
     /// Record an action and return the rate decision.
     pub fn record(&mut self, action: ActionType) -> RateDecision {
         let count = self.counters.entry(action).or_insert(0);
-        *count += 1;
+        *count = count.saturating_add(1);
         let current = *count;
 
         let (warn_threshold, block_threshold) = self.limits.limits_for(action);

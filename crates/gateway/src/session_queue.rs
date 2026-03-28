@@ -42,13 +42,14 @@ impl SessionQueue {
 
     /// Enqueue a unit of work for sequential processing within its session.
     /// Spawns a new consumer task if this is the first message for the session.
-    pub async fn enqueue(&self, session_key: String, work: WorkFn) {
+    /// Returns `false` if the queue is at capacity and the work was dropped.
+    pub async fn enqueue(&self, session_key: String, work: WorkFn) -> bool {
         let mut senders = self.senders.lock().await;
 
         // Try to send to existing consumer
         let work = if let Some(tx) = senders.get(&session_key) {
             match tx.send(work).await {
-                Ok(()) => return,
+                Ok(()) => return true,
                 Err(e) => {
                     // Channel closed — consumer exited, remove stale sender
                     senders.remove(&session_key);
@@ -64,7 +65,7 @@ impl SessionQueue {
             warn!(
                 "Session queue at capacity ({MAX_ACTIVE_SESSIONS}), dropping work for '{session_key}'"
             );
-            return;
+            return false;
         }
 
         // Spawn a new consumer for this session
@@ -75,7 +76,7 @@ impl SessionQueue {
 
         if tx.send(work).await.is_err() {
             warn!("Failed to enqueue first work item for session '{session_key}'");
-            return;
+            return false;
         }
 
         senders.insert(session_key, tx);
@@ -85,6 +86,8 @@ impl SessionQueue {
             cleanup_senders.lock().await.remove(&key);
             info!("Session queue for '{key}' cleaned up after idle timeout");
         });
+
+        true
     }
 }
 

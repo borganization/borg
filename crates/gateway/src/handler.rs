@@ -428,7 +428,18 @@ pub async fn invoke_agent_with_auto_reply(
 
     // Scan full text for injection BEFORE truncation so patterns spanning
     // the truncation boundary are still detected.
-    let injection_level = scan_for_injection(&cleaned_text);
+    // Cap scan input at 256 KB to prevent regex DoS on extremely large payloads.
+    const MAX_SCAN_BYTES: usize = 256 * 1024;
+    let scan_input = if cleaned_text.len() > MAX_SCAN_BYTES {
+        let mut end = MAX_SCAN_BYTES;
+        while end > 0 && !cleaned_text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &cleaned_text[..end]
+    } else {
+        &cleaned_text
+    };
+    let injection_level = scan_for_injection(scan_input);
 
     // Truncate inbound text to prevent excessive LLM token consumption
     const MAX_INBOUND_TEXT_BYTES: usize = 32 * 1024; // 32 KB
