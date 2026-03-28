@@ -1,3 +1,4 @@
+use anyhow::{bail, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 
@@ -32,7 +33,7 @@ pub fn tool_definition() -> ToolDefinition {
     )
 }
 
-pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String> {
+pub async fn handle(arguments: &Value, config: &Config) -> Result<String> {
     let (client, token, action) =
         super::resolve_credential_and_action(arguments, config, "MS_GRAPH_TOKEN")?;
 
@@ -40,11 +41,11 @@ pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String
         "send" => send_email(&client, &token, arguments).await,
         "search" => search_emails(&client, &token, arguments).await,
         "read" => read_email(&client, &token, arguments).await,
-        _ => Err(format!("Unknown action: {action}")),
+        _ => bail!("Unknown action: {action}"),
     }
 }
 
-async fn send_email(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn send_email(client: &Client, token: &str, args: &Value) -> Result<String> {
     let to = require_str(args, "to")?;
     let subject = args["subject"].as_str().unwrap_or("(no subject)");
     let body = args["body"].as_str().unwrap_or("");
@@ -71,7 +72,7 @@ async fn send_email(client: &Client, token: &str, args: &Value) -> Result<String
     Ok(format!("Email sent to {to}"))
 }
 
-async fn search_emails(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn search_emails(client: &Client, token: &str, args: &Value) -> Result<String> {
     let query = require_str(args, "query")?;
     let limit = args["limit"].as_u64().unwrap_or(10);
 
@@ -102,7 +103,7 @@ async fn search_emails(client: &Client, token: &str, args: &Value) -> Result<Str
     ))
 }
 
-async fn read_email(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn read_email(client: &Client, token: &str, args: &Value) -> Result<String> {
     let message_id = require_str(args, "message_id")?;
     let message_id = validate_resource_id(message_id, "message_id")?;
 

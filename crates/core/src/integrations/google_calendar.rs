@@ -1,3 +1,4 @@
+use anyhow::{bail, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 
@@ -32,7 +33,7 @@ pub fn tool_definition() -> ToolDefinition {
     )
 }
 
-pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String> {
+pub async fn handle(arguments: &Value, config: &Config) -> Result<String> {
     let (client, token, action) =
         super::resolve_credential_and_action(arguments, config, "GOOGLE_CALENDAR_TOKEN")?;
 
@@ -40,11 +41,11 @@ pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String
         "list" => list_events(&client, &token, arguments).await,
         "create" => create_event(&client, &token, arguments).await,
         "delete" => delete_event(&client, &token, arguments).await,
-        _ => Err(format!("Unknown action: {action}")),
+        _ => bail!("Unknown action: {action}"),
     }
 }
 
-async fn list_events(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn list_events(client: &Client, token: &str, args: &Value) -> Result<String> {
     let days = args["days"].as_u64().unwrap_or(7);
     let now = chrono::Utc::now();
     let time_min = now.to_rfc3339();
@@ -81,7 +82,7 @@ async fn list_events(client: &Client, token: &str, args: &Value) -> Result<Strin
     ))
 }
 
-async fn create_event(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn create_event(client: &Client, token: &str, args: &Value) -> Result<String> {
     let summary = require_str(args, "summary")?;
     let start = require_str(args, "start")?;
     let end = require_str(args, "end")?;
@@ -107,7 +108,7 @@ async fn create_event(client: &Client, token: &str, args: &Value) -> Result<Stri
     Ok(format!("Event created: {summary} (id: {id})"))
 }
 
-async fn delete_event(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn delete_event(client: &Client, token: &str, args: &Value) -> Result<String> {
     let event_id = require_str(args, "event_id")?;
     let event_id = validate_resource_id(event_id, "event_id")?;
 

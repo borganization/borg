@@ -1,3 +1,4 @@
+use anyhow::{bail, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 
@@ -30,7 +31,7 @@ pub fn tool_definition() -> ToolDefinition {
     )
 }
 
-pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String> {
+pub async fn handle(arguments: &Value, config: &Config) -> Result<String> {
     let (client, token, action) =
         super::resolve_credential_and_action(arguments, config, "LINEAR_API_KEY")?;
 
@@ -38,7 +39,7 @@ pub async fn handle(arguments: &Value, config: &Config) -> Result<String, String
         "list" => list_issues(&client, &token, arguments).await,
         "create" => create_issue(&client, &token, arguments).await,
         "search" => search_issues(&client, &token, arguments).await,
-        _ => Err(format!("Unknown action: {action}")),
+        _ => bail!("Unknown action: {action}"),
     }
 }
 
@@ -47,7 +48,7 @@ async fn graphql_request(
     token: &str,
     query: &str,
     variables: Value,
-) -> Result<Value, String> {
+) -> Result<Value> {
     let result: Value = send_json(
         client
             .post(GRAPHQL_URL)
@@ -63,14 +64,14 @@ async fn graphql_request(
                 .iter()
                 .filter_map(|e| e["message"].as_str())
                 .collect();
-            return Err(format!("GraphQL errors: {}", msgs.join("; ")));
+            bail!("GraphQL errors: {}", msgs.join("; "));
         }
     }
 
     Ok(result["data"].clone())
 }
 
-async fn list_issues(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn list_issues(client: &Client, token: &str, args: &Value) -> Result<String> {
     let team_filter = args["team_id"]
         .as_str()
         .map(|id| validate_resource_id(id, "team_id"))
@@ -111,7 +112,7 @@ async fn list_issues(client: &Client, token: &str, args: &Value) -> Result<Strin
     ))
 }
 
-async fn create_issue(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn create_issue(client: &Client, token: &str, args: &Value) -> Result<String> {
     let title = require_str(args, "title")?;
     let description = args["description"].as_str().unwrap_or("");
     let team_id = require_str(args, "team_id")?;
@@ -133,7 +134,7 @@ async fn create_issue(client: &Client, token: &str, args: &Value) -> Result<Stri
     let data = graphql_request(client, token, query, variables).await?;
 
     if data["issueCreate"]["success"].as_bool() != Some(true) {
-        return Err("Failed to create issue".to_string());
+        bail!("Failed to create issue");
     }
 
     let issue = &data["issueCreate"]["issue"];
@@ -143,7 +144,7 @@ async fn create_issue(client: &Client, token: &str, args: &Value) -> Result<Stri
     Ok(format!("Issue created: {identifier} — {title}\n{url}"))
 }
 
-async fn search_issues(client: &Client, token: &str, args: &Value) -> Result<String, String> {
+async fn search_issues(client: &Client, token: &str, args: &Value) -> Result<String> {
     let search_query = require_str(args, "query")?;
 
     let query = r#"query($query: String!) {

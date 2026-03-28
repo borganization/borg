@@ -6,9 +6,10 @@ macro_rules! integration_handle_tests {
             let config = crate::config::Config::default();
             let args = serde_json::json!({"action": "test"});
             let result = super::handle(&args, &config).await;
-            assert_eq!(
-                result.unwrap_err(),
-                format!("{} not configured", $credential)
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("{} not configured", $credential)),
+                "unexpected error: {err}"
             );
         }
 
@@ -25,9 +26,10 @@ macro_rules! integration_handle_tests {
             }
             let args = serde_json::json!({"action": "nonexistent_action"});
             let result = super::handle(&args, &config).await;
-            assert_eq!(
-                result.unwrap_err(),
-                "Unknown action: nonexistent_action"
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("Unknown action: nonexistent_action"),
+                "unexpected error: {err}"
             );
         }
 
@@ -44,7 +46,11 @@ macro_rules! integration_handle_tests {
             }
             let args = serde_json::json!({});
             let result = super::handle(&args, &config).await;
-            assert_eq!(result.unwrap_err(), "Missing 'action' parameter");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("Missing 'action' parameter"),
+                "unexpected error: {err}"
+            );
         }
     };
 }
@@ -56,13 +62,14 @@ pub mod linear;
 pub mod notion;
 pub mod outlook;
 
+use anyhow::{bail, Result};
 use serde_json::Value;
 
 /// Extract a required string argument, returning a consistent error message.
-pub fn require_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, String> {
+pub fn require_str<'a>(args: &'a Value, field: &str) -> Result<&'a str> {
     args[field]
         .as_str()
-        .ok_or_else(|| format!("Missing '{field}'"))
+        .ok_or_else(|| anyhow::anyhow!("Missing '{field}'"))
 }
 
 /// Format an array of JSON values into a list string with a header.
@@ -85,22 +92,22 @@ pub fn resolve_credential_and_action<'a>(
     arguments: &'a Value,
     config: &crate::config::Config,
     credential_name: &str,
-) -> Result<(reqwest::Client, String, &'a str), String> {
+) -> Result<(reqwest::Client, String, &'a str)> {
     let token = config
         .resolve_credential_or_env(credential_name)
-        .ok_or_else(|| format!("{credential_name} not configured"))?;
+        .ok_or_else(|| anyhow::anyhow!("{credential_name} not configured"))?;
     let action = arguments["action"]
         .as_str()
-        .ok_or_else(|| "Missing 'action' parameter".to_string())?;
+        .ok_or_else(|| anyhow::anyhow!("Missing 'action' parameter"))?;
     Ok((reqwest::Client::new(), token, action))
 }
 
 /// Validate that an API resource ID contains only safe characters
 /// (alphanumeric, hyphens, underscores, dots). Prevents path traversal
 /// when IDs are interpolated into API URLs.
-pub fn validate_resource_id<'a>(id: &'a str, field_name: &str) -> Result<&'a str, String> {
+pub fn validate_resource_id<'a>(id: &'a str, field_name: &str) -> Result<&'a str> {
     if id.is_empty() {
-        return Err(format!("Empty {field_name}"));
+        bail!("Empty {field_name}");
     }
     if id
         .chars()
@@ -108,7 +115,7 @@ pub fn validate_resource_id<'a>(id: &'a str, field_name: &str) -> Result<&'a str
     {
         Ok(id)
     } else {
-        Err(format!("Invalid {field_name}: contains illegal characters"))
+        bail!("Invalid {field_name}: contains illegal characters");
     }
 }
 
@@ -141,7 +148,7 @@ macro_rules! integration_dispatch {
             tool_name: &str,
             arguments: &Value,
             config: &crate::config::Config,
-        ) -> Option<Result<String, String>> {
+        ) -> Option<Result<String>> {
             match tool_name {
                 $($name => Some($module::handle(arguments, config).await),)+
                 _ => None,
