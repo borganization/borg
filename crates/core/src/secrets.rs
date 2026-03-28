@@ -1,66 +1,36 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-fn compile_regex(pattern: &str) -> Regex {
-    Regex::new(pattern).unwrap_or_else(|e| panic!("bad regex: {e}"))
-}
-
 struct SecretPattern {
     regex: Regex,
     label: &'static str,
 }
 
 static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
-    vec![
-        SecretPattern {
-            regex: compile_regex(r"AKIA[0-9A-Z]{16}"),
-            label: "AWS Access Key",
-        },
-        SecretPattern {
-            regex: compile_regex(r"(?:ghp|ghs|gho|ghu|ghm)_[A-Za-z0-9_]{36,}"),
-            label: "GitHub Token",
-        },
-        SecretPattern {
-            regex: compile_regex(r"sk[-_]ant[-_][A-Za-z0-9_-]{32,}"),
-            label: "Anthropic API Key",
-        },
-        SecretPattern {
-            regex: compile_regex(r"sk[-_]proj[-_][A-Za-z0-9_-]{32,}"),
-            label: "OpenAI Project Key",
-        },
-        SecretPattern {
-            regex: compile_regex(r"sk-[A-Za-z0-9]{48,}"),
-            label: "API Key",
-        },
-        SecretPattern {
-            regex: compile_regex(
-                r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
-            ),
-            label: "JWT",
-        },
-        SecretPattern {
-            regex: compile_regex(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"),
-            label: "Private Key",
-        },
-        SecretPattern {
-            regex: compile_regex(r"xox[bpsar]-[A-Za-z0-9-]{24,}"),
-            label: "Slack Token",
-        },
-        SecretPattern {
-            regex: compile_regex(r#"(?:password|passwd|pwd)\s*[=:]\s*"[^"]{8,}""#),
-            label: "Quoted Password",
-        },
-        SecretPattern {
-            regex: compile_regex(r"(?:password|passwd|pwd)\s*[=:]\s*(\S{8,64})"),
-            label: "Password Assignment",
-        },
-        SecretPattern {
-            regex: compile_regex(
-                r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|mssql)://[^\s]{8,}",
-            ),
-            label: "Database Connection String",
-        },
-    ]
+    let patterns: Vec<(&str, &str)> = vec![
+        (r"AKIA[0-9A-Z]{16}", "AWS Access Key"),
+        (r"(?:ghp|ghs|gho|ghu|ghm)_[A-Za-z0-9_]{36,}", "GitHub Token"),
+        (r"sk[-_]ant[-_][A-Za-z0-9_-]{32,}", "Anthropic API Key"),
+        (r"sk[-_]proj[-_][A-Za-z0-9_-]{32,}", "OpenAI Project Key"),
+        (r"sk-[A-Za-z0-9]{48,}", "API Key"),
+        (r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}", "JWT"),
+        (r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----", "Private Key"),
+        (r"xox[bpsar]-[A-Za-z0-9-]{24,}", "Slack Token"),
+        (r#"(?:password|passwd|pwd)\s*[=:]\s*"[^"]{8,}""#, "Quoted Password"),
+        (r"(?:password|passwd|pwd)\s*[=:]\s*(\S{8,64})", "Password Assignment"),
+        (r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|mssql)://[^\s]{8,}", "Database Connection String"),
+    ];
+
+    patterns
+        .into_iter()
+        .filter_map(|(pattern, label)| match Regex::new(pattern) {
+            Ok(regex) => Some(SecretPattern { regex, label }),
+            Err(e) => {
+                tracing::error!("Failed to compile secret pattern '{label}': {e} — skipping");
+                None
+            }
+        })
+        .collect()
 });
 
 /// Redact detected secrets in text, replacing matches with `[REDACTED <label>]`.

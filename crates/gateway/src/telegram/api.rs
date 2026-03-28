@@ -101,6 +101,10 @@ impl TelegramClient {
         message_thread_id: Option<i64>,
         reply_to_message_id: Option<i64>,
     ) -> Result<()> {
+        if self.circuit_breaker.is_open() {
+            bail!("Telegram circuit breaker open, skipping send_message");
+        }
+
         let body = SendMessageRequest {
             chat_id,
             text: text.to_string(),
@@ -145,6 +149,7 @@ impl TelegramClient {
                 .context("Failed to parse sendMessage response")?;
 
             if resp_body.ok {
+                self.circuit_breaker.record_success();
                 return Ok(());
             }
 
@@ -152,13 +157,14 @@ impl TelegramClient {
             if status.as_u16() == 429 {
                 attempts += 1;
                 if attempts > MAX_SEND_RETRIES {
+                    self.circuit_breaker.record_failure(429);
                     bail!("sendMessage rate limited after {MAX_SEND_RETRIES} retries");
                 }
                 let retry_secs = resp_body.retry_after.unwrap_or(5).min(MAX_RETRY_AFTER_SECS);
-                let jitter_ms = std::time::SystemTime::now()
+                let jitter_ms = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .subsec_millis() as u64
+                    .subsec_nanos() as u64)
                     % 1000;
                 warn!("Telegram rate limited, retry after {retry_secs}s +{jitter_ms}ms jitter (attempt {attempts}/{MAX_SEND_RETRIES})");
                 tokio::time::sleep(
@@ -168,6 +174,7 @@ impl TelegramClient {
                 continue;
             }
 
+            self.circuit_breaker.record_failure(status.as_u16());
             bail!(
                 "sendMessage failed ({}): {}",
                 status.as_u16(),

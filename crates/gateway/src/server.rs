@@ -584,6 +584,7 @@ impl GatewayServer {
                     tokio::time::interval_at(start, Duration::from_millis(poll_interval_ms));
 
                 let mut consecutive_errors: u32 = 0;
+                let mut total_error_cycles: u32 = 0;
                 let initial_backoff = Duration::from_secs(5);
                 let max_backoff = Duration::from_secs(300);
                 let max_consecutive_errors: u32 = 10;
@@ -604,9 +605,17 @@ impl GatewayServer {
                                 );
 
                                 if consecutive_errors >= max_consecutive_errors {
+                                    total_error_cycles += 1;
+                                    if total_error_cycles >= 3 {
+                                        tracing::error!(
+                                            "Poll loop for '{}' permanently failed after {} error cycles ({} total errors). Restart gateway to retry.",
+                                            channel_name, total_error_cycles, consecutive_errors + (total_error_cycles - 1) * max_consecutive_errors
+                                        );
+                                        break;
+                                    }
                                     warn!(
-                                        "Poll loop for '{}' hit {} consecutive errors, pausing for {:?}",
-                                        channel_name, consecutive_errors, max_backoff
+                                        "Poll loop for '{}' hit {} consecutive errors (cycle {}/3), pausing for {:?}",
+                                        channel_name, consecutive_errors, total_error_cycles, max_backoff
                                     );
                                     tokio::time::sleep(max_backoff).await;
                                     consecutive_errors = 0;

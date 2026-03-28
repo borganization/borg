@@ -127,9 +127,10 @@ fn config_fingerprint(config: &EmbeddingsConfig) -> String {
 /// Automatically re-resolves if the config has changed since the last call.
 pub fn get_or_init_provider(config: &EmbeddingsConfig) -> Option<EmbeddingProvider> {
     let fingerprint = config_fingerprint(config);
-    let mut cache = PROVIDER_CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cache = PROVIDER_CACHE.lock().unwrap_or_else(|e| {
+        tracing::warn!("Embedding provider cache mutex was poisoned, recovering");
+        e.into_inner()
+    });
     if let Some((cached_fp, cached_provider)) = &*cache {
         if *cached_fp == fingerprint {
             return cached_provider.clone();
@@ -142,9 +143,10 @@ pub fn get_or_init_provider(config: &EmbeddingsConfig) -> Option<EmbeddingProvid
 
 /// Clear the cached provider so the next call to `get_or_init_provider` re-resolves.
 pub fn invalidate_provider_cache() {
-    let mut cache = PROVIDER_CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cache = PROVIDER_CACHE.lock().unwrap_or_else(|e| {
+        tracing::warn!("Embedding provider cache mutex was poisoned, recovering");
+        e.into_inner()
+    });
     *cache = None;
 }
 

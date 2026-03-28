@@ -58,6 +58,9 @@ pub const INJECTION_FLAGGED_THRESHOLD: u8 = 20;
 /// Rough bytes-per-token estimate for truncation math.
 pub const APPROX_BYTES_PER_TOKEN: usize = 4;
 
+/// Maximum input size (bytes) for injection scanning to prevent ReDoS.
+pub const MAX_INJECTION_SCAN_BYTES: usize = 64 * 1024;
+
 // Telegram polling backoff parameters
 pub const TELEGRAM_MIN_BACKOFF: Duration = Duration::from_secs(2);
 pub const TELEGRAM_MAX_BACKOFF: Duration = Duration::from_secs(30);
