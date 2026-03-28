@@ -305,3 +305,198 @@ fn save_last_rowid(state_path: &std::path::Path, rowid: i64) {
         warn!("Failed to save iMessage state: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- load_last_rowid / save_last_rowid --
+
+    #[test]
+    fn load_last_rowid_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+        assert_eq!(load_last_rowid(&path), 0);
+    }
+
+    #[test]
+    fn save_and_load_last_rowid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        save_last_rowid(&path, 42);
+        assert_eq!(load_last_rowid(&path), 42);
+    }
+
+    #[test]
+    fn load_last_rowid_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, "not json at all").unwrap();
+        assert_eq!(load_last_rowid(&path), 0);
+    }
+
+    #[test]
+    fn load_last_rowid_missing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"other_key": 99}"#).unwrap();
+        assert_eq!(load_last_rowid(&path), 0);
+    }
+
+    #[test]
+    fn save_last_rowid_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        save_last_rowid(&path, 10);
+        save_last_rowid(&path, 20);
+        assert_eq!(load_last_rowid(&path), 20);
+    }
+
+    // -- evaluate_message --
+
+    fn make_payload(
+        rowid: i64,
+        text: Option<&str>,
+        sender: Option<&str>,
+        is_from_me: bool,
+        chat_identifier: Option<&str>,
+    ) -> IMessagePayload {
+        IMessagePayload {
+            rowid,
+            text: text.map(|t| t.to_string()),
+            sender: sender.map(|s| s.to_string()),
+            is_from_me,
+            chat_identifier: chat_identifier.map(|c| c.to_string()),
+            is_group: false,
+        }
+    }
+
+    #[test]
+    fn evaluate_drops_empty_text() {
+        let payload = make_payload(1, None, Some("+1234"), false, Some("chat1"));
+        let mut echo = EchoCache::new();
+        let mut self_chat = SelfChatCache::new();
+        match evaluate_message(&payload, &mut echo, &mut self_chat) {
+            InboundDecision::Drop { reason } => assert!(reason.contains("empty")),
+            InboundDecision::Dispatch { .. } => panic!("expected Drop"),
+        }
+    }
+
+    #[test]
+    fn evaluate_drops_whitespace_only_text() {
+        let payload = make_payload(1, Some("   "), Some("+1234"), false, Some("chat1"));
+        let mut echo = EchoCache::new();
+        let mut self_chat = SelfChatCache::new();
+        match evaluate_message(&payload, &mut echo, &mut self_chat) {
+            InboundDecision::Drop { reason } => assert!(reason.contains("empty")),
+            InboundDecision::Dispatch { .. } => panic!("expected Drop"),
+        }
+    }
+
+    #[test]
+    fn evaluate_drops_from_me() {
+        let payload = make_payload(1, Some("hello"), Some("+1234"), true, Some("chat1"));
+        let mut echo = EchoCache::new();
+        let mut self_chat = SelfChatCache::new();
+        match evaluate_message(&payload, &mut echo, &mut self_chat) {
+            InboundDecision::Drop { reason } => assert!(reason.contains("is_from_me")),
+            InboundDecision::Dispatch { .. } => panic!("expected Drop"),
+        }
+    }
+
+    #[test]
+    fn evaluate_drops_echo() {
+        let payload = make_payload(1, Some("hello"), Some("+1234"), false, Some("chat1"));
+        let mut echo = EchoCache::new();
+        let mut self_chat = SelfChatCache::new();
+        echo.remember("hello", None);
+        match evaluate_message(&payload, &mut echo, &mut self_chat) {
+            InboundDecision::Drop { reason } => assert!(reason.contains("echo")),
+            InboundDecision::Dispatch { .. } => panic!("expected Drop"),
+        }
+    }
+
+    #[test]
+    fn evaluate_drops_self_chat_echo() {
+        let payload = make_payload(1, Some("hello"), Some("+1234"), false, Some("chat1"));
+        let mut echo = EchoCache::new();
+        let mut self_chat = SelfChatCache::new();
+        self_chat.remember("hello", "chat1");
+        match evaluate_message(&payload, &mut echo, &mut self_chat) {
+            InboundDecision::Drop { reason } => assert!(reason.contains("self-chat")),
+            InboundDecision::Dispatch { .. } => panic!("expected Drop"),
+        }
+    }
+
+    #[test]
+    fn evaluate_drops_reflected_content() {
+        let payload = make_payload(
+            1,
+            Some("<thinking>leaked thought</thinking>"),
+            Some("+1234"),
+            false,
+            Some("chat1"),
+        );
+        let mut echo = EchoCache::new();
+        let mut self_chat = SelfChatCache::new();
+        match evaluate_message(&payload, &mut echo, &mut self_chat) {
+            InboundDecision::Drop { reason } => assert!(reason.contains("reflected")),
+            InboundDecision::Dispatch { .. } => panic!("expected Drop"),
+        }
+    }
+
+    #[test]
+    fn evaluate_dispatches_clean_message() {
+        let payload = make_payload(1, Some("hello"), Some("+1234"), false, Some("chat1"));
+        let mut echo = EchoCache::new();
+        let mut self_chat = SelfChatCache::new();
+        match evaluate_message(&payload, &mut echo, &mut self_chat) {
+            InboundDecision::Dispatch {
+                sender_id,
+                text,
+                channel_id,
+            } => {
+                assert_eq!(sender_id, "+1234");
+                assert_eq!(text, "hello");
+                assert_eq!(channel_id, "chat1");
+            }
+            InboundDecision::Drop { reason } => panic!("expected Dispatch, got Drop: {reason}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_uses_unknown_for_missing_sender() {
+        let payload = make_payload(1, Some("hello"), None, false, Some("chat1"));
+        let mut echo = EchoCache::new();
+        let mut self_chat = SelfChatCache::new();
+        match evaluate_message(&payload, &mut echo, &mut self_chat) {
+            InboundDecision::Dispatch { sender_id, .. } => {
+                assert_eq!(sender_id, "unknown");
+            }
+            InboundDecision::Drop { .. } => panic!("expected Dispatch"),
+        }
+    }
+
+    #[test]
+    fn evaluate_uses_unknown_for_missing_chat_id() {
+        let payload = make_payload(1, Some("hello"), Some("+1234"), false, None);
+        let mut echo = EchoCache::new();
+        let mut self_chat = SelfChatCache::new();
+        match evaluate_message(&payload, &mut echo, &mut self_chat) {
+            InboundDecision::Dispatch { channel_id, .. } => {
+                assert_eq!(channel_id, "unknown");
+            }
+            InboundDecision::Drop { .. } => panic!("expected Dispatch"),
+        }
+    }
+
+    #[test]
+    fn evaluate_from_me_populates_self_chat_cache() {
+        let payload = make_payload(1, Some("my message"), Some("+1234"), true, Some("chat1"));
+        let mut echo = EchoCache::new();
+        let mut self_chat = SelfChatCache::new();
+        evaluate_message(&payload, &mut echo, &mut self_chat);
+        // Now the self-chat cache should catch this
+        assert!(self_chat.is_self_echo("my message", "chat1"));
+    }
+}

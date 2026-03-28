@@ -972,4 +972,93 @@ mod tests {
         // When only the mention remains, we return original text
         assert_eq!(text, "@mybot");
     }
+
+    // -- InboundMessage::session_key --
+
+    #[test]
+    fn session_key_format() {
+        let msg = InboundMessage {
+            sender_id: "user42".to_string(),
+            text: "hello".to_string(),
+            channel_id: None,
+            thread_id: None,
+            message_id: None,
+            thread_ts: None,
+            attachments: Vec::new(),
+            reaction: None,
+            metadata: serde_json::Value::Null,
+            peer_kind: None,
+        };
+        assert_eq!(msg.session_key("telegram", "main"), "telegram:user42:main");
+    }
+
+    #[test]
+    fn session_key_different_channels() {
+        let msg = InboundMessage {
+            sender_id: "u1".to_string(),
+            text: "hi".to_string(),
+            channel_id: None,
+            thread_id: None,
+            message_id: None,
+            thread_ts: None,
+            attachments: Vec::new(),
+            reaction: None,
+            metadata: serde_json::Value::Null,
+            peer_kind: None,
+        };
+        assert_ne!(
+            msg.session_key("telegram", "main"),
+            msg.session_key("slack", "main")
+        );
+    }
+
+    #[test]
+    fn session_key_different_subs() {
+        let msg = InboundMessage {
+            sender_id: "u1".to_string(),
+            text: "hi".to_string(),
+            channel_id: None,
+            thread_id: None,
+            message_id: None,
+            thread_ts: None,
+            attachments: Vec::new(),
+            reaction: None,
+            metadata: serde_json::Value::Null,
+            peer_kind: None,
+        };
+        assert_ne!(
+            msg.session_key("telegram", "main"),
+            msg.session_key("telegram", "thread-123")
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_empty_string() {
+        assert_eq!(
+            sanitize_filename(&Some(String::new())),
+            Some("attachment".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_double_dots() {
+        assert_eq!(
+            sanitize_filename(&Some("file..name.txt".to_string())),
+            Some("attachment".to_string())
+        );
+    }
+
+    #[test]
+    fn inbound_message_peer_kind_deserialized() {
+        let json = r#"{"sender_id": "u1", "text": "hi", "peer_kind": "group"}"#;
+        let msg: InboundMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.peer_kind.as_deref(), Some("group"));
+    }
+
+    #[test]
+    fn inbound_message_metadata_object() {
+        let json = r#"{"sender_id": "u1", "text": "hi", "metadata": {"key": "val"}}"#;
+        let msg: InboundMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.metadata["key"], "val");
+    }
 }

@@ -123,3 +123,114 @@ pub enum InstallEvent {
     Complete { id: String },
     Error { id: String, message: String },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- PluginKind --
+
+    #[test]
+    fn plugin_kind_display() {
+        assert_eq!(PluginKind::Channel.to_string(), "channel");
+        assert_eq!(PluginKind::Tool.to_string(), "tool");
+    }
+
+    #[test]
+    fn plugin_kind_equality() {
+        assert_eq!(PluginKind::Channel, PluginKind::Channel);
+        assert_ne!(PluginKind::Channel, PluginKind::Tool);
+    }
+
+    // -- Category --
+
+    #[test]
+    fn category_display() {
+        assert_eq!(Category::Messaging.to_string(), "MESSAGING");
+        assert_eq!(Category::Email.to_string(), "EMAIL");
+        assert_eq!(Category::Productivity.to_string(), "PRODUCTIVITY");
+    }
+
+    // -- Platform --
+
+    #[test]
+    fn platform_all_is_always_available() {
+        assert!(Platform::All.is_available());
+    }
+
+    #[test]
+    fn platform_all_has_no_label() {
+        assert!(Platform::All.label().is_none());
+    }
+
+    #[test]
+    fn platform_macos_has_label() {
+        assert_eq!(Platform::MacOS.label(), Some("macOS only"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn platform_macos_available_on_macos() {
+        assert!(Platform::MacOS.is_available());
+    }
+
+    // -- TemplateTarget --
+
+    #[test]
+    fn template_target_base_dir_channels() {
+        let dir = std::path::Path::new("/home/user/.borg");
+        assert_eq!(
+            TemplateTarget::Channels.base_dir(dir),
+            std::path::PathBuf::from("/home/user/.borg/channels")
+        );
+    }
+
+    #[test]
+    fn template_target_base_dir_tools() {
+        let dir = std::path::Path::new("/home/user/.borg");
+        assert_eq!(
+            TemplateTarget::Tools.base_dir(dir),
+            std::path::PathBuf::from("/home/user/.borg/tools")
+        );
+    }
+
+    // -- InstallResult --
+
+    #[test]
+    fn install_result_default_is_empty() {
+        let result = InstallResult::default();
+        assert!(result.notes.is_empty());
+        assert!(result.credential_entries.is_empty());
+        assert!(result.file_hashes.is_empty());
+    }
+
+    // -- CredentialSpec --
+
+    #[test]
+    fn credential_spec_fields() {
+        let spec = CredentialSpec {
+            key: "SLACK_TOKEN",
+            label: "Slack Bot Token",
+            help_url: "https://api.slack.com",
+            is_optional: false,
+        };
+        assert_eq!(spec.key, "SLACK_TOKEN");
+        assert!(!spec.is_optional);
+    }
+
+    // -- Serde roundtrip --
+
+    #[test]
+    fn plugin_kind_serde_roundtrip() {
+        let json = serde_json::to_string(&PluginKind::Channel).unwrap();
+        let deserialized: PluginKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, PluginKind::Channel);
+    }
+
+    #[test]
+    fn category_serde_roundtrip() {
+        let json = serde_json::to_string(&Category::Email).unwrap();
+        let deserialized: Category = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, Category::Email);
+    }
+}
