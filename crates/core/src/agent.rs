@@ -1438,7 +1438,7 @@ impl Agent {
                 self.agent_control.as_ref(),
             ),
             // Legacy aliases for list
-            "list_tools" => tool_handlers::handle_list_tools(&self.tool_registry),
+            "list_tools" => tool_handlers::handle_list_tools(&self.tool_registry, &self.config),
             "list_skills" => tool_handlers::handle_list_skills(&self.config),
             "list_channels" => tool_handlers::handle_list_channels(&self.config),
             // Consolidated apply_patch with target param

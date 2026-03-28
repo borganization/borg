@@ -45,6 +45,7 @@ impl<'a> ToolExecutor<'a> {
             .sandbox_policy()
             .with_borg_dir_protected()
             .with_tildes_expanded()
+            .with_defaults_applied()
             .with_blocked_paths_filtered(blocked_paths);
 
         let (ok, text) = run_sandboxed_script(
@@ -81,6 +82,7 @@ impl<'a> ToolExecutor<'a> {
             .sandbox_policy()
             .with_borg_dir_protected()
             .with_tildes_expanded()
+            .with_defaults_applied()
             .with_blocked_paths_filtered(blocked_paths);
 
         let runner = ScriptRunner {

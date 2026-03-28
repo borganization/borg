@@ -41,13 +41,36 @@ pub fn handle_read_memory(args: &serde_json::Value) -> Result<String> {
     read_memory(filename)
 }
 
-pub fn handle_list_tools(registry: &ToolRegistry) -> Result<String> {
+pub fn handle_list_tools(registry: &ToolRegistry, config: &Config) -> Result<String> {
+    use crate::tool_catalog::{ToolProfile, ALL_GROUPS};
+
+    let profile =
+        ToolProfile::from_str_opt(&config.tools.policy.profile).unwrap_or(ToolProfile::Full);
+    let active_groups = profile.groups();
+    let mut out = format!("# Tools (profile: {profile:?})\n\n## Built-in Tools\n");
+
+    for group in ALL_GROUPS {
+        let active = if active_groups.contains(group) {
+            ""
+        } else {
+            " (disabled)"
+        };
+        out.push_str(&format!("\n### {}{}\n", group.label(), active));
+        for name in group.tool_names() {
+            out.push_str(&format!("  - {name}\n"));
+        }
+    }
+
     let tool_list = registry.list_tools();
-    Ok(if tool_list.is_empty() {
-        "No user tools installed.".to_string()
+    out.push_str("\n## User Tools\n");
+    if tool_list.is_empty() {
+        out.push_str("  No user tools installed.\n");
     } else {
-        tool_list.join("\n")
-    })
+        for tool in &tool_list {
+            out.push_str(&format!("  - {tool}\n"));
+        }
+    }
+    Ok(out)
 }
 
 pub fn handle_list_skills(config: &Config) -> Result<String> {
@@ -148,7 +171,7 @@ pub fn handle_list(
 ) -> Result<String> {
     let what = require_str_param(args, "what")?;
     match what {
-        "tools" => handle_list_tools(registry),
+        "tools" => handle_list_tools(registry, config),
         "skills" => handle_list_skills(config),
         "channels" => handle_list_channels(config),
         "agents" => {
@@ -1784,5 +1807,46 @@ mod tests {
                 std::env::set_var(k, val);
             }
         }
+    }
+
+    // -- handle_list_tools (enhanced with built-ins) --
+
+    #[test]
+    fn handle_list_tools_includes_builtins() {
+        let registry = empty_registry();
+        let config = Config::default();
+        let result = handle_list_tools(&registry, &config).unwrap();
+        assert!(result.contains("Memory"), "should include Memory group");
+        assert!(
+            result.contains("Filesystem"),
+            "should include Filesystem group"
+        );
+        assert!(
+            result.contains("write_memory"),
+            "should list write_memory tool"
+        );
+        assert!(
+            result.contains("apply_patch"),
+            "should list apply_patch tool"
+        );
+    }
+
+    #[test]
+    fn handle_list_tools_shows_profile() {
+        let registry = empty_registry();
+        let config = Config::default();
+        let result = handle_list_tools(&registry, &config).unwrap();
+        assert!(result.contains("Full"), "should show current profile name");
+    }
+
+    #[test]
+    fn handle_list_tools_has_user_tools_section() {
+        let registry = empty_registry();
+        let config = Config::default();
+        let result = handle_list_tools(&registry, &config).unwrap();
+        assert!(
+            result.contains("User Tools"),
+            "should have User Tools section"
+        );
     }
 }
