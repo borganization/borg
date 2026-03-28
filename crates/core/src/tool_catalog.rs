@@ -40,6 +40,23 @@ impl ToolGroup {
         }
     }
 
+    /// Human-readable label for this group.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Memory => "Memory",
+            Self::Fs => "Filesystem",
+            Self::Runtime => "Runtime",
+            Self::Discovery => "Discovery",
+            Self::Web => "Web",
+            Self::Ui => "UI",
+            Self::Scheduling => "Scheduling",
+            Self::Media => "Media",
+            Self::Security => "Security",
+            Self::Integration => "Integration",
+            Self::Agents => "Agents",
+        }
+    }
+
     /// All tool names that belong to this group.
     pub fn tool_names(&self) -> &[&str] {
         match self {
@@ -128,6 +145,21 @@ impl ToolProfile {
         }
     }
 }
+
+/// All tool groups in display order.
+pub const ALL_GROUPS: &[ToolGroup] = &[
+    ToolGroup::Memory,
+    ToolGroup::Fs,
+    ToolGroup::Runtime,
+    ToolGroup::Discovery,
+    ToolGroup::Web,
+    ToolGroup::Ui,
+    ToolGroup::Scheduling,
+    ToolGroup::Media,
+    ToolGroup::Security,
+    ToolGroup::Integration,
+    ToolGroup::Agents,
+];
 
 /// Map a tool name to its group. Returns `None` for user-created tools.
 pub fn tool_group(name: &str) -> Option<ToolGroup> {
@@ -372,5 +404,35 @@ mod tests {
     #[test]
     fn default_profile_is_full() {
         assert_eq!(ToolProfile::default(), ToolProfile::Full);
+    }
+
+    #[test]
+    fn all_groups_constant_has_all_variants() {
+        assert_eq!(ALL_GROUPS.len(), 11);
+        assert!(ALL_GROUPS.contains(&ToolGroup::Memory));
+        assert!(ALL_GROUPS.contains(&ToolGroup::Fs));
+        assert!(ALL_GROUPS.contains(&ToolGroup::Runtime));
+        assert!(ALL_GROUPS.contains(&ToolGroup::Discovery));
+        assert!(ALL_GROUPS.contains(&ToolGroup::Web));
+        assert!(ALL_GROUPS.contains(&ToolGroup::Ui));
+        assert!(ALL_GROUPS.contains(&ToolGroup::Scheduling));
+        assert!(ALL_GROUPS.contains(&ToolGroup::Media));
+        assert!(ALL_GROUPS.contains(&ToolGroup::Security));
+        assert!(ALL_GROUPS.contains(&ToolGroup::Integration));
+        assert!(ALL_GROUPS.contains(&ToolGroup::Agents));
+    }
+
+    #[test]
+    fn group_labels_are_non_empty() {
+        for group in ALL_GROUPS {
+            assert!(!group.label().is_empty(), "{group:?} should have a label");
+        }
+    }
+
+    #[test]
+    fn group_labels_are_unique() {
+        let labels: Vec<&str> = ALL_GROUPS.iter().map(|g| g.label()).collect();
+        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        assert_eq!(labels.len(), unique.len(), "group labels should be unique");
     }
 }

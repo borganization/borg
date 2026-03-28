@@ -97,6 +97,30 @@ impl SandboxPolicy {
         }
     }
 
+    /// Return a copy with smart defaults applied based on policy properties.
+    /// For example, `network == true` implies TLS certificate paths should be readable.
+    /// Idempotent: does not add paths that are already present.
+    pub fn with_defaults_applied(&self) -> Self {
+        let mut fs_read = self.fs_read.clone();
+
+        if self.network {
+            for tls_path in &["/etc/ssl", "/etc/ssl/certs"] {
+                let s = tls_path.to_string();
+                if !fs_read.contains(&s) {
+                    fs_read.push(s);
+                }
+            }
+        }
+
+        Self {
+            network: self.network,
+            fs_read,
+            fs_write: self.fs_write.clone(),
+            deny_read: self.deny_read.clone(),
+            deny_write: self.deny_write.clone(),
+        }
+    }
+
     /// Return a copy with `~/.borg/` added to deny_write to protect agent config
     /// from tool writes, even if `~/.borg/` doesn't exist yet.
     pub fn with_borg_dir_protected(&self) -> Self {
@@ -374,6 +398,103 @@ mod tests {
         };
         let filtered = policy.with_blocked_paths_filtered(&[]);
         assert_eq!(filtered.deny_read, vec!["/secret/data".to_string()]);
+    }
+
+    // -- with_defaults_applied --
+
+    #[test]
+    fn defaults_applied_adds_tls_for_network() {
+        let policy = SandboxPolicy {
+            network: true,
+            fs_read: vec!["/data".into()],
+            ..Default::default()
+        };
+        let applied = policy.with_defaults_applied();
+        assert!(
+            applied.fs_read.contains(&"/etc/ssl".to_string()),
+            "network=true should add /etc/ssl"
+        );
+        assert!(
+            applied.fs_read.contains(&"/etc/ssl/certs".to_string()),
+            "network=true should add /etc/ssl/certs"
+        );
+        assert!(
+            applied.fs_read.contains(&"/data".to_string()),
+            "original paths preserved"
+        );
+    }
+
+    #[test]
+    fn defaults_applied_no_tls_without_network() {
+        let policy = SandboxPolicy {
+            network: false,
+            ..Default::default()
+        };
+        let applied = policy.with_defaults_applied();
+        assert!(
+            !applied.fs_read.contains(&"/etc/ssl".to_string()),
+            "network=false should not add TLS paths"
+        );
+    }
+
+    #[test]
+    fn defaults_applied_is_idempotent() {
+        let policy = SandboxPolicy {
+            network: true,
+            fs_read: vec!["/etc/ssl".into()],
+            ..Default::default()
+        };
+        let applied = policy.with_defaults_applied();
+        let count = applied.fs_read.iter().filter(|p| *p == "/etc/ssl").count();
+        assert_eq!(count, 1, "should not duplicate existing /etc/ssl");
+    }
+
+    #[test]
+    fn defaults_applied_twice_is_idempotent() {
+        let policy = SandboxPolicy {
+            network: true,
+            ..Default::default()
+        };
+        let once = policy.with_defaults_applied();
+        let twice = once.with_defaults_applied();
+        assert_eq!(
+            once.fs_read.len(),
+            twice.fs_read.len(),
+            "applying defaults twice should not add duplicates"
+        );
+    }
+
+    #[test]
+    fn defaults_applied_preserves_other_fields() {
+        let policy = SandboxPolicy {
+            network: true,
+            fs_read: vec!["/custom".into()],
+            fs_write: vec!["/tmp/out".into()],
+            deny_read: vec!["/secret".into()],
+            deny_write: vec!["/protected".into()],
+        };
+        let applied = policy.with_defaults_applied();
+        assert!(applied.network);
+        assert_eq!(applied.fs_write, vec!["/tmp/out".to_string()]);
+        assert_eq!(applied.deny_read, vec!["/secret".to_string()]);
+        assert_eq!(applied.deny_write, vec!["/protected".to_string()]);
+    }
+
+    #[test]
+    fn defaults_then_blocked_filter_overrides_defaults() {
+        let policy = SandboxPolicy {
+            network: true,
+            ..Default::default()
+        };
+        // Hypothetically block /etc/ssl
+        let blocked = vec!["ssl".to_string()];
+        let result = policy
+            .with_defaults_applied()
+            .with_blocked_paths_filtered(&blocked);
+        assert!(
+            !result.fs_read.contains(&"/etc/ssl".to_string()),
+            "blocked paths filter should override defaults"
+        );
     }
 
     #[test]

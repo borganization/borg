@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 use tracing::debug;
 
 use crate::config::{Config, EmbeddingsConfig};
@@ -8,6 +8,12 @@ use crate::db::{ChunkData, Database};
 
 /// Shared HTTP client for all embedding API calls (connection pooling + keep-alive).
 static EMBEDDING_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+
+/// Cached provider entry: config fingerprint + resolved provider.
+type CachedProvider = Option<(String, Option<EmbeddingProvider>)>;
+
+/// Cached embedding provider keyed on config fingerprint.
+static PROVIDER_CACHE: LazyLock<Mutex<CachedProvider>> = LazyLock::new(|| Mutex::new(None));
 
 /// Resolved embedding provider with endpoint, key, model, and dimension.
 #[derive(Debug, Clone)]
@@ -107,6 +113,39 @@ impl EmbeddingProvider {
             dimension,
         })
     }
+}
+
+/// Build a fingerprint for cache invalidation when config changes.
+fn config_fingerprint(config: &EmbeddingsConfig) -> String {
+    format!(
+        "enabled={};provider={:?};model={:?};dim={:?};key_env={:?}",
+        config.enabled, config.provider, config.model, config.dimension, config.api_key_env,
+    )
+}
+
+/// Get or initialize the cached embedding provider.
+/// Automatically re-resolves if the config has changed since the last call.
+pub fn get_or_init_provider(config: &EmbeddingsConfig) -> Option<EmbeddingProvider> {
+    let fingerprint = config_fingerprint(config);
+    let mut cache = PROVIDER_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((cached_fp, cached_provider)) = &*cache {
+        if *cached_fp == fingerprint {
+            return cached_provider.clone();
+        }
+    }
+    let provider = EmbeddingProvider::from_config(config);
+    *cache = Some((fingerprint, provider.clone()));
+    provider
+}
+
+/// Clear the cached provider so the next call to `get_or_init_provider` re-resolves.
+pub fn invalidate_provider_cache() {
+    let mut cache = PROVIDER_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *cache = None;
 }
 
 fn default_env_var(provider: &str) -> &str {
@@ -222,7 +261,7 @@ pub async fn embed_memory_file(
     content: &str,
     scope: &str,
 ) -> Result<()> {
-    let provider = match EmbeddingProvider::from_config(&config.memory.embeddings) {
+    let provider = match get_or_init_provider(&config.memory.embeddings) {
         Some(p) => p,
         None => return Ok(()),
     };
@@ -261,7 +300,7 @@ pub async fn generate_query_embedding(
     config: &Config,
     query: &str,
 ) -> Result<(EmbeddingProvider, Vec<f32>)> {
-    let provider = match EmbeddingProvider::from_config(&config.memory.embeddings) {
+    let provider = match get_or_init_provider(&config.memory.embeddings) {
         Some(p) => p,
         None => bail!("No embedding provider available"),
     };
@@ -330,7 +369,7 @@ pub async fn embed_memory_file_chunked(
     content: &str,
     scope: &str,
 ) -> Result<()> {
-    let provider = match EmbeddingProvider::from_config(&config.memory.embeddings) {
+    let provider = match get_or_init_provider(&config.memory.embeddings) {
         Some(p) => p,
         None => return Ok(()),
     };
@@ -596,6 +635,43 @@ mod tests {
         let filtered: Vec<_> = merged.into_iter().filter(|r| r.2 >= 0.2).collect();
         assert!(filtered.len() >= 1);
         assert!(filtered.iter().all(|r| r.2 >= 0.2));
+    }
+
+    // -- provider cache --
+
+    #[test]
+    fn get_or_init_provider_returns_none_when_disabled() {
+        invalidate_provider_cache();
+        let config = EmbeddingsConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(get_or_init_provider(&config).is_none());
+    }
+
+    #[test]
+    fn cached_provider_is_consistent() {
+        invalidate_provider_cache();
+        let config = EmbeddingsConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let a = get_or_init_provider(&config);
+        let b = get_or_init_provider(&config);
+        assert_eq!(a.is_some(), b.is_some());
+    }
+
+    #[test]
+    fn invalidate_cache_allows_re_resolution() {
+        invalidate_provider_cache();
+        let config = EmbeddingsConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(get_or_init_provider(&config).is_none());
+        invalidate_provider_cache();
+        // Re-resolves (still None because disabled)
+        assert!(get_or_init_provider(&config).is_none());
     }
 
     #[test]

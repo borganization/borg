@@ -60,6 +60,22 @@ impl HeartbeatScheduler {
         }
     }
 
+    /// Try to send a Fire event without blocking. Returns `false` if the channel is closed
+    /// (meaning the consumer is gone and the scheduler should shut down).
+    fn try_fire(tx: &mpsc::Sender<HeartbeatEvent>) -> bool {
+        match tx.try_send(HeartbeatEvent::Fire) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!("Heartbeat: consumer busy, skipping fire");
+                true
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                info!("Heartbeat: consumer dropped, shutting down");
+                false
+            }
+        }
+    }
+
     async fn run_interval(&mut self, tx: mpsc::Sender<HeartbeatEvent>, cancel: CancellationToken) {
         let mut interval =
             parse_interval(&self.config.interval).unwrap_or(std::time::Duration::from_secs(1800));
@@ -88,14 +104,14 @@ impl HeartbeatScheduler {
                 _ = self.recv_wake() => {
                     // Wake signal — fire immediately, skip quiet hours (intentional wake)
                     debug!("Heartbeat: wake signal received, firing immediately");
-                    let _ = tx.send(HeartbeatEvent::Fire).await;
+                    if !Self::try_fire(&tx) { return; }
                 }
                 _ = ticker.tick() => {
                     if self.is_quiet_hours() {
                         debug!("Heartbeat: in quiet hours, skipping");
                         continue;
                     }
-                    let _ = tx.send(HeartbeatEvent::Fire).await;
+                    if !Self::try_fire(&tx) { return; }
                 }
             }
         }
@@ -140,14 +156,14 @@ impl HeartbeatScheduler {
                 }
                 _ = self.recv_wake() => {
                     debug!("Heartbeat: wake signal received, firing immediately");
-                    let _ = tx.send(HeartbeatEvent::Fire).await;
+                    if !Self::try_fire(&tx) { return; }
                 }
                 _ = tokio::time::sleep(wait) => {
                     if self.is_quiet_hours() {
                         debug!("Heartbeat: in quiet hours, skipping");
                         continue;
                     }
-                    let _ = tx.send(HeartbeatEvent::Fire).await;
+                    if !Self::try_fire(&tx) { return; }
                 }
             }
         }
@@ -410,6 +426,103 @@ mod tests {
 
         assert!(matches!(event, HeartbeatEvent::Fire));
 
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn scheduler_skips_when_channel_full() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (wake_tx, wake_rx) = mpsc::channel(8);
+        let (fire_tx, _fire_rx) = mpsc::channel(1); // capacity 1, never drained
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // First wake fills the channel, second should be skipped (not block)
+        wake_tx.send(()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wake_tx.send(()).await.unwrap();
+
+        // If try_send works, scheduler is still alive and responds to cancel
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn scheduler_exits_when_channel_closed() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "1s".to_string(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (wake_tx, wake_rx) = mpsc::channel(1);
+        let (fire_tx, fire_rx) = mpsc::channel(1);
+        drop(fire_rx); // Close the receiving end
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let handle = tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // Send a wake to trigger a try_send on the closed channel
+        let _ = wake_tx.send(()).await;
+
+        // Scheduler should exit on its own when it detects closed channel
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("scheduler should exit when channel closed")
+            .expect("scheduler task panicked");
+    }
+
+    #[tokio::test]
+    async fn multiple_rapid_wakes_dont_block() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (wake_tx, wake_rx) = mpsc::channel(16);
+        let (fire_tx, mut fire_rx) = mpsc::channel(2); // small buffer
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // Send 5 rapid wakes — some will be skipped due to full channel
+        for _ in 0..5 {
+            let _ = wake_tx.send(()).await;
+        }
+
+        // Drain what we can — should get at least 1, at most 2 (channel capacity)
+        let mut count = 0;
+        while let Ok(Some(_)) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), fire_rx.recv()).await
+        {
+            count += 1;
+            if count >= 2 {
+                break;
+            }
+        }
+        assert!(count >= 1, "should receive at least one Fire event");
         cancel.cancel();
     }
 }

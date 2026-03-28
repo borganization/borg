@@ -154,10 +154,55 @@ impl Skill {
             SkillSource::BuiltIn => "built-in",
             SkillSource::User => "user",
         };
-        format!(
+        let mut line = format!(
             "[{}] {} ({}) — {}",
             status, self.manifest.name, source, self.manifest.description
-        )
+        );
+        if !self.available && !self.disabled {
+            if let Some(hint) = self.install_hint() {
+                line.push_str(&format!("\n    Install: {hint}"));
+            }
+        }
+        line
+    }
+
+    /// Return a platform-appropriate install command for missing dependencies.
+    /// Looks at the `install` map in the manifest and picks the best option
+    /// for the current OS: brew (macOS), apt (Linux), npm, or url as fallback.
+    pub fn install_hint(&self) -> Option<String> {
+        if self.manifest.install.is_empty() {
+            return None;
+        }
+
+        let mut hints = Vec::new();
+        let mut keys: Vec<_> = self.manifest.install.keys().collect();
+        keys.sort();
+        for key in keys {
+            let spec = &self.manifest.install[key];
+            let hint = if cfg!(target_os = "macos") {
+                spec.brew
+                    .as_deref()
+                    .map(|b| format!("brew install {b}"))
+                    .or_else(|| spec.npm.as_deref().map(|n| format!("npm install -g {n}")))
+                    .or_else(|| spec.url.as_deref().map(|u| format!("See: {u}")))
+            } else {
+                spec.apt
+                    .as_deref()
+                    .map(|a| format!("apt install {a}"))
+                    .or_else(|| spec.brew.as_deref().map(|b| format!("brew install {b}")))
+                    .or_else(|| spec.npm.as_deref().map(|n| format!("npm install -g {n}")))
+                    .or_else(|| spec.url.as_deref().map(|u| format!("See: {u}")))
+            };
+            if let Some(h) = hint {
+                hints.push(h);
+            }
+        }
+
+        if hints.is_empty() {
+            None
+        } else {
+            Some(hints.join("; "))
+        }
     }
 }
 
@@ -1316,5 +1361,130 @@ Use docker commands.
         let env = collect_skill_env(&config);
         assert_eq!(env.get("SLACK_TOKEN").unwrap(), "xoxb-123");
         assert!(!env.contains_key("SHOULD_NOT_APPEAR"));
+    }
+
+    // -- install_hint --
+
+    fn test_skill(
+        install: std::collections::HashMap<String, InstallSpec>,
+        available: bool,
+    ) -> Skill {
+        Skill {
+            manifest: SkillManifest {
+                name: "test".into(),
+                description: "test skill".into(),
+                requires: SkillRequires::default(),
+                os: vec![],
+                install,
+            },
+            body: String::new(),
+            source: SkillSource::BuiltIn,
+            available,
+            disabled: false,
+            references: vec![],
+            scripts: vec![],
+        }
+    }
+
+    #[test]
+    fn install_hint_returns_none_when_no_install_specs() {
+        let skill = test_skill(std::collections::HashMap::new(), true);
+        assert!(skill.install_hint().is_none());
+    }
+
+    #[test]
+    fn install_hint_prefers_platform_package_manager() {
+        let mut install = std::collections::HashMap::new();
+        install.insert(
+            "curl".to_string(),
+            InstallSpec {
+                brew: Some("curl".to_string()),
+                apt: Some("curl".to_string()),
+                npm: None,
+                url: None,
+            },
+        );
+        let skill = test_skill(install, false);
+        let hint = skill.install_hint().unwrap();
+        #[cfg(target_os = "macos")]
+        assert!(
+            hint.contains("brew"),
+            "macOS should prefer brew, got: {hint}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(hint.contains("apt"), "Linux should prefer apt, got: {hint}");
+    }
+
+    #[test]
+    fn install_hint_falls_back_to_npm() {
+        let mut install = std::collections::HashMap::new();
+        install.insert(
+            "sometool".to_string(),
+            InstallSpec {
+                brew: None,
+                apt: None,
+                npm: Some("sometool".to_string()),
+                url: None,
+            },
+        );
+        let skill = test_skill(install, false);
+        let hint = skill.install_hint().unwrap();
+        assert!(hint.contains("npm"), "should fall back to npm, got: {hint}");
+    }
+
+    #[test]
+    fn install_hint_falls_back_to_url() {
+        let mut install = std::collections::HashMap::new();
+        install.insert(
+            "rare".to_string(),
+            InstallSpec {
+                brew: None,
+                apt: None,
+                npm: None,
+                url: Some("https://example.com/install".to_string()),
+            },
+        );
+        let skill = test_skill(install, false);
+        let hint = skill.install_hint().unwrap();
+        assert!(
+            hint.contains("https://example.com"),
+            "should fall back to URL, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn summary_line_includes_install_hint_for_unavailable() {
+        let mut install = std::collections::HashMap::new();
+        install.insert(
+            "tool".to_string(),
+            InstallSpec {
+                brew: Some("tool".to_string()),
+                ..Default::default()
+            },
+        );
+        let skill = test_skill(install, false);
+        let line = skill.summary_line();
+        assert!(
+            line.contains("Install:"),
+            "unavailable skill should show install hint, got: {line}"
+        );
+    }
+
+    #[test]
+    fn summary_line_no_hint_for_available() {
+        let mut install = std::collections::HashMap::new();
+        install.insert(
+            "tool".to_string(),
+            InstallSpec {
+                brew: Some("tool".to_string()),
+                ..Default::default()
+            },
+        );
+        let skill = test_skill(install, true);
+        let line = skill.summary_line();
+        assert!(
+            !line.contains("Install:"),
+            "available skill should not show install hint, got: {line}"
+        );
     }
 }
