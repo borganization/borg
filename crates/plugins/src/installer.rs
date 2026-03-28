@@ -71,7 +71,7 @@ pub async fn install(
     let credential_entries = credentials
         .iter()
         .map(|(key, _)| {
-            let account = format!("borg-{key}");
+            let account = credential_account(key);
             crate::CredentialEntry {
                 key: key.clone(),
                 service: service.clone(),
@@ -105,10 +105,7 @@ pub fn uninstall(def: &PluginDef, data_dir: &std::path::Path) -> Result<()> {
             .next()
             .context("empty relative path")?;
 
-        let target_dir = match first_tmpl.target {
-            TemplateTarget::Channels => data_dir.join("channels").join(dir_name),
-            TemplateTarget::Tools => data_dir.join("tools").join(dir_name),
-        };
+        let target_dir = first_tmpl.target.base_dir(data_dir).join(dir_name);
 
         if target_dir.exists() {
             std::fs::remove_dir_all(&target_dir)
@@ -140,7 +137,7 @@ pub fn is_installed(def: &PluginDef, _data_dir: &std::path::Path) -> bool {
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
             let service = format!("borg-{}", def.id.replace('/', "-"));
-            let account = format!("borg-{}", cred.key);
+            let account = credential_account(cred.key);
             has_env || crate::keychain::check(&service, &account)
         });
     }
@@ -155,12 +152,10 @@ pub fn is_installed(def: &PluginDef, _data_dir: &std::path::Path) -> bool {
         None => return false,
     };
 
+    let base = first_tmpl.target.base_dir(_data_dir).join(dir_name);
     let manifest = match first_tmpl.target {
-        TemplateTarget::Channels => _data_dir
-            .join("channels")
-            .join(dir_name)
-            .join("channel.toml"),
-        TemplateTarget::Tools => _data_dir.join("tools").join(dir_name).join("tool.toml"),
+        TemplateTarget::Channels => base.join("channel.toml"),
+        TemplateTarget::Tools => base.join("tool.toml"),
     };
 
     manifest.exists()
@@ -173,11 +168,7 @@ pub fn is_installed(def: &PluginDef, _data_dir: &std::path::Path) -> bool {
 pub fn compute_file_hashes(def: &PluginDef, data_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut hashes = Vec::new();
     for tmpl in def.templates {
-        let base = match tmpl.target {
-            TemplateTarget::Channels => data_dir.join("channels"),
-            TemplateTarget::Tools => data_dir.join("tools"),
-        };
-        let full_path = base.join(tmpl.relative_path);
+        let full_path = tmpl.target.base_dir(data_dir).join(tmpl.relative_path);
         match std::fs::read(&full_path) {
             Ok(content) => {
                 let mut hasher = Sha256::new();
@@ -217,12 +208,7 @@ fn check_prerequisites(def: &PluginDef) -> Result<()> {
 
 fn write_templates(def: &PluginDef, data_dir: &std::path::Path) -> Result<()> {
     for tmpl in def.templates {
-        let base = match tmpl.target {
-            TemplateTarget::Channels => data_dir.join("channels"),
-            TemplateTarget::Tools => data_dir.join("tools"),
-        };
-
-        let full_path = base.join(tmpl.relative_path);
+        let full_path = tmpl.target.base_dir(data_dir).join(tmpl.relative_path);
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create {}", parent.display()))?;
@@ -241,11 +227,7 @@ fn make_scripts_executable(def: &PluginDef, data_dir: &std::path::Path) -> Resul
         use std::os::unix::fs::PermissionsExt;
         for tmpl in def.templates {
             if tmpl.relative_path.ends_with(".sh") || tmpl.relative_path.ends_with(".py") {
-                let base = match tmpl.target {
-                    TemplateTarget::Channels => data_dir.join("channels"),
-                    TemplateTarget::Tools => data_dir.join("tools"),
-                };
-                let path = base.join(tmpl.relative_path);
+                let path = tmpl.target.base_dir(data_dir).join(tmpl.relative_path);
                 if path.exists() {
                     let mut perms = std::fs::metadata(&path)?.permissions();
                     perms.set_mode(0o755);
@@ -257,13 +239,17 @@ fn make_scripts_executable(def: &PluginDef, data_dir: &std::path::Path) -> Resul
     Ok(())
 }
 
+fn credential_account(key: &str) -> String {
+    format!("borg-{key}")
+}
+
 fn store_credential(service: &str, key: &str, value: &str) -> Result<()> {
-    let account = format!("borg-{key}");
+    let account = credential_account(key);
     crate::keychain::store(service, &account, value)
 }
 
 fn remove_credential(service: &str, key: &str) {
-    let account = format!("borg-{key}");
+    let account = credential_account(key);
     crate::keychain::remove(service, &account);
 }
 

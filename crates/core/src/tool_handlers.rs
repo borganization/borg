@@ -986,6 +986,102 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     defs
 }
 
+/// Execute hybrid memory search (FTS + vector) across global and local scopes.
+pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> Result<String> {
+    let query = require_str_param(args, "query")?;
+    let max_results = args["max_results"].as_u64().unwrap_or(5) as usize;
+    let min_score = args["min_score"].as_f64().unwrap_or(0.2) as f32;
+    let vector_weight = config.memory.embeddings.vector_weight;
+    let bm25_weight = config.memory.embeddings.bm25_weight;
+    let db = Database::open()?;
+    let mut all_results = Vec::new();
+
+    for scope in &["global", "local"] {
+        // FTS search — collect into owned tuples
+        let fts_rows = db
+            .fts_search(scope, query, max_results * 4)
+            .unwrap_or_default();
+        let fts_owned: Vec<(String, i64, f32)> = fts_rows
+            .iter()
+            .map(|(c, score)| (c.filename.clone(), c.chunk_index, *score))
+            .collect();
+        // Build a snippet map from FTS results
+        let fts_snippets: std::collections::HashMap<(String, i64), String> = fts_rows
+            .into_iter()
+            .map(|(c, _)| ((c.filename.clone(), c.chunk_index), c.content))
+            .collect();
+
+        // Vector search across chunks
+        let chunks = db.get_all_chunks(scope).unwrap_or_default();
+        let vec_owned: Vec<(String, i64, f32)> = if let Ok((_prov, query_emb)) =
+            crate::embeddings::generate_query_embedding(config, query).await
+        {
+            chunks
+                .iter()
+                .filter_map(|c| {
+                    c.embedding.as_ref().map(|emb_bytes| {
+                        let stored = crate::embeddings::bytes_to_embedding(emb_bytes);
+                        let sim = crate::embeddings::cosine_similarity(&query_emb, &stored);
+                        (c.filename.clone(), c.chunk_index, sim)
+                    })
+                })
+                .filter(|(_f, _ci, sim)| *sim >= min_score * 0.5)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Build snippet map from vector results
+        let vec_snippets: std::collections::HashMap<(String, i64), String> = chunks
+            .into_iter()
+            .map(|c| ((c.filename, c.chunk_index), c.content))
+            .collect();
+
+        // Convert to borrowed slices for merge_search_scores
+        let fts_refs: Vec<(&str, i64, f32)> = fts_owned
+            .iter()
+            .map(|(f, ci, s)| (f.as_str(), *ci, *s))
+            .collect();
+        let vec_refs: Vec<(&str, i64, f32)> = vec_owned
+            .iter()
+            .map(|(f, ci, s)| (f.as_str(), *ci, *s))
+            .collect();
+        let merged = crate::embeddings::merge_search_scores(
+            &vec_refs,
+            &fts_refs,
+            vector_weight,
+            bm25_weight,
+        );
+
+        for (filename, chunk_index, score) in merged {
+            if score < min_score {
+                continue;
+            }
+            let key = (filename.clone(), chunk_index);
+            let snippet = fts_snippets
+                .get(&key)
+                .or_else(|| vec_snippets.get(&key))
+                .cloned()
+                .unwrap_or_default();
+            all_results.push(crate::embeddings::SearchResult {
+                filename,
+                chunk_index,
+                start_line: None,
+                end_line: None,
+                score,
+                snippet,
+            });
+        }
+    }
+
+    all_results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    all_results.truncate(max_results);
+    Ok(format_search_results(&all_results))
+}
+
 /// Format search results for display.
 pub fn format_search_results(results: &[crate::embeddings::SearchResult]) -> String {
     if results.is_empty() {

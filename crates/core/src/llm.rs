@@ -15,6 +15,8 @@ use crate::provider::Provider;
 use crate::retry::backoff_delay;
 use crate::types::{Message, Role, ToolCall, ToolDefinition};
 
+const MAX_SSE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
+
 // ── Error classification ──
 
 /// Why a provider failed — used for cooldown duration calculation.
@@ -712,8 +714,6 @@ impl LlmClient {
 
         let response = self.send_request(&request, cancel).await?;
 
-        const MAX_SSE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
-
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
 
@@ -959,8 +959,6 @@ impl LlmClient {
         }
 
         let response = self.send_request(&body, cancel).await?;
-
-        const MAX_SSE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();

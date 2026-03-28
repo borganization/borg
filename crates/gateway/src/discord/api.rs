@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -10,11 +8,11 @@ use tracing::warn;
 use super::types::{CreateMessageRequest, CurrentUser, InteractionResponse};
 use crate::chunker;
 use crate::commands::{CommandDef, NativeCommandRegistration};
+use crate::constants::GATEWAY_HTTP_TIMEOUT;
 use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
-const MESSAGE_CHUNK_SIZE: usize = 2000;
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const DISCORD_MESSAGE_CHUNK_SIZE: usize = 2000;
 
 /// A client for the Discord REST API.
 #[derive(Clone)]
@@ -28,7 +26,7 @@ impl DiscordClient {
     pub fn new(token: &str) -> Result<Self> {
         Ok(Self {
             client: Client::builder()
-                .timeout(HTTP_TIMEOUT)
+                .timeout(GATEWAY_HTTP_TIMEOUT)
                 .build()
                 .context("Failed to build Discord HTTP client")?,
             token: token.to_string(),
@@ -113,7 +111,7 @@ impl DiscordClient {
         interaction_token: &str,
         text: &str,
     ) -> Result<()> {
-        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
+        let chunks = chunker::chunk_text_nonempty(text, DISCORD_MESSAGE_CHUNK_SIZE);
 
         // Edit the original response with the first chunk
         let url = format!(
@@ -163,7 +161,7 @@ impl DiscordClient {
 
     /// Send a message to a channel, chunking at 2000 characters.
     pub async fn send_message(&self, channel_id: &str, text: &str) -> Result<()> {
-        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
+        let chunks = chunker::chunk_text_nonempty(text, DISCORD_MESSAGE_CHUNK_SIZE);
 
         for chunk in &chunks {
             let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
@@ -384,7 +382,7 @@ mod tests {
     #[test]
     fn chunking_at_2000() {
         let long_text: String = "a".repeat(4500);
-        let chunks = chunker::chunk_text(&long_text, MESSAGE_CHUNK_SIZE);
+        let chunks = chunker::chunk_text(&long_text, DISCORD_MESSAGE_CHUNK_SIZE);
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].len(), 2000);
         assert_eq!(chunks[1].len(), 2000);
@@ -394,7 +392,7 @@ mod tests {
     #[test]
     fn short_text_single_chunk() {
         let text = "short message";
-        let chunks = chunker::chunk_text(text, MESSAGE_CHUNK_SIZE);
+        let chunks = chunker::chunk_text(text, DISCORD_MESSAGE_CHUNK_SIZE);
         assert_eq!(chunks, vec!["short message"]);
     }
 

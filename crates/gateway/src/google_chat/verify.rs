@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use subtle::ConstantTimeEq;
 
 use super::types::ChatEvent;
 
@@ -28,7 +27,7 @@ pub fn verify_google_chat_token(event: &ChatEvent, expected_token: Option<&str>)
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Google Chat event missing verification token"))?;
 
-    let is_equal: bool = actual.as_bytes().ct_eq(expected.as_bytes()).into();
+    let is_equal = crate::crypto::constant_time_eq(actual.as_bytes(), expected.as_bytes());
     if !is_equal {
         bail!("Google Chat verification token mismatch");
     }

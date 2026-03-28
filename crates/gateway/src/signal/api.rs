@@ -2,13 +2,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
-use reqwest::Client;
-use tracing::warn;
-
 use super::types::{JsonRpcRequest, JsonRpcResponse};
 use crate::chunker;
 use crate::circuit_breaker::CircuitBreaker;
+use anyhow::{bail, Context, Result};
+use reqwest::Client;
 
 use borg_core::constants;
 
@@ -65,7 +63,7 @@ impl SignalClient {
         let sse_client = Client::builder()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .unwrap_or_default();
 
         sse_client
             .get(url)
@@ -108,8 +106,7 @@ impl SignalClient {
             });
             let resp = self.rpc_call("send", params).await?;
             if let Some(ref err) = resp.error {
-                warn!("Signal send error (code {}): {}", err.code, err.message);
-                bail!("Signal send failed: {}", err.message);
+                bail!("Signal send failed (code {}): {}", err.code, err.message);
             }
         }
         Ok(())

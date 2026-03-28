@@ -328,10 +328,7 @@ async fn generate_fal(
     let mut images = Vec::new();
     for fal_img in result.images {
         if !is_fal_domain(&fal_img.url) {
-            warn!(
-                "Skipping FAL image with untrusted CDN URL: {}",
-                fal_img.url
-            );
+            warn!("Skipping FAL image with untrusted CDN URL: {}", fal_img.url);
             continue;
         }
         match client.get(&fal_img.url).send().await {

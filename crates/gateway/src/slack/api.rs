@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
@@ -10,11 +9,10 @@ use super::echo::EchoCache;
 use super::types::{AuthTestResponse, PostMessageRequest};
 use crate::chunker;
 use crate::circuit_breaker::CircuitBreaker;
+use crate::constants::{DEFAULT_MESSAGE_CHUNK_SIZE, GATEWAY_HTTP_TIMEOUT};
 use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
-const MESSAGE_CHUNK_SIZE: usize = 4000;
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Circuit breaker thresholds for Slack typing indicators.
 /// Trips after 2 consecutive failures (matching OpenClaw's maxConsecutiveFailures).
@@ -38,7 +36,7 @@ impl SlackClient {
     pub fn new(token: &str) -> Result<Self> {
         Ok(Self {
             client: Client::builder()
-                .timeout(HTTP_TIMEOUT)
+                .timeout(GATEWAY_HTTP_TIMEOUT)
                 .build()
                 .context("Failed to build Slack HTTP client")?,
             token: token.to_string(),
@@ -96,7 +94,7 @@ impl SlackClient {
         text: &str,
         thread_ts: Option<&str>,
     ) -> Result<()> {
-        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
+        let chunks = chunker::chunk_text_nonempty(text, DEFAULT_MESSAGE_CHUNK_SIZE);
 
         for chunk in &chunks {
             self.send_single_message(channel, chunk, thread_ts).await?;

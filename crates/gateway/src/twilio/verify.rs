@@ -3,7 +3,6 @@ use axum::http::HeaderMap;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
-use subtle::ConstantTimeEq;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -34,7 +33,7 @@ pub fn verify_twilio_signature(
         .decode(&expected)
         .map_err(|e| anyhow::anyhow!("Internal base64 error: {e}"))?;
 
-    if sig_bytes.ct_eq(&expected_bytes).into() {
+    if crate::crypto::constant_time_eq(&sig_bytes, &expected_bytes) {
         Ok(())
     } else {
         anyhow::bail!("Twilio signature verification failed")

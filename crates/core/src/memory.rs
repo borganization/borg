@@ -61,28 +61,11 @@ pub fn load_memory_context_scoped(max_tokens: usize, scope: Option<&str>) -> Res
         "Memory"
     };
 
-    load_memory_core(
-        max_tokens,
-        &mem_dir,
-        // Override the default "Memory" label with scope-aware label
-        |dir, _default_label, max, tokens, parts| {
-            load_memory_files_from_dir(dir, label, max, tokens, parts)
-        },
-        load_memory_files_from_dir,
-    )
+    load_memory_core(max_tokens, &mem_dir, label)
 }
 
 /// Shared skeleton: load MEMORY.md index, global memory dir, and local project memory.
-fn load_memory_core<F, G>(
-    max_tokens: usize,
-    mem_dir: &std::path::Path,
-    load_global: F,
-    load_local: G,
-) -> Result<String>
-where
-    F: FnOnce(&std::path::Path, &str, usize, &mut usize, &mut Vec<String>) -> Result<()>,
-    G: FnOnce(&std::path::Path, &str, usize, &mut usize, &mut Vec<String>) -> Result<()>,
-{
+fn load_memory_core(max_tokens: usize, mem_dir: &std::path::Path, label: &str) -> Result<String> {
     let mut parts = Vec::new();
     let mut estimated_tokens = 0;
 
@@ -97,16 +80,16 @@ where
     )?;
 
     // Load global memory files
-    load_global(
+    load_memory_files_from_dir(
         mem_dir,
-        "Memory",
+        label,
         max_tokens,
         &mut estimated_tokens,
         &mut parts,
     )?;
 
     // Load local project memory
-    load_local_memory(max_tokens, &mut estimated_tokens, &mut parts, load_local)?;
+    load_local_memory(max_tokens, &mut estimated_tokens, &mut parts)?;
 
     if parts.is_empty() {
         Ok(String::new())
@@ -138,16 +121,11 @@ fn try_load_index_file(
 }
 
 /// Load local project memory from CWD/.borg/memory/ if it exists.
-/// The `load_files` callback loads memory files from the local memory directory.
-fn load_local_memory<F>(
+fn load_local_memory(
     max_tokens: usize,
     estimated_tokens: &mut usize,
     parts: &mut Vec<String>,
-    load_files: F,
-) -> Result<()>
-where
-    F: FnOnce(&std::path::Path, &str, usize, &mut usize, &mut Vec<String>) -> Result<()>,
-{
+) -> Result<()> {
     if let Ok(cwd) = std::env::current_dir() {
         let local_mem_dir = cwd.join(".borg").join("memory");
         if local_mem_dir.exists() {
@@ -159,7 +137,7 @@ where
                 estimated_tokens,
                 parts,
             )?;
-            load_files(
+            load_memory_files_from_dir(
                 &local_mem_dir,
                 "Local Memory",
                 max_tokens,
@@ -245,16 +223,58 @@ pub fn load_memory_context_ranked(
     ranked_global: &[(String, f32)],
     ranked_local: &[(String, f32)],
 ) -> Result<String> {
-    load_memory_core(
+    let mut parts = Vec::new();
+    let mut estimated_tokens = 0;
+
+    // Always load MEMORY.md first (global)
+    let index_path = memory_index_path()?;
+    try_load_index_file(
+        &index_path,
+        "MEMORY.md",
         max_tokens,
-        &memory_dir()?,
-        |dir, label, max, tokens, parts| {
-            load_memory_files_ranked(dir, label, ranked_global, max, tokens, parts)
-        },
-        |dir, label, max, tokens, parts| {
-            load_memory_files_ranked(dir, label, ranked_local, max, tokens, parts)
-        },
-    )
+        &mut estimated_tokens,
+        &mut parts,
+    )?;
+
+    // Load global memory files in ranked order
+    let mem_dir = memory_dir()?;
+    load_memory_files_ranked(
+        &mem_dir,
+        "Memory",
+        ranked_global,
+        max_tokens,
+        &mut estimated_tokens,
+        &mut parts,
+    )?;
+
+    // Load local project memory in ranked order
+    if let Ok(cwd) = std::env::current_dir() {
+        let local_mem_dir = cwd.join(".borg").join("memory");
+        if local_mem_dir.exists() {
+            let local_index = cwd.join(".borg").join("MEMORY.md");
+            try_load_index_file(
+                &local_index,
+                "Local MEMORY.md",
+                max_tokens,
+                &mut estimated_tokens,
+                &mut parts,
+            )?;
+            load_memory_files_ranked(
+                &local_mem_dir,
+                "Local Memory",
+                ranked_local,
+                max_tokens,
+                &mut estimated_tokens,
+                &mut parts,
+            )?;
+        }
+    }
+
+    if parts.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(parts.join("\n\n"))
+    }
 }
 
 /// Load memory files in ranked order, appending unranked files by mtime at the end.

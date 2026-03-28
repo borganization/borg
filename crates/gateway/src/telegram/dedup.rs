@@ -1,40 +1,25 @@
-use std::collections::{HashSet, VecDeque};
-
 use borg_core::constants;
+
+use crate::dedup::BoundedDedup;
 
 const DEFAULT_CAPACITY: usize = constants::TELEGRAM_DEDUP_CAPACITY;
 
 /// Bounded deduplicator for Telegram update IDs.
-/// Uses a HashSet for O(1) lookups with a VecDeque for eviction order.
-pub struct UpdateDeduplicator {
-    order: VecDeque<i64>,
-    set: HashSet<i64>,
-    capacity: usize,
-}
+pub struct UpdateDeduplicator(BoundedDedup<i64>);
 
 impl UpdateDeduplicator {
     pub fn new() -> Self {
-        Self {
-            order: VecDeque::with_capacity(DEFAULT_CAPACITY),
-            set: HashSet::with_capacity(DEFAULT_CAPACITY),
-            capacity: DEFAULT_CAPACITY,
-        }
+        Self(BoundedDedup::new(DEFAULT_CAPACITY))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self(BoundedDedup::new(capacity))
     }
 
     /// Returns `true` if this update_id has been seen before.
     pub fn is_duplicate(&mut self, update_id: i64) -> bool {
-        if self.set.contains(&update_id) {
-            return true;
-        }
-
-        if self.order.len() >= self.capacity {
-            if let Some(evicted) = self.order.pop_front() {
-                self.set.remove(&evicted);
-            }
-        }
-        self.order.push_back(update_id);
-        self.set.insert(update_id);
-        false
+        self.0.is_duplicate(&update_id)
     }
 }
 
@@ -71,11 +56,7 @@ mod tests {
 
     #[test]
     fn eviction_at_capacity() {
-        let mut dedup = UpdateDeduplicator {
-            order: VecDeque::with_capacity(3),
-            set: HashSet::with_capacity(3),
-            capacity: 3,
-        };
+        let mut dedup = UpdateDeduplicator::with_capacity(3);
 
         assert!(!dedup.is_duplicate(1));
         assert!(!dedup.is_duplicate(2));

@@ -1,4 +1,5 @@
 use super::types::{ChatEvent, EventType};
+use crate::constants::{PEER_KIND_DIRECT, PEER_KIND_GROUP};
 use crate::handler::InboundMessage;
 
 /// Parse a Google Chat event into an `InboundMessage`.
@@ -63,9 +64,9 @@ pub fn parse_event(event: &ChatEvent) -> Option<InboundMessage> {
             .and_then(|s| s.space_type.as_deref())
             .map(|t| {
                 if t == "DM" {
-                    "direct".to_string()
+                    PEER_KIND_DIRECT.to_string()
                 } else {
-                    "group".to_string()
+                    PEER_KIND_GROUP.to_string()
                 }
             }),
     })

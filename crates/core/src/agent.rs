@@ -272,51 +272,76 @@ pub struct Agent {
     cached_skills_context: Option<String>,
 }
 
+/// Common state produced by `build_common`, consumed by both `new()` and `new_sub_agent()`.
+struct AgentCommon {
+    tool_registry: ToolRegistry,
+    policy: ExecutionPolicy,
+    rate_guard: SessionRateGuard,
+    session: Session,
+    db: Option<Database>,
+    skill_env_allowlist: std::collections::HashSet<String>,
+    tts_synthesizer: Option<crate::tts::TtsSynthesizer>,
+}
+
+/// Build the shared initialization state used by both `Agent::new` and `Agent::new_sub_agent`.
+fn build_common(config: &Config) -> Result<AgentCommon> {
+    let _ = LlmClient::new(config.clone())?;
+    let tool_registry = ToolRegistry::new()?;
+    let policy = config.policy.clone();
+    let rate_guard = SessionRateGuard::new(config.security.action_limits.clone());
+    let session = Session::new();
+    let db = match Database::open() {
+        Ok(db) => Some(db),
+        Err(e) => {
+            warn!("Failed to open database on agent init: {e}");
+            None
+        }
+    };
+    let resolved_creds = config.resolve_credentials();
+    let skill_env_allowlist =
+        crate::skills::collect_required_env_vars(&resolved_creds, &config.skills);
+    let tts_synthesizer = crate::tts::TtsSynthesizer::from_config(config);
+    Ok(AgentCommon {
+        tool_registry,
+        policy,
+        rate_guard,
+        session,
+        db,
+        skill_env_allowlist,
+        tts_synthesizer,
+    })
+}
+
 impl Agent {
     pub fn new(config: Config, metrics: BorgMetrics) -> Result<Self> {
-        let _ = LlmClient::new(config.clone())?;
-        let tool_registry = ToolRegistry::new()?;
-        let policy = config.policy.clone();
-        let rate_guard = SessionRateGuard::new(config.security.action_limits.clone());
-        let session = Session::new();
+        let common = build_common(&config)?;
         let agent_control = if config.agents.enabled {
             Some(crate::multi_agent::AgentControl::new(
                 &config.agents,
-                &session.meta.id,
+                &common.session.meta.id,
                 0,
             ))
         } else {
             None
         };
-        let db = match Database::open() {
-            Ok(db) => Some(db),
-            Err(e) => {
-                warn!("Failed to open database on agent init: {e}");
-                None
-            }
-        };
-        let resolved_creds = config.resolve_credentials();
-        let skill_env_allowlist =
-            crate::skills::collect_required_env_vars(&resolved_creds, &config.skills);
-        let tts_synthesizer = crate::tts::TtsSynthesizer::from_config(&config);
         Ok(Self {
             config,
             history: Vec::new(),
-            tool_registry,
-            session,
-            policy,
+            tool_registry: common.tool_registry,
+            session: common.session,
+            policy: common.policy,
             hook_registry: HookRegistry::new(),
             turn_count: 0,
-            rate_guard,
+            rate_guard: common.rate_guard,
             agent_control,
             spawn_depth: 0,
             tools_filter: None,
-            skill_env_allowlist,
-            tts_synthesizer,
+            skill_env_allowlist: common.skill_env_allowlist,
+            tts_synthesizer: common.tts_synthesizer,
             metrics,
             browser_session: None,
             config_rx: None,
-            db: Mutex::new(db),
+            db: Mutex::new(common.db),
             cached_skills_context: None,
         })
     }
@@ -345,50 +370,35 @@ impl Agent {
         metrics: BorgMetrics,
         tools_filter: Option<Vec<String>>,
     ) -> Result<Self> {
-        let _ = LlmClient::new(config.clone())?;
-        let tool_registry = ToolRegistry::new()?;
-        let policy = config.policy.clone();
-        let rate_guard = SessionRateGuard::new(config.security.action_limits.clone());
-        let session = Session::new();
+        let common = build_common(&config)?;
         let agent_control = if agents_config.enabled && spawn_depth < agents_config.max_spawn_depth
         {
             Some(crate::multi_agent::AgentControl::new(
                 agents_config,
-                &session.meta.id,
+                &common.session.meta.id,
                 spawn_depth,
             ))
         } else {
             None
         };
-        let db = match Database::open() {
-            Ok(db) => Some(db),
-            Err(e) => {
-                warn!("Failed to open database on sub-agent init: {e}");
-                None
-            }
-        };
-        let resolved_creds = config.resolve_credentials();
-        let skill_env_allowlist =
-            crate::skills::collect_required_env_vars(&resolved_creds, &config.skills);
-        let tts_synthesizer = crate::tts::TtsSynthesizer::from_config(&config);
         Ok(Self {
             config,
             history: Vec::new(),
-            tool_registry,
-            session,
-            policy,
+            tool_registry: common.tool_registry,
+            session: common.session,
+            policy: common.policy,
             hook_registry: HookRegistry::new(),
             turn_count: 0,
-            rate_guard,
+            rate_guard: common.rate_guard,
             agent_control,
             spawn_depth,
             tools_filter,
-            skill_env_allowlist,
-            tts_synthesizer,
+            skill_env_allowlist: common.skill_env_allowlist,
+            tts_synthesizer: common.tts_synthesizer,
             metrics,
             browser_session: None,
             config_rx: None,
-            db: Mutex::new(db),
+            db: Mutex::new(common.db),
             cached_skills_context: None,
         })
     }
@@ -1395,102 +1405,7 @@ impl Agent {
                 result
             }
             "read_memory" => tool_handlers::handle_read_memory(&args),
-            "memory_search" => {
-                let query = tool_handlers::require_str_param(&args, "query")?.to_string();
-                let max_results = args["max_results"].as_u64().unwrap_or(5) as usize;
-                let min_score = args["min_score"].as_f64().unwrap_or(0.2) as f32;
-                let config = self.config.clone();
-                let vector_weight = config.memory.embeddings.vector_weight;
-                let bm25_weight = config.memory.embeddings.bm25_weight;
-                let db = crate::db::Database::open()?;
-                let mut all_results = Vec::new();
-
-                for scope in &["global", "local"] {
-                    // FTS search — collect into owned tuples
-                    let fts_rows = db
-                        .fts_search(scope, &query, max_results * 4)
-                        .unwrap_or_default();
-                    let fts_owned: Vec<(String, i64, f32)> = fts_rows
-                        .iter()
-                        .map(|(c, score)| (c.filename.clone(), c.chunk_index, *score))
-                        .collect();
-                    // Build a snippet map from FTS results
-                    let fts_snippets: std::collections::HashMap<(String, i64), String> = fts_rows
-                        .into_iter()
-                        .map(|(c, _)| ((c.filename.clone(), c.chunk_index), c.content))
-                        .collect();
-
-                    // Vector search across chunks
-                    let chunks = db.get_all_chunks(scope).unwrap_or_default();
-                    let vec_owned: Vec<(String, i64, f32)> = if let Ok((_prov, query_emb)) =
-                        crate::embeddings::generate_query_embedding(&config, &query).await
-                    {
-                        chunks
-                            .iter()
-                            .filter_map(|c| {
-                                c.embedding.as_ref().map(|emb_bytes| {
-                                    let stored = crate::embeddings::bytes_to_embedding(emb_bytes);
-                                    let sim =
-                                        crate::embeddings::cosine_similarity(&query_emb, &stored);
-                                    (c.filename.clone(), c.chunk_index, sim)
-                                })
-                            })
-                            .filter(|(_f, _ci, sim)| *sim >= min_score * 0.5)
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    // Build snippet map from vector results
-                    let vec_snippets: std::collections::HashMap<(String, i64), String> = chunks
-                        .into_iter()
-                        .map(|c| ((c.filename, c.chunk_index), c.content))
-                        .collect();
-
-                    // Convert to borrowed slices for merge_search_scores
-                    let fts_refs: Vec<(&str, i64, f32)> = fts_owned
-                        .iter()
-                        .map(|(f, ci, s)| (f.as_str(), *ci, *s))
-                        .collect();
-                    let vec_refs: Vec<(&str, i64, f32)> = vec_owned
-                        .iter()
-                        .map(|(f, ci, s)| (f.as_str(), *ci, *s))
-                        .collect();
-                    let merged = crate::embeddings::merge_search_scores(
-                        &vec_refs,
-                        &fts_refs,
-                        vector_weight,
-                        bm25_weight,
-                    );
-
-                    for (filename, chunk_index, score) in merged {
-                        if score < min_score {
-                            continue;
-                        }
-                        let key = (filename.clone(), chunk_index);
-                        let snippet = fts_snippets
-                            .get(&key)
-                            .or_else(|| vec_snippets.get(&key))
-                            .cloned()
-                            .unwrap_or_default();
-                        all_results.push(crate::embeddings::SearchResult {
-                            filename,
-                            chunk_index,
-                            start_line: None,
-                            end_line: None,
-                            score,
-                            snippet,
-                        });
-                    }
-                }
-
-                all_results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                all_results.truncate(max_results);
-                Ok(tool_handlers::format_search_results(&all_results))
-            }
+            "memory_search" => tool_handlers::handle_memory_search(&args, &self.config).await,
             // Consolidated list tool
             "list" => tool_handlers::handle_list(
                 &args,

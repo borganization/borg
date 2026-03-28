@@ -14,20 +14,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 
+use crate::logo::LOGO;
 use crate::onboarding::{models_for_provider, OnboardingResult, PROVIDERS};
 use crate::tui::theme;
 use borg_core::config::Config;
 use borg_core::provider::Provider;
 use std::str::FromStr;
-
-const LOGO: &str = r#"
- oooooooooo.    .oooooo.   ooooooooo.     .oooooo.
- `888'   `Y8b  d8P'  `Y8b  `888   `Y88.  d8P'  `Y8b
-  888     888 888      888  888   .d88' 888
-  888oooo888' 888      888  888ooo88P'  888
-  888    `88b 888      888  888`88b.    888     ooooo
-  888    .88P `88b    d88'  888  `88b.  `88.    .88'
- o888bood8P'   `Y8bood8P'  o888o  o888o  `Y8bood8P'"#;
 
 const LOGO_HEIGHT: u16 = 8; // includes leading blank line
 
@@ -81,6 +73,10 @@ enum WelcomeFocus {
 enum InputMode {
     Normal,
     TextInput,
+}
+
+fn is_shift_tab(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)
 }
 
 struct OnboardingState {
@@ -273,7 +269,7 @@ impl OnboardingState {
     fn handle_welcome_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Tab => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if is_shift_tab(&key) {
                     self.prev_tab();
                 } else {
                     match self.welcome_focus {
@@ -321,7 +317,7 @@ impl OnboardingState {
                 self.next_tab();
             }
             KeyCode::Tab | KeyCode::Right => {
-                if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT) {
+                if is_shift_tab(&key) {
                     self.prev_tab();
                 } else {
                     self.security_accepted = true;
@@ -337,7 +333,7 @@ impl OnboardingState {
         if self.api_key_existing {
             match key.code {
                 KeyCode::Tab | KeyCode::Right => {
-                    if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT) {
+                    if is_shift_tab(&key) {
                         self.prev_tab();
                     } else {
                         self.done = true;
@@ -353,7 +349,7 @@ impl OnboardingState {
         }
         match key.code {
             KeyCode::Tab => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                if is_shift_tab(&key) {
                     self.prev_tab();
                 } else if self.api_key_input.trim().is_empty() {
                     self.api_key_required_hint = true;
