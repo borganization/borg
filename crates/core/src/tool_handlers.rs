@@ -1849,4 +1849,218 @@ mod tests {
             "should have User Tools section"
         );
     }
+
+    // -- is_blocked_path --
+
+    #[test]
+    fn is_blocked_path_matches_blocked_dir() {
+        let home = dirs::home_dir().unwrap();
+        let path = home.join(".ssh/id_rsa");
+        let blocked = vec![".ssh".to_string()];
+        assert!(is_blocked_path(&path, &blocked));
+    }
+
+    #[test]
+    fn is_blocked_path_rejects_non_blocked() {
+        let home = dirs::home_dir().unwrap();
+        let path = home.join("Documents/safe.txt");
+        let blocked = vec![".ssh".to_string(), ".aws".to_string()];
+        assert!(!is_blocked_path(&path, &blocked));
+    }
+
+    #[test]
+    fn is_blocked_path_nested_blocked() {
+        let home = dirs::home_dir().unwrap();
+        let path = home.join(".aws/credentials/secret");
+        let blocked = vec![".aws".to_string()];
+        assert!(is_blocked_path(&path, &blocked));
+    }
+
+    #[test]
+    fn is_blocked_path_empty_blocked_list() {
+        let home = dirs::home_dir().unwrap();
+        let path = home.join(".ssh/id_rsa");
+        let blocked: Vec<String> = vec![];
+        assert!(!is_blocked_path(&path, &blocked));
+    }
+
+    #[test]
+    fn is_blocked_path_outside_home() {
+        let blocked = vec![".ssh".to_string()];
+        let path = std::path::Path::new("/tmp/.ssh/id_rsa");
+        assert!(!is_blocked_path(path, &blocked));
+    }
+
+    // -- handle_read_file (additional) --
+
+    #[test]
+    fn handle_read_file_empty_file() {
+        let tmp = std::env::temp_dir().join(format!("borg_empty_{}", std::process::id()));
+        std::fs::write(&tmp, "").unwrap();
+        let config = Config::default();
+        let result =
+            handle_read_file(&json!({"path": tmp.to_string_lossy().as_ref()}), &config).unwrap();
+        match result {
+            ToolOutput::Text(s) => assert!(s.contains("empty"), "expected 'empty' in: {s}"),
+            _ => panic!("expected Text"),
+        }
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn handle_read_file_tilde_expansion() {
+        let config = Config::default();
+        let result = handle_read_file(
+            &json!({"path": "~/nonexistent_borg_test_file_xyz.txt"}),
+            &config,
+        )
+        .unwrap();
+        match result {
+            ToolOutput::Text(s) => {
+                assert!(s.contains("not found"), "expected 'not found' in: {s}")
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn handle_read_file_truncation() {
+        let tmp = std::env::temp_dir().join(format!("borg_trunc_{}", std::process::id()));
+        let content = "x\n".repeat(1000);
+        std::fs::write(&tmp, &content).unwrap();
+        let config = Config::default();
+        let result = handle_read_file(
+            &json!({"path": tmp.to_string_lossy().as_ref(), "max_chars": 100}),
+            &config,
+        )
+        .unwrap();
+        match result {
+            ToolOutput::Text(s) => {
+                assert!(s.contains("truncated"), "expected 'truncated' in: {s}")
+            }
+            _ => panic!("expected Text"),
+        }
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    // -- disabled feature guards --
+
+    #[tokio::test]
+    async fn handle_web_fetch_disabled() {
+        let mut config = Config::default();
+        config.web.enabled = false;
+        let result = handle_web_fetch(&json!({"url": "https://example.com"}), &config)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("disabled"),
+            "expected 'disabled' in: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_web_search_disabled() {
+        let mut config = Config::default();
+        config.web.enabled = false;
+        let result = handle_web_search(&json!({"query": "test"}), &config)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("disabled"),
+            "expected 'disabled' in: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_generate_image_disabled() {
+        let mut config = Config::default();
+        config.image_gen.enabled = false;
+        let result = handle_generate_image(&json!({"prompt": "a cat"}), &config)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("disabled"),
+            "expected 'disabled' in: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_generate_image_empty_prompt() {
+        let mut config = Config::default();
+        config.image_gen.enabled = true;
+        let result = handle_generate_image(&json!({"prompt": ""}), &config)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("required"),
+            "expected 'required' in: {result}"
+        );
+    }
+
+    // -- handle_list dispatch --
+
+    #[test]
+    fn list_skills_dispatches() {
+        let registry = empty_registry();
+        let config = Config::default();
+        let args = json!({"what": "skills"});
+        let result = handle_list(&args, &registry, &config, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_channels_dispatches() {
+        let registry = empty_registry();
+        let config = Config::default();
+        let args = json!({"what": "channels"});
+        let result = handle_list(&args, &registry, &config, None);
+        assert!(result.is_ok());
+    }
+
+    // -- handle_manage_tasks (additional) --
+
+    #[test]
+    fn handle_manage_tasks_create_invalid_schedule() {
+        let args = json!({
+            "action": "create",
+            "name": "test",
+            "prompt": "do stuff",
+            "schedule_type": "cron",
+            "schedule_expr": "not a cron"
+        });
+        let result = handle_manage_tasks(&args, &Config::default()).unwrap();
+        assert!(
+            result.contains("Invalid schedule") || result.contains("Error"),
+            "expected schedule error in: {result}"
+        );
+    }
+
+    #[test]
+    fn handle_manage_tasks_create_missing_name() {
+        let args = json!({
+            "action": "create",
+            "prompt": "do stuff",
+            "schedule_expr": "30m"
+        });
+        let result = handle_manage_tasks(&args, &Config::default());
+        assert!(result.is_err());
+    }
+
+    // -- handle_list_tools profile filtering --
+
+    #[test]
+    fn handle_list_tools_minimal_profile_disables_groups() {
+        let registry = empty_registry();
+        let mut config = Config::default();
+        config.tools.policy.profile = "minimal".to_string();
+        let result = handle_list_tools(&registry, &config).unwrap();
+        assert!(
+            result.contains("(disabled)"),
+            "minimal profile should mark most groups as disabled, got: {result}"
+        );
+        assert!(
+            result.contains("Minimal"),
+            "should show Minimal profile name"
+        );
+    }
 }
