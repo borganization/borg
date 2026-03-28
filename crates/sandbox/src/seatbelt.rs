@@ -86,6 +86,19 @@ pub fn generate_profile(
         profile.push_str(&format!("(allow file-write* (subpath \"{path}\"))\n"));
     }
 
+    // Deny read access to specific paths (overrides the blanket allow).
+    // Deny rules are security-critical — invalid paths are hard errors.
+    for path in &policy.deny_read {
+        validate_seatbelt_path(path)?;
+        profile.push_str(&format!("(deny file-read* (subpath \"{path}\"))\n"));
+    }
+
+    // Deny write access to protected paths (e.g. ~/.borg/).
+    for path in &policy.deny_write {
+        validate_seatbelt_path(path)?;
+        profile.push_str(&format!("(deny file-write* (subpath \"{path}\"))\n"));
+    }
+
     // Network access
     if policy.network {
         profile.push_str("(allow network*)\n");
@@ -99,11 +112,7 @@ mod tests {
     use super::*;
 
     fn default_policy() -> SandboxPolicy {
-        SandboxPolicy {
-            network: false,
-            fs_read: vec![],
-            fs_write: vec![],
-        }
+        SandboxPolicy::default()
     }
 
     #[test]
@@ -131,8 +140,7 @@ mod tests {
     fn profile_network_when_allowed() {
         let policy = SandboxPolicy {
             network: true,
-            fs_read: vec![],
-            fs_write: vec![],
+            ..Default::default()
         };
         let profile = generate_profile(&policy, Path::new("/tmp/tool"), None).unwrap();
         assert!(profile.contains("(allow network*)"));
@@ -141,9 +149,8 @@ mod tests {
     #[test]
     fn profile_additional_read_paths() {
         let policy = SandboxPolicy {
-            network: false,
             fs_read: vec!["/data/input".to_string()],
-            fs_write: vec![],
+            ..Default::default()
         };
         let profile = generate_profile(&policy, Path::new("/tmp/tool"), None).unwrap();
         assert!(profile.contains("(allow file-read* (subpath \"/data/input\"))"));
@@ -152,9 +159,8 @@ mod tests {
     #[test]
     fn profile_additional_write_paths() {
         let policy = SandboxPolicy {
-            network: false,
-            fs_read: vec![],
             fs_write: vec!["/data/output".to_string()],
+            ..Default::default()
         };
         let profile = generate_profile(&policy, Path::new("/tmp/tool"), None).unwrap();
         assert!(profile.contains("(allow file-write* (subpath \"/data/output\"))"));
@@ -183,9 +189,8 @@ mod tests {
     #[test]
     fn rejects_quote_injection_in_fs_read() {
         let policy = SandboxPolicy {
-            network: false,
             fs_read: vec!["\"))\n(allow default)\n(deny file-read* (subpath \"".to_string()],
-            fs_write: vec![],
+            ..Default::default()
         };
         let result = generate_profile(&policy, Path::new("/tmp/tool"), None);
         assert!(result.is_err());
@@ -194,9 +199,8 @@ mod tests {
     #[test]
     fn rejects_quote_injection_in_fs_write() {
         let policy = SandboxPolicy {
-            network: false,
-            fs_read: vec![],
             fs_write: vec!["/foo\"))\n(allow default)".to_string()],
+            ..Default::default()
         };
         let result = generate_profile(&policy, Path::new("/tmp/tool"), None);
         assert!(result.is_err());
@@ -205,9 +209,8 @@ mod tests {
     #[test]
     fn rejects_relative_path() {
         let policy = SandboxPolicy {
-            network: false,
             fs_read: vec!["relative/path".to_string()],
-            fs_write: vec![],
+            ..Default::default()
         };
         let result = generate_profile(&policy, Path::new("/tmp/tool"), None);
         assert!(result.is_err());
@@ -216,9 +219,8 @@ mod tests {
     #[test]
     fn rejects_parentheses_in_path() {
         let policy = SandboxPolicy {
-            network: false,
             fs_read: vec!["/foo(bar)".to_string()],
-            fs_write: vec![],
+            ..Default::default()
         };
         let result = generate_profile(&policy, Path::new("/tmp/tool"), None);
         assert!(result.is_err());
@@ -227,9 +229,8 @@ mod tests {
     #[test]
     fn rejects_newline_in_path() {
         let policy = SandboxPolicy {
-            network: false,
             fs_read: vec!["/foo\nbar".to_string()],
-            fs_write: vec![],
+            ..Default::default()
         };
         let result = generate_profile(&policy, Path::new("/tmp/tool"), None);
         assert!(result.is_err());
@@ -296,5 +297,51 @@ mod tests {
     #[test]
     fn validate_seatbelt_path_rejects_carriage_return() {
         assert!(validate_seatbelt_path("/tmp/path\rfoo").is_err());
+    }
+
+    #[test]
+    fn profile_includes_deny_read_rules() {
+        let policy = SandboxPolicy {
+            network: false,
+            fs_read: vec![],
+            fs_write: vec![],
+            deny_read: vec!["/secret/data".to_string()],
+            deny_write: vec![],
+        };
+        let profile = generate_profile(&policy, Path::new("/tmp/tool"), None).unwrap();
+        assert!(profile.contains("(deny file-read* (subpath \"/secret/data\"))"));
+    }
+
+    #[test]
+    fn rejects_invalid_deny_read_path() {
+        let policy = SandboxPolicy {
+            deny_read: vec!["/foo\"))\n(allow default)".to_string()],
+            ..Default::default()
+        };
+        let result = generate_profile(&policy, Path::new("/tmp/tool"), None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_deny_write_path() {
+        let policy = SandboxPolicy {
+            deny_write: vec!["relative/path".to_string()],
+            ..Default::default()
+        };
+        let result = generate_profile(&policy, Path::new("/tmp/tool"), None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn profile_includes_deny_write_rules() {
+        let policy = SandboxPolicy {
+            network: false,
+            fs_read: vec![],
+            fs_write: vec![],
+            deny_read: vec![],
+            deny_write: vec!["/home/user/.borg".to_string()],
+        };
+        let profile = generate_profile(&policy, Path::new("/tmp/tool"), None).unwrap();
+        assert!(profile.contains("(deny file-write* (subpath \"/home/user/.borg\"))"));
     }
 }

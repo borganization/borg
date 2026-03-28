@@ -23,6 +23,7 @@ use crate::secrets::redact_secrets;
 use crate::session::Session;
 use crate::skills::load_skills_context;
 use crate::telemetry::BorgMetrics;
+use crate::template::Template;
 use crate::tool_handlers;
 use crate::truncate::truncate_output;
 use crate::types::{ContentPart, FunctionCall, Message, ToolCall, ToolDefinition, ToolOutput};
@@ -30,8 +31,25 @@ use borg_tools::registry::ToolRegistry;
 
 use crate::constants;
 
+use std::sync::LazyLock;
+
 /// Max tokens for tool output before truncation (head + tail preserved).
 const TOOL_OUTPUT_MAX_TOKENS: usize = constants::TOOL_OUTPUT_MAX_TOKENS;
+
+fn parse_template(source: &str) -> Template {
+    Template::parse(source).unwrap_or_else(|e| panic!("bad template: {e}"))
+}
+
+static MEMORY_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
+    parse_template("\n<user_memory trust=\"stored\">\n{{ memory }}\n</user_memory>\n")
+});
+
+static SKILLS_TEMPLATE: LazyLock<Template> =
+    LazyLock::new(|| parse_template("\n<skills trust=\"verified\">\n{{ skills }}\n</skills>\n"));
+
+static SETUP_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
+    parse_template("\n<first_conversation>\n{{ setup }}\n</first_conversation>\n")
+});
 
 /// Maximum number of parallel tool calls allowed in a single LLM response.
 /// Prevents OOM from malformed stream events with huge indices.
@@ -596,9 +614,11 @@ impl Agent {
         system.push_str("</environment>\n");
 
         if !memory.is_empty() {
-            system.push_str(&format!(
-                "\n<user_memory trust=\"stored\">\n{memory}\n</user_memory>\n"
-            ));
+            system.push_str(
+                &MEMORY_TEMPLATE
+                    .render([("memory", memory.as_str())])
+                    .unwrap_or_else(|e| panic!("memory template render failed: {e}")),
+            );
         }
 
         system.push_str("\n<memory_recall>\nWhen answering questions about prior work, past decisions, dates, people, preferences, todos, or anything previously discussed, use the memory_search tool to look up relevant context. Auto-loaded memory above may not contain all relevant information.\n</memory_recall>\n");
@@ -616,9 +636,11 @@ impl Agent {
                 }
             };
             if !skills.is_empty() {
-                system.push_str(&format!(
-                    "\n<skills trust=\"verified\">\n{skills}\n</skills>\n"
-                ));
+                system.push_str(
+                    &SKILLS_TEMPLATE
+                        .render([("skills", skills.as_str())])
+                        .unwrap_or_else(|e| panic!("skills template render failed: {e}")),
+                );
             }
         }
 
@@ -633,9 +655,11 @@ impl Agent {
             let consumed = setup_path.with_extension("md.consumed");
             if std::fs::rename(&setup_path, &consumed).is_ok() {
                 if let Ok(setup) = std::fs::read_to_string(&consumed) {
-                    system.push_str(&format!(
-                        "\n<first_conversation>\n{setup}\n</first_conversation>\n"
-                    ));
+                    system.push_str(
+                        &SETUP_TEMPLATE
+                            .render([("setup", setup.as_str())])
+                            .unwrap_or_else(|e| panic!("setup template render failed: {e}")),
+                    );
                 }
                 let _ = std::fs::remove_file(&consumed);
             }

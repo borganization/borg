@@ -43,6 +43,7 @@ impl<'a> ToolExecutor<'a> {
         let sandbox_policy = self
             .manifest
             .sandbox_policy()
+            .with_borg_dir_protected()
             .with_tildes_expanded()
             .with_blocked_paths_filtered(blocked_paths);
 
@@ -78,6 +79,7 @@ impl<'a> ToolExecutor<'a> {
         let sandbox_policy = self
             .manifest
             .sandbox_policy()
+            .with_borg_dir_protected()
             .with_tildes_expanded()
             .with_blocked_paths_filtered(blocked_paths);
 
