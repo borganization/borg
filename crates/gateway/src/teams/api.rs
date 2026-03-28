@@ -7,11 +7,10 @@ use tracing::warn;
 
 use super::types::{ReplyActivity, TokenResponse};
 use crate::chunker;
+use crate::constants::{DEFAULT_MESSAGE_CHUNK_SIZE, GATEWAY_HTTP_TIMEOUT};
 use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
 
 const TOKEN_ENDPOINT: &str = "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
-const MESSAGE_CHUNK_SIZE: usize = 4000;
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Buffer in seconds before token expiry to trigger refresh.
 const TOKEN_EXPIRY_BUFFER_SECS: u64 = 60;
 
@@ -36,7 +35,7 @@ impl TeamsClient {
     pub fn new(app_id: &str, app_secret: &str) -> Result<Self> {
         Ok(Self {
             client: Client::builder()
-                .timeout(HTTP_TIMEOUT)
+                .timeout(GATEWAY_HTTP_TIMEOUT)
                 .build()
                 .context("Failed to build Teams HTTP client")?,
             app_id: app_id.to_string(),
@@ -126,7 +125,7 @@ impl TeamsClient {
         validate_service_url(service_url)?;
         let base = ensure_trailing_slash(service_url);
 
-        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
+        let chunks = chunker::chunk_text_nonempty(text, DEFAULT_MESSAGE_CHUNK_SIZE);
 
         for chunk in &chunks {
             let url = format!("{base}v3/conversations/{conversation_id}/activities/{activity_id}");
@@ -148,7 +147,7 @@ impl TeamsClient {
         validate_service_url(service_url)?;
         let base = ensure_trailing_slash(service_url);
 
-        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
+        let chunks = chunker::chunk_text_nonempty(text, DEFAULT_MESSAGE_CHUNK_SIZE);
 
         for chunk in &chunks {
             let url = format!("{base}v3/conversations/{conversation_id}/activities");
@@ -313,7 +312,7 @@ mod tests {
     #[test]
     fn chunking_integration() {
         let long_text: String = "a".repeat(8500);
-        let chunks = chunker::chunk_text(&long_text, MESSAGE_CHUNK_SIZE);
+        let chunks = chunker::chunk_text(&long_text, DEFAULT_MESSAGE_CHUNK_SIZE);
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].len(), 4000);
         assert_eq!(chunks[1].len(), 4000);
