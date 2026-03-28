@@ -968,7 +968,7 @@ async fn webhook_handler(
     let health = state.health.clone();
     let request_timeout = state.request_timeout;
 
-    state
+    let enqueued = state
         .session_queue
         .enqueue(
             session_key,
@@ -988,6 +988,10 @@ async fn webhook_handler(
             }),
         )
         .await;
+
+    if !enqueued {
+        return service_unavailable_response();
+    }
 
     match rx.await {
         Ok(Ok(response)) => (
@@ -1014,6 +1018,13 @@ fn ok_response() -> WebhookResponse {
     (
         StatusCode::OK,
         axum::Json(serde_json::json!({ "ok": true })),
+    )
+}
+
+fn service_unavailable_response() -> WebhookResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(serde_json::json!({ "error": "Server at capacity, try again later" })),
     )
 }
 
@@ -1110,7 +1121,7 @@ async fn handle_telegram_webhook(
     let state = state.clone();
     let tg_client = tg_client.clone();
     let work_state = state.clone();
-    state
+    let enqueued = state
         .session_queue
         .enqueue(
             session_key,
@@ -1155,6 +1166,9 @@ async fn handle_telegram_webhook(
         )
         .await;
 
+    if !enqueued {
+        return service_unavailable_response();
+    }
     // Return 200 immediately — response is sent via Telegram API asynchronously
     ok_response()
 }
@@ -1264,7 +1278,7 @@ async fn handle_slack_webhook(
     let state = state.clone();
     let slack_client = slack_client.clone();
     let work_state = state.clone();
-    state
+    let enqueued = state
         .session_queue
         .enqueue(
             session_key,
@@ -1337,6 +1351,9 @@ async fn handle_slack_webhook(
         )
         .await;
 
+    if !enqueued {
+        return service_unavailable_response();
+    }
     ok_response()
 }
 
@@ -1404,7 +1421,7 @@ async fn slack_command_handler(
 
     let slack_client = slack_client.clone();
     let work_state = state.clone();
-    state
+    let enqueued = state
         .session_queue
         .enqueue(
             session_key,
@@ -1454,6 +1471,9 @@ async fn slack_command_handler(
         )
         .await;
 
+    if !enqueued {
+        return service_unavailable_response();
+    }
     ok_response()
 }
 
@@ -1512,7 +1532,7 @@ async fn handle_twilio_webhook(
     let state = state.clone();
     let twilio_client = twilio_client.clone();
     let work_state = state.clone();
-    state
+    let enqueued = state
         .session_queue
         .enqueue(
             session_key,
@@ -1574,6 +1594,9 @@ async fn handle_twilio_webhook(
         )
         .await;
 
+    if !enqueued {
+        return service_unavailable_response();
+    }
     ok_response()
 }
 
@@ -1682,7 +1705,7 @@ async fn handle_discord_webhook_route(
             let state = state.clone();
             let discord_client = discord_client.clone();
             let work_state = state.clone();
-            state
+            let enqueued = state
                 .session_queue
                 .enqueue(
                     session_key,
@@ -1758,6 +1781,9 @@ async fn handle_discord_webhook_route(
                 )
                 .await;
 
+            if !enqueued {
+                return service_unavailable_response();
+            }
             ok_response()
         }
     }
@@ -1804,7 +1830,7 @@ async fn handle_teams_webhook_route(
 
     let state = state.clone();
     let work_state = state.clone();
-    state
+    let enqueued = state
         .session_queue
         .enqueue(
             session_key,
@@ -1860,6 +1886,9 @@ async fn handle_teams_webhook_route(
         )
         .await;
 
+    if !enqueued {
+        return service_unavailable_response();
+    }
     ok_response()
 }
 
@@ -1889,7 +1918,7 @@ async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> 
         let gc_client = gc_client.clone();
         let state = state.clone();
         let work_state = state.clone();
-        state
+        let enqueued = state
             .session_queue
             .enqueue(
                 session_key,
@@ -1930,6 +1959,9 @@ async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> 
             )
             .await;
 
+        if !enqueued {
+            return service_unavailable_response();
+        }
         ok_response()
     } else {
         // No async client — invoke agent and return synchronous response
@@ -1940,7 +1972,7 @@ async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> 
         // For sync Google Chat, we still queue but wait for the result
         let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
         let work_state = state.clone();
-        state
+        let enqueued = state
             .session_queue
             .enqueue(
                 session_key,
@@ -1968,6 +2000,10 @@ async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> 
                 }),
             )
             .await;
+
+        if !enqueued {
+            return service_unavailable_response();
+        }
 
         match rx.await {
             Ok(Some(text)) => (

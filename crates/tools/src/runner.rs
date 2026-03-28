@@ -115,6 +115,8 @@ impl<'a> ScriptRunner<'a> {
         let mut stdout_buf = String::new();
         let mut stderr_buf = String::new();
         let mut callback_bytes: usize = 0;
+        let mut stdout_truncated = false;
+        let mut stderr_truncated = false;
         const STREAM_CALLBACK_LIMIT: usize = 120 * 1024;
         const MAX_OUTPUT_BYTES: usize = 10 * 1024 * 1024; // 10 MB cap per stream
 
@@ -141,6 +143,8 @@ impl<'a> ScriptRunner<'a> {
                                 if stdout_buf.len() + l.len() < MAX_OUTPUT_BYTES {
                                     stdout_buf.push_str(&l);
                                     stdout_buf.push('\n');
+                                } else {
+                                    stdout_truncated = true;
                                 }
                             }
                             _ => { stdout_done = true; }
@@ -161,6 +165,8 @@ impl<'a> ScriptRunner<'a> {
                                 if stderr_buf.len() + l.len() < MAX_OUTPUT_BYTES {
                                     stderr_buf.push_str(&l);
                                     stderr_buf.push('\n');
+                                } else {
+                                    stderr_truncated = true;
                                 }
                             }
                             _ => { stderr_done = true; }
@@ -176,6 +182,13 @@ impl<'a> ScriptRunner<'a> {
             .await
             .map_err(|_| anyhow::anyhow!("'{}' timed out after {}ms", self.name, self.timeout_ms))?
             .context("Failed to wait for script process")?;
+
+        if stdout_truncated {
+            stdout_buf.push_str("\n[output truncated at 10MB]");
+        }
+        if stderr_truncated {
+            stderr_buf.push_str("\n[output truncated at 10MB]");
+        }
 
         Ok(ScriptOutput {
             stdout: stdout_buf,

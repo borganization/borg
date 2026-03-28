@@ -126,7 +126,10 @@ impl SandboxPolicy {
     pub fn with_borg_dir_protected(&self) -> Self {
         let borg_dir = dirs::home_dir()
             .map(|h| format!("{}/.borg", h.display()))
-            .unwrap_or_else(|| "~/.borg".to_string());
+            .unwrap_or_else(|| {
+                tracing::warn!("Could not determine home directory; using literal '~/.borg' which may not resolve");
+                "~/.borg".to_string()
+            });
 
         let mut deny_write = self.deny_write.clone();
         if !deny_write.iter().any(|p| p == &borg_dir) {

@@ -389,8 +389,12 @@ pub fn write_memory_scoped(
     };
 
     if mode == WriteMode::Append && path.exists() {
-        let existing = std::fs::read_to_string(&path)?;
-        std::fs::write(&path, format!("{existing}\n{content}"))?;
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        writeln!(f, "\n{content}")?;
     } else {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

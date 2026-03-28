@@ -132,6 +132,21 @@ impl HeartbeatScheduler {
             }
         };
 
+        // Validate minimum interval between cron firings
+        {
+            let mut upcoming = schedule.upcoming(chrono::Utc);
+            if let (Some(t1), Some(t2)) = (upcoming.next(), upcoming.next()) {
+                let interval = (t2 - t1).to_std().unwrap_or_default();
+                if interval < std::time::Duration::from_secs(60) {
+                    warn!(
+                        "Cron expression '{cron_expr}' fires more often than once per minute ({interval:?}). Falling back to interval."
+                    );
+                    self.run_interval(tx, cancel).await;
+                    return;
+                }
+            }
+        }
+
         info!("Heartbeat scheduler started (cron: {cron_expr})");
 
         loop {

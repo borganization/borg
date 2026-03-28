@@ -112,3 +112,11 @@ pub const GW_RATE_MEMORY_WRITES_WARN: u32 = 5;
 pub const GW_RATE_MEMORY_WRITES_BLOCK: u32 = 10;
 pub const GW_RATE_WEB_REQUESTS_WARN: u32 = 10;
 pub const GW_RATE_WEB_REQUESTS_BLOCK: u32 = 25;
+
+// Tool call validation limits
+/// Max length of a tool call name from LLM response.
+pub const MAX_TOOL_NAME_LEN: usize = 256;
+/// Max length of tool call arguments JSON from LLM response (1 MB).
+pub const MAX_TOOL_ARGS_LEN: usize = 1_000_000;
+/// Max number of tool calls allowed in a single LLM response.
+pub const MAX_TOOL_CALLS_PER_RESPONSE: usize = 50;

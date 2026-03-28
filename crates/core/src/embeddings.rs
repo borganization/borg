@@ -198,7 +198,13 @@ pub async fn generate_embedding(
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("Invalid embedding response: missing data[0].embedding"))?
         .iter()
-        .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+        .map(|v| match v.as_f64() {
+            Some(f) => f as f32,
+            None => {
+                tracing::warn!("Non-numeric value in embedding response: {v}");
+                0.0
+            }
+        })
         .collect();
 
     Ok(embedding)
@@ -236,6 +242,13 @@ pub fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
 
 /// Unpack little-endian bytes into f32 embedding.
 pub fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
+    if bytes.len() % 4 != 0 {
+        tracing::warn!(
+            "Corrupted embedding data: length {} not aligned to 4 bytes, returning empty",
+            bytes.len()
+        );
+        return Vec::new();
+    }
     bytes
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))

@@ -155,8 +155,16 @@ impl TelegramClient {
                     bail!("sendMessage rate limited after {MAX_SEND_RETRIES} retries");
                 }
                 let retry_secs = resp_body.retry_after.unwrap_or(5).min(MAX_RETRY_AFTER_SECS);
-                warn!("Telegram rate limited, retry after {retry_secs}s (attempt {attempts}/{MAX_SEND_RETRIES})");
-                tokio::time::sleep(Duration::from_secs(retry_secs)).await;
+                let jitter_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_millis() as u64
+                    % 1000;
+                warn!("Telegram rate limited, retry after {retry_secs}s +{jitter_ms}ms jitter (attempt {attempts}/{MAX_SEND_RETRIES})");
+                tokio::time::sleep(
+                    Duration::from_secs(retry_secs) + Duration::from_millis(jitter_ms),
+                )
+                .await;
                 continue;
             }
 

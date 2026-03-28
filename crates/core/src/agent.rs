@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
@@ -37,7 +37,12 @@ use std::sync::LazyLock;
 const TOOL_OUTPUT_MAX_TOKENS: usize = constants::TOOL_OUTPUT_MAX_TOKENS;
 
 fn parse_template(source: &str) -> Template {
-    Template::parse(source).unwrap_or_else(|e| panic!("bad template: {e}"))
+    Template::parse(source).unwrap_or_else(|e| {
+        tracing::error!("Failed to parse template: {e} — using fallback");
+        // SAFETY: This literal template string is known valid at compile time
+        #[allow(clippy::expect_used)]
+        Template::parse("{{ memory }}").expect("fallback template must parse")
+    })
 }
 
 static MEMORY_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
@@ -929,6 +934,8 @@ impl Agent {
                                 .await;
                         }
                     }
+                } else {
+                    warn!("Budget enforcement skipped: database unavailable");
                 }
             }
 
@@ -995,7 +1002,10 @@ impl Agent {
                 }
             }
 
-            let mut system_prompt = self.build_system_prompt().await?;
+            let mut system_prompt = self
+                .build_system_prompt()
+                .await
+                .context("Failed to build system prompt")?;
             let tool_defs = self.build_tool_definitions();
 
             // Fire BeforeAgentStart (first iteration) or BeforeLlmCall
@@ -1042,7 +1052,8 @@ impl Agent {
             let tools_clone = tools.map(<[ToolDefinition]>::to_vec);
             let cancel_clone = cancel.clone();
             let stream_handle = {
-                let mut llm_client = LlmClient::new(self.config.clone())?;
+                let mut llm_client = LlmClient::new(self.config.clone())
+                    .context("Failed to initialize LLM client")?;
                 tokio::spawn(async move {
                     if let Err(e) = llm_client
                         .stream_chat_with_cancel(
@@ -1185,9 +1196,25 @@ impl Agent {
 
             let tc: Vec<ToolCall> = tool_calls
                 .iter()
+                .take(constants::MAX_TOOL_CALLS_PER_RESPONSE)
                 .filter(|ptc| {
                     if ptc.name.is_empty() || ptc.id.is_empty() {
                         warn!("Dropping incomplete tool call (missing name or id)");
+                        return false;
+                    }
+                    if ptc.name.len() > constants::MAX_TOOL_NAME_LEN {
+                        warn!(
+                            "Dropping tool call with oversized name ({} bytes)",
+                            ptc.name.len()
+                        );
+                        return false;
+                    }
+                    if ptc.arguments.len() > constants::MAX_TOOL_ARGS_LEN {
+                        warn!(
+                            "Dropping tool call '{}' with oversized arguments ({} bytes)",
+                            ptc.name,
+                            ptc.arguments.len()
+                        );
                         return false;
                     }
                     if serde_json::from_str::<serde_json::Value>(&ptc.arguments).is_err() {

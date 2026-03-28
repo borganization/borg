@@ -968,7 +968,13 @@ impl Config {
         self.user
             .timezone
             .as_deref()
-            .and_then(|s| s.parse::<chrono_tz::Tz>().ok())
+            .and_then(|s| {
+                s.parse::<chrono_tz::Tz>()
+                    .inspect_err(|e| {
+                        tracing::warn!("Invalid timezone '{s}': {e}, defaulting to UTC");
+                    })
+                    .ok()
+            })
             .unwrap_or(chrono_tz::Tz::UTC)
     }
 
@@ -1034,6 +1040,7 @@ impl Config {
             let trimmed = line.trim();
             if trimmed.starts_with('[') && !trimmed.starts_with("[[") {
                 if seen.contains(trimmed) {
+                    tracing::warn!("Duplicate config table '{trimmed}' found — keeping first occurrence, dropping duplicate");
                     skip = true;
                     continue;
                 }
@@ -1318,7 +1325,10 @@ impl Config {
                 Ok(key) if !key.is_empty() => {
                     // Infer provider from api_key_env name
                     let provider = Provider::from_env_var_name(&self.llm.api_key_env)
-                        .unwrap_or(Provider::OpenRouter);
+                        .unwrap_or_else(|| {
+                            warn!("Could not infer provider from api_key_env '{}', defaulting to OpenRouter", self.llm.api_key_env);
+                            Provider::OpenRouter
+                        });
                     return Ok((provider, key));
                 }
                 Ok(_) => {
@@ -1338,7 +1348,10 @@ impl Config {
             if let Ok(key) = std::env::var(&self.llm.api_key_env) {
                 if !key.is_empty() {
                     let provider = Provider::from_env_var_name(&self.llm.api_key_env)
-                        .unwrap_or(Provider::OpenRouter);
+                        .unwrap_or_else(|| {
+                            warn!("Could not infer provider from api_key_env '{}', defaulting to OpenRouter", self.llm.api_key_env);
+                            Provider::OpenRouter
+                        });
                     return Ok((provider, key));
                 }
             }
@@ -1366,9 +1379,10 @@ impl Config {
                     Provider::from_str(provider_str)?
                 } else {
                     // Infer provider via resolve_provider; ignore errors since we have keys
-                    self.resolve_provider()
-                        .map(|(p, _)| p)
-                        .unwrap_or(Provider::OpenRouter)
+                    self.resolve_provider().map(|(p, _)| p).unwrap_or_else(|_| {
+                        warn!("Could not infer provider from config, defaulting to OpenRouter");
+                        Provider::OpenRouter
+                    })
                 };
                 return Ok((provider, keys));
             }

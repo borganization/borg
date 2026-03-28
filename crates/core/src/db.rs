@@ -254,6 +254,7 @@ impl Database {
         // WAL pragma returns a result row — use query_row to avoid execute_batch error
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        let _: i64 = conn.query_row("PRAGMA busy_timeout=5000", [], |row| row.get(0))?;
         let db = Self { conn };
         db.run_migrations()?;
         Ok(db)
@@ -265,6 +266,7 @@ impl Database {
         // WAL pragma returns a result row — use query_row to avoid execute_batch error
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        let _: i64 = conn.query_row("PRAGMA busy_timeout=5000", [], |row| row.get(0))?;
         let db = Self { conn };
         db.run_migrations()?;
         Ok(db)
