@@ -205,6 +205,58 @@ impl TelegramClient {
         Ok(())
     }
 
+    /// Send a voice message (OGG/Opus audio) to a chat.
+    /// Uses Telegram's `sendVoice` API with multipart/form-data upload.
+    pub async fn send_voice(
+        &self,
+        chat_id: i64,
+        audio_bytes: &[u8],
+        caption: Option<&str>,
+        message_thread_id: Option<i64>,
+        reply_to_message_id: Option<i64>,
+    ) -> Result<()> {
+        let file_part = reqwest::multipart::Part::bytes(audio_bytes.to_vec())
+            .file_name("voice.ogg")
+            .mime_str("audio/ogg")?;
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part("voice", file_part);
+
+        if let Some(cap) = caption {
+            form = form.text("caption", cap.to_string());
+        }
+        if let Some(tid) = message_thread_id {
+            form = form.text("message_thread_id", tid.to_string());
+        }
+        if let Some(rid) = reply_to_message_id {
+            form = form.text("reply_to_message_id", rid.to_string());
+        }
+
+        let resp = self
+            .client
+            .post(self.api_url("sendVoice"))
+            .multipart(form)
+            .send()
+            .await
+            .context("Failed to send voice message")?;
+
+        let resp_body: ApiResponse<serde_json::Value> = resp
+            .json()
+            .await
+            .context("Failed to parse sendVoice response")?;
+
+        if !resp_body.ok {
+            bail!(
+                "sendVoice failed: {}",
+                resp_body
+                    .description
+                    .unwrap_or_else(|| "unknown error".into())
+            );
+        }
+        Ok(())
+    }
+
     /// Register a webhook URL with Telegram.
     pub async fn set_webhook(&self, url: &str, secret_token: Option<&str>) -> Result<()> {
         let mut body = serde_json::json!({ "url": url });
@@ -577,6 +629,15 @@ mod tests {
         assert_eq!(
             client.api_url("sendMessage"),
             "https://api.telegram.org/bot123:ABC/sendMessage"
+        );
+    }
+
+    #[test]
+    fn send_voice_url_construction() {
+        let client = TelegramClient::new("123:ABC").unwrap();
+        assert_eq!(
+            client.api_url("sendVoice"),
+            "https://api.telegram.org/bot123:ABC/sendVoice"
         );
     }
 
