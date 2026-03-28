@@ -185,6 +185,30 @@ const SETTINGS: &[SettingEntry] = &[
         kind: SettingKind::Uint,
         category: "Gateway",
     },
+    SettingEntry {
+        key: "tts.enabled",
+        label: "Enabled",
+        kind: SettingKind::Bool,
+        category: "Voice",
+    },
+    SettingEntry {
+        key: "tts.auto_mode",
+        label: "Auto voice reply",
+        kind: SettingKind::Bool,
+        category: "Voice",
+    },
+    SettingEntry {
+        key: "tts.default_voice",
+        label: "Default voice",
+        kind: SettingKind::Text,
+        category: "Voice",
+    },
+    SettingEntry {
+        key: "tts.default_format",
+        label: "Output format",
+        kind: SettingKind::Text,
+        category: "Voice",
+    },
 ];
 
 impl SettingsPopup {
@@ -287,6 +311,10 @@ impl SettingsPopup {
             "gateway.telegram_dedup_capacity" => {
                 format!("{}", config.gateway.telegram_dedup_capacity)
             }
+            "tts.enabled" => format!("{}", config.tts.enabled),
+            "tts.auto_mode" => format!("{}", config.tts.auto_mode),
+            "tts.default_voice" => config.tts.default_voice.clone(),
+            "tts.default_format" => config.tts.default_format.clone(),
             _ => "?".to_string(),
         }
     }
@@ -828,7 +856,7 @@ mod tests {
     #[test]
     fn all_settings_covered() {
         let popup = SettingsPopup::new();
-        assert_eq!(popup.entries.len(), 23);
+        assert_eq!(popup.entries.len(), 27);
 
         let cfg = Config::default();
         for entry in popup.entries {

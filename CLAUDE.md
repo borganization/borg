@@ -386,6 +386,34 @@ slack = "open"                  # trust Slack workspace auth
 
 Hooks implement the `Hook` trait and are registered on the agent via `agent.hook_registry_mut().register(...)`. Multiple hooks can be registered; `InjectContext` results are merged, `Skip` short-circuits.
 
+## Settings System
+
+Three-tier resolution (highest priority wins): **Database** → **config.toml** → **Compiled defaults**.
+
+Settings are persisted in SQLite (`settings` table) and applied as runtime overrides on top of `config.toml`. Users can configure via:
+- `/settings` TUI popup (interactive toggle/edit)
+- `borg settings set KEY VALUE` / `borg settings get KEY` / `borg settings unset KEY` (CLI)
+- Direct `config.toml` edits (for array/nested config like provider fallback chains)
+
+### Adding a New Setting (4 touch points)
+
+1. **`config.rs`** — Add field to the relevant config struct + `apply_setting()` match arm with validation
+2. **`settings.rs`** — Add key to `ALL_SETTING_KEYS` array + `config_value_for_key()` match arm
+3. **`settings_popup.rs`** — Add `SettingEntry` to `SETTINGS` array (key, label, kind, category)
+4. Tests in each file verifying parse/resolve/display
+
+The `SettingsResolver` handles merging automatically — no additional wiring needed. `SettingKind` options: `Bool` (Space toggles), `Float` (arrows ±0.1), `Uint` (Enter to edit), `Text` (Enter to edit), `Select` (Left/Right cycle).
+
+### Key Files
+
+| File | Role |
+|------|------|
+| `crates/core/src/settings.rs` | Resolver: DB → TOML → defaults, `ALL_SETTING_KEYS`, `config_value_for_key()` |
+| `crates/core/src/config.rs` | `Config::apply_setting()` — validates and applies key/value pairs |
+| `crates/cli/src/tui/settings_popup.rs` | TUI popup: `SETTINGS` array, interactive editing, DB persistence |
+| `crates/core/src/db.rs` | SQLite `settings` table: `get_setting`, `set_setting`, `delete_setting`, `list_settings` |
+| `crates/cli/src/main.rs` | CLI `borg settings` subcommands |
+
 ## Doctor Command
 
 `crates/core/src/doctor.rs` — diagnostic checks for config, provider, sandbox, tools, skills, memory, data directory, budget, and host security.

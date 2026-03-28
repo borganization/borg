@@ -56,6 +56,10 @@ pub const ALL_SETTING_KEYS: &[&str] = &[
     "gateway.telegram_circuit_failure_threshold",
     "gateway.telegram_circuit_suspension_secs",
     "gateway.telegram_dedup_capacity",
+    "tts.enabled",
+    "tts.auto_mode",
+    "tts.default_voice",
+    "tts.default_format",
 ];
 
 /// Merges settings from three layers: DB overrides → config.toml → compiled defaults.
@@ -207,6 +211,10 @@ fn config_value_for_key(config: &Config, key: &str) -> Option<String> {
         "gateway.telegram_dedup_capacity" => {
             format!("{}", config.gateway.telegram_dedup_capacity)
         }
+        "tts.enabled" => format!("{}", config.tts.enabled),
+        "tts.auto_mode" => format!("{}", config.tts.auto_mode),
+        "tts.default_voice" => config.tts.default_voice.clone(),
+        "tts.default_format" => config.tts.default_format.clone(),
         _ => return None,
     })
 }
