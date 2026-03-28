@@ -43,6 +43,7 @@ pub enum AppAction {
     /// Request the event loop to spawn an agent call
     SendMessage {
         input: String,
+        images: Vec<super::composer::ImageAttachment>,
         event_tx: mpsc::Sender<AgentEvent>,
         cancel: CancellationToken,
     },
@@ -387,6 +388,14 @@ impl<'a> App<'a> {
                 // Ctrl+G — launch external editor
                 if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(AppAction::LaunchExternalEditor);
+                }
+
+                // Ctrl+V — paste clipboard image (fall through to normal paste if no image)
+                if key.code == KeyCode::Char('v')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && try_paste_clipboard_image(&mut self.composer)
+                {
+                    return Ok(AppAction::Continue);
                 }
 
                 // Shift+Tab — toggle plan mode
@@ -953,6 +962,9 @@ impl<'a> App<'a> {
             streaming: true,
         });
 
+        // Take image attachments before file refs
+        let images = self.composer.take_image_attachments();
+
         // Inject file contents from @mentions
         let file_refs = self.composer.take_file_refs();
         let final_input = if file_refs.is_empty() {
@@ -1005,6 +1017,7 @@ impl<'a> App<'a> {
 
         Ok(AppAction::SendMessage {
             input: final_input,
+            images,
             event_tx,
             cancel,
         })
@@ -1406,6 +1419,7 @@ impl<'a> App<'a> {
 
         Ok(AppAction::SendMessage {
             input: input.to_string(),
+            images: Vec::new(),
             event_tx,
             cancel,
         })
@@ -1541,6 +1555,60 @@ fn extract_at_query(text: &str) -> Option<String> {
         return None;
     }
     Some(after.to_string())
+}
+
+/// Try to paste a clipboard image into the composer. Returns true if an image was pasted.
+fn try_paste_clipboard_image(composer: &mut Composer) -> bool {
+    let Ok(mut clipboard) = arboard::Clipboard::new() else {
+        return false;
+    };
+
+    // Try image data first
+    if let Ok(img_data) = clipboard.get_image() {
+        if let Some(png_bytes) = rgba_to_png(
+            &img_data.bytes,
+            img_data.width as u32,
+            img_data.height as u32,
+        ) {
+            composer.add_image(png_bytes, "image/png".to_string());
+            return true;
+        }
+    }
+
+    // Try text that looks like an image file path
+    if let Ok(text) = clipboard.get_text() {
+        let trimmed = text.trim();
+        let path = std::path::Path::new(trimmed);
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let ext_lower = ext.to_lowercase();
+            const IMG_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif"];
+            if IMG_EXTS.contains(&ext_lower.as_str()) && path.exists() {
+                if let Ok(bytes) = std::fs::read(path) {
+                    let mime = match ext_lower.as_str() {
+                        "png" => "image/png",
+                        "jpg" | "jpeg" => "image/jpeg",
+                        "gif" => "image/gif",
+                        "webp" => "image/webp",
+                        "bmp" => "image/bmp",
+                        "heic" | "heif" => "image/heic",
+                        _ => "application/octet-stream",
+                    };
+                    composer.add_image(bytes, mime.to_string());
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Convert raw RGBA pixel data to PNG bytes.
+fn rgba_to_png(rgba_bytes: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let img = image::RgbaImage::from_raw(width, height, rgba_bytes.to_vec())?;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png).ok()?;
+    Some(buf.into_inner())
 }
 
 #[cfg(test)]

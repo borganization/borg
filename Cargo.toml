@@ -66,6 +66,7 @@ tracing-opentelemetry = "0.29"
 chromiumoxide = { version = "0.9", default-features = false }
 notify = "7"
 image = "0.25"
+arboard = "3"
 
 [workspace.lints.clippy]
 identity_op = "deny"

@@ -1439,6 +1439,9 @@ impl Agent {
             "web_search" => tool_handlers::handle_web_search(&args, &self.config).await,
             "manage_tasks" => tool_handlers::handle_manage_tasks(&args, &self.config),
             "read_pdf" => tool_handlers::handle_read_pdf(&args),
+            "read_file" => {
+                return tool_handlers::handle_read_file(&args, &self.config);
+            }
             "security_audit" => tool_handlers::handle_security_audit(&args, &self.config),
             "browser" => {
                 return tool_handlers::handle_browser(

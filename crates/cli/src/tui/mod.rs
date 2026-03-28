@@ -397,17 +397,40 @@ async fn run_event_loop(
             }
             AppAction::SendMessage {
                 input,
+                images,
                 event_tx,
                 cancel,
             } => {
                 let agent_clone = Arc::clone(agent);
                 tokio::spawn(async move {
                     let mut agent = agent_clone.lock().await;
-                    if let Err(e) = agent
-                        .send_message_with_cancel(&input, event_tx.clone(), cancel)
-                        .await
-                    {
-                        let _ = event_tx.send(AgentEvent::Error(e.to_string())).await;
+                    if images.is_empty() {
+                        if let Err(e) = agent
+                            .send_message_with_cancel(&input, event_tx.clone(), cancel)
+                            .await
+                        {
+                            let _ = event_tx.send(AgentEvent::Error(e.to_string())).await;
+                        }
+                    } else {
+                        // Build multimodal message with text + images
+                        use base64::Engine as _;
+                        use borg_core::types::{ContentPart, MediaData, Message};
+                        let engine = base64::engine::general_purpose::STANDARD;
+                        let mut parts = vec![ContentPart::Text(input)];
+                        for img in images {
+                            parts.push(ContentPart::ImageBase64 {
+                                media: MediaData {
+                                    mime_type: img.mime_type,
+                                    data: engine.encode(&img.data),
+                                    filename: None,
+                                },
+                            });
+                        }
+                        let msg = Message::user_multimodal(parts);
+                        if let Err(e) = agent.send_message_raw(msg, event_tx.clone(), cancel).await
+                        {
+                            let _ = event_tx.send(AgentEvent::Error(e.to_string())).await;
+                        }
                     }
                 });
             }

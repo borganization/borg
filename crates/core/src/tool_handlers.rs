@@ -595,6 +595,190 @@ pub fn handle_read_pdf(args: &serde_json::Value) -> Result<String> {
     }
 }
 
+/// Image file extensions that should be returned as multimodal content.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif", "svg",
+];
+
+/// Check whether `path` falls under any of the configured blocked paths.
+fn is_blocked_path(path: &std::path::Path, blocked: &[String]) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        // Can't verify — deny by default
+        return true;
+    };
+    for entry in blocked {
+        let blocked_abs = home.join(entry);
+        if path.starts_with(&blocked_abs) {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn handle_read_file(args: &serde_json::Value, config: &Config) -> Result<ToolOutput> {
+    let raw_path = require_str_param(args, "path")?;
+    let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(0) as usize;
+    let max_chars = args["max_chars"].as_u64().unwrap_or(50000) as usize;
+
+    // Resolve path: expand ~ and resolve relative paths
+    let expanded = shellexpand::tilde(raw_path).to_string();
+    let resolved = if std::path::Path::new(&expanded).is_absolute() {
+        std::path::PathBuf::from(&expanded)
+    } else {
+        std::env::current_dir().unwrap_or_default().join(&expanded)
+    };
+
+    // Canonicalize to prevent traversal
+    let canonical = match resolved.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return Ok(ToolOutput::Text(format!("File not found: {raw_path}")));
+        }
+    };
+
+    if !canonical.exists() {
+        return Ok(ToolOutput::Text(format!("File not found: {raw_path}")));
+    }
+
+    if canonical.is_dir() {
+        return Ok(ToolOutput::Text(format!(
+            "Path is a directory, not a file: {raw_path}. Use run_shell with ls to list directory contents."
+        )));
+    }
+
+    // Security: check blocked paths
+    if is_blocked_path(&canonical, &config.security.blocked_paths) {
+        return Ok(ToolOutput::Text(format!(
+            "Access denied: {raw_path} is in a blocked path."
+        )));
+    }
+
+    // Dispatch by extension
+    let ext = canonical
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext == "pdf" {
+        // Delegate to existing PDF handler
+        let pdf_args =
+            serde_json::json!({"file_path": canonical.to_string_lossy(), "max_chars": max_chars});
+        return Ok(ToolOutput::Text(handle_read_pdf(&pdf_args)?));
+    }
+
+    if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        // Guard against huge images (50MB max)
+        if let Ok(meta) = std::fs::metadata(&canonical) {
+            if meta.len() > 50 * 1024 * 1024 {
+                return Ok(ToolOutput::Text(format!(
+                    "Image too large ({} MB). Max 50 MB.",
+                    meta.len() / (1024 * 1024)
+                )));
+            }
+        }
+
+        // Read image bytes, compress, return as multimodal
+        let raw_bytes = match std::fs::read(&canonical) {
+            Ok(b) => b,
+            Err(e) => {
+                return Ok(ToolOutput::Text(format!("Error reading file: {e}")));
+            }
+        };
+
+        let engine = base64::engine::general_purpose::STANDARD;
+        let b64 = engine.encode(&raw_bytes);
+        let mime = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "heic" | "heif" => "image/heic",
+            "svg" => "image/svg+xml",
+            _ => "application/octet-stream",
+        };
+
+        // Compress if needed (1MB threshold)
+        let (final_b64, final_mime) =
+            crate::media::compress_image(&b64, mime, 1_048_576).unwrap_or((b64, mime.to_string()));
+
+        let summary = format!(
+            "Image: {} ({} bytes)",
+            canonical.file_name().unwrap_or_default().to_string_lossy(),
+            raw_bytes.len()
+        );
+
+        return Ok(ToolOutput::Multimodal {
+            text: summary.clone(),
+            parts: vec![
+                ContentPart::Text(summary),
+                ContentPart::ImageBase64 {
+                    media: MediaData {
+                        mime_type: final_mime,
+                        data: final_b64,
+                        filename: canonical
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string()),
+                    },
+                },
+            ],
+        });
+    }
+
+    // Text file: read with line numbers
+    let content = match std::fs::read_to_string(&canonical) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(ToolOutput::Text(format!(
+                "Error reading file: {e}. The file may be binary."
+            )));
+        }
+    };
+
+    if content.is_empty() {
+        return Ok(ToolOutput::Text(format!("[File is empty: {raw_path}]")));
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+
+    // Apply offset (1-based) and limit
+    let start = (offset - 1).min(total_lines);
+    let end = if limit > 0 {
+        (start + limit).min(total_lines)
+    } else {
+        total_lines
+    };
+
+    let mut output = String::new();
+    for (i, line) in lines[start..end].iter().enumerate() {
+        let line_no = start + i + 1;
+        output.push_str(&format!("{line_no:>6}\t{line}\n"));
+    }
+
+    // Truncate if too long (safe for multi-byte UTF-8)
+    if output.len() > max_chars {
+        let truncate_at = output
+            .char_indices()
+            .take_while(|(i, _)| *i <= max_chars)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        output.truncate(truncate_at);
+        output.push_str(&format!(
+            "\n\n[truncated — {max_chars} chars shown, {total_lines} total lines]"
+        ));
+    } else if end < total_lines {
+        output.push_str(&format!(
+            "\n[showing lines {offset}–{end} of {total_lines}]"
+        ));
+    }
+
+    Ok(ToolOutput::Text(output))
+}
+
 pub fn handle_security_audit(args: &serde_json::Value, config: &Config) -> Result<String> {
     if !config.security.host_audit {
         return Ok(
@@ -893,6 +1077,7 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         ToolDefinition::new("apply_patch", "Create, update, or delete files using the patch DSL. Use target to choose location: cwd (default), tools (~/.borg/tools/), skills (~/.borg/skills/), channels (~/.borg/channels/).", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"},"target":{"type":"string","enum":["cwd","tools","skills","channels"],"description":"Where to apply the patch (default: cwd)","default":"cwd"}},"required":["patch"]})),
         ToolDefinition::new("run_shell", "Execute a shell command. Requires user confirmation before execution.", serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]})),
         ToolDefinition::new("read_pdf", "Read and extract text from a PDF file.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the PDF file"},"max_chars":{"type":"integer","description":"Maximum characters to return (default: 50000)","default":50000}},"required":["file_path"]})),
+        ToolDefinition::new("read_file", "Read a file's contents. Returns text with line numbers for code files, renders images visually, and extracts text from PDFs. Use offset/limit to read specific line ranges of large files.", serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path (relative to cwd or absolute)"},"offset":{"type":"integer","description":"Start line, 1-based (default: 1)"},"limit":{"type":"integer","description":"Max lines to read (default: all, truncated at max_chars)"},"max_chars":{"type":"integer","description":"Max characters to return (default: 50000)"}},"required":["path"]})),
     ];
 
     if config.web.enabled {
@@ -1158,6 +1343,7 @@ mod tests {
         assert!(names.contains(&"apply_patch"));
         assert!(names.contains(&"run_shell"));
         assert!(names.contains(&"read_pdf"));
+        assert!(names.contains(&"read_file"));
         assert!(names.contains(&"manage_tasks"));
         // Consolidated: no longer separate tools
         assert!(!names.contains(&"list_tools"));
@@ -1297,6 +1483,83 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // -- handle_read_file --
+
+    #[test]
+    fn handle_read_file_missing_file() {
+        let config = Config::default();
+        let result = handle_read_file(&json!({"path": "/nonexistent/file.txt"}), &config).unwrap();
+        match result {
+            ToolOutput::Text(s) => assert!(s.contains("not found")),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn handle_read_file_missing_param() {
+        let config = Config::default();
+        let result = handle_read_file(&json!({}), &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn handle_read_file_text_with_line_numbers() {
+        let config = Config::default();
+        // Read this source file itself
+        let result = handle_read_file(&json!({"path": "Cargo.toml", "limit": 3}), &config).unwrap();
+        match result {
+            ToolOutput::Text(s) => {
+                assert!(s.contains("     1\t"), "should have line numbers");
+                assert!(s.contains("     2\t"));
+                assert!(s.contains("     3\t"));
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn handle_read_file_offset_limit() {
+        let config = Config::default();
+        let result = handle_read_file(
+            &json!({"path": "Cargo.toml", "offset": 2, "limit": 2}),
+            &config,
+        )
+        .unwrap();
+        match result {
+            ToolOutput::Text(s) => {
+                assert!(!s.contains("     1\t"), "should not include line 1");
+                assert!(s.contains("     2\t"), "should start at line 2");
+                assert!(s.contains("     3\t"), "should include line 3");
+                assert!(!s.contains("     4\t"), "should stop at limit");
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn handle_read_file_blocked_path() {
+        let config = Config::default();
+        // Default blocked_paths includes .ssh
+        let home = dirs::home_dir().unwrap();
+        let blocked = home.join(".ssh/id_rsa");
+        let result =
+            handle_read_file(&json!({"path": blocked.to_string_lossy()}), &config).unwrap();
+        match result {
+            ToolOutput::Text(s) => assert!(s.contains("denied") || s.contains("not found")),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn handle_read_file_directory_rejected() {
+        let config = Config::default();
+        let result = handle_read_file(&json!({"path": "."}), &config).unwrap();
+        match result {
+            ToolOutput::Text(s) => assert!(s.contains("directory")),
+            _ => panic!("expected Text"),
+        }
+    }
+
     // -- handle_manage_tasks --
 
     #[test]
@@ -1418,24 +1681,24 @@ mod tests {
     fn core_tool_definitions_count_reduced() {
         // With all defaults enabled (web, browser, security_audit):
         // write_memory, read_memory, memory_search, list, apply_patch, run_shell, read_pdf,
-        // web_fetch, web_search, manage_tasks, browser, security_audit = 12
+        // read_file, web_fetch, web_search, manage_tasks, browser, security_audit = 13
         let config = Config::default();
         let defs = core_tool_definitions(&config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert_eq!(
             names.len(),
-            12,
-            "expected 12 core tools (all enabled), got: {names:?}"
+            13,
+            "expected 13 core tools (all enabled), got: {names:?}"
         );
 
-        // With everything disabled: 7 base tools
+        // With everything disabled: 8 base tools
         let mut minimal_config = Config::default();
         minimal_config.web.enabled = false;
         minimal_config.browser.enabled = false;
         minimal_config.security.host_audit = false;
         let defs = core_tool_definitions(&minimal_config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert_eq!(names.len(), 8, "expected 8 base tools, got: {names:?}");
+        assert_eq!(names.len(), 9, "expected 9 base tools, got: {names:?}");
     }
 
     #[test]
