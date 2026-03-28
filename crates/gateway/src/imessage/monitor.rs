@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::constants::PEER_KIND_DIRECT;
 use borg_core::config::Config;
 
 use super::echo_cache::EchoCache;
@@ -115,7 +116,7 @@ async fn monitor_loop(
                                         attachments: Vec::new(),
                                         reaction: None,
                                         metadata: serde_json::Value::Null,
-                                        peer_kind: Some("direct".to_string()),
+                                        peer_kind: Some(PEER_KIND_DIRECT.to_string()),
                                     };
 
                                     match handler::handle_polled_message(
@@ -278,11 +279,24 @@ fn open_chatdb(db_uri: &str) -> Result<rusqlite::Connection> {
 }
 
 fn load_last_rowid(state_path: &std::path::Path) -> i64 {
-    std::fs::read_to_string(state_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("last_rowid")?.as_i64())
-        .unwrap_or(0)
+    let content = match std::fs::read_to_string(state_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(e) => {
+            warn!("Failed to parse iMessage state file, starting from rowid 0: {e}");
+            return 0;
+        }
+    };
+    match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(v) => v
+            .get("last_rowid")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
+        Err(e) => {
+            warn!("Failed to parse iMessage state file, starting from rowid 0: {e}");
+            0
+        }
+    }
 }
 
 fn save_last_rowid(state_path: &std::path::Path, rowid: i64) {

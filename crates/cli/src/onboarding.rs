@@ -5,6 +5,9 @@ use std::str::FromStr;
 use borg_core::config::Config;
 use borg_core::provider::Provider;
 
+/// Standard subdirectories created under the Borg data directory.
+pub(crate) const BORG_SUBDIRS: &[&str] = &["memory", "tools", "skills", "logs", "cache"];
+
 /// Auto-detect the system's IANA timezone (e.g. "America/New_York").
 #[allow(dead_code)]
 pub(crate) fn detect_system_timezone() -> Option<String> {
@@ -260,7 +263,7 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     let data_dir = Config::data_dir()?;
 
     // Create directory structure
-    for sub in &["memory", "tools", "skills", "logs", "cache"] {
+    for sub in BORG_SUBDIRS {
         std::fs::create_dir_all(data_dir.join(sub))?;
     }
 

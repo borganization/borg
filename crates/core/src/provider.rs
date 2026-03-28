@@ -195,6 +195,21 @@ impl Provider {
         }
     }
 
+    /// Infer provider from an environment variable name.
+    /// Returns `None` for unrecognized variable names.
+    pub fn from_env_var_name(name: &str) -> Option<Provider> {
+        match name {
+            "OPENROUTER_API_KEY" => Some(Provider::OpenRouter),
+            "OPENAI_API_KEY" => Some(Provider::OpenAi),
+            "ANTHROPIC_API_KEY" => Some(Provider::Anthropic),
+            "GEMINI_API_KEY" => Some(Provider::Gemini),
+            "DEEPSEEK_API_KEY" => Some(Provider::DeepSeek),
+            "GROQ_API_KEY" => Some(Provider::Groq),
+            "OLLAMA_HOST" => Some(Provider::Ollama),
+            _ => None,
+        }
+    }
+
     /// Check if Ollama is reachable (sync, short timeout).
     pub fn ollama_available() -> bool {
         let default_addr: SocketAddr = SocketAddr::from(([127, 0, 0, 1], 11434));
@@ -452,6 +467,19 @@ mod tests {
         assert!(Provider::Groq.supports_vision("some-vision-model"));
         assert!(!Provider::Groq.supports_vision("llama-3.3-70b-versatile"));
         assert!(!Provider::Groq.supports_vision("mixtral-8x7b-32768"));
+    }
+
+    #[test]
+    fn from_env_var_name_round_trip() {
+        for provider in DETECT_ORDER {
+            let env_var = provider.default_env_var();
+            assert_eq!(Provider::from_env_var_name(env_var), Some(*provider));
+        }
+        assert_eq!(
+            Provider::from_env_var_name("OLLAMA_HOST"),
+            Some(Provider::Ollama)
+        );
+        assert_eq!(Provider::from_env_var_name("UNKNOWN_KEY"), None);
     }
 
     #[test]

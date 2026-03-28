@@ -87,6 +87,16 @@ pub enum TemplateTarget {
     Tools,
 }
 
+impl TemplateTarget {
+    /// Base directory for this target type under the Borg data directory.
+    pub fn base_dir(&self, data_dir: &std::path::Path) -> std::path::PathBuf {
+        match self {
+            TemplateTarget::Channels => data_dir.join("channels"),
+            TemplateTarget::Tools => data_dir.join("tools"),
+        }
+    }
+}
+
 /// Metadata about a credential stored in the OS keychain during installation.
 #[derive(Debug, Clone)]
 pub struct CredentialEntry {

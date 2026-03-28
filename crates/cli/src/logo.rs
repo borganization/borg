@@ -5,7 +5,7 @@ use crossterm::{
 use std::io::{self, Write};
 
 #[allow(dead_code)]
-const LOGO: &str = r#"
+pub const LOGO: &str = r#"
 oooooooooo.    .oooooo.   ooooooooo.     .oooooo.
 `888'   `Y8b  d8P'  `Y8b  `888   `Y88.  d8P'  `Y8b
  888     888 888      888  888   .d88' 888

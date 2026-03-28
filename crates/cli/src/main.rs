@@ -17,6 +17,18 @@ mod repl;
 mod service;
 mod tui;
 
+/// Format a Unix timestamp for display. Returns "?" if invalid.
+fn format_ts(ts: i64, fmt: &str) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| dt.format(fmt).to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Return the first 8 characters of an ID for compact display.
+fn short_id(id: &str) -> &str {
+    &id[..8.min(id.len())]
+}
+
 #[derive(Parser)]
 #[command(name = "borg", about = "AI Personal Assistant Agent", version)]
 struct Cli {
@@ -511,9 +523,7 @@ fn run_pairing_list(channel: Option<&str>) -> Result<()> {
     );
     println!("{}", "─".repeat(64));
     for r in &requests {
-        let expires = chrono::DateTime::from_timestamp(r.expires_at, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-            .unwrap_or_else(|| "?".into());
+        let expires = format_ts(r.expires_at, "%Y-%m-%d %H:%M UTC");
         println!(
             "{:<12} {:<20} {:<10} {:<20}",
             r.channel_name, r.sender_id, r.code, expires
@@ -557,9 +567,7 @@ fn run_pairing_approved(channel: Option<&str>) -> Result<()> {
     );
     println!("{}", "─".repeat(70));
     for s in &senders {
-        let approved = chrono::DateTime::from_timestamp(s.approved_at, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-            .unwrap_or_else(|| "?".into());
+        let approved = format_ts(s.approved_at, "%Y-%m-%d %H:%M UTC");
         let name = s.display_name.as_deref().unwrap_or("—");
         println!(
             "{:<12} {:<20} {:<16} {:<20}",
@@ -741,15 +749,11 @@ fn run_tasks_list() -> Result<()> {
         for task in &tasks {
             let next_run = task
                 .next_run
-                .map(|ts| {
-                    chrono::DateTime::from_timestamp(ts, 0)
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_else(|| "?".to_string())
-                })
+                .map(|ts| format_ts(ts, "%Y-%m-%d %H:%M:%S"))
                 .unwrap_or_else(|| "-".to_string());
             println!(
                 "{:8}  {:20}  {:8}  {:8}  {:20}  {}",
-                &task.id[..8.min(task.id.len())],
+                short_id(&task.id),
                 truncate_str(&task.name, 20),
                 task.schedule_type,
                 task.status,
@@ -792,7 +796,7 @@ fn run_tasks_create(
         delivery_target,
     })?;
 
-    println!("Created task {} ({})", &id[..8.min(id.len())], name);
+    println!("Created task {} ({})", short_id(&id), name);
     Ok(())
 }
 
@@ -803,10 +807,7 @@ fn run_tasks_run(id: &str) -> Result<()> {
             let now = chrono::Utc::now().timestamp();
             db.update_task_next_run(id, Some(now))?;
             db.clear_task_retry(id)?;
-            println!(
-                "Task {} queued for immediate execution.",
-                &id[..8.min(id.len())]
-            );
+            println!("Task {} queued for immediate execution.", short_id(id));
         }
         None => println!("Task not found: {id}"),
     }
@@ -817,15 +818,13 @@ fn run_tasks_runs(id: &str, count: usize) -> Result<()> {
     let db = borg_core::db::Database::open()?;
     let runs = db.task_run_history(id, count)?;
     if runs.is_empty() {
-        println!("No runs recorded for task {}", &id[..8.min(id.len())]);
+        println!("No runs recorded for task {}", short_id(id));
         return Ok(());
     }
     println!("{:<20} {:<8} {:<10} Details", "Time", "Status", "Duration");
     println!("{}", "-".repeat(70));
     for run in &runs {
-        let when = chrono::DateTime::from_timestamp(run.started_at, 0)
-            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| run.started_at.to_string());
+        let when = format_ts(run.started_at, "%Y-%m-%d %H:%M");
         let status = if run.error.is_some() { "FAIL" } else { "OK" };
         let duration = format!("{}ms", run.duration_ms);
         let details = run
@@ -864,17 +863,13 @@ fn run_tasks_status(id: &str) -> Result<()> {
                     println!("    Last error: {}", &err[..err.len().min(100)]);
                 }
                 if let Some(retry_at) = task.retry_after {
-                    let when = chrono::DateTime::from_timestamp(retry_at, 0)
-                        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                        .unwrap_or_else(|| retry_at.to_string());
+                    let when = format_ts(retry_at, "%Y-%m-%d %H:%M UTC");
                     println!("    Next retry: {when}");
                 }
             }
             if let Ok(Some(run)) = db.last_task_run(id) {
                 let status = if run.error.is_some() { "error" } else { "ok" };
-                let when = chrono::DateTime::from_timestamp(run.started_at, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                    .unwrap_or_else(|| run.started_at.to_string());
+                let when = format_ts(run.started_at, "%Y-%m-%d %H:%M UTC");
                 println!("    Last run: {status} at {when} ({}ms)", run.duration_ms);
             }
         }
@@ -886,7 +881,7 @@ fn run_tasks_status(id: &str) -> Result<()> {
 fn run_tasks_delete(id: &str) -> Result<()> {
     let db = borg_core::db::Database::open()?;
     if db.delete_task(id)? {
-        println!("Deleted task {}", &id[..8.min(id.len())]);
+        println!("Deleted task {}", short_id(id));
     } else {
         println!("Task not found: {id}");
     }
@@ -896,7 +891,7 @@ fn run_tasks_delete(id: &str) -> Result<()> {
 fn run_tasks_update_status(id: &str, status: &str) -> Result<()> {
     let db = borg_core::db::Database::open()?;
     if db.update_task_status(id, status)? {
-        println!("Task {} status: {status}", &id[..8.min(id.len())]);
+        println!("Task {} status: {status}", short_id(id));
     } else {
         println!("Task not found: {id}");
     }
@@ -958,7 +953,7 @@ fn delete_data_dir(data_dir: &std::path::Path) -> Result<()> {
 
 /// Non-interactive fallback: write default config files without the wizard.
 fn init_data_dir_defaults(data_dir: &std::path::Path) -> Result<()> {
-    for sub in &["memory", "tools", "skills", "logs", "cache"] {
+    for sub in crate::onboarding::BORG_SUBDIRS {
         std::fs::create_dir_all(data_dir.join(sub))?;
     }
 

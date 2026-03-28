@@ -1,3 +1,4 @@
+use crate::constants::{PEER_KIND_DIRECT, PEER_KIND_GROUP};
 use crate::handler::InboundMessage;
 
 use super::types::SignalEnvelope;
@@ -102,9 +103,9 @@ pub fn parse_envelope(envelope: &SignalEnvelope, own_account: &str) -> Option<In
             "timestamp": env.timestamp,
         }),
         peer_kind: if data_msg.group_info.is_some() {
-            Some("group".to_string())
+            Some(PEER_KIND_GROUP.to_string())
         } else {
-            Some("direct".to_string())
+            Some(PEER_KIND_DIRECT.to_string())
         },
     })
 }

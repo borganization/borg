@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use super::types::{TwilioChannelType, TwilioWebhook};
+use crate::constants::PEER_KIND_DIRECT;
 use crate::handler::InboundMessage;
 
 /// Parsed Twilio inbound message with typed channel information.
@@ -50,7 +51,7 @@ pub fn parse_webhook(body: &str) -> Result<TwilioInbound> {
                     attachments: Vec::new(),
                     reaction: None,
                     metadata: serde_json::Value::Null,
-                    peer_kind: Some("direct".to_string()),
+                    peer_kind: Some(PEER_KIND_DIRECT.to_string()),
                 },
                 channel_type,
                 audio_url,
@@ -72,7 +73,7 @@ pub fn parse_webhook(body: &str) -> Result<TwilioInbound> {
             attachments: Vec::new(),
             reaction: None,
             metadata: serde_json::Value::Null,
-            peer_kind: Some("direct".to_string()),
+            peer_kind: Some(PEER_KIND_DIRECT.to_string()),
         },
         channel_type,
         audio_url,

@@ -14,11 +14,14 @@ use super::types::{
 };
 use crate::chunker;
 use crate::commands::{CommandDef, NativeCommandRegistration};
+use crate::constants::{DEFAULT_MESSAGE_CHUNK_SIZE, GATEWAY_HTTP_TIMEOUT};
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
-const MESSAGE_CHUNK_SIZE: usize = 4000;
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+// Telegram returns retry_after in JSON body, not Retry-After header, so we use custom retry logic instead of http_retry.
+const MAX_SEND_RETRIES: u32 = 5;
+const MAX_RETRY_AFTER_SECS: u64 = 300;
 
 /// A client for the Telegram Bot API.
 #[derive(Clone)]
@@ -33,7 +36,7 @@ impl TelegramClient {
         Ok(Self {
             client: Client::builder()
                 .connect_timeout(HTTP_CONNECT_TIMEOUT)
-                .timeout(HTTP_TIMEOUT)
+                .timeout(GATEWAY_HTTP_TIMEOUT)
                 .build()
                 .context("Failed to build Telegram HTTP client")?,
             token: token.to_string(),
@@ -79,7 +82,7 @@ impl TelegramClient {
         message_thread_id: Option<i64>,
         reply_to_message_id: Option<i64>,
     ) -> Result<()> {
-        let chunks = chunker::chunk_text_nonempty(text, MESSAGE_CHUNK_SIZE);
+        let chunks = chunker::chunk_text_nonempty(text, DEFAULT_MESSAGE_CHUNK_SIZE);
 
         for (i, chunk) in chunks.iter().enumerate() {
             // Only reply to the original message on the first chunk
@@ -108,8 +111,6 @@ impl TelegramClient {
             disable_notification: None,
         };
 
-        const MAX_RETRIES: u32 = 5;
-        const MAX_RETRY_AFTER_SECS: u64 = 300;
         let mut attempts = 0u32;
 
         loop {
@@ -125,11 +126,11 @@ impl TelegramClient {
                 Err(e) => {
                     if is_safe_to_retry(&e) {
                         attempts += 1;
-                        if attempts > MAX_RETRIES {
-                            bail!("sendMessage failed after {MAX_RETRIES} retries: {e}");
+                        if attempts > MAX_SEND_RETRIES {
+                            bail!("sendMessage failed after {MAX_SEND_RETRIES} retries: {e}");
                         }
                         let backoff = Duration::from_millis(500 * 2u64.pow(attempts - 1));
-                        warn!("sendMessage connection error, retrying in {backoff:?} (attempt {attempts}/{MAX_RETRIES}): {e}");
+                        warn!("sendMessage connection error, retrying in {backoff:?} (attempt {attempts}/{MAX_SEND_RETRIES}): {e}");
                         tokio::time::sleep(backoff).await;
                         continue;
                     }
@@ -150,11 +151,11 @@ impl TelegramClient {
             // Handle 429 rate limiting
             if status.as_u16() == 429 {
                 attempts += 1;
-                if attempts > MAX_RETRIES {
-                    bail!("sendMessage rate limited after {MAX_RETRIES} retries");
+                if attempts > MAX_SEND_RETRIES {
+                    bail!("sendMessage rate limited after {MAX_SEND_RETRIES} retries");
                 }
                 let retry_secs = resp_body.retry_after.unwrap_or(5).min(MAX_RETRY_AFTER_SECS);
-                warn!("Telegram rate limited, retry after {retry_secs}s (attempt {attempts}/{MAX_RETRIES})");
+                warn!("Telegram rate limited, retry after {retry_secs}s (attempt {attempts}/{MAX_SEND_RETRIES})");
                 tokio::time::sleep(Duration::from_secs(retry_secs)).await;
                 continue;
             }

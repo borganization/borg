@@ -1,4 +1,5 @@
 use super::types::Update;
+use crate::constants::{PEER_KIND_DIRECT, PEER_KIND_GROUP};
 use crate::handler::InboundMessage;
 
 /// Reference to an audio file in a Telegram message (for transcription).
@@ -76,8 +77,8 @@ pub fn parse_update(update: &Update) -> Option<(InboundMessage, Option<TelegramA
         let message_id = Some(msg.message_id.to_string());
 
         let peer_kind = match msg.chat.chat_type.as_str() {
-            "private" => Some("direct".to_string()),
-            "group" | "supergroup" | "channel" => Some("group".to_string()),
+            "private" => Some(PEER_KIND_DIRECT.to_string()),
+            "group" | "supergroup" | "channel" => Some(PEER_KIND_GROUP.to_string()),
             _ => None,
         };
 
@@ -117,8 +118,8 @@ pub fn parse_update(update: &Update) -> Option<(InboundMessage, Option<TelegramA
             .message
             .as_ref()
             .map(|m| match m.chat.chat_type.as_str() {
-                "private" => "direct".to_string(),
-                _ => "group".to_string(),
+                "private" => PEER_KIND_DIRECT.to_string(),
+                _ => PEER_KIND_GROUP.to_string(),
             });
 
         return Some((

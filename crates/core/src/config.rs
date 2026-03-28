@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 use std::str::FromStr;
 
@@ -1289,10 +1290,12 @@ impl Config {
                 match secret_ref.resolve() {
                     Ok(key) if !key.is_empty() => return Ok((provider, key)),
                     Ok(_) => {
-                        eprintln!("Warning: api_key SecretRef resolved to empty string, falling back to api_key_env");
+                        warn!("api_key SecretRef resolved to empty string, falling back to api_key_env");
                     }
                     Err(e) => {
-                        eprintln!("Warning: api_key SecretRef failed to resolve: {e}, falling back to api_key_env");
+                        warn!(
+                            "api_key SecretRef failed to resolve: {e}, falling back to api_key_env"
+                        );
                     }
                 }
             }
@@ -1314,20 +1317,19 @@ impl Config {
             match secret_ref.resolve() {
                 Ok(key) if !key.is_empty() => {
                     // Infer provider from api_key_env name
-                    let provider = match self.llm.api_key_env.as_str() {
-                        "OPENAI_API_KEY" => Provider::OpenAi,
-                        "ANTHROPIC_API_KEY" => Provider::Anthropic,
-                        "GEMINI_API_KEY" => Provider::Gemini,
-                        "OLLAMA_HOST" => Provider::Ollama,
-                        _ => Provider::OpenRouter,
-                    };
+                    let provider = Provider::from_env_var_name(&self.llm.api_key_env)
+                        .unwrap_or(Provider::OpenRouter);
                     return Ok((provider, key));
                 }
                 Ok(_) => {
-                    eprintln!("Warning: api_key SecretRef resolved to empty string, falling back to env detection");
+                    warn!(
+                        "api_key SecretRef resolved to empty string, falling back to env detection"
+                    );
                 }
                 Err(e) => {
-                    eprintln!("Warning: api_key SecretRef failed to resolve: {e}, falling back to env detection");
+                    warn!(
+                        "api_key SecretRef failed to resolve: {e}, falling back to env detection"
+                    );
                 }
             }
         }
@@ -1335,13 +1337,8 @@ impl Config {
         if self.llm.api_key_env != LlmConfig::default().api_key_env {
             if let Ok(key) = std::env::var(&self.llm.api_key_env) {
                 if !key.is_empty() {
-                    let provider = match self.llm.api_key_env.as_str() {
-                        "OPENAI_API_KEY" => Provider::OpenAi,
-                        "ANTHROPIC_API_KEY" => Provider::Anthropic,
-                        "GEMINI_API_KEY" => Provider::Gemini,
-                        "OLLAMA_HOST" => Provider::Ollama,
-                        _ => Provider::OpenRouter,
-                    };
+                    let provider = Provider::from_env_var_name(&self.llm.api_key_env)
+                        .unwrap_or(Provider::OpenRouter);
                     return Ok((provider, key));
                 }
             }

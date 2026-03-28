@@ -2,6 +2,7 @@ use tokio::sync::Mutex;
 
 use super::echo::EchoCache;
 use super::types::EventCallback;
+use crate::constants::{PEER_KIND_DIRECT, PEER_KIND_GROUP};
 use crate::handler::{InboundAttachment, InboundMessage};
 
 /// Parse a Slack `EventCallback` into an `InboundMessage`.
@@ -80,8 +81,8 @@ pub async fn parse_event(
         .unwrap_or_default();
 
     let peer_kind = match event.channel_type.as_deref() {
-        Some("im") => Some("direct".to_string()),
-        Some("channel") | Some("group") | Some("mpim") => Some("group".to_string()),
+        Some("im") => Some(PEER_KIND_DIRECT.to_string()),
+        Some("channel") | Some("group") | Some("mpim") => Some(PEER_KIND_GROUP.to_string()),
         _ => None,
     };
 

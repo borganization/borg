@@ -1,6 +1,7 @@
 use regex::Regex;
 
 use super::types::Activity;
+use crate::constants::{PEER_KIND_DIRECT, PEER_KIND_GROUP};
 use crate::handler::InboundMessage;
 
 /// Parse a Teams `Activity` into an `InboundMessage`.
@@ -50,9 +51,9 @@ pub fn parse_activity(activity: &Activity) -> Option<InboundMessage> {
             .and_then(|c| c.is_group)
             .map(|g| {
                 if g {
-                    "group".to_string()
+                    PEER_KIND_GROUP.to_string()
                 } else {
-                    "direct".to_string()
+                    PEER_KIND_DIRECT.to_string()
                 }
             }),
     })
@@ -60,7 +61,9 @@ pub fn parse_activity(activity: &Activity) -> Option<InboundMessage> {
 
 /// Remove `<at>...</at>` mention tags from Teams message text.
 fn strip_mention_tags(text: &str) -> String {
-    let re = Regex::new(r"<at>[^<]*</at>\s*").unwrap_or_else(|_| unreachable!());
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"<at>[^<]*</at>\s*").unwrap_or_else(|_| unreachable!()));
     re.replace_all(text, "").to_string()
 }
 

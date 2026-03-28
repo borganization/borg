@@ -1,4 +1,5 @@
 use super::types::{Interaction, InteractionType};
+use crate::constants::{PEER_KIND_DIRECT, PEER_KIND_GROUP};
 use crate::handler::InboundMessage;
 
 /// Parse a Discord interaction into an `InboundMessage`.
@@ -44,9 +45,9 @@ pub fn parse_interaction(interaction: &Interaction) -> Option<InboundMessage> {
         reaction: None,
         metadata: serde_json::Value::Null,
         peer_kind: if interaction.guild_id.is_some() {
-            Some("group".to_string())
+            Some(PEER_KIND_GROUP.to_string())
         } else {
-            Some("direct".to_string())
+            Some(PEER_KIND_DIRECT.to_string())
         },
     })
 }
