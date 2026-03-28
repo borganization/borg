@@ -105,6 +105,17 @@ pub fn scan_for_injection(text: &str) -> ThreatLevel {
         return ThreatLevel::Clean;
     }
 
+    // Cap input size to prevent ReDoS on very large untrusted input
+    let text = if text.len() > constants::MAX_INJECTION_SCAN_BYTES {
+        let mut end = constants::MAX_INJECTION_SCAN_BYTES;
+        while !text.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        &text[..end]
+    } else {
+        text
+    };
+
     // Normalize Unicode (NFKC) to defeat homoglyph-based bypass attempts
     let raw_scannable = extract_non_code_regions(text);
     let scannable: String = raw_scannable.nfkc().collect();

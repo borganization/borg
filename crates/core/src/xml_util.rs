@@ -17,17 +17,22 @@ pub fn sanitize_xml_boundaries(s: &str) -> String {
     use regex::Regex;
     use std::sync::OnceLock;
 
-    static BOUNDARY_RE: OnceLock<Regex> = OnceLock::new();
+    static BOUNDARY_RE: OnceLock<Option<Regex>> = OnceLock::new();
     let re = BOUNDARY_RE.get_or_init(|| {
         Regex::new(r"(?i)</\s*(tool_output|system_instructions|user_memory)\s*>")
-            .unwrap_or_else(|e| panic!("Invalid boundary regex: {e}"))
+            .map_err(|e| tracing::error!("Invalid boundary regex: {e}"))
+            .ok()
     });
 
-    re.replace_all(s, |caps: &regex::Captures| {
-        let tag = &caps[1];
-        format!("&lt;/{tag}&gt;")
-    })
-    .into_owned()
+    match re {
+        Some(re) => re
+            .replace_all(s, |caps: &regex::Captures| {
+                let tag = &caps[1];
+                format!("&lt;/{tag}&gt;")
+            })
+            .into_owned(),
+        None => s.to_owned(),
+    }
 }
 
 #[cfg(test)]

@@ -342,13 +342,15 @@ fn validate_memory_filename(filename: &str) -> Result<()> {
     // Allow daily/YYYY-MM-DD.md pattern
     if filename.contains('/') {
         use std::sync::OnceLock;
-        static DAILY_RE: OnceLock<regex::Regex> = OnceLock::new();
+        static DAILY_RE: OnceLock<Option<regex::Regex>> = OnceLock::new();
         let re = DAILY_RE.get_or_init(|| {
             regex::Regex::new(r"^daily/\d{4}-\d{2}-\d{2}\.md$")
-                .unwrap_or_else(|e| panic!("Invalid daily log regex: {e}"))
+                .map_err(|e| tracing::error!("Invalid daily log regex: {e}"))
+                .ok()
         });
-        if !re.is_match(filename) {
-            bail!("Invalid memory filename: only 'daily/YYYY-MM-DD.md' paths are allowed");
+        match re {
+            Some(re) if re.is_match(filename) => {}
+            _ => bail!("Invalid memory filename: only 'daily/YYYY-MM-DD.md' paths are allowed"),
         }
     }
     Ok(())

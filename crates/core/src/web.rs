@@ -168,16 +168,18 @@ async fn duckduckgo_search(query: &str) -> Result<String> {
     let html = resp.text().await?;
     let document = Html::parse_document(&html);
 
-    static RESULT_SEL: LazyLock<Selector> =
-        LazyLock::new(|| Selector::parse(".result").unwrap_or_else(|_| panic!("bad selector")));
-    static TITLE_SEL: LazyLock<Selector> =
-        LazyLock::new(|| Selector::parse(".result__a").unwrap_or_else(|_| panic!("bad selector")));
-    static SNIPPET_SEL: LazyLock<Selector> = LazyLock::new(|| {
-        Selector::parse(".result__snippet").unwrap_or_else(|_| panic!("bad selector"))
-    });
-    let result_selector = &*RESULT_SEL;
-    let title_selector = &*TITLE_SEL;
-    let snippet_selector = &*SNIPPET_SEL;
+    static RESULT_SEL: LazyLock<Option<Selector>> =
+        LazyLock::new(|| Selector::parse(".result").ok());
+    static TITLE_SEL: LazyLock<Option<Selector>> =
+        LazyLock::new(|| Selector::parse(".result__a").ok());
+    static SNIPPET_SEL: LazyLock<Option<Selector>> =
+        LazyLock::new(|| Selector::parse(".result__snippet").ok());
+    let (Some(result_selector), Some(title_selector), Some(snippet_selector)) =
+        (RESULT_SEL.as_ref(), TITLE_SEL.as_ref(), SNIPPET_SEL.as_ref())
+    else {
+        tracing::error!("Failed to parse DuckDuckGo CSS selectors");
+        return Ok(format_results(query, &[]));
+    };
 
     let mut results = Vec::new();
     for (i, result) in document.select(result_selector).enumerate() {
@@ -240,7 +242,10 @@ async fn brave_search(query: &str, config: &WebConfig) -> Result<String> {
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp.text().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to read error response body: {e}");
+            String::new()
+        });
         anyhow::bail!("Brave Search returned HTTP {status}: {body}");
     }
 
@@ -291,7 +296,10 @@ async fn tavily_search(query: &str, config: &WebConfig) -> Result<String> {
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp.text().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to read error response body: {e}");
+            String::new()
+        });
         anyhow::bail!("Tavily returned HTTP {status}: {body}");
     }
 
@@ -341,7 +349,10 @@ async fn serper_search(query: &str, config: &WebConfig) -> Result<String> {
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp.text().await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to read error response body: {e}");
+            String::new()
+        });
         anyhow::bail!("Serper returned HTTP {status}: {body}");
     }
 

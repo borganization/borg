@@ -622,7 +622,7 @@ impl Agent {
             system.push_str(
                 &MEMORY_TEMPLATE
                     .render([("memory", memory.as_str())])
-                    .unwrap_or_else(|e| panic!("memory template render failed: {e}")),
+                    .context("memory template render failed")?,
             );
         }
 
@@ -644,7 +644,7 @@ impl Agent {
                 system.push_str(
                     &SKILLS_TEMPLATE
                         .render([("skills", skills.as_str())])
-                        .unwrap_or_else(|e| panic!("skills template render failed: {e}")),
+                        .context("skills template render failed")?,
                 );
             }
         }
@@ -663,7 +663,7 @@ impl Agent {
                     system.push_str(
                         &SETUP_TEMPLATE
                             .render([("setup", setup.as_str())])
-                            .unwrap_or_else(|e| panic!("setup template render failed: {e}")),
+                            .context("setup template render failed")?,
                     );
                 }
                 let _ = std::fs::remove_file(&consumed);

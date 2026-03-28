@@ -154,7 +154,8 @@ impl HeartbeatScheduler {
             let next = match schedule.upcoming(chrono::Local).next() {
                 Some(t) => t,
                 None => {
-                    warn!("Cron schedule exhausted");
+                    tracing::error!("Cron schedule exhausted, falling back to interval mode");
+                    self.run_interval(tx, cancel).await;
                     return;
                 }
             };

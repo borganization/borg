@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::parser::{Hunk, Patch, PatchOperation};
 use crate::seek_sequence::seek_sequence;
@@ -123,10 +123,14 @@ pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<AffectedPaths> {
             let full_path = base_dir.join(&path);
             match snapshot {
                 FileSnapshot::Existed(content) => {
-                    let _ = std::fs::write(&full_path, content);
+                    if let Err(e) = std::fs::write(&full_path, &content) {
+                        warn!("Rollback: failed to restore {}: {e}", full_path.display());
+                    }
                 }
                 FileSnapshot::DidNotExist => {
-                    let _ = std::fs::remove_file(&full_path);
+                    if let Err(e) = std::fs::remove_file(&full_path) {
+                        warn!("Rollback: failed to remove {}: {e}", full_path.display());
+                    }
                 }
             }
         }

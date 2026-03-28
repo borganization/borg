@@ -16,6 +16,9 @@ const QUEUE_CAPACITY: usize = 64;
 /// Maximum number of concurrent session consumers to prevent memory exhaustion.
 const MAX_ACTIVE_SESSIONS: usize = 10_000;
 
+/// Maximum sessions a single sender can create across all channels/threads.
+const MAX_SESSIONS_PER_SENDER: usize = 10;
+
 /// Brief window to coalesce rapid-fire messages from the same session.
 const COALESCE_WINDOW: Duration = Duration::from_millis(200);
 
@@ -66,6 +69,18 @@ impl SessionQueue {
                 "Session queue at capacity ({MAX_ACTIVE_SESSIONS}), dropping work for '{session_key}'"
             );
             return false;
+        }
+
+        // Enforce per-sender session limit: session keys use format "channel:sender:sub"
+        if let Some(sender_id) = session_key.split(':').nth(1) {
+            let sender_prefix = format!(":{sender_id}:");
+            let sender_count = senders.keys().filter(|k| k.contains(&sender_prefix)).count();
+            if sender_count >= MAX_SESSIONS_PER_SENDER {
+                warn!(
+                    "Sender '{sender_id}' at session limit ({MAX_SESSIONS_PER_SENDER}), dropping work for '{session_key}'"
+                );
+                return false;
+            }
         }
 
         // Spawn a new consumer for this session

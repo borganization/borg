@@ -1024,7 +1024,27 @@ impl Config {
         let content = Self::dedup_toml_tables(&content);
         let config: Config =
             toml::from_str(&content).with_context(|| "Failed to parse config.toml")?;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Validate config values after loading. Returns an error for fatal
+    /// misconfigurations and logs warnings for non-fatal issues.
+    pub fn validate(&self) -> Result<()> {
+        if !(0.0..=2.0).contains(&self.llm.temperature) {
+            anyhow::bail!(
+                "llm.temperature must be between 0.0 and 2.0, got {}",
+                self.llm.temperature
+            );
+        }
+        if self.llm.max_tokens == 0 {
+            anyhow::bail!("llm.max_tokens must be greater than 0");
+        }
+        if self.memory.max_context_tokens == 0 {
+            anyhow::bail!("memory.max_context_tokens must be greater than 0");
+        }
+        self.security.action_limits.validate_thresholds();
+        Ok(())
     }
 
     /// Remove duplicate TOML table headers that would cause parse errors.

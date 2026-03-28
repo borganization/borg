@@ -1,13 +1,27 @@
-use tiktoken_rs::cl100k_base;
+use std::sync::LazyLock;
+use tiktoken_rs::{cl100k_base, CoreBPE};
+
+static BPE: LazyLock<Option<CoreBPE>> = LazyLock::new(|| match cl100k_base() {
+    Ok(bpe) => Some(bpe),
+    Err(e) => {
+        tracing::error!("Failed to load cl100k_base tokenizer: {e} — using byte heuristic");
+        None
+    }
+});
 
 /// Estimate token count using the cl100k_base BPE tokenizer.
 ///
 /// cl100k_base is the encoding used by GPT-4, ChatGPT, and text-embedding-ada-002.
 /// It provides a reasonable approximation for most LLMs available through OpenRouter,
 /// including Claude models.
+///
+/// Falls back to a byte-count heuristic (~4 bytes per token) if the tokenizer
+/// fails to initialize.
 pub fn estimate_tokens(text: &str) -> usize {
-    let bpe = cl100k_base().unwrap_or_else(|e| panic!("Failed to load cl100k_base tokenizer: {e}"));
-    bpe.encode_with_special_tokens(text).len()
+    match BPE.as_ref() {
+        Some(bpe) => bpe.encode_with_special_tokens(text).len(),
+        None => text.len().div_ceil(4),
+    }
 }
 
 #[cfg(test)]
