@@ -299,34 +299,31 @@ pub async fn invoke_agent_with_auto_reply(
     );
 
     // Access control: check sender pairing status
-    {
-        let ch = channel_name.to_string();
-        let sid = inbound.sender_id.clone();
-        let cfg = config.clone();
-        let access = tokio::task::spawn_blocking(move || {
-            let db = Database::open().context("Failed to open database for pairing check")?;
-            borg_core::pairing::check_sender_access(&db, &cfg, &ch, &sid)
-        })
-        .await
-        .context("Pairing check task panicked")??;
+    let ch = channel_name.to_string();
+    let sid = inbound.sender_id.clone();
+    let cfg = config.clone();
+    let access = tokio::task::spawn_blocking(move || {
+        let db = Database::open().context("Failed to open database for pairing check")?;
+        borg_core::pairing::check_sender_access(&db, &cfg, &ch, &sid)
+    })
+    .await
+    .context("Pairing check task panicked")??;
 
-        match access {
-            borg_core::pairing::AccessCheckResult::Allowed => {}
-            borg_core::pairing::AccessCheckResult::Challenge { message, .. } => {
-                info!(
-                    "Pairing challenge issued for sender '{}' on channel '{}'",
-                    inbound.sender_id, channel_name
-                );
-                return Ok((message, String::new()));
-            }
-            borg_core::pairing::AccessCheckResult::Denied { reason } => {
-                info!(
-                    "Access denied for sender '{}' on channel '{}': {}",
-                    inbound.sender_id, channel_name, reason
-                );
-                // Return empty response to silently drop the message
-                return Ok((String::new(), String::new()));
-            }
+    match access {
+        borg_core::pairing::AccessCheckResult::Allowed => {}
+        borg_core::pairing::AccessCheckResult::Challenge { message, .. } => {
+            info!(
+                "Pairing challenge issued for sender '{}' on channel '{}'",
+                inbound.sender_id, channel_name
+            );
+            return Ok((message, String::new()));
+        }
+        borg_core::pairing::AccessCheckResult::Denied { reason } => {
+            info!(
+                "Access denied for sender '{}' on channel '{}': {}",
+                inbound.sender_id, channel_name, reason
+            );
+            return Ok((String::new(), String::new()));
         }
     }
 
@@ -335,7 +332,6 @@ pub async fn invoke_agent_with_auto_reply(
     }
 
     // Resolve session — include thread_id and binding_id in the key for isolation
-    // Wrap blocking SQLite calls in spawn_blocking to avoid blocking the tokio worker
     let base_key = match &inbound.thread_id {
         Some(tid) => format!("{}:{}", inbound.sender_id, tid),
         None => inbound.sender_id.clone(),
@@ -444,7 +440,8 @@ pub async fn invoke_agent_with_auto_reply(
     // Truncate inbound text to prevent excessive LLM token consumption
     const MAX_INBOUND_TEXT_BYTES: usize = 32 * 1024; // 32 KB
     let text = if cleaned_text.len() > MAX_INBOUND_TEXT_BYTES {
-        let mut truncated = cleaned_text.clone();
+        let original_len = cleaned_text.len();
+        let mut truncated = cleaned_text;
         truncated.truncate(MAX_INBOUND_TEXT_BYTES);
         // Ensure we don't split a multi-byte char
         while !truncated.is_char_boundary(truncated.len()) {
@@ -452,7 +449,7 @@ pub async fn invoke_agent_with_auto_reply(
         }
         warn!(
             "Truncated inbound message from {} bytes to {} bytes for channel '{}'",
-            cleaned_text.len(),
+            original_len,
             truncated.len(),
             channel_name
         );

@@ -13,12 +13,27 @@ static SECRET_PATTERNS: LazyLock<Vec<SecretPattern>> = LazyLock::new(|| {
         (r"sk[-_]ant[-_][A-Za-z0-9_-]{32,}", "Anthropic API Key"),
         (r"sk[-_]proj[-_][A-Za-z0-9_-]{32,}", "OpenAI Project Key"),
         (r"sk-[A-Za-z0-9]{48,}", "API Key"),
-        (r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}", "JWT"),
-        (r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----", "Private Key"),
+        (
+            r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+            "JWT",
+        ),
+        (
+            r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----",
+            "Private Key",
+        ),
         (r"xox[bpsar]-[A-Za-z0-9-]{24,}", "Slack Token"),
-        (r#"(?:password|passwd|pwd)\s*[=:]\s*"[^"]{8,}""#, "Quoted Password"),
-        (r"(?:password|passwd|pwd)\s*[=:]\s*(\S{8,64})", "Password Assignment"),
-        (r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|mssql)://[^\s]{8,}", "Database Connection String"),
+        (
+            r#"(?:password|passwd|pwd)\s*[=:]\s*"[^"]{8,}""#,
+            "Quoted Password",
+        ),
+        (
+            r"(?:password|passwd|pwd)\s*[=:]\s*(\S{8,64})",
+            "Password Assignment",
+        ),
+        (
+            r"(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|mssql)://[^\s]{8,}",
+            "Database Connection String",
+        ),
     ];
 
     patterns

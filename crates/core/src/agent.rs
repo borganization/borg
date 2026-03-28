@@ -308,7 +308,7 @@ struct AgentCommon {
 
 /// Build the shared initialization state used by both `Agent::new` and `Agent::new_sub_agent`.
 fn build_common(config: &Config) -> Result<AgentCommon> {
-    let _ = LlmClient::new(config.clone())?;
+    let _ = LlmClient::new(config)?;
     let tool_registry = ToolRegistry::new()?;
     let policy = config.policy.clone();
     let rate_guard = SessionRateGuard::new(config.security.action_limits.clone());
@@ -556,7 +556,7 @@ impl Agent {
     /// Compact conversation history using LLM summarization, returning (before_tokens, after_tokens).
     pub async fn compact(&mut self) -> (usize, usize) {
         let before = history_tokens(&self.history);
-        let llm = match LlmClient::new(self.config.clone()) {
+        let llm = match LlmClient::new(&self.config) {
             Ok(l) => l,
             Err(_) => return (before, before),
         };
@@ -764,7 +764,7 @@ impl Agent {
             crate::types::Message::user(format!("Extract key information from:\n\n{transcript}")),
         ];
 
-        let llm = match LlmClient::new(self.config.clone()) {
+        let llm = match LlmClient::new(&self.config) {
             Ok(l) => l,
             Err(_) => return,
         };
@@ -985,7 +985,7 @@ impl Agent {
                         }
                     }
                 }
-                let compaction_llm = LlmClient::new(self.config.clone())?;
+                let compaction_llm = LlmClient::new(&self.config)?;
                 compact_history(&mut self.history, max_hist, &compaction_llm).await;
             }
 
@@ -1052,8 +1052,8 @@ impl Agent {
             let tools_clone = tools.map(<[ToolDefinition]>::to_vec);
             let cancel_clone = cancel.clone();
             let stream_handle = {
-                let mut llm_client = LlmClient::new(self.config.clone())
-                    .context("Failed to initialize LLM client")?;
+                let mut llm_client =
+                    LlmClient::new(&self.config).context("Failed to initialize LLM client")?;
                 tokio::spawn(async move {
                     if let Err(e) = llm_client
                         .stream_chat_with_cancel(

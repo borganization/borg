@@ -174,9 +174,11 @@ async fn duckduckgo_search(query: &str) -> Result<String> {
         LazyLock::new(|| Selector::parse(".result__a").ok());
     static SNIPPET_SEL: LazyLock<Option<Selector>> =
         LazyLock::new(|| Selector::parse(".result__snippet").ok());
-    let (Some(result_selector), Some(title_selector), Some(snippet_selector)) =
-        (RESULT_SEL.as_ref(), TITLE_SEL.as_ref(), SNIPPET_SEL.as_ref())
-    else {
+    let (Some(result_selector), Some(title_selector), Some(snippet_selector)) = (
+        RESULT_SEL.as_ref(),
+        TITLE_SEL.as_ref(),
+        SNIPPET_SEL.as_ref(),
+    ) else {
         tracing::error!("Failed to parse DuckDuckGo CSS selectors");
         return Ok(format_results(query, &[]));
     };

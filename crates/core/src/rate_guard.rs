@@ -116,10 +116,22 @@ impl ActionLimits {
     pub fn validate_thresholds(&self) {
         let pairs: &[(&str, u32, u32)] = &[
             ("tool_calls", self.tool_calls_warn, self.tool_calls_block),
-            ("shell_commands", self.shell_commands_warn, self.shell_commands_block),
+            (
+                "shell_commands",
+                self.shell_commands_warn,
+                self.shell_commands_block,
+            ),
             ("file_writes", self.file_writes_warn, self.file_writes_block),
-            ("memory_writes", self.memory_writes_warn, self.memory_writes_block),
-            ("web_requests", self.web_requests_warn, self.web_requests_block),
+            (
+                "memory_writes",
+                self.memory_writes_warn,
+                self.memory_writes_block,
+            ),
+            (
+                "web_requests",
+                self.web_requests_warn,
+                self.web_requests_block,
+            ),
         ];
         for (name, warn, block) in pairs {
             if warn >= block {

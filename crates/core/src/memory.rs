@@ -151,16 +151,16 @@ fn load_local_memory(
 
 /// Collect `.md` files from a directory, sorted by mtime (most recent first).
 fn md_entries_sorted_by_mtime(dir: &std::path::Path) -> Result<Vec<std::fs::DirEntry>> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)?
+    let mut entries_with_time: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(std::result::Result::ok)
         .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
+        .map(|e| {
+            let mtime = e.metadata().and_then(|m| m.modified()).ok();
+            (e, mtime)
+        })
         .collect();
-    entries.sort_by(|a, b| {
-        let time_a = a.metadata().and_then(|m| m.modified()).ok();
-        let time_b = b.metadata().and_then(|m| m.modified()).ok();
-        time_b.cmp(&time_a)
-    });
-    Ok(entries)
+    entries_with_time.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(entries_with_time.into_iter().map(|(e, _)| e).collect())
 }
 
 /// Try to load a single memory file within the token budget.

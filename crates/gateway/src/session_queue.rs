@@ -47,23 +47,53 @@ impl SessionQueue {
     /// Spawns a new consumer task if this is the first message for the session.
     /// Returns `false` if the queue is at capacity and the work was dropped.
     pub async fn enqueue(&self, session_key: String, work: WorkFn) -> bool {
-        let mut senders = self.senders.lock().await;
-
-        // Try to send to existing consumer
-        let work = if let Some(tx) = senders.get(&session_key) {
+        // Fast path: try to send to an existing consumer without holding the lock during send
+        let existing_tx = {
+            let senders = self.senders.lock().await;
+            senders.get(&session_key).cloned()
+        };
+        if let Some(tx) = existing_tx {
             match tx.send(work).await {
                 Ok(()) => return true,
-                Err(e) => {
-                    // Channel closed — consumer exited, remove stale sender
-                    senders.remove(&session_key);
-                    e.0
+                Err(send_err) => {
+                    // Channel closed — consumer exited, remove stale sender and fall through
+                    self.senders.lock().await.remove(&session_key);
+                    return self.spawn_new_consumer(session_key, send_err.0).await;
                 }
             }
-        } else {
-            work
-        };
+        }
 
-        // Reject if at max capacity
+        self.spawn_new_consumer(session_key, work).await
+    }
+
+    /// Validate capacity limits and spawn a new session consumer.
+    async fn spawn_new_consumer(&self, session_key: String, work: WorkFn) -> bool {
+        let mut senders = self.senders.lock().await;
+
+        // Re-check: another task may have created a consumer while we waited for the lock
+        if let Some(tx) = senders.get(&session_key).cloned() {
+            drop(senders);
+            match tx.send(work).await {
+                Ok(()) => return true,
+                Err(send_err) => {
+                    // Consumer exited between get and send — clean up and spawn fresh
+                    let mut senders = self.senders.lock().await;
+                    senders.remove(&session_key);
+                    return self.do_spawn(&mut senders, session_key, send_err.0).await;
+                }
+            }
+        }
+
+        self.do_spawn(&mut senders, session_key, work).await
+    }
+
+    /// Check capacity limits and spawn a consumer. Caller must hold the lock.
+    async fn do_spawn(
+        &self,
+        senders: &mut HashMap<String, mpsc::Sender<WorkFn>>,
+        session_key: String,
+        work: WorkFn,
+    ) -> bool {
         if senders.len() >= MAX_ACTIVE_SESSIONS {
             warn!(
                 "Session queue at capacity ({MAX_ACTIVE_SESSIONS}), dropping work for '{session_key}'"
@@ -74,7 +104,10 @@ impl SessionQueue {
         // Enforce per-sender session limit: session keys use format "channel:sender:sub"
         if let Some(sender_id) = session_key.split(':').nth(1) {
             let sender_prefix = format!(":{sender_id}:");
-            let sender_count = senders.keys().filter(|k| k.contains(&sender_prefix)).count();
+            let sender_count = senders
+                .keys()
+                .filter(|k| k.contains(&sender_prefix))
+                .count();
             if sender_count >= MAX_SESSIONS_PER_SENDER {
                 warn!(
                     "Sender '{sender_id}' at session limit ({MAX_SESSIONS_PER_SENDER}), dropping work for '{session_key}'"
@@ -83,7 +116,6 @@ impl SessionQueue {
             }
         }
 
-        // Spawn a new consumer for this session
         let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
         let semaphore = self.semaphore.clone();
         let cleanup_senders = self.senders.clone();
