@@ -61,7 +61,7 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
     let db = borg_core::db::Database::open()?;
 
     // Validate that LLM client can be constructed
-    let _ = borg_core::llm::LlmClient::new(config.clone())?;
+    let _ = borg_core::llm::LlmClient::new(&config)?;
 
     let max_concurrent = config.tasks.max_concurrent;
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
@@ -254,7 +254,7 @@ async fn spawn_task_execution(
             borg_core::types::Message::user(&task_prompt),
         ];
 
-        let llm = match borg_core::llm::LlmClient::new(config.clone()) {
+        let llm = match borg_core::llm::LlmClient::new(&config) {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!("Failed to create LLM client for task '{task_name}': {e}");

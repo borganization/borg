@@ -75,55 +75,39 @@ fn expand_tilde_paths(paths: &[String]) -> Vec<String> {
 }
 
 impl SandboxPolicy {
-    /// Return a copy of this policy with blocked paths removed from fs_read/fs_write.
-    pub fn with_blocked_paths_filtered(&self, blocked_paths: &[String]) -> Self {
-        Self {
-            network: self.network,
-            fs_read: filter_blocked(&self.fs_read, blocked_paths),
-            fs_write: filter_blocked(&self.fs_write, blocked_paths),
-            deny_read: self.deny_read.clone(),
-            deny_write: self.deny_write.clone(),
-        }
+    /// Filter blocked paths from fs_read/fs_write, consuming self.
+    pub fn with_blocked_paths_filtered(mut self, blocked_paths: &[String]) -> Self {
+        self.fs_read = filter_blocked(&self.fs_read, blocked_paths);
+        self.fs_write = filter_blocked(&self.fs_write, blocked_paths);
+        self
     }
 
-    /// Return a copy with `~` expanded to the user's home directory in all paths.
-    pub fn with_tildes_expanded(&self) -> Self {
-        Self {
-            network: self.network,
-            fs_read: expand_tilde_paths(&self.fs_read),
-            fs_write: expand_tilde_paths(&self.fs_write),
-            deny_read: expand_tilde_paths(&self.deny_read),
-            deny_write: expand_tilde_paths(&self.deny_write),
-        }
+    /// Expand `~` to the user's home directory in all paths, consuming self.
+    pub fn with_tildes_expanded(mut self) -> Self {
+        self.fs_read = expand_tilde_paths(&self.fs_read);
+        self.fs_write = expand_tilde_paths(&self.fs_write);
+        self.deny_read = expand_tilde_paths(&self.deny_read);
+        self.deny_write = expand_tilde_paths(&self.deny_write);
+        self
     }
 
-    /// Return a copy with smart defaults applied based on policy properties.
+    /// Apply smart defaults based on policy properties, consuming self.
     /// For example, `network == true` implies TLS certificate paths should be readable.
     /// Idempotent: does not add paths that are already present.
-    pub fn with_defaults_applied(&self) -> Self {
-        let mut fs_read = self.fs_read.clone();
-
+    pub fn with_defaults_applied(mut self) -> Self {
         if self.network {
             for tls_path in &["/etc/ssl", "/etc/ssl/certs"] {
                 let s = tls_path.to_string();
-                if !fs_read.contains(&s) {
-                    fs_read.push(s);
+                if !self.fs_read.contains(&s) {
+                    self.fs_read.push(s);
                 }
             }
         }
-
-        Self {
-            network: self.network,
-            fs_read,
-            fs_write: self.fs_write.clone(),
-            deny_read: self.deny_read.clone(),
-            deny_write: self.deny_write.clone(),
-        }
+        self
     }
 
-    /// Return a copy with `~/.borg/` added to deny_write to protect agent config
-    /// from tool writes, even if `~/.borg/` doesn't exist yet.
-    pub fn with_borg_dir_protected(&self) -> Self {
+    /// Add `~/.borg/` to deny_write to protect agent config, consuming self.
+    pub fn with_borg_dir_protected(mut self) -> Self {
         let borg_dir = dirs::home_dir()
             .map(|h| format!("{}/.borg", h.display()))
             .unwrap_or_else(|| {
@@ -131,18 +115,10 @@ impl SandboxPolicy {
                 "~/.borg".to_string()
             });
 
-        let mut deny_write = self.deny_write.clone();
-        if !deny_write.iter().any(|p| p == &borg_dir) {
-            deny_write.push(borg_dir);
+        if !self.deny_write.iter().any(|p| p == &borg_dir) {
+            self.deny_write.push(borg_dir);
         }
-
-        Self {
-            network: self.network,
-            fs_read: self.fs_read.clone(),
-            fs_write: self.fs_write.clone(),
-            deny_read: self.deny_read.clone(),
-            deny_write,
-        }
+        self
     }
 
     pub fn wrap_command(
@@ -317,8 +293,9 @@ mod tests {
             fs_read: vec!["/home/user/.ssh".into()],
             ..Default::default()
         };
+        let expected_fs_read = policy.fs_read.clone();
         let filtered = policy.with_blocked_paths_filtered(&[]);
-        assert_eq!(filtered.fs_read, policy.fs_read);
+        assert_eq!(filtered.fs_read, expected_fs_read);
         assert!(filtered.network);
     }
 
@@ -459,9 +436,10 @@ mod tests {
             ..Default::default()
         };
         let once = policy.with_defaults_applied();
+        let once_len = once.fs_read.len();
         let twice = once.with_defaults_applied();
         assert_eq!(
-            once.fs_read.len(),
+            once_len,
             twice.fs_read.len(),
             "applying defaults twice should not add duplicates"
         );

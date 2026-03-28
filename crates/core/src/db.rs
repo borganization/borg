@@ -1130,35 +1130,37 @@ impl Database {
 
     /// Upsert a set of chunks for a given scope+filename, replacing any existing chunks for that file.
     pub fn upsert_chunks(&self, scope: &str, filename: &str, chunks: &[ChunkData]) -> Result<()> {
-        // Delete existing chunks for this file
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM memory_chunks WHERE scope = ?1 AND filename = ?2",
             params![scope, filename],
         )?;
         let now = chrono::Utc::now().timestamp();
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO memory_chunks
+                (scope, filename, chunk_index, start_line, end_line, content, content_hash, embedding, dimension, model, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(scope, filename, chunk_index) DO UPDATE SET
+                start_line = ?4, end_line = ?5, content = ?6, content_hash = ?7,
+                embedding = ?8, dimension = ?9, model = ?10, created_at = ?11",
+        )?;
         for chunk in chunks {
-            self.conn.execute(
-                "INSERT INTO memory_chunks
-                    (scope, filename, chunk_index, start_line, end_line, content, content_hash, embedding, dimension, model, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                 ON CONFLICT(scope, filename, chunk_index) DO UPDATE SET
-                    start_line = ?4, end_line = ?5, content = ?6, content_hash = ?7,
-                    embedding = ?8, dimension = ?9, model = ?10, created_at = ?11",
-                params![
-                    scope,
-                    filename,
-                    chunk.chunk_index,
-                    chunk.start_line,
-                    chunk.end_line,
-                    chunk.content,
-                    chunk.content_hash,
-                    chunk.embedding,
-                    chunk.dimension.map(|d| d as i64),
-                    chunk.model,
-                    now
-                ],
-            )?;
+            stmt.execute(params![
+                scope,
+                filename,
+                chunk.chunk_index,
+                chunk.start_line,
+                chunk.end_line,
+                chunk.content,
+                chunk.content_hash,
+                chunk.embedding,
+                chunk.dimension.map(|d| d as i64),
+                chunk.model,
+                now
+            ])?;
         }
+        drop(stmt);
+        tx.commit()?;
         Ok(())
     }
 
@@ -1551,11 +1553,13 @@ impl Database {
         drop(stmt);
 
         // Mark claimed rows as in_progress
-        for row in &rows {
-            tx.execute(
+        {
+            let mut upd = tx.prepare_cached(
                 "UPDATE delivery_queue SET status = 'in_progress', updated_at = ?1 WHERE id = ?2",
-                params![now, row.id],
             )?;
+            for row in &rows {
+                upd.execute(params![now, row.id])?;
+            }
         }
 
         tx.commit()?;

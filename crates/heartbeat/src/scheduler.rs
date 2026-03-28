@@ -25,15 +25,39 @@ pub struct HeartbeatScheduler {
     config: HeartbeatConfig,
     timezone: Tz,
     wake_rx: Option<mpsc::Receiver<()>>,
+    /// Parsed quiet hours (start, end) cached at construction time.
+    quiet_hours: Option<(NaiveTime, NaiveTime)>,
 }
 
 impl HeartbeatScheduler {
     pub fn new(config: HeartbeatConfig, timezone: Tz, wake_rx: mpsc::Receiver<()>) -> Self {
+        let quiet_hours = Self::parse_quiet_hours(&config);
         Self {
             config,
             timezone,
             wake_rx: Some(wake_rx),
+            quiet_hours,
         }
+    }
+
+    fn parse_quiet_hours(config: &HeartbeatConfig) -> Option<(NaiveTime, NaiveTime)> {
+        let start_str = config.quiet_hours_start.as_ref()?;
+        let end_str = config.quiet_hours_end.as_ref()?;
+        let start = match NaiveTime::parse_from_str(start_str, "%H:%M") {
+            Ok(t) => t,
+            Err(_) => {
+                warn!("Invalid quiet_hours_start '{start_str}', expected HH:MM — quiet hours disabled");
+                return None;
+            }
+        };
+        let end = match NaiveTime::parse_from_str(end_str, "%H:%M") {
+            Ok(t) => t,
+            Err(_) => {
+                warn!("Invalid quiet_hours_end '{end_str}', expected HH:MM — quiet hours disabled");
+                return None;
+            }
+        };
+        Some((start, end))
     }
 
     pub async fn run(mut self, tx: mpsc::Sender<HeartbeatEvent>, cancel: CancellationToken) {
@@ -186,20 +210,7 @@ impl HeartbeatScheduler {
     }
 
     fn is_quiet_hours(&self) -> bool {
-        let (Some(start_str), Some(end_str)) =
-            (&self.config.quiet_hours_start, &self.config.quiet_hours_end)
-        else {
-            return false;
-        };
-
-        let Ok(start) = NaiveTime::parse_from_str(start_str, "%H:%M") else {
-            warn!("Invalid quiet_hours_start format '{start_str}', expected HH:MM — quiet hours disabled");
-            return false;
-        };
-        let Ok(end) = NaiveTime::parse_from_str(end_str, "%H:%M") else {
-            warn!(
-                "Invalid quiet_hours_end format '{end_str}', expected HH:MM — quiet hours disabled"
-            );
+        let Some((start, end)) = self.quiet_hours else {
             return false;
         };
 
@@ -273,10 +284,12 @@ mod tests {
 
     fn test_scheduler(config: HeartbeatConfig, tz: Tz) -> HeartbeatScheduler {
         let (_tx, rx) = mpsc::channel(1);
+        let quiet_hours = HeartbeatScheduler::parse_quiet_hours(&config);
         HeartbeatScheduler {
             config,
             timezone: tz,
             wake_rx: Some(rx),
+            quiet_hours,
         }
     }
 

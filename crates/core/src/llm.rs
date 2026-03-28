@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use crate::config::Config;
+use crate::config::{Config, LlmConfig};
 use crate::provider::Provider;
 use crate::retry::backoff_delay;
 use crate::types::{Message, Role, ToolCall, ToolDefinition};
@@ -282,7 +282,7 @@ struct ProviderSlot {
 
 pub struct LlmClient {
     client: Client,
-    config: Config,
+    llm_config: LlmConfig,
     provider: Provider,
     api_key: String,
     /// Additional fallback keys (rotated on 401/429 errors).
@@ -297,14 +297,13 @@ pub struct LlmClient {
 impl LlmClient {
     /// Effective API URL: config override → provider default.
     fn effective_base_url(&self) -> &str {
-        self.config
-            .llm
+        self.llm_config
             .base_url
             .as_deref()
             .unwrap_or_else(|| self.provider.base_url())
     }
 
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(config: &Config) -> Result<Self> {
         let (provider, mut keys) = config.resolve_api_keys()?;
         let debug_logging = config.debug.llm_logging;
         let client = Client::new();
@@ -313,7 +312,7 @@ impl LlmClient {
         // Build provider-level failover slots
         let mut provider_slots = Vec::new();
         for fb in &config.llm.fallback {
-            match Self::resolve_fallback_slot(fb, &config) {
+            match Self::resolve_fallback_slot(fb, config) {
                 Ok(slot) => provider_slots.push(slot),
                 Err(e) => {
                     warn!("Skipping fallback provider '{}': {e}", fb.provider);
@@ -323,7 +322,7 @@ impl LlmClient {
 
         Ok(Self {
             client,
-            config,
+            llm_config: config.llm.clone(),
             provider,
             api_key,
             fallback_keys: keys,
@@ -418,10 +417,10 @@ impl LlmClient {
             self.provider = slot.provider;
             self.api_key = slot.keys[0].clone();
             self.fallback_keys = slot.keys[1..].to_vec();
-            self.config.llm.model = slot.model.clone();
-            self.config.llm.temperature = slot.temperature;
-            self.config.llm.max_tokens = slot.max_tokens;
-            self.config.llm.base_url = slot.base_url.clone();
+            self.llm_config.model = slot.model.clone();
+            self.llm_config.temperature = slot.temperature;
+            self.llm_config.max_tokens = slot.max_tokens;
+            self.llm_config.base_url = slot.base_url.clone();
             self.active_slot_index = i;
             info!(
                 "Failover to provider {} (model: {})",
@@ -499,7 +498,7 @@ impl LlmClient {
     /// Stream chat with cancellation support, retry logic, and provider-level failover.
     /// Supports multi-key fallback: on 401/429 errors, rotates to the next available key.
     /// On exhausted retries, attempts failover to the next provider in the fallback chain.
-    #[instrument(skip_all, fields(llm.provider = %self.provider, llm.model = %self.config.llm.model))]
+    #[instrument(skip_all, fields(llm.provider = %self.provider, llm.model = %self.llm_config.model))]
     pub async fn stream_chat_with_cancel(
         &mut self,
         messages: &[Message],
@@ -508,7 +507,7 @@ impl LlmClient {
         cancel: CancellationToken,
     ) -> Result<()> {
         // Strip images for non-vision models (safety net)
-        let messages = if !self.provider.supports_vision(&self.config.llm.model) {
+        let messages = if !self.provider.supports_vision(&self.llm_config.model) {
             strip_images(messages)
         } else {
             messages.to_vec()
@@ -518,8 +517,8 @@ impl LlmClient {
         let max_provider_attempts = 1 + self.provider_slots.len();
 
         for _provider_attempt in 0..max_provider_attempts {
-            let max_retries = self.config.llm.max_retries;
-            let initial_delay = Duration::from_millis(self.config.llm.initial_retry_delay_ms);
+            let max_retries = self.llm_config.max_retries;
+            let initial_delay = Duration::from_millis(self.llm_config.initial_retry_delay_ms);
             let total_keys = 1 + self.fallback_keys.len();
             let mut keys_tried = 0_usize;
             let mut should_failover = false;
@@ -627,7 +626,7 @@ impl LlmClient {
         body: &impl Serialize,
         cancel: &CancellationToken,
     ) -> std::result::Result<reqwest::Response, LlmError> {
-        let timeout = Duration::from_millis(self.config.llm.request_timeout_ms);
+        let timeout = Duration::from_millis(self.llm_config.request_timeout_ms);
 
         let fut =
             self.client
@@ -658,7 +657,7 @@ impl LlmClient {
                             source: anyhow::anyhow!(
                                 "Request to {} timed out after {}ms",
                                 self.provider,
-                                self.config.llm.request_timeout_ms
+                                self.llm_config.request_timeout_ms
                             ),
                             retry_after: None,
                             reason: FailoverReason::Timeout,
@@ -687,10 +686,9 @@ impl LlmClient {
         tx: &mpsc::Sender<StreamEvent>,
         cancel: &CancellationToken,
     ) -> std::result::Result<(), LlmError> {
-        let model = self.provider.normalize_model(&self.config.llm.model);
+        let model = self.provider.normalize_model(&self.llm_config.model);
         let reasoning_effort = self
-            .config
-            .llm
+            .llm_config
             .thinking
             .openai_reasoning_effort()
             .map(String::from);
@@ -698,8 +696,8 @@ impl LlmClient {
             model: model.clone(),
             messages: messages.to_vec(),
             tools: tools.map(<[ToolDefinition]>::to_vec),
-            temperature: self.config.llm.temperature,
-            max_tokens: self.config.llm.max_tokens,
+            temperature: self.llm_config.temperature,
+            max_tokens: self.llm_config.max_tokens,
             stream: true,
             reasoning_effort,
         };
@@ -754,9 +752,11 @@ impl LlmClient {
                 });
             }
 
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim().to_owned();
-                buffer.drain(..line_end + 1);
+            let mut cursor = 0;
+            while let Some(rel_end) = buffer[cursor..].find('\n') {
+                let line_end = cursor + rel_end;
+                let line = buffer[cursor..line_end].trim();
+                cursor = line_end + 1;
 
                 if line.is_empty() || line.starts_with(':') {
                     continue;
@@ -778,7 +778,7 @@ impl LlmClient {
                                         completion_tokens: usage.completion_tokens.unwrap_or(0),
                                         total_tokens: usage.total_tokens.unwrap_or(0),
                                         provider: self.provider.as_str().to_string(),
-                                        model: self.config.llm.model.clone(),
+                                        model: self.llm_config.model.clone(),
                                     }))
                                     .await;
                             }
@@ -821,6 +821,7 @@ impl LlmClient {
                     }
                 }
             }
+            buffer.drain(..cursor);
         }
     }
 
@@ -829,10 +830,9 @@ impl LlmClient {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<Message> {
-        let model = self.provider.normalize_model(&self.config.llm.model);
+        let model = self.provider.normalize_model(&self.llm_config.model);
         let reasoning_effort = self
-            .config
-            .llm
+            .llm_config
             .thinking
             .openai_reasoning_effort()
             .map(String::from);
@@ -840,8 +840,8 @@ impl LlmClient {
             model,
             messages: messages.to_vec(),
             tools: tools.map(<[ToolDefinition]>::to_vec),
-            temperature: self.config.llm.temperature,
-            max_tokens: self.config.llm.max_tokens,
+            temperature: self.llm_config.temperature,
+            max_tokens: self.llm_config.max_tokens,
             stream: false,
             reasoning_effort,
         };
@@ -889,7 +889,7 @@ impl LlmClient {
         tools: Option<&[ToolDefinition]>,
         stream: bool,
     ) -> serde_json::Value {
-        let model = self.provider.normalize_model(&self.config.llm.model);
+        let model = self.provider.normalize_model(&self.llm_config.model);
 
         // Extract system message
         let system_text: Option<String> = messages
@@ -913,10 +913,10 @@ impl LlmClient {
                 .collect()
         });
 
-        let mut body = if let Some(budget) = self.config.llm.thinking.budget_tokens() {
+        let mut body = if let Some(budget) = self.llm_config.thinking.budget_tokens() {
             // When thinking is enabled: omit temperature (Anthropic requirement),
             // ensure max_tokens accommodates both thinking budget and response.
-            let max_tokens = self.config.llm.max_tokens.max(budget + 1024);
+            let max_tokens = self.llm_config.max_tokens.max(budget + 1024);
             serde_json::json!({
                 "model": model,
                 "max_tokens": max_tokens,
@@ -929,8 +929,8 @@ impl LlmClient {
         } else {
             serde_json::json!({
                 "model": model,
-                "max_tokens": self.config.llm.max_tokens,
-                "temperature": self.config.llm.temperature,
+                "max_tokens": self.llm_config.max_tokens,
+                "temperature": self.llm_config.temperature,
                 "stream": stream,
             })
         };
@@ -954,7 +954,7 @@ impl LlmClient {
         cancel: &CancellationToken,
     ) -> std::result::Result<(), LlmError> {
         let body = self.build_anthropic_request(messages, tools, true);
-        let model = self.provider.normalize_model(&self.config.llm.model);
+        let model = self.provider.normalize_model(&self.llm_config.model);
 
         debug!("Sending streaming request to Anthropic (model: {})", model);
 
@@ -1006,9 +1006,11 @@ impl LlmClient {
                 });
             }
 
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim().to_owned();
-                buffer.drain(..line_end + 1);
+            let mut cursor = 0;
+            while let Some(rel_end) = buffer[cursor..].find('\n') {
+                let line_end = cursor + rel_end;
+                let line = buffer[cursor..line_end].trim();
+                cursor = line_end + 1;
 
                 if line.is_empty() || line.starts_with(':') {
                     continue;
@@ -1114,7 +1116,7 @@ impl LlmClient {
                                             completion_tokens: output,
                                             total_tokens: input + output,
                                             provider: self.provider.as_str().to_string(),
-                                            model: self.config.llm.model.clone(),
+                                            model: self.llm_config.model.clone(),
                                         }))
                                         .await;
                                 }
@@ -1139,6 +1141,7 @@ impl LlmClient {
                     }
                 }
             }
+            buffer.drain(..cursor);
         }
     }
 
@@ -1415,7 +1418,7 @@ mod tests {
         config.llm.provider = Some("anthropic".to_string());
         config.llm.api_key_env = env_var.to_string();
         config.llm.model = "claude-sonnet-4".to_string();
-        LlmClient::new(config).unwrap()
+        LlmClient::new(&config).unwrap()
     }
 
     #[test]
@@ -1803,7 +1806,7 @@ mod tests {
         let mut config = Config::default();
         config.llm.provider = Some("ollama".to_string());
         config.llm.model = "llama3.3".to_string();
-        let client = LlmClient::new(config);
+        let client = LlmClient::new(&config);
         assert!(client.is_ok());
     }
 
@@ -1813,7 +1816,7 @@ mod tests {
         config.llm.provider = Some("ollama".to_string());
         config.llm.model = "llama3.3".to_string();
         config.llm.base_url = Some("http://custom:8080/v1/chat/completions".to_string());
-        let client = LlmClient::new(config).expect("should create client");
+        let client = LlmClient::new(&config).expect("should create client");
         assert_eq!(
             client.effective_base_url(),
             "http://custom:8080/v1/chat/completions"
@@ -1825,7 +1828,7 @@ mod tests {
         let mut config = Config::default();
         config.llm.provider = Some("ollama".to_string());
         config.llm.model = "llama3.3".to_string();
-        let client = LlmClient::new(config).expect("should create client");
+        let client = LlmClient::new(&config).expect("should create client");
         assert_eq!(
             client.effective_base_url(),
             "http://localhost:11434/v1/chat/completions"
@@ -1840,7 +1843,7 @@ mod tests {
         config.llm.model = "claude-sonnet-4-20250514".to_string();
         config.llm.thinking = crate::config::ThinkingLevel::Off;
         std::env::set_var("ANTHROPIC_API_KEY", "test-key");
-        let client = LlmClient::new(config).expect("should create client");
+        let client = LlmClient::new(&config).expect("should create client");
 
         let messages = vec![Message::user("hi")];
         let body = client.build_anthropic_request(&messages, None, false);
@@ -1864,7 +1867,7 @@ mod tests {
         config.llm.model = "claude-sonnet-4-20250514".to_string();
         config.llm.thinking = crate::config::ThinkingLevel::High;
         std::env::set_var("ANTHROPIC_API_KEY", "test-key");
-        let client = LlmClient::new(config).expect("should create client");
+        let client = LlmClient::new(&config).expect("should create client");
 
         let messages = vec![Message::user("hi")];
         let body = client.build_anthropic_request(&messages, None, false);
