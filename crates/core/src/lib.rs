@@ -34,6 +34,7 @@ pub mod settings;
 pub mod skills;
 pub mod tasks;
 pub mod telemetry;
+pub mod template;
 pub mod tokenizer;
 pub mod tool_catalog;
 pub mod tool_handlers;

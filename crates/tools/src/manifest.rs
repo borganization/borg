@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +36,8 @@ impl SandboxSection {
             network: self.network,
             fs_read: self.fs_read.clone(),
             fs_write: self.fs_write.clone(),
+            deny_read: Vec::new(),
+            deny_write: Vec::new(),
         }
     }
 }
@@ -86,7 +89,9 @@ impl ToolManifest {
         Ok(manifest)
     }
 
-    /// Convert parameters section to JSON Schema for the LLM
+    /// Convert parameters section to JSON Schema for the LLM.
+    /// Applies sanitization to infer missing `type` fields and fill required
+    /// child fields with permissive defaults.
     pub fn parameters_json_schema(&self) -> serde_json::Value {
         let mut properties = serde_json::Map::new();
 
@@ -102,19 +107,108 @@ impl ToolManifest {
                         serde_json::Value::String(d.to_string()),
                     );
                 }
+                if let Some(e) = table.get("enum").and_then(|v| v.as_array()) {
+                    let vals: Vec<JsonValue> = e
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| JsonValue::String(s.to_string())))
+                        .collect();
+                    prop.insert("enum".to_string(), JsonValue::Array(vals));
+                }
                 properties.insert(key.clone(), serde_json::Value::Object(prop));
             }
         }
 
-        serde_json::json!({
+        let mut schema = serde_json::json!({
             "type": "object",
             "properties": properties,
             "required": self.parameters.required.values,
-        })
+        });
+
+        sanitize_json_schema(&mut schema);
+        schema
     }
 
     pub fn sandbox_policy(&self) -> borg_sandbox::policy::SandboxPolicy {
         self.sandbox.to_policy()
+    }
+}
+
+/// Sanitize a JSON Schema value to ensure LLM compatibility.
+///
+/// Ported from codex-rs `codex-tools`. This function:
+/// - Ensures every schema object has a `type`. If missing, infers it from
+///   common keywords (properties => object, items => array, enum/const/format => string).
+/// - Fills required child fields (e.g. array `items`, object `properties`) with
+///   permissive defaults when absent.
+fn sanitize_json_schema(value: &mut JsonValue) {
+    match value {
+        JsonValue::Bool(_) => {
+            *value = serde_json::json!({ "type": "string" });
+        }
+        JsonValue::Array(values) => {
+            for v in values {
+                sanitize_json_schema(v);
+            }
+        }
+        JsonValue::Object(map) => {
+            // Recurse into known sub-schema fields
+            if let Some(properties) = map.get_mut("properties") {
+                if let Some(props_map) = properties.as_object_mut() {
+                    for v in props_map.values_mut() {
+                        sanitize_json_schema(v);
+                    }
+                }
+            }
+            if let Some(items) = map.get_mut("items") {
+                sanitize_json_schema(items);
+            }
+            for combiner in ["oneOf", "anyOf", "allOf"] {
+                if let Some(v) = map.get_mut(combiner) {
+                    sanitize_json_schema(v);
+                }
+            }
+
+            // Infer missing type
+            let mut schema_type = map.get("type").and_then(|v| v.as_str()).map(str::to_string);
+
+            if schema_type.is_none() {
+                if map.contains_key("properties")
+                    || map.contains_key("required")
+                    || map.contains_key("additionalProperties")
+                {
+                    schema_type = Some("object".to_string());
+                } else if map.contains_key("items") {
+                    schema_type = Some("array".to_string());
+                // Note: JSON Schema allows non-string enums, but tool.toml enums
+                // are typically strings. Defaulting to "string" is a safe heuristic.
+                } else if map.contains_key("enum")
+                    || map.contains_key("const")
+                    || map.contains_key("format")
+                {
+                    schema_type = Some("string".to_string());
+                } else if map.contains_key("minimum")
+                    || map.contains_key("maximum")
+                    || map.contains_key("multipleOf")
+                {
+                    schema_type = Some("number".to_string());
+                }
+            }
+
+            let schema_type = schema_type.unwrap_or_else(|| "string".to_string());
+            map.insert("type".to_string(), JsonValue::String(schema_type.clone()));
+
+            // Ensure required children exist
+            if schema_type == "object" && !map.contains_key("properties") {
+                map.insert(
+                    "properties".to_string(),
+                    JsonValue::Object(serde_json::Map::new()),
+                );
+            }
+            if schema_type == "array" && !map.contains_key("items") {
+                map.insert("items".to_string(), serde_json::json!({ "type": "string" }));
+            }
+        }
+        _ => {}
     }
 }
 
@@ -220,5 +314,119 @@ description = "No params"
     fn load_nonexistent_file_errors() {
         let result = ToolManifest::load(Path::new("/tmp/nonexistent_tool_toml_xyz.toml"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn sanitize_infers_object_type_from_properties() {
+        let mut schema = serde_json::json!({
+            "properties": { "name": { "type": "string" } }
+        });
+        sanitize_json_schema(&mut schema);
+        assert_eq!(schema["type"], "object");
+    }
+
+    #[test]
+    fn sanitize_infers_array_type_from_items() {
+        let mut schema = serde_json::json!({
+            "items": { "type": "string" }
+        });
+        sanitize_json_schema(&mut schema);
+        assert_eq!(schema["type"], "array");
+    }
+
+    #[test]
+    fn sanitize_infers_string_type_from_enum() {
+        let mut schema = serde_json::json!({
+            "enum": ["a", "b"]
+        });
+        sanitize_json_schema(&mut schema);
+        assert_eq!(schema["type"], "string");
+    }
+
+    #[test]
+    fn sanitize_infers_number_type_from_minimum() {
+        let mut schema = serde_json::json!({
+            "minimum": 0
+        });
+        sanitize_json_schema(&mut schema);
+        assert_eq!(schema["type"], "number");
+    }
+
+    #[test]
+    fn sanitize_defaults_to_string() {
+        let mut schema = serde_json::json!({});
+        sanitize_json_schema(&mut schema);
+        assert_eq!(schema["type"], "string");
+    }
+
+    #[test]
+    fn sanitize_adds_missing_properties_to_object() {
+        let mut schema = serde_json::json!({
+            "type": "object"
+        });
+        sanitize_json_schema(&mut schema);
+        assert_eq!(schema["properties"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn sanitize_adds_missing_items_to_array() {
+        let mut schema = serde_json::json!({
+            "type": "array"
+        });
+        sanitize_json_schema(&mut schema);
+        assert_eq!(schema["items"]["type"], "string");
+    }
+
+    #[test]
+    fn sanitize_preserves_existing_type() {
+        let mut schema = serde_json::json!({
+            "type": "boolean"
+        });
+        sanitize_json_schema(&mut schema);
+        assert_eq!(schema["type"], "boolean");
+    }
+
+    #[test]
+    fn sanitize_recurses_into_properties() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tags": { "items": { "type": "string" } }
+            }
+        });
+        sanitize_json_schema(&mut schema);
+        // tags should be inferred as array
+        assert_eq!(schema["properties"]["tags"]["type"], "array");
+    }
+
+    #[test]
+    fn sanitize_coerces_bool_schema() {
+        let mut schema = serde_json::json!(true);
+        sanitize_json_schema(&mut schema);
+        assert_eq!(schema["type"], "string");
+    }
+
+    #[test]
+    fn parameters_json_schema_with_enum() {
+        let toml_str = r#"
+name = "color-tool"
+description = "Pick a color"
+
+[parameters]
+type = "object"
+[parameters.properties.color]
+type = "string"
+description = "The color"
+enum = ["red", "green", "blue"]
+[parameters.required]
+values = ["color"]
+"#;
+        let manifest: ToolManifest = toml::from_str(toml_str).unwrap();
+        let schema = manifest.parameters_json_schema();
+        assert_eq!(schema["properties"]["color"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["color"]["enum"],
+            serde_json::json!(["red", "green", "blue"])
+        );
     }
 }

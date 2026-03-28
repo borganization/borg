@@ -31,9 +31,19 @@ pub fn build_bwrap_args(policy: &SandboxPolicy, tool_dir: &Path) -> Vec<String> 
         args.extend(["--ro-bind".to_string(), path.clone(), path.clone()]);
     }
 
-    // Additional write paths
+    // Additional write paths (skip any that are in deny_write)
     for path in &policy.fs_write {
-        args.extend(["--bind".to_string(), path.clone(), path.clone()]);
+        let denied = policy.deny_write.iter().any(|d| path.starts_with(d));
+        if !denied {
+            args.extend(["--bind".to_string(), path.clone(), path.clone()]);
+        }
+    }
+
+    // Protect deny_write paths by mounting them read-only
+    for path in &policy.deny_write {
+        if Path::new(path).exists() {
+            args.extend(["--ro-bind".to_string(), path.clone(), path.clone()]);
+        }
     }
 
     // Network isolation (unshare network namespace unless allowed)
@@ -53,11 +63,7 @@ mod tests {
     use super::*;
 
     fn default_policy() -> SandboxPolicy {
-        SandboxPolicy {
-            network: false,
-            fs_read: vec![],
-            fs_write: vec![],
-        }
+        SandboxPolicy::default()
     }
 
     #[test]
@@ -81,8 +87,7 @@ mod tests {
     fn network_allowed_when_policy_permits() {
         let policy = SandboxPolicy {
             network: true,
-            fs_read: vec![],
-            fs_write: vec![],
+            ..Default::default()
         };
         let args = build_bwrap_args(&policy, Path::new("/tmp/tool"));
         assert!(!args.contains(&"--unshare-net".to_string()));
@@ -91,9 +96,8 @@ mod tests {
     #[test]
     fn additional_fs_read_paths() {
         let policy = SandboxPolicy {
-            network: false,
             fs_read: vec!["/data/input".to_string()],
-            fs_write: vec![],
+            ..Default::default()
         };
         let args = build_bwrap_args(&policy, Path::new("/tmp/tool"));
         assert!(args
@@ -104,9 +108,8 @@ mod tests {
     #[test]
     fn additional_fs_write_paths() {
         let policy = SandboxPolicy {
-            network: false,
-            fs_read: vec![],
             fs_write: vec!["/data/output".to_string()],
+            ..Default::default()
         };
         let args = build_bwrap_args(&policy, Path::new("/tmp/tool"));
         assert!(args
@@ -119,6 +122,21 @@ mod tests {
         let args = build_bwrap_args(&default_policy(), Path::new("/tmp/tool"));
         assert!(args.contains(&"--unshare-pid".to_string()));
         assert!(args.contains(&"--die-with-parent".to_string()));
+    }
+
+    #[test]
+    fn deny_write_skips_writable_bind() {
+        let policy = SandboxPolicy {
+            fs_write: vec!["/home/user/.borg".to_string()],
+            deny_write: vec!["/home/user/.borg".to_string()],
+            ..Default::default()
+        };
+        let args = build_bwrap_args(&policy, Path::new("/tmp/tool"));
+        // Should NOT have a writable --bind for the denied path
+        let has_writable = args
+            .windows(3)
+            .any(|w| w[0] == "--bind" && w[1] == "/home/user/.borg");
+        assert!(!has_writable);
     }
 
     #[test]

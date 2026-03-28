@@ -5,6 +5,14 @@ pub struct SandboxPolicy {
     pub network: bool,
     pub fs_read: Vec<String>,
     pub fs_write: Vec<String>,
+    /// Glob patterns to deny read access to (e.g. `["~/.borg/**"]`).
+    /// Evaluated after fs_read allows; deny takes precedence.
+    #[serde(default)]
+    pub deny_read: Vec<String>,
+    /// Paths to deny write access to, even if not in fs_write.
+    /// Always includes `~/.borg/` to protect agent config from tool writes.
+    #[serde(default)]
+    pub deny_write: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +81,8 @@ impl SandboxPolicy {
             network: self.network,
             fs_read: filter_blocked(&self.fs_read, blocked_paths),
             fs_write: filter_blocked(&self.fs_write, blocked_paths),
+            deny_read: self.deny_read.clone(),
+            deny_write: self.deny_write.clone(),
         }
     }
 
@@ -82,6 +92,29 @@ impl SandboxPolicy {
             network: self.network,
             fs_read: expand_tilde_paths(&self.fs_read),
             fs_write: expand_tilde_paths(&self.fs_write),
+            deny_read: expand_tilde_paths(&self.deny_read),
+            deny_write: expand_tilde_paths(&self.deny_write),
+        }
+    }
+
+    /// Return a copy with `~/.borg/` added to deny_write to protect agent config
+    /// from tool writes, even if `~/.borg/` doesn't exist yet.
+    pub fn with_borg_dir_protected(&self) -> Self {
+        let borg_dir = dirs::home_dir()
+            .map(|h| format!("{}/.borg", h.display()))
+            .unwrap_or_else(|| "~/.borg".to_string());
+
+        let mut deny_write = self.deny_write.clone();
+        if !deny_write.iter().any(|p| p == &borg_dir) {
+            deny_write.push(borg_dir);
+        }
+
+        Self {
+            network: self.network,
+            fs_read: self.fs_read.clone(),
+            fs_write: self.fs_write.clone(),
+            deny_read: self.deny_read.clone(),
+            deny_write,
         }
     }
 
@@ -237,13 +270,13 @@ mod tests {
     fn filter_blocked_paths_removes_sensitive() {
         let blocked = vec![".ssh".into(), ".aws".into(), "credentials".into()];
         let policy = SandboxPolicy {
-            network: false,
             fs_read: vec![
                 "/home/user/.ssh".into(),
                 "/data/public".into(),
                 "/home/user/.aws/config".into(),
             ],
             fs_write: vec!["/tmp/output".into(), "/home/user/credentials".into()],
+            ..Default::default()
         };
         let filtered = policy.with_blocked_paths_filtered(&blocked);
         assert_eq!(filtered.fs_read, vec!["/data/public".to_string()]);
@@ -255,7 +288,7 @@ mod tests {
         let policy = SandboxPolicy {
             network: true,
             fs_read: vec!["/home/user/.ssh".into()],
-            fs_write: vec![],
+            ..Default::default()
         };
         let filtered = policy.with_blocked_paths_filtered(&[]);
         assert_eq!(filtered.fs_read, policy.fs_read);
@@ -313,14 +346,45 @@ mod tests {
     }
 
     #[test]
+    fn with_borg_dir_protected_adds_deny_write() {
+        let policy = SandboxPolicy::default();
+        let protected = policy.with_borg_dir_protected();
+        assert!(!protected.deny_write.is_empty());
+        assert!(protected.deny_write[0].ends_with("/.borg"));
+    }
+
+    #[test]
+    fn with_borg_dir_protected_is_idempotent() {
+        let policy = SandboxPolicy::default();
+        let protected = policy.with_borg_dir_protected().with_borg_dir_protected();
+        // Should not duplicate the entry
+        let borg_count = protected
+            .deny_write
+            .iter()
+            .filter(|p| p.ends_with("/.borg"))
+            .count();
+        assert_eq!(borg_count, 1);
+    }
+
+    #[test]
+    fn deny_read_preserved_through_filter() {
+        let policy = SandboxPolicy {
+            deny_read: vec!["/secret/data".into()],
+            ..Default::default()
+        };
+        let filtered = policy.with_blocked_paths_filtered(&[]);
+        assert_eq!(filtered.deny_read, vec!["/secret/data".to_string()]);
+    }
+
+    #[test]
     fn with_tildes_expanded_applies_to_all_paths() {
         let home = dirs::home_dir().expect("home dir must exist for test");
         let home_str = home.to_string_lossy();
 
         let policy = SandboxPolicy {
-            network: false,
             fs_read: vec!["~/Library/Messages".into(), "/etc/ssl".into()],
             fs_write: vec!["~/.borg/channels/imessage".into()],
+            ..Default::default()
         };
         let expanded = policy.with_tildes_expanded();
 
