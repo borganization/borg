@@ -44,7 +44,7 @@ impl ToolGroup {
     pub fn tool_names(&self) -> &[&str] {
         match self {
             Self::Memory => &["write_memory", "read_memory"],
-            Self::Fs => &["apply_patch"],
+            Self::Fs => &["apply_patch", "read_file"],
             Self::Runtime => &["run_shell"],
             Self::Discovery => &["list"],
             Self::Web => &["web_fetch", "web_search"],
@@ -133,7 +133,7 @@ impl ToolProfile {
 pub fn tool_group(name: &str) -> Option<ToolGroup> {
     match name {
         "write_memory" | "read_memory" => Some(ToolGroup::Memory),
-        "apply_patch" | "create_tool" | "apply_skill_patch" | "create_channel" => {
+        "apply_patch" | "create_tool" | "apply_skill_patch" | "create_channel" | "read_file" => {
             Some(ToolGroup::Fs)
         }
         "run_shell" => Some(ToolGroup::Runtime),

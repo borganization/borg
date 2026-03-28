@@ -14,6 +14,13 @@ pub struct FileRef {
     pub path: PathBuf,
 }
 
+pub struct ImageAttachment {
+    #[allow(dead_code)]
+    pub placeholder: String,
+    pub data: Vec<u8>,
+    pub mime_type: String,
+}
+
 struct InputHistory {
     entries: Vec<String>,
     cursor: Option<usize>,
@@ -92,6 +99,7 @@ pub struct Composer<'a> {
     textarea: TextArea<'a>,
     history: InputHistory,
     file_refs: Vec<FileRef>,
+    image_attachments: Vec<ImageAttachment>,
 }
 
 impl<'a> Composer<'a> {
@@ -108,6 +116,7 @@ impl<'a> Composer<'a> {
             textarea,
             history: InputHistory::new(),
             file_refs: Vec::new(),
+            image_attachments: Vec::new(),
         }
     }
 
@@ -189,6 +198,7 @@ impl<'a> Composer<'a> {
                 self.textarea.cut();
                 self.history.reset();
                 self.file_refs.clear();
+                self.image_attachments.clear();
                 None
             }
             _ => {
@@ -226,6 +236,21 @@ impl<'a> Composer<'a> {
 
     pub fn take_file_refs(&mut self) -> Vec<FileRef> {
         std::mem::take(&mut self.file_refs)
+    }
+
+    pub fn add_image(&mut self, data: Vec<u8>, mime_type: String) {
+        let n = self.image_attachments.len() + 1;
+        let placeholder = format!("[Image #{n}]");
+        self.textarea.insert_str(&placeholder);
+        self.image_attachments.push(ImageAttachment {
+            placeholder,
+            data,
+            mime_type,
+        });
+    }
+
+    pub fn take_image_attachments(&mut self) -> Vec<ImageAttachment> {
+        std::mem::take(&mut self.image_attachments)
     }
 
     pub fn height(&self) -> u16 {
