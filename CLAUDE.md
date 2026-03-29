@@ -202,6 +202,9 @@ mode = "strict"
 
 [memory]
 max_context_tokens = 8000
+flush_before_compaction = false  # extract durable info before compaction
+flush_min_messages = 4           # minimum dropped messages to trigger flush
+# extra_paths = ["~/notes", "~/docs"]  # additional dirs to index and search
 
 [memory.embeddings]
 enabled = true                   # enable semantic memory search
@@ -210,6 +213,8 @@ enabled = true                   # enable semantic memory search
 # dimension = 1536              # optional: override vector dimension
 # api_key_env = "OPENAI_API_KEY" # optional: override API key env var
 recency_weight = 0.2            # 0.0=pure similarity, 1.0=pure recency
+mmr_enabled = true               # MMR diversity re-ranking of search results
+mmr_lambda = 0.7                 # 1.0=pure relevance, 0.0=pure diversity
 
 [skills]
 enabled = true
@@ -259,6 +264,14 @@ MY_SECRET = { source = "env", var = "MY_SECRET" }    # explicit env SecretRef
 - `write_memory` tool accepts `scope: "local"` to write to project-local memory
 - Token estimation via `tiktoken-rs` (cl100k_base BPE tokenizer)
 - **Semantic search**: Embeddings generated on `write_memory` and stored in SQLite. Memory files ranked by cosine similarity to the user's query, blended with recency. Auto-detects embedding provider from API keys (OpenAI → OpenRouter → Gemini). Silently falls back to recency when no embedding provider available (e.g., Anthropic-only users). Configure via `[memory.embeddings]` in config.
+- **Hybrid search**: `memory_search` tool combines vector similarity (70%) and BM25 full-text search (30%) with adaptive weighting — when one signal is unavailable, the other scales to full weight
+- **Markdown-aware chunking**: Chunks respect code fences (never split mid-fence) and use headings as natural chunk boundaries
+- **MMR diversity re-ranking**: Search results are re-ranked using Maximal Marginal Relevance (Jaccard similarity) to reduce redundant results. Configure via `mmr_enabled` and `mmr_lambda`
+- **Embedding cache**: API results cached in SQLite by (provider, model, content_hash) to avoid redundant embedding API calls
+- **Extra search paths**: `memory.extra_paths` config indexes additional directories alongside regular memory (validated against `security.blocked_paths`)
+- **Memory file watcher**: Background watcher auto-re-indexes .md files when modified on disk (1.5s debounce)
+- **Session transcript indexing**: Past conversations are indexed on startup and searchable via `memory_search` under the "sessions" scope
+- **Pre-compaction memory flush**: When enabled (`flush_before_compaction`), extracts durable information from messages about to be dropped and saves to `daily/{date}.md`
 
 ## Identity (IDENTITY.md)
 
@@ -427,6 +440,8 @@ SQLite at `~/.borg/borg.db` with versioned migrations:
 - **V2**: messages table (crash recovery), retry_count on scheduled_tasks
 - **V3**: channel_sessions + channel_messages tables (gateway)
 - **V14**: Add retry (max_retries, retry_count, retry_after, last_error), timeout (timeout_ms), and delivery (delivery_channel, delivery_target) columns to `scheduled_tasks`
+- **V16**: `embedding_cache` table for caching embedding API results
+- **V17**: `session_index_status` table for tracking indexed sessions
 - Schema version tracked in `meta` table; migrations run automatically on `Database::open()`
 
 ## Signal Handling & Graceful Shutdown
@@ -496,7 +511,11 @@ Six-layer defense against prompt injection attacks:
 | `crates/core/src/config.rs` | Config parsing with defaults |
 | `crates/core/src/identity.rs` | IDENTITY.md load/save |
 | `crates/core/src/memory.rs` | Memory loading with token budget |
-| `crates/core/src/embeddings.rs` | Embedding API client, cosine similarity, semantic memory ranking |
+| `crates/core/src/embeddings.rs` | Embedding API client, cosine similarity, hybrid search merge, embedding cache |
+| `crates/core/src/mmr.rs` | MMR diversity re-ranking (Jaccard similarity, greedy selection) |
+| `crates/core/src/memory_watcher.rs` | File watcher for auto-re-indexing memory .md files |
+| `crates/core/src/session_indexer.rs` | Session transcript indexing for searchable conversations |
+| `crates/core/src/chunker.rs` | Markdown-aware content chunking with code fence preservation |
 | `crates/core/src/skills.rs` | Skills loading, parsing, progressive token budgeting |
 | `crates/core/src/hooks.rs` | Lifecycle hook system (trait, registry, dispatch) |
 | `crates/core/src/doctor.rs` | Diagnostic checks and report formatting |

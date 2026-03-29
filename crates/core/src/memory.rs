@@ -474,6 +474,85 @@ pub struct MemoryFileInfo {
     pub modified_at: Option<chrono::DateTime<chrono::Local>>,
 }
 
+/// Scan extra paths for .md files. Returns (relative_name, full_path) pairs.
+/// Paths support `~` expansion. Non-existent directories are silently skipped.
+/// Paths matching `blocked_paths` (from security config) are rejected.
+pub fn scan_extra_paths(
+    extra_paths: &[String],
+    blocked_paths: &[String],
+) -> Vec<(String, std::path::PathBuf)> {
+    let mut files = Vec::new();
+    for raw_path in extra_paths {
+        let expanded = shellexpand::tilde(raw_path).to_string();
+        let dir = std::path::PathBuf::from(&expanded);
+
+        // Security: reject paths in blocked_paths
+        if crate::tool_handlers::is_blocked_path(&dir, blocked_paths) {
+            tracing::warn!("Extra path '{}' is in blocked_paths, skipping", raw_path);
+            continue;
+        }
+
+        if dir.is_file() && dir.extension().is_some_and(|e| e == "md") {
+            let name = format!(
+                "extra/{}",
+                dir.file_name().unwrap_or_default().to_string_lossy()
+            );
+            files.push((name, dir));
+            continue;
+        }
+        if !dir.is_dir() {
+            continue;
+        }
+        let dir_name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().is_some_and(|e| e == "md") {
+                    let rel = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    files.push((format!("extra/{dir_name}/{rel}"), path));
+                }
+            }
+        }
+    }
+    files
+}
+
+/// Load extra paths content into memory context within token budget.
+pub fn load_extra_paths(
+    extra_paths: &[String],
+    blocked_paths: &[String],
+    max_tokens: usize,
+    estimated_tokens: &mut usize,
+    parts: &mut Vec<String>,
+) {
+    let files = scan_extra_paths(extra_paths, blocked_paths);
+    for (name, path) in files {
+        if *estimated_tokens >= max_tokens {
+            break;
+        }
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let tokens = estimate_tokens(&content);
+            if *estimated_tokens + tokens > max_tokens {
+                continue;
+            }
+            let safe_name = escape_xml_attr(&name);
+            parts.push(format!(
+                "<memory_file name=\"{safe_name}\">\n{content}\n</memory_file>"
+            ));
+            *estimated_tokens += tokens;
+            debug!("Loaded extra path {name} ({tokens} tokens)");
+        }
+    }
+}
+
 /// Load daily logs (today + yesterday) from a memory directory within token budget.
 /// Returns content wrapped in XML tags, or empty string if no logs exist.
 pub fn load_daily_logs_from_dir(memory_dir: &std::path::Path, max_tokens: usize) -> String {
@@ -857,5 +936,56 @@ mod tests {
             tokens <= 200,
             "should roughly respect token budget: {tokens}"
         );
+    }
+
+    // -- extra paths tests --
+
+    #[test]
+    fn scan_extra_paths_empty() {
+        let files = scan_extra_paths(&[], &[]);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn scan_extra_paths_nonexistent_dir() {
+        let files = scan_extra_paths(&["/nonexistent/path/12345".to_string()], &[]);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn scan_extra_paths_finds_md_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("notes.md"), "some notes").unwrap();
+        std::fs::write(tmp.path().join("readme.txt"), "not md").unwrap();
+        let files = scan_extra_paths(&[tmp.path().to_string_lossy().to_string()], &[]);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.contains("notes.md"));
+    }
+
+    #[test]
+    fn scan_extra_paths_single_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let md_path = tmp.path().join("single.md");
+        std::fs::write(&md_path, "single file").unwrap();
+        let files = scan_extra_paths(&[md_path.to_string_lossy().to_string()], &[]);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.contains("single.md"));
+    }
+
+    #[test]
+    fn load_extra_paths_respects_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("big.md"), "word ".repeat(5000)).unwrap();
+        let mut tokens = 0;
+        let mut parts = Vec::new();
+        load_extra_paths(
+            &[tmp.path().to_string_lossy().to_string()],
+            &[],
+            100,
+            &mut tokens,
+            &mut parts,
+        );
+        // Either the file fits or it doesn't, but we shouldn't exceed budget
+        assert!(tokens <= 100 || parts.is_empty());
     }
 }

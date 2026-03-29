@@ -277,7 +277,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 15;
+    const CURRENT_VERSION: u32 = 17;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking
@@ -334,6 +334,12 @@ impl Database {
         }
         if current < 15 {
             self.migrate_v15()?;
+        }
+        if current < 16 {
+            self.migrate_v16()?;
+        }
+        if current < 17 {
+            self.migrate_v17()?;
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
@@ -817,6 +823,125 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// V16: Add embedding_cache table for caching API embedding results.
+    fn migrate_v16(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider     TEXT NOT NULL,
+                model        TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                embedding    BLOB NOT NULL,
+                dimension    INTEGER NOT NULL,
+                created_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+                UNIQUE(provider, model, content_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_embedding_cache_lookup
+                ON embedding_cache(provider, model, content_hash);
+            ",
+        )?;
+        Ok(())
+    }
+
+    /// V17: Add session_index_status table for tracking which sessions have been indexed.
+    fn migrate_v17(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS session_index_status (
+                session_id    TEXT PRIMARY KEY,
+                indexed_at    INTEGER NOT NULL,
+                message_count INTEGER NOT NULL DEFAULT 0
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
+    // ── Embedding Cache CRUD ──
+
+    /// Get a cached embedding by provider, model, and content hash.
+    pub fn get_cached_embedding(
+        &self,
+        provider: &str,
+        model: &str,
+        content_hash: &str,
+    ) -> Result<Option<(Vec<u8>, usize)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT embedding, dimension FROM embedding_cache
+             WHERE provider = ?1 AND model = ?2 AND content_hash = ?3",
+        )?;
+        let result = stmt
+            .query_row(params![provider, model, content_hash], |row| {
+                let embedding: Vec<u8> = row.get(0)?;
+                let dimension: usize = row.get(1)?;
+                Ok((embedding, dimension))
+            })
+            .optional()?;
+        Ok(result)
+    }
+
+    /// Cache an embedding result.
+    pub fn cache_embedding(
+        &self,
+        provider: &str,
+        model: &str,
+        content_hash: &str,
+        embedding: &[u8],
+        dimension: usize,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO embedding_cache
+             (provider, model, content_hash, embedding, dimension)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![provider, model, content_hash, embedding, dimension],
+        )?;
+        Ok(())
+    }
+
+    /// Clear all cached embeddings. Returns the number of rows deleted.
+    pub fn clear_embedding_cache(&self) -> Result<usize> {
+        let count = self.conn.execute("DELETE FROM embedding_cache", [])?;
+        Ok(count)
+    }
+
+    // ── Session Index Status CRUD ──
+
+    /// Check if a session has been indexed.
+    pub fn is_session_indexed(&self, session_id: &str) -> Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT 1 FROM session_index_status WHERE session_id = ?1")?;
+        Ok(stmt.exists(params![session_id])?)
+    }
+
+    /// Mark a session as indexed.
+    pub fn mark_session_indexed(&self, session_id: &str, message_count: usize) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO session_index_status
+             (session_id, indexed_at, message_count)
+             VALUES (?1, ?2, ?3)",
+            params![session_id, now, message_count as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Get session IDs that haven't been indexed yet.
+    pub fn get_unindexed_sessions(&self, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id FROM sessions s
+             LEFT JOIN session_index_status si ON s.id = si.session_id
+             WHERE si.session_id IS NULL
+             ORDER BY s.updated_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // ── Pairing CRUD ──
