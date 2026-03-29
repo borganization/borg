@@ -530,6 +530,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn no_credential_input_for_zero_cred_defs() {
         let mut popup = PluginsPopup::new();
         let tmp = std::env::temp_dir().join("borg-plugins-test-nocred");
