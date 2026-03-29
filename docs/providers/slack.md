@@ -85,3 +85,38 @@ Invite the bot to a channel or send it a direct message. You should get a respon
 - Automatic message chunking (4000 char limit)
 - Rate-limit retry with exponential backoff
 - Bot message filtering (prevents self-reply loops)
+- Message deduplication
+
+## Additional configuration
+
+### Channel allowlist
+
+Restrict the bot to specific Slack channels:
+
+```toml
+[gateway]
+slack_channel_allowlist = ["C01234567", "C89012345"]
+```
+
+### Group activation mode
+
+Control how the bot responds in channels (vs DMs):
+
+```toml
+[gateway]
+group_activation = "mention"   # mention (default) | always
+```
+
+- `mention` — only responds when @mentioned in channels; DMs always activate
+- `always` — responds to all messages in channels the bot is in
+
+### Access control
+
+Configure sender pairing policy for Slack:
+
+```toml
+[gateway.channel_policies]
+slack = "open"    # trust Slack workspace auth (no pairing needed)
+```
+
+Options: `pairing` (default), `open`, `disabled`. See [Configuration](../configuration.md#gateway) for details.

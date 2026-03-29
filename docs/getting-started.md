@@ -4,14 +4,23 @@ Borg is an AI personal assistant agent built in Rust. The agent writes its own t
 
 ## Prerequisites
 
-- **Rust toolchain**: Install via [rustup](https://rustup.rs/)
-- **LLM API key**: One of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`
+- **LLM API key**: One of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, or a running Ollama instance (no key needed)
 - **Linux**: `bwrap` (bubblewrap) for tool sandboxing — install via your package manager
 - **macOS**: `sandbox-exec` is included with the OS
 
 ## Installation
 
-Clone the repository and build from source:
+### Quick install (recommended)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/borganization/borg/main/scripts/install.sh | bash
+```
+
+The installer detects OS/arch, downloads a pre-built binary from GitHub Releases, verifies checksums, installs to `~/.local/bin/`, and runs `borg init` for first-time setup.
+
+### Build from source
+
+Requires the [Rust toolchain](https://rustup.rs/):
 
 ```sh
 git clone https://github.com/borganization/borg.git
@@ -33,9 +42,13 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 export OPENAI_API_KEY="sk-..."
 # or
 export GEMINI_API_KEY="..."
+# or
+export DEEPSEEK_API_KEY="..."
+# or
+export GROQ_API_KEY="..."
 ```
 
-Or add it to your shell profile / `.env` file. See `.env.example` for the template. The provider is auto-detected based on which key is set.
+Or add it to your shell profile / `.env` file. See `.env.example` for the template. The provider is auto-detected based on which key is set. Ollama requires no API key — just a running instance.
 
 2. Initialize with the onboarding wizard:
 
@@ -43,13 +56,16 @@ Or add it to your shell profile / `.env` file. See `.env.example` for the templa
 borg init
 ```
 
-This launches an interactive TUI that walks you through setup:
+This launches an interactive wizard that walks you through setup:
 
-- **Name your agent** — give it a custom identity (appears in IDENTITY.md)
-- **Pick a personality style** — Professional, Casual, Snarky, Nurturing, or Minimal
-- **Choose a provider and model** — select from OpenRouter, OpenAI, Anthropic, or Gemini models
+1. **Welcome** — Your name + agent name
+2. **Security** — Security warning acknowledgment (required)
+3. **Provider** — Select LLM provider (OpenRouter, OpenAI, Anthropic, Gemini, DeepSeek, Groq, Ollama)
+4. **API Key** — Enter API key (auto-detects existing keys)
+5. **Channels** — Configure messaging channels (Telegram, Slack, Discord, etc.)
+6. **Summary** — Review all settings including defaults, confirm and launch
 
-The wizard writes your choices to `config.toml` and generates a personalized `IDENTITY.md`. If you cancel mid-wizard, defaults are used instead.
+Defaults applied automatically: Professional personality, recommended model per provider, 1M token/month budget, gateway at 127.0.0.1:7842, strict sandbox. Customize via `borg settings`.
 
 This creates `~/.borg/` with your customized config, personality, and memory files:
 
@@ -60,24 +76,23 @@ This creates `~/.borg/` with your customized config, personality, and memory fil
 ├── MEMORY.md         # Memory index
 ├── memory/           # Topic-specific memories
 ├── tools/            # User-created tools
-├── skills/           # User-created skills
-├── sessions/         # Session persistence (JSON files)
+├── skills/           # Bundled + user-created skills
 ├── logs/             # Daily JSONL debug logs
 ├── cache/
-└── borg.db     # SQLite database (sessions, scheduled tasks)
+└── borg.db           # SQLite database (sessions, tasks, settings, embeddings)
 ```
 
 ## Usage
 
-### Interactive REPL
+### Interactive TUI (default)
 
 ```sh
 borg
 # or
-borg chat
+borg start
 ```
 
-Start a conversation. The agent streams responses, can call tools, and remembers context across turns within a session. Use slash commands like `/compact`, `/undo`, `/memory cleanup`, and `/session list` for session management.
+Launches the full TUI with markdown rendering, slash commands, and an auto-started gateway for messaging channels. Use slash commands like `/compact`, `/undo`, `/settings`, `/plugins`, `/pairing`, and `/doctor`.
 
 ### One-shot query
 
@@ -88,8 +103,8 @@ borg ask "What's the weather in Tokyo?"
 Send a single message, get a response, and exit.
 
 Flags:
-- `--yes` — auto-approve all tool executions (skip confirmation prompts)
-- `--json` — output response as JSON
+- `--yes` / `-y` — auto-approve all tool executions (skip confirmation prompts)
+- `--json` / `-j` — output response as JSON
 
 ### Daemon mode
 
@@ -97,7 +112,7 @@ Flags:
 borg daemon
 ```
 
-Run the agent in the background for scheduled tasks and heartbeat check-ins without the interactive TUI.
+Run the agent in the background for scheduled tasks, heartbeat check-ins, and messaging gateway without the interactive TUI.
 
 ### System service
 
@@ -107,14 +122,39 @@ borg service uninstall  # remove the service
 borg service status     # check service status
 ```
 
+### All CLI commands
+
+| Command | Description |
+|---------|-------------|
+| `borg` / `borg start` | Interactive TUI with auto-gateway (default) |
+| `borg ask "message"` | One-shot query |
+| `borg init` | Interactive onboarding wizard |
+| `borg doctor` | Run diagnostics |
+| `borg daemon` | Run background service |
+| `borg gateway` | Start webhook gateway standalone |
+| `borg wake` | Trigger immediate heartbeat check-in |
+| `borg tasks list/create/run/runs/status/pause/resume/delete` | Manage scheduled tasks |
+| `borg pairing list/approve/revoke/approved` | Manage sender access |
+| `borg settings get/set/unset` | Manage settings |
+| `borg logs` | Show conversation history |
+| `borg usage` | Token usage and cost breakdown |
+| `borg add <name>` | Set up an integration's credentials |
+| `borg remove <name>` | Remove an integration's credentials |
+| `borg plugins` | List available integrations |
+| `borg away [message]` | Enable auto-reply |
+| `borg available` | Disable auto-reply |
+| `borg stop` / `borg restart` | Daemon lifecycle |
+| `borg service install/uninstall/status` | System service management |
+| `borg uninstall` | Delete all Borg data |
+
 ## What happens when you chat
 
 1. Your message is added to the conversation history
-2. A system prompt is assembled from: `IDENTITY.md` + current time + memory context + skills context
+2. A system prompt is assembled from: `IDENTITY.md` + security policy + current time + memory context (semantic search) + skills context
 3. The message is streamed to the LLM via the configured provider
 4. If the LLM responds with tool calls, each tool is executed and results are fed back
 5. The loop continues until the LLM responds with text only
-6. The session is auto-saved for later resumption
+6. Each message is persisted to SQLite for crash recovery
 
 ## Next steps
 
@@ -122,4 +162,6 @@ borg service status     # check service status
 - [Tools](tools.md) — learn how the agent creates and uses tools
 - [Skills](skills.md) — instruction bundles for teaching the agent CLI workflows
 - [Memory](memory.md) — how the agent remembers things across sessions
+- [Heartbeat](heartbeat.md) — proactive check-ins and daemon mode
 - [Architecture](architecture.md) — how the codebase is structured
+- [Providers](providers/) — setup guides for Telegram, Slack, Discord, and more

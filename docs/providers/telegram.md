@@ -81,6 +81,7 @@ Open your bot in Telegram and send `/start`. You should get a response from your
 
 - Text messages, edited messages, callback queries
 - Photo, document, video, audio, voice, and sticker messages (with placeholders)
+- Audio message transcription (when `[audio] enabled = true`)
 - Forum/topic support in supergroups
 - Automatic message chunking (4000 char limit)
 - Markdown-to-HTML response formatting
@@ -88,3 +89,38 @@ Open your bot in Telegram and send `/start`. You should get a response from your
 - Update deduplication
 - Typing indicators with circuit breaker protection
 - Sequential per-chat message processing
+
+## Additional configuration
+
+### Group activation mode
+
+Control how the bot responds in group chats:
+
+```toml
+[gateway]
+group_activation = "mention"   # mention (default) | always
+```
+
+- `mention` — only responds when @mentioned in groups; DMs always activate
+- `always` — responds to all messages in groups the bot is in
+
+### Access control
+
+Configure sender pairing policy for Telegram:
+
+```toml
+[gateway.channel_policies]
+telegram = "pairing"   # pairing (default) | open | disabled
+```
+
+See [Configuration](../configuration.md#gateway) for details on the pairing system.
+
+### Telegram-specific tuning
+
+```toml
+[gateway]
+telegram_poll_timeout_secs = 30           # long-polling timeout
+telegram_circuit_failure_threshold = 5    # failures before circuit breaker trips
+telegram_circuit_suspension_secs = 60     # suspension after circuit break
+telegram_dedup_capacity = 10000           # dedup cache size
+```

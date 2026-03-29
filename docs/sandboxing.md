@@ -36,6 +36,14 @@ The tool always has read access to its own directory (`~/.borg/tools/<name>/`).
 | `network` | `false` | Whether the tool can make network connections |
 | `fs_read` | `[]` | Extra filesystem paths the tool can read |
 | `fs_write` | `[]` | Filesystem paths the tool can write to |
+| `deny_read` | `[]` | Paths to explicitly deny read access (takes precedence over fs_read) |
+| `deny_write` | `[]` | Paths to explicitly deny write access |
+
+### Automatic protections
+
+- **Borg directory protection**: `~/.borg/` is automatically added to `deny_write` to prevent tools from modifying agent config, memory, or other tools.
+- **Blocked path filtering**: Paths listed in `[security] blocked_paths` config (defaults: `.ssh`, `.aws`, `.gnupg`, `.config/gh`, `.env`, `credentials`, `private_key`) are filtered from tool `fs_read`/`fs_write` before sandbox profile generation.
+- **TLS paths**: When `network = true`, standard TLS certificate paths are automatically added to `fs_read`.
 
 ## macOS (Seatbelt)
 
