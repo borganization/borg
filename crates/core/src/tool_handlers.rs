@@ -624,7 +624,8 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 ];
 
 /// Check whether `path` falls under any of the configured blocked paths.
-fn is_blocked_path(path: &std::path::Path, blocked: &[String]) -> bool {
+/// Check if a path falls within any of the security-blocked directories.
+pub fn is_blocked_path(path: &std::path::Path, blocked: &[String]) -> bool {
     let Some(home) = dirs::home_dir() else {
         // Can't verify — deny by default
         return true;
@@ -1194,6 +1195,9 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     defs
 }
 
+/// Chunk metadata: (snippet, start_line, end_line).
+type ChunkMeta<'a> = std::collections::HashMap<(String, i64), (&'a str, Option<i64>, Option<i64>)>;
+
 /// Execute hybrid memory search (FTS + vector) across global and local scopes.
 pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> Result<String> {
     let query = require_str_param(args, "query")?;
@@ -1204,8 +1208,18 @@ pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> 
     let db = Database::open()?;
     let mut all_results = Vec::new();
 
-    for scope in &["global", "local"] {
-        // FTS search — collect into owned tuples
+    // Pre-compute query embedding once for all scopes
+    let query_embedding = crate::embeddings::generate_query_embedding(config, query)
+        .await
+        .map(|(_prov, emb)| emb)
+        .ok();
+
+    if query_embedding.is_none() {
+        tracing::debug!("memory_search: no embedding provider, falling back to FTS-only");
+    }
+
+    for scope in &["global", "local", "extra", "sessions"] {
+        // FTS search
         let fts_rows = db
             .fts_search(scope, query, max_results * 4)
             .unwrap_or_default();
@@ -1213,23 +1227,27 @@ pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> 
             .iter()
             .map(|(c, score)| (c.filename.clone(), c.chunk_index, *score))
             .collect();
-        // Build a snippet map from FTS results
-        let fts_snippets: std::collections::HashMap<(String, i64), String> = fts_rows
-            .into_iter()
-            .map(|(c, _)| ((c.filename.clone(), c.chunk_index), c.content))
+
+        // Build metadata maps from FTS results
+        let fts_meta: ChunkMeta<'_> = fts_rows
+            .iter()
+            .map(|(c, _)| {
+                (
+                    (c.filename.clone(), c.chunk_index),
+                    (c.content.as_str(), c.start_line, c.end_line),
+                )
+            })
             .collect();
 
         // Vector search across chunks
         let chunks = db.get_all_chunks(scope).unwrap_or_default();
-        let vec_owned: Vec<(String, i64, f32)> = if let Ok((_prov, query_emb)) =
-            crate::embeddings::generate_query_embedding(config, query).await
-        {
+        let vec_owned: Vec<(String, i64, f32)> = if let Some(ref query_emb) = query_embedding {
             chunks
                 .iter()
                 .filter_map(|c| {
                     c.embedding.as_ref().map(|emb_bytes| {
                         let stored = crate::embeddings::bytes_to_embedding(emb_bytes);
-                        let sim = crate::embeddings::cosine_similarity(&query_emb, &stored);
+                        let sim = crate::embeddings::cosine_similarity(query_emb, &stored);
                         (c.filename.clone(), c.chunk_index, sim)
                     })
                 })
@@ -1238,13 +1256,19 @@ pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> 
         } else {
             Vec::new()
         };
-        // Build snippet map from vector results
-        let vec_snippets: std::collections::HashMap<(String, i64), String> = chunks
-            .into_iter()
-            .map(|c| ((c.filename, c.chunk_index), c.content))
+
+        // Build metadata map from chunk rows (snippet, line numbers)
+        let chunk_meta: ChunkMeta<'_> = chunks
+            .iter()
+            .map(|c| {
+                (
+                    (c.filename.clone(), c.chunk_index),
+                    (c.content.as_str(), c.start_line, c.end_line),
+                )
+            })
             .collect();
 
-        // Convert to borrowed slices for merge_search_scores
+        // Merge hybrid scores
         let fts_refs: Vec<(&str, i64, f32)> = fts_owned
             .iter()
             .map(|(f, ci, s)| (f.as_str(), *ci, *s))
@@ -1265,19 +1289,46 @@ pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> 
                 continue;
             }
             let key = (filename.clone(), chunk_index);
-            let snippet = fts_snippets
+            let (snippet, start_line, end_line) = fts_meta
                 .get(&key)
-                .or_else(|| vec_snippets.get(&key))
-                .cloned()
+                .or_else(|| chunk_meta.get(&key))
+                .map(|(s, sl, el)| (s.to_string(), *sl, *el))
                 .unwrap_or_default();
             all_results.push(crate::embeddings::SearchResult {
                 filename,
                 chunk_index,
-                start_line: None,
-                end_line: None,
+                start_line,
+                end_line,
                 score,
                 snippet,
             });
+        }
+    }
+
+    // If no results, try a looser FTS search with individual terms
+    if all_results.is_empty() {
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        if terms.len() > 1 {
+            let mut seen: std::collections::HashSet<(String, i64)> =
+                std::collections::HashSet::new();
+            for scope in &["global", "local", "extra", "sessions"] {
+                for term in &terms {
+                    let fts_rows = db.fts_search(scope, term, max_results).unwrap_or_default();
+                    for (c, score) in fts_rows {
+                        let key = (c.filename.clone(), c.chunk_index);
+                        if score >= min_score && seen.insert(key) {
+                            all_results.push(crate::embeddings::SearchResult {
+                                filename: c.filename,
+                                chunk_index: c.chunk_index,
+                                start_line: c.start_line,
+                                end_line: c.end_line,
+                                score,
+                                snippet: c.content,
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1286,6 +1337,23 @@ pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> 
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    // Pre-truncate before MMR to limit O(n^2) work
+    all_results.truncate(max_results * 3);
+
+    // Apply MMR diversity re-ranking if enabled
+    if config.memory.embeddings.mmr_enabled && all_results.len() > 1 {
+        let items: Vec<(usize, f32, &str)> = all_results
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (i, r.score, r.snippet.as_str()))
+            .collect();
+        let reordered =
+            crate::mmr::mmr_rerank(&items, config.memory.embeddings.mmr_lambda, max_results);
+        let original = all_results.clone();
+        all_results = reordered.into_iter().map(|i| original[i].clone()).collect();
+    }
+
     all_results.truncate(max_results);
     Ok(format_search_results(&all_results))
 }

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -786,6 +787,20 @@ impl Agent {
                         "global",
                     ) {
                         tracing::warn!("Failed to write pre-compaction flush: {e}");
+                    } else if self.config.memory.embeddings.enabled {
+                        // Index the daily log so it's immediately searchable
+                        let config = self.config.clone();
+                        let fname = filename.clone();
+                        let full_content = crate::memory::read_memory(&fname).unwrap_or_default();
+                        tokio::spawn(async move {
+                            let _ = crate::embeddings::embed_memory_file_chunked(
+                                &config,
+                                &fname,
+                                &full_content,
+                                "global",
+                            )
+                            .await;
+                        });
                     }
                 }
             }
@@ -872,6 +887,38 @@ impl Agent {
     ) -> Result<()> {
         let max_iterations = self.config.conversation.max_iterations as usize;
         let mut iteration: usize = 0;
+
+        // Background: index extra paths and pending sessions on first run
+        if self.config.memory.embeddings.enabled {
+            if !self.config.memory.extra_paths.is_empty() {
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    let files = crate::memory::scan_extra_paths(
+                        &config.memory.extra_paths,
+                        &config.security.blocked_paths,
+                    );
+                    for (filename, path) in files {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let _ = crate::embeddings::embed_memory_file_chunked(
+                                &config, &filename, &content, "extra",
+                            )
+                            .await;
+                        }
+                    }
+                });
+            }
+            static SESSION_INDEX_RUNNING: AtomicBool = AtomicBool::new(false);
+            if SESSION_INDEX_RUNNING
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                let config = self.config.clone();
+                tokio::spawn(async move {
+                    let _ = crate::session_indexer::index_pending_sessions(&config, 10).await;
+                    SESSION_INDEX_RUNNING.store(false, Ordering::Release);
+                });
+            }
+        }
 
         loop {
             // Hot-reload config between turns (in-flight keeps old config)
@@ -972,15 +1019,19 @@ impl Agent {
                     if let Some(keep_from) =
                         crate::conversation::plan_compaction(&self.history, max_hist)
                     {
-                        let dropped_tokens: usize = self.history[..keep_from]
+                        let dropped = &self.history[..keep_from];
+                        let dropped_tokens: usize = dropped
                             .iter()
                             .map(|m| match m.text_content() {
                                 Some(s) => crate::tokenizer::estimate_tokens(s),
                                 None => 0,
                             })
                             .sum();
-                        if dropped_tokens > self.config.memory.flush_soft_threshold_tokens {
-                            let dropped = self.history[..keep_from].to_vec();
+                        let dropped_count = dropped.len();
+                        if dropped_tokens > self.config.memory.flush_soft_threshold_tokens
+                            && dropped_count >= self.config.memory.flush_min_messages
+                        {
+                            let dropped = dropped.to_vec();
                             self.flush_memory_before_compaction(&dropped).await;
                         }
                     }

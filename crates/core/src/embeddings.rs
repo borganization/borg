@@ -269,6 +269,45 @@ pub fn blended_score(similarity: f32, recency_score: f32, recency_weight: f32) -
     (1.0 - recency_weight) * similarity + recency_weight * recency_score
 }
 
+/// Generate an embedding with cache. Checks DB cache first, falls back to API call.
+pub async fn generate_embedding_cached(
+    client: &reqwest::Client,
+    provider: &EmbeddingProvider,
+    text: &str,
+) -> Result<Vec<f32>> {
+    let hash = content_hash(text);
+    let db = Database::open().ok();
+
+    // Check cache
+    if let Some(ref db) = db {
+        if let Ok(Some((cached_bytes, _dim))) =
+            db.get_cached_embedding(&provider.endpoint, &provider.model, &hash)
+        {
+            debug!("Embedding cache hit for hash {}", &hash[..8]);
+            return Ok(bytes_to_embedding(&cached_bytes));
+        }
+    }
+
+    // API call
+    let embedding = generate_embedding(client, provider, text).await?;
+
+    // Store in cache
+    if let Some(ref db) = db {
+        let bytes = embedding_to_bytes(&embedding);
+        if let Err(e) = db.cache_embedding(
+            &provider.endpoint,
+            &provider.model,
+            &hash,
+            &bytes,
+            provider.dimension,
+        ) {
+            debug!("Failed to cache embedding: {e}");
+        }
+    }
+
+    Ok(embedding)
+}
+
 /// Embed a memory file and store in the database. Skips if content unchanged.
 pub async fn embed_memory_file(
     config: &Config,
@@ -292,7 +331,7 @@ pub async fn embed_memory_file(
         }
     }
 
-    let embedding = generate_embedding(&EMBEDDING_CLIENT, &provider, content).await?;
+    let embedding = generate_embedding_cached(&EMBEDDING_CLIENT, &provider, content).await?;
     let bytes = embedding_to_bytes(&embedding);
 
     db.upsert_embedding(
@@ -319,7 +358,7 @@ pub async fn generate_query_embedding(
         Some(p) => p,
         None => bail!("No embedding provider available"),
     };
-    let embedding = generate_embedding(&EMBEDDING_CLIENT, &provider, query).await?;
+    let embedding = generate_embedding_cached(&EMBEDDING_CLIENT, &provider, query).await?;
     Ok((provider, embedding))
 }
 
@@ -417,7 +456,7 @@ pub async fn embed_memory_file_chunked(
             .unwrap_or(true);
 
         let embedding = if needs_embedding {
-            match generate_embedding(&EMBEDDING_CLIENT, &provider, &chunk.content).await {
+            match generate_embedding_cached(&EMBEDDING_CLIENT, &provider, &chunk.content).await {
                 Ok(emb) => Some(embedding_to_bytes(&emb)),
                 Err(e) => {
                     debug!("Failed to embed chunk {i} of {filename}: {e}");
@@ -463,6 +502,10 @@ pub struct SearchResult {
 /// Merge vector and FTS search scores, deduplicate, and sort descending.
 /// Each input is (filename, chunk_index, score).
 /// Returns merged (filename, chunk_index, blended_score).
+///
+/// Uses adaptive weighting: when one result set is empty, the other set's
+/// weight is scaled to 1.0 so scores remain meaningful. NaN/Inf scores
+/// are filtered out.
 pub fn merge_search_scores(
     vector_results: &[(&str, i64, f32)],
     fts_results: &[(&str, i64, f32)],
@@ -471,24 +514,22 @@ pub fn merge_search_scores(
 ) -> Vec<(String, i64, f32)> {
     use std::collections::HashMap;
 
-    // Normalize scores to [0, 1] within each set
+    // Normalize scores to [0, 1] within each set, filtering non-finite values
     let normalize = |results: &[(&str, i64, f32)]| -> Vec<(String, i64, f32)> {
-        if results.is_empty() {
+        let finite: Vec<_> = results.iter().filter(|r| r.2.is_finite()).collect();
+        if finite.is_empty() {
             return Vec::new();
         }
-        let max_score = results
-            .iter()
-            .map(|r| r.2)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_score = results.iter().map(|r| r.2).fold(f32::INFINITY, f32::min);
+        let max_score = finite.iter().map(|r| r.2).fold(f32::NEG_INFINITY, f32::max);
+        let min_score = finite.iter().map(|r| r.2).fold(f32::INFINITY, f32::min);
         let range = max_score - min_score;
         if range == 0.0 {
-            results
+            finite
                 .iter()
                 .map(|r| (r.0.to_string(), r.1, 1.0f32))
                 .collect()
         } else {
-            results
+            finite
                 .iter()
                 .map(|r| (r.0.to_string(), r.1, (r.2 - min_score) / range))
                 .collect()
@@ -497,6 +538,14 @@ pub fn merge_search_scores(
 
     let norm_vec = normalize(vector_results);
     let norm_fts = normalize(fts_results);
+
+    // Adaptive weighting: when one set is empty, use the other at full weight
+    let (eff_vec_w, eff_bm25_w) = match (norm_vec.is_empty(), norm_fts.is_empty()) {
+        (true, true) => return Vec::new(),
+        (true, false) => (0.0, 1.0),
+        (false, true) => (1.0, 0.0),
+        (false, false) => (vector_weight, bm25_weight),
+    };
 
     // Merge into a map keyed by (filename, chunk_index)
     let mut scores: HashMap<(String, i64), (f32, f32)> = HashMap::new();
@@ -512,7 +561,7 @@ pub fn merge_search_scores(
 
     let mut merged: Vec<(String, i64, f32)> = scores
         .into_iter()
-        .map(|((f, ci), (vs, fs))| (f, ci, vector_weight * vs + bm25_weight * fs))
+        .map(|((f, ci), (vs, fs))| (f, ci, eff_vec_w * vs + eff_bm25_w * fs))
         .collect();
 
     merged.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
@@ -803,5 +852,49 @@ mod tests {
         let a = vec![0.0, 0.0, 0.0];
         let b = vec![1.0, 2.0, 3.0];
         assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    // -- adaptive hybrid merge --
+
+    #[test]
+    fn merge_empty_vector_uses_fts_only() {
+        let vector: Vec<(&str, i64, f32)> = vec![];
+        let fts = vec![("file.md", 0i64, 0.8f32), ("other.md", 0, 0.4)];
+        let merged = merge_search_scores(&vector, &fts, 0.7, 0.3);
+        assert_eq!(merged.len(), 2);
+        // With adaptive weighting, FTS weight should be 1.0
+        assert!(
+            merged[0].2 > 0.9,
+            "top score should be ~1.0 (full FTS weight)"
+        );
+    }
+
+    #[test]
+    fn merge_empty_fts_uses_vector_only() {
+        let vector = vec![("file.md", 0i64, 0.9f32), ("other.md", 0, 0.3)];
+        let fts: Vec<(&str, i64, f32)> = vec![];
+        let merged = merge_search_scores(&vector, &fts, 0.7, 0.3);
+        assert_eq!(merged.len(), 2);
+        assert!(
+            merged[0].2 > 0.9,
+            "top score should be ~1.0 (full vector weight)"
+        );
+    }
+
+    #[test]
+    fn merge_handles_nan_scores() {
+        let vector = vec![("good.md", 0i64, 0.8f32), ("bad.md", 0, f32::NAN)];
+        let fts = vec![("good.md", 0i64, 0.6f32)];
+        let merged = merge_search_scores(&vector, &fts, 0.7, 0.3);
+        // NaN entry should be filtered out during normalization
+        assert!(merged.iter().all(|r| r.2.is_finite()));
+    }
+
+    #[test]
+    fn merge_both_empty_returns_empty() {
+        let vector: Vec<(&str, i64, f32)> = vec![];
+        let fts: Vec<(&str, i64, f32)> = vec![];
+        let merged = merge_search_scores(&vector, &fts, 0.7, 0.3);
+        assert!(merged.is_empty());
     }
 }

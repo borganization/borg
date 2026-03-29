@@ -281,6 +281,11 @@ pub struct MemoryConfig {
     pub flush_before_compaction: bool,
     /// Minimum token count of dropped messages to trigger a pre-compaction flush.
     pub flush_soft_threshold_tokens: usize,
+    /// Minimum number of dropped messages to trigger a pre-compaction flush.
+    pub flush_min_messages: usize,
+    /// Additional directories to scan for .md files and index alongside memory.
+    #[serde(default)]
+    pub extra_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +305,10 @@ pub struct EmbeddingsConfig {
     pub bm25_weight: f32,
     /// Weight for vector similarity scores in hybrid search (default 0.7).
     pub vector_weight: f32,
+    /// Enable MMR diversity re-ranking of search results.
+    pub mmr_enabled: bool,
+    /// MMR lambda: 1.0 = pure relevance, 0.0 = pure diversity (default 0.7).
+    pub mmr_lambda: f32,
 }
 
 fn default_true() -> bool {
@@ -868,6 +877,8 @@ impl Default for MemoryConfig {
             memory_scope: None,
             flush_before_compaction: false,
             flush_soft_threshold_tokens: 2000,
+            flush_min_messages: 4,
+            extra_paths: Vec::new(),
         }
     }
 }
@@ -885,6 +896,8 @@ impl Default for EmbeddingsConfig {
             chunk_overlap_tokens: 80,
             bm25_weight: 0.3,
             vector_weight: 0.7,
+            mmr_enabled: true,
+            mmr_lambda: 0.7,
         }
     }
 }
@@ -1166,6 +1179,46 @@ impl Config {
                 let v: usize = value.parse().with_context(|| "Invalid integer")?;
                 self.memory.max_context_tokens = v;
                 Ok(format!("memory.max_context_tokens = {v}"))
+            }
+            "memory.flush_before_compaction" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for flush_before_compaction")?;
+                self.memory.flush_before_compaction = v;
+                Ok(format!("memory.flush_before_compaction = {v}"))
+            }
+            "memory.flush_min_messages" => {
+                let v: usize = value
+                    .parse()
+                    .with_context(|| "Invalid integer for flush_min_messages")?;
+                self.memory.flush_min_messages = v;
+                Ok(format!("memory.flush_min_messages = {v}"))
+            }
+            "memory.extra_paths" => {
+                let paths: Vec<String> = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                self.memory.extra_paths = paths.clone();
+                Ok(format!("memory.extra_paths = {}", paths.join(", ")))
+            }
+            "memory.embeddings.mmr_enabled" => {
+                let v: bool = value
+                    .parse()
+                    .with_context(|| "Invalid bool for mmr_enabled")?;
+                self.memory.embeddings.mmr_enabled = v;
+                Ok(format!("memory.embeddings.mmr_enabled = {v}"))
+            }
+            "memory.embeddings.mmr_lambda" => {
+                let v: f32 = value
+                    .parse()
+                    .with_context(|| "Invalid float for mmr_lambda")?;
+                if !(0.0..=1.0).contains(&v) {
+                    anyhow::bail!("mmr_lambda must be between 0.0 and 1.0");
+                }
+                self.memory.embeddings.mmr_lambda = v;
+                Ok(format!("memory.embeddings.mmr_lambda = {v}"))
             }
             "skills.enabled" => {
                 let v: bool = value
