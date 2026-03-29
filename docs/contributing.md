@@ -48,6 +48,10 @@ Good areas for contribution:
 - **Tests**: Several crates have limited test coverage (see [Development](development.md))
 - **Documentation**: Improvements to these docs or inline code documentation
 - **Skills**: New built-in skills for popular CLI tools
+- **Gateway integrations**: New messaging channel adapters or improvements to existing ones
+- **Plugins**: Native integrations for the marketplace (email, productivity, etc.)
+- **Multi-agent**: Improvements to the multi-agent orchestration system
+- **Audio/TTS**: New transcription and speech providers
 - **Bug fixes**: Check the issue tracker
 - **Platform support**: Windows sandboxing, additional runtime support
 

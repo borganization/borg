@@ -44,17 +44,16 @@ description = "City name"
 [parameters.required]
 values = ["city"]
 
-[credentials]
-# key-value pairs mapping to config [credentials] entries
-# api_key = "weather_api"
+[[credentials]]
+# List of credential keys required from config [credentials]
 ```
 
 ### Fields
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `name` | yes | — | Tool identifier (must match directory name) |
-| `description` | yes | — | What the tool does (shown to the LLM) |
+| `name` | yes | -- | Tool identifier (must match directory name) |
+| `description` | yes | -- | What the tool does (shown to the LLM) |
 | `runtime` | no | `"python"` | Script runtime: `python`, `node`, `deno`, or `bash` |
 | `entrypoint` | no | `"main.py"` | Script filename to execute |
 | `timeout_ms` | no | `30000` | Maximum execution time |
@@ -63,8 +62,8 @@ values = ["city"]
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `network` | `false` | Whether the tool can make network requests |
-| `fs_read` | `[]` | Filesystem paths the tool can read (beyond its own directory) |
+| `network` | `false` | Whether the tool can make network connections |
+| `fs_read` | `[]` | Extra filesystem paths the tool can read |
 | `fs_write` | `[]` | Filesystem paths the tool can write to |
 
 ### Parameters section
@@ -73,7 +72,7 @@ Parameters are defined in TOML and converted to JSON Schema for the LLM. Each pr
 
 ### Credentials section
 
-The `[credentials]` section maps tool-local names to keys in the global `[credentials]` config. This lets the tool access API keys stored as environment variable references in `config.toml`.
+The `[[credentials]]` list specifies credential keys required from the global `[credentials]` config. Resolved credentials are injected as environment variables when the tool runs.
 
 ## Tool execution
 
@@ -98,7 +97,7 @@ response = urllib.request.urlopen(url)
 data = json.loads(response.read())
 
 current = data["current_condition"][0]
-print(f"{city}: {current['temp_C']}°C, {current['weatherDesc'][0]['value']}")
+print(f"{city}: {current['temp_C']}C, {current['weatherDesc'][0]['value']}")
 ```
 
 ## Built-in tools
@@ -107,25 +106,29 @@ These are always available and don't require tool.toml manifests:
 
 | Tool | Description |
 |------|-------------|
-| `write_memory` | Write or append to memory files (IDENTITY.md, MEMORY.md, or topic files) |
+| `write_memory` | Write or append to memory files. Supports `scope` param (`global`/`local`) |
 | `read_memory` | Read a memory file |
 | `list_tools` | List all user-created tools |
+| `read_file` | Read a file with line offsets/limits, image support, PDF delegation |
+| `read_pdf` | Extract text from a PDF file with token-aware truncation |
 | `apply_patch` | Create/update/delete files in the current working directory via [Patch DSL](patch-dsl.md) |
 | `create_tool` | Create/modify files in `~/.borg/tools/` via [Patch DSL](patch-dsl.md) |
 | `run_shell` | Execute a shell command (subject to [execution policy](configuration.md#policy)) |
 | `list_skills` | List all skills with status and source |
 | `apply_skill_patch` | Create/modify files in `~/.borg/skills/` via [Patch DSL](patch-dsl.md) |
+| `create_channel` | Create/modify channel integrations in `~/.borg/channels/` via [Patch DSL](patch-dsl.md) |
+| `list_channels` | List all messaging channels with status and webhook paths |
+| `manage_tasks` | Manage scheduled tasks (create, list, get, update, pause, resume, cancel, delete, runs, run_now) |
 
 ### Conditional tools
 
-These tools are available when their corresponding config section is enabled:
+These tools are available when their corresponding config is enabled:
 
-| Tool | Config | Description |
-|------|--------|-------------|
+| Tool | Condition | Description |
+|------|-----------|-------------|
 | `web_fetch` | `[web] enabled = true` | Fetch a URL and convert HTML to text |
 | `web_search` | `[web] enabled = true` | Search the web (DuckDuckGo or Brave) |
-| `schedule_task` | `[tasks] enabled = true` | Create a scheduled task (cron, interval, or one-time) |
-| `list_scheduled_tasks` | `[tasks] enabled = true` | List all scheduled tasks with status |
-| `pause_task` | `[tasks] enabled = true` | Pause a running scheduled task |
-| `resume_task` | `[tasks] enabled = true` | Resume a paused scheduled task |
-| `cancel_task` | `[tasks] enabled = true` | Cancel a scheduled task |
+| `browser` | `[browser] enabled = true` | Headless Chrome automation (navigate, click, type, screenshot, get_text, evaluate_js, close) |
+| `security_audit` | `[security] host_audit = true` | Run host security audit (firewall, ports, SSH, permissions, encryption) |
+| `generate_image` | `[image_gen] enabled = true` | Generate images via OpenAI/fal |
+| `text_to_speech` | `[tts] enabled = true` | Convert text to speech audio |
