@@ -593,26 +593,25 @@ impl<'a> App<'a> {
                 self.push_system_message(
                     "Commands:\n  \
                      /help      - Show this help\n  \
-                     /settings  - Configure settings (/settings <key> <value>)\n  \
+                     /settings  - Configure settings\n  \
                      /usage     - Show usage stats\n  \
+                     /plan      - Toggle plan mode\n\
+                     \n  \
                      /compact   - Compact conversation history\n  \
                      /clear     - Clear conversation\n  \
-                     /undo      - Undo last agent turn\n  \
+                     /undo      - Undo last agent turn\n\
+                     \n  \
                      /tools     - List tools\n  \
                      /memory    - Show memory\n  \
                      /skills    - List skills\n  \
-                     /doctor    - Run diagnostics\n  \
-                     /history   - Show recent history\n  \
-                     /sessions  - List saved sessions\n  \
+                     /doctor    - Run diagnostics\n\
+                     \n  \
+                     /sessions  - Browse saved sessions\n  \
                      /save      - Save current session\n  \
-                     /load <id> - Load a saved session\n  \
-                     /new       - Start new session\n  \
-                     /plugins   - Integration marketplace\n  \
-                     /schedule-tasks - Manage scheduled tasks\n  \
-                     /restart   - Restart services\n  \
-                     /logs      - Show recent logs\n  \
-                     /mode      - Switch collaboration mode (default/execute/plan)\n  \
-                     /plan      - Send message in plan mode\n  \
+                     /new       - Start new session\n\
+                     \n  \
+                     /plugins   - Browse integrations\n  \
+                     /schedule  - Manage scheduled tasks\n  \
                      quit/exit  - Exit"
                         .to_string(),
                 );
@@ -794,7 +793,7 @@ impl<'a> App<'a> {
                 }
                 return Ok(AppAction::Continue);
             }
-            "/schedule-tasks" => {
+            "/schedule-tasks" | "/schedule" => {
                 self.schedule_popup.show();
                 return Ok(AppAction::Continue);
             }
