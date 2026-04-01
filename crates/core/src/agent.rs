@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::constants;
 use crate::conversation::{
     compact_history, compact_tool_results, enforce_tool_result_share_limit, history_tokens,
-    normalize_history, undo_last_turn,
+    normalize_history, rewind_to_nth_user, undo_last_turn,
 };
 use crate::db::Database;
 use crate::hooks::{HookAction, HookContext, HookData, HookPoint, HookRegistry};
@@ -572,6 +572,13 @@ impl Agent {
     /// Returns the number of messages removed, or 0 if nothing to undo.
     pub fn undo(&mut self) -> usize {
         undo_last_turn(&mut self.history)
+    }
+
+    /// Rewind conversation to the Nth user message (0-indexed, oldest-first).
+    /// Removes that message and everything after it.
+    /// Returns the number of messages removed.
+    pub fn rewind_to_nth_user_message(&mut self, n: usize) -> usize {
+        rewind_to_nth_user(&mut self.history, n)
     }
 
     /// Returns (message_count, estimated_token_count) for the current session.
