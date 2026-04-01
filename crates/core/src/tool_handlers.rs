@@ -2311,6 +2311,32 @@ mod tests {
     }
 
     #[test]
+    fn list_skills_output_contains_skill_names() {
+        let config = Config::default();
+        let output = handle_list_skills(&config).unwrap();
+        // Skills should appear with status markers and source indicators
+        assert!(
+            output.contains("] slack ("),
+            "output should list slack skill, got:\n{output}"
+        );
+        assert!(
+            output.contains("] git ("),
+            "output should list git skill, got:\n{output}"
+        );
+        assert!(
+            output.contains("[✓]") || output.contains("[✗]") || output.contains("[—]"),
+            "output should contain status markers"
+        );
+    }
+
+    #[test]
+    fn apply_skill_patch_missing_patch_param() {
+        let args = json!({});
+        let result = handle_apply_skill_patch(&args);
+        assert!(result.is_err(), "should error on missing patch param");
+    }
+
+    #[test]
     fn list_channels_dispatches() {
         let registry = empty_registry();
         let config = Config::default();

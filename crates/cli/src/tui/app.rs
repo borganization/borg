@@ -684,18 +684,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/skills" => {
-                let resolved_creds = self.config.resolve_credentials();
-                let skills =
-                    borg_core::skills::load_all_skills(&resolved_creds, &self.config.skills)?;
-                let text = if skills.is_empty() {
-                    "No skills installed.".to_string()
-                } else {
-                    skills
-                        .iter()
-                        .map(|s| format!("  {}", s.summary_line()))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
+                let text = borg_core::tool_handlers::handle_list_skills(&self.config)?;
                 self.push_system_message(text);
                 return Ok(AppAction::Continue);
             }
