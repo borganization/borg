@@ -62,4 +62,45 @@ mod tests {
         let delay = backoff_delay(5, Duration::from_millis(0), 2.0);
         assert_eq!(delay.as_millis(), 0);
     }
+
+    #[test]
+    fn backoff_factor_one_no_growth() {
+        // With factor 1.0, delay should stay near initial regardless of attempt
+        // Wider tolerance than jitter range to focus on "no exponential growth"
+        let d0 = backoff_delay(0, Duration::from_millis(500), 1.0);
+        let d5 = backoff_delay(5, Duration::from_millis(500), 1.0);
+        let d10 = backoff_delay(10, Duration::from_millis(500), 1.0);
+        for d in [d0, d5, d10] {
+            assert!(d.as_millis() >= 440, "delay {} too low", d.as_millis());
+            assert!(d.as_millis() <= 560, "delay {} too high", d.as_millis());
+        }
+    }
+
+    #[test]
+    fn backoff_jitter_within_bounds() {
+        // Run multiple times to statistically verify jitter stays within ±10%
+        let initial = Duration::from_millis(1000);
+        for _ in 0..100 {
+            let delay = backoff_delay(0, initial, 1.0);
+            assert!(
+                delay.as_millis() >= 900,
+                "jitter below -10%: {}ms",
+                delay.as_millis()
+            );
+            assert!(
+                delay.as_millis() <= 1100,
+                "jitter above +10%: {}ms",
+                delay.as_millis()
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_large_initial_clamps_to_max() {
+        // Initial of 10 minutes should clamp to 5-minute max
+        let delay = backoff_delay(0, Duration::from_secs(600), 2.0);
+        assert!(delay.as_millis() <= 300_000);
+        // Should be near the 300s cap (minus jitter)
+        assert!(delay.as_millis() >= 270_000);
+    }
 }
