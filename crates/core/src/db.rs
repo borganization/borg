@@ -1025,7 +1025,7 @@ impl Database {
             let mut stmt = self.conn.prepare("PRAGMA table_info(scheduled_tasks)")?;
             let rows: Vec<String> = stmt
                 .query_map([], |row| row.get::<_, String>(1))?
-                .filter_map(std::result::Result::ok)
+                .filter_map(Result::ok)
                 .collect();
             rows.iter().any(|name| name == "allowed_tools")
         };

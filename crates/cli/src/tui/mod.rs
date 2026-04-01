@@ -300,8 +300,8 @@ fn drain_queued_if_idle(app: &mut App<'_>) -> Result<AppAction> {
             }
             return Ok(AppAction::Continue);
         }
-        if let Some(queued) = app.pop_next_queued() {
-            return app.handle_queued_submit(&queued);
+        if let Some(qm) = app.pop_next_queued() {
+            return app.handle_queued_submit(qm);
         }
     }
     Ok(AppAction::Continue)
@@ -506,6 +506,17 @@ async fn run_event_loop(
                     ));
                 } else {
                     app.push_system_message("Nothing to undo.".to_string());
+                }
+            }
+            AppAction::RewindTo { nth_user_message } => {
+                let mut agent = agent.lock().await;
+                let removed = agent.rewind_to_nth_user_message(nth_user_message);
+                if removed > 0 {
+                    app.push_system_message(format!(
+                        "Rewound conversation ({removed} messages removed). Edit and re-send."
+                    ));
+                } else {
+                    app.push_system_message("Nothing to rewind.".to_string());
                 }
             }
             AppAction::UpdateSetting { key, value } => {
@@ -800,7 +811,10 @@ async fn run_event_loop(
                 } else {
                     "Proceed with the plan as outlined.".to_string()
                 };
-                app.queued_messages.push_front(proceed_msg);
+                app.queued_messages.push_front(app::QueuedMessage {
+                    text: proceed_msg,
+                    images: Vec::new(),
+                });
             }
             AppAction::RunScheduleActions { actions } => {
                 let mut results: Vec<String> = Vec::new();

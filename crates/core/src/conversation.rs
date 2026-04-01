@@ -424,6 +424,26 @@ pub fn undo_last_turn(history: &mut Vec<Message>) -> usize {
     }
 }
 
+/// Rewind conversation to the Nth user message (0-indexed, oldest-first).
+/// Truncates everything from that user message onward (inclusive).
+/// Returns the number of messages removed, or 0 if the index is out of range.
+pub fn rewind_to_nth_user(history: &mut Vec<Message>, n: usize) -> usize {
+    let user_positions: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == crate::types::Role::User)
+        .map(|(i, _)| i)
+        .collect();
+
+    if let Some(&history_idx) = user_positions.get(n) {
+        let removed = history.len() - history_idx;
+        history.truncate(history_idx);
+        removed
+    } else {
+        0
+    }
+}
+
 /// Normalize conversation history to prevent API errors.
 ///
 /// Ensures structural invariants inspired by codex-rs:
@@ -776,6 +796,59 @@ mod tests {
     fn undo_single_user_message() {
         let mut history = vec![make_user("hello")];
         let removed = undo_last_turn(&mut history);
+        assert_eq!(removed, 1);
+        assert!(history.is_empty());
+    }
+
+    // -- rewind_to_nth_user --
+
+    #[test]
+    fn rewind_to_first_user_message() {
+        let mut history = vec![
+            make_user("hello"),
+            make_assistant("hi"),
+            make_user("world"),
+            make_assistant("ok"),
+        ];
+        let removed = rewind_to_nth_user(&mut history, 0);
+        assert_eq!(removed, 4);
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn rewind_to_second_user_message() {
+        let mut history = vec![
+            make_user("hello"),
+            make_assistant("hi"),
+            make_user("world"),
+            make_assistant("ok"),
+        ];
+        let removed = rewind_to_nth_user(&mut history, 1);
+        assert_eq!(removed, 2);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].text_content(), Some("hello"));
+        assert_eq!(history[1].text_content(), Some("hi"));
+    }
+
+    #[test]
+    fn rewind_out_of_range() {
+        let mut history = vec![make_user("hello"), make_assistant("hi")];
+        let removed = rewind_to_nth_user(&mut history, 5);
+        assert_eq!(removed, 0);
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn rewind_empty_history() {
+        let mut history: Vec<Message> = Vec::new();
+        let removed = rewind_to_nth_user(&mut history, 0);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn rewind_single_user_message() {
+        let mut history = vec![make_user("hello")];
+        let removed = rewind_to_nth_user(&mut history, 0);
         assert_eq!(removed, 1);
         assert!(history.is_empty());
     }

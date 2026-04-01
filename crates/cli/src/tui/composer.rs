@@ -253,6 +253,10 @@ impl<'a> Composer<'a> {
         std::mem::take(&mut self.image_attachments)
     }
 
+    pub fn set_image_attachments(&mut self, images: Vec<ImageAttachment>) {
+        self.image_attachments = images;
+    }
+
     pub fn height(&self) -> u16 {
         let content_lines = self.textarea.lines().len() as u16;
         // 2 for border, min 1 content line
