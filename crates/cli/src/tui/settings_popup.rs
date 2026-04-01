@@ -114,6 +114,12 @@ const SETTINGS: &[SettingEntry] = &[
         category: "Conversation",
     },
     SettingEntry {
+        key: "conversation.collaboration_mode",
+        label: "Collaboration mode",
+        kind: SettingKind::Select,
+        category: "Conversation",
+    },
+    SettingEntry {
         key: "security.secret_detection",
         label: "Secret detection",
         kind: SettingKind::Bool,
@@ -315,6 +321,9 @@ impl SettingsPopup {
             "tts.auto_mode" => format!("{}", config.tts.auto_mode),
             "tts.default_voice" => config.tts.default_voice.clone(),
             "tts.default_format" => config.tts.default_format.clone(),
+            "conversation.collaboration_mode" => {
+                format!("{}", config.conversation.collaboration_mode)
+            }
             _ => "?".to_string(),
         }
     }
@@ -492,6 +501,31 @@ impl SettingsPopup {
                         actions.push(AppAction::UpdateSetting {
                             key: "model".to_string(),
                             value: model_id.to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        self.status_message = Some((format!("Error: {e}"), false));
+                        return Ok(None);
+                    }
+                }
+            }
+            "conversation.collaboration_mode" => {
+                const MODES: &[&str] = &["default", "execute", "plan"];
+                let current = format!("{}", config.conversation.collaboration_mode);
+                let idx = MODES.iter().position(|&m| m == current).unwrap_or(0);
+                let next_idx = if forward {
+                    (idx + 1) % MODES.len()
+                } else {
+                    (idx + MODES.len() - 1) % MODES.len()
+                };
+                let new_mode = MODES[next_idx];
+                match config.apply_setting("conversation.collaboration_mode", new_mode) {
+                    Ok(confirmation) => {
+                        let _ = self.save_setting("conversation.collaboration_mode", new_mode);
+                        self.status_message = Some((format!("Updated: {confirmation}"), true));
+                        actions.push(AppAction::UpdateSetting {
+                            key: "conversation.collaboration_mode".to_string(),
+                            value: new_mode.to_string(),
                         });
                     }
                     Err(e) => {
@@ -856,7 +890,7 @@ mod tests {
     #[test]
     fn all_settings_covered() {
         let popup = SettingsPopup::new();
-        assert_eq!(popup.entries.len(), 27);
+        assert_eq!(popup.entries.len(), 28);
 
         let cfg = Config::default();
         for entry in popup.entries {

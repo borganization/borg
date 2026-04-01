@@ -6,10 +6,57 @@ use tracing::warn;
 
 use std::str::FromStr;
 
+use std::fmt;
+
 use crate::constants;
 use crate::policy::ExecutionPolicy;
 use crate::provider::Provider;
 use crate::secrets_resolve::SecretRef;
+
+/// Collaboration mode that controls how the agent interacts during a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CollaborationMode {
+    /// Standard collaborative interaction — asks questions when needed.
+    #[default]
+    Default,
+    /// Autonomous execution — makes assumptions, executes independently, reports progress.
+    Execute,
+    /// Read-only planning — explores codebase, asks questions, produces a plan, blocks mutations.
+    Plan,
+}
+
+impl CollaborationMode {
+    /// Returns true if this mode blocks mutating tool calls.
+    pub fn blocks_mutations(&self) -> bool {
+        matches!(self, Self::Plan)
+    }
+}
+
+impl FromStr for CollaborationMode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "default" => Ok(Self::Default),
+            "execute" => Ok(Self::Execute),
+            "plan" => Ok(Self::Plan),
+            other => {
+                anyhow::bail!("Unknown collaboration mode '{other}'. Valid: default, execute, plan")
+            }
+        }
+    }
+}
+
+impl fmt::Display for CollaborationMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Default => write!(f, "default"),
+            Self::Execute => write!(f, "execute"),
+            Self::Plan => write!(f, "plan"),
+        }
+    }
+}
 
 /// A credential value that can be either a plain env var name (legacy) or a full SecretRef.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +397,8 @@ pub struct ConversationConfig {
     pub tool_output_max_tokens: usize,
     pub compaction_marker_tokens: usize,
     pub max_transcript_chars: usize,
+    #[serde(default)]
+    pub collaboration_mode: CollaborationMode,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -921,6 +970,7 @@ impl Default for ConversationConfig {
             tool_output_max_tokens: constants::TOOL_OUTPUT_MAX_TOKENS,
             compaction_marker_tokens: constants::COMPACTION_MARKER_TOKENS,
             max_transcript_chars: constants::MAX_TRANSCRIPT_CHARS,
+            collaboration_mode: CollaborationMode::Default,
         }
     }
 }
@@ -1339,6 +1389,11 @@ impl Config {
                 self.tts.default_format = value.to_string();
                 Ok(format!("tts.default_format = {value}"))
             }
+            "conversation.collaboration_mode" => {
+                let mode: CollaborationMode = value.parse()?;
+                self.conversation.collaboration_mode = mode;
+                Ok(format!("conversation.collaboration_mode = {mode}"))
+            }
             _ => anyhow::bail!(
                 "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
                  sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled, \
@@ -1346,7 +1401,8 @@ impl Config {
                  security.secret_detection, security.host_audit, \
                  budget.monthly_token_limit, budget.warning_threshold, \
                  browser.enabled, browser.headless, \
-                 tts.enabled, tts.auto_mode, tts.default_voice, tts.default_format"
+                 tts.enabled, tts.auto_mode, tts.default_voice, tts.default_format, \
+                 conversation.collaboration_mode"
             ),
         }
     }
@@ -3098,5 +3154,77 @@ base_url = "https://proxy.example.com/v1/chat/completions"
     fn group_activation_defaults_to_mention() {
         let cfg = Config::default();
         assert_eq!(cfg.gateway.group_activation, ActivationMode::Mention);
+    }
+
+    // -- CollaborationMode --
+
+    #[test]
+    fn collaboration_mode_default_is_default() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.conversation.collaboration_mode,
+            CollaborationMode::Default
+        );
+    }
+
+    #[test]
+    fn collaboration_mode_from_str_roundtrip() {
+        for mode_str in &["default", "execute", "plan"] {
+            let mode: CollaborationMode = mode_str.parse().unwrap();
+            assert_eq!(&format!("{mode}"), mode_str);
+        }
+    }
+
+    #[test]
+    fn collaboration_mode_from_str_invalid() {
+        assert!("bogus".parse::<CollaborationMode>().is_err());
+    }
+
+    #[test]
+    fn apply_setting_collaboration_mode() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("conversation.collaboration_mode", "execute")
+            .unwrap();
+        assert_eq!(
+            cfg.conversation.collaboration_mode,
+            CollaborationMode::Execute
+        );
+        cfg.apply_setting("conversation.collaboration_mode", "plan")
+            .unwrap();
+        assert_eq!(cfg.conversation.collaboration_mode, CollaborationMode::Plan);
+        cfg.apply_setting("conversation.collaboration_mode", "default")
+            .unwrap();
+        assert_eq!(
+            cfg.conversation.collaboration_mode,
+            CollaborationMode::Default
+        );
+    }
+
+    #[test]
+    fn apply_setting_collaboration_mode_invalid() {
+        let mut cfg = Config::default();
+        assert!(cfg
+            .apply_setting("conversation.collaboration_mode", "bogus")
+            .is_err());
+    }
+
+    #[test]
+    fn collaboration_mode_blocks_mutations_only_for_plan() {
+        assert!(!CollaborationMode::Default.blocks_mutations());
+        assert!(!CollaborationMode::Execute.blocks_mutations());
+        assert!(CollaborationMode::Plan.blocks_mutations());
+    }
+
+    #[test]
+    fn collaboration_mode_serde_roundtrip() {
+        let toml_str = r#"
+[conversation]
+collaboration_mode = "execute"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.conversation.collaboration_mode,
+            CollaborationMode::Execute
+        );
     }
 }

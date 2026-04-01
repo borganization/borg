@@ -65,6 +65,7 @@ pub const ALL_SETTING_KEYS: &[&str] = &[
     "tts.auto_mode",
     "tts.default_voice",
     "tts.default_format",
+    "conversation.collaboration_mode",
 ];
 
 /// Merges settings from three layers: DB overrides → config.toml → compiled defaults.
@@ -225,6 +226,9 @@ fn config_value_for_key(config: &Config, key: &str) -> Option<String> {
         "tts.auto_mode" => format!("{}", config.tts.auto_mode),
         "tts.default_voice" => config.tts.default_voice.clone(),
         "tts.default_format" => config.tts.default_format.clone(),
+        "conversation.collaboration_mode" => {
+            format!("{}", config.conversation.collaboration_mode)
+        }
         _ => return None,
     })
 }

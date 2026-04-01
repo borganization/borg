@@ -56,6 +56,9 @@ enum Commands {
         /// Output raw JSON instead of streaming text
         #[arg(long, short)]
         json: bool,
+        /// Collaboration mode: default, execute, plan
+        #[arg(long, short)]
+        mode: Option<String>,
     },
     /// Run diagnostics to check configuration, connectivity, and dependencies
     Doctor,
@@ -362,7 +365,12 @@ async fn main() -> Result<()> {
         Some(Commands::Stop) => service::stop_service()?,
         Some(Commands::Restart) => service::restart_service()?,
         Some(Commands::Init) => init_data_dir()?,
-        Some(Commands::Ask { message, yes, json }) => repl::one_shot(&message, yes, json).await?,
+        Some(Commands::Ask {
+            message,
+            yes,
+            json,
+            mode,
+        }) => repl::one_shot(&message, yes, json, mode.as_deref()).await?,
         Some(Commands::Doctor) => run_doctor()?,
         Some(Commands::Daemon) => service::run_daemon(shutdown).await?,
         Some(Commands::Service { action }) => match action {
@@ -1242,10 +1250,16 @@ mod tests {
     fn test_parse_ask_short_flags() {
         let cli = Cli::try_parse_from(["borg", "ask", "-y", "-j", "hello"]).unwrap();
         match cli.command {
-            Some(Commands::Ask { message, yes, json }) => {
+            Some(Commands::Ask {
+                message,
+                yes,
+                json,
+                mode,
+            }) => {
                 assert_eq!(message, "hello");
                 assert!(yes);
                 assert!(json);
+                assert!(mode.is_none());
             }
             _ => panic!("Expected Ask"),
         }

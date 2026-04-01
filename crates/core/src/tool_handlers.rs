@@ -595,6 +595,113 @@ pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result
     }
 }
 
+pub fn handle_list_dir(args: &serde_json::Value, config: &Config) -> Result<String> {
+    let path_str = args["path"].as_str().unwrap_or(".");
+    let depth = args["depth"].as_u64().unwrap_or(1).min(3) as usize;
+    let include_hidden = args["include_hidden"].as_bool().unwrap_or(false);
+
+    let base = if path_str.starts_with('/') || path_str.starts_with('~') {
+        std::path::PathBuf::from(shellexpand::tilde(path_str).as_ref())
+    } else {
+        std::env::current_dir()?.join(path_str)
+    };
+
+    let canonical = base.canonicalize().unwrap_or_else(|_| base.clone());
+
+    // Security: reuse the same blocked-path check as read_file
+    if is_blocked_path(&canonical, &config.security.blocked_paths) {
+        return Ok(format!("Access denied: {path_str} is in a blocked path"));
+    }
+
+    if !canonical.is_dir() {
+        return Ok(format!("Not a directory: {path_str}"));
+    }
+
+    let mut output = String::new();
+    list_dir_recursive(
+        &canonical,
+        depth,
+        0,
+        include_hidden,
+        &config.security.blocked_paths,
+        &mut output,
+    )?;
+    if output.is_empty() {
+        output = "(empty directory)".to_string();
+    }
+    Ok(output)
+}
+
+fn list_dir_recursive(
+    dir: &std::path::Path,
+    max_depth: usize,
+    current_depth: usize,
+    include_hidden: bool,
+    blocked_paths: &[String],
+    output: &mut String,
+) -> Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(Result::ok).collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+
+    let indent = "  ".repeat(current_depth);
+    for entry in &entries {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if !include_hidden && name_str.starts_with('.') {
+            continue;
+        }
+
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+
+        // Security: check each entry against blocked paths before displaying/recursing
+        let entry_canonical = entry.path().canonicalize().unwrap_or_else(|_| entry.path());
+        if is_blocked_path(&entry_canonical, blocked_paths) {
+            output.push_str(&format!("{indent}[blocked] {name_str}\n"));
+            continue;
+        }
+
+        if ft.is_dir() {
+            output.push_str(&format!("{indent}[dir]  {name_str}/\n"));
+            if current_depth < max_depth {
+                list_dir_recursive(
+                    &entry.path(),
+                    max_depth,
+                    current_depth + 1,
+                    include_hidden,
+                    blocked_paths,
+                    output,
+                )?;
+            }
+        } else if ft.is_symlink() {
+            let target = std::fs::read_link(entry.path())
+                .map(|t| t.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "?".to_string());
+            output.push_str(&format!("{indent}[link] {name_str} -> {target}\n"));
+        } else {
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let size_str = format_size(size);
+            output.push_str(&format!("{indent}[file] {name_str} ({size_str})\n"));
+        }
+    }
+    Ok(())
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
 pub fn handle_read_pdf(args: &serde_json::Value) -> Result<String> {
     let file_path = require_str_param(args, "file_path")?;
     let max_chars = args["max_chars"].as_u64().unwrap_or(50000) as usize;
@@ -1111,6 +1218,7 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         ToolDefinition::new("run_shell", "Execute a shell command. Requires user confirmation before execution.", serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]})),
         ToolDefinition::new("read_pdf", "Read and extract text from a PDF file.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the PDF file"},"max_chars":{"type":"integer","description":"Maximum characters to return (default: 50000)","default":50000}},"required":["file_path"]})),
         ToolDefinition::new("read_file", "Read a file's contents. Returns text with line numbers for code files, renders images visually, and extracts text from PDFs. Use offset/limit to read specific line ranges of large files.", serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path (relative to cwd or absolute)"},"offset":{"type":"integer","description":"Start line, 1-based (default: 1)"},"limit":{"type":"integer","description":"Max lines to read (default: all, truncated at max_chars)"},"max_chars":{"type":"integer","description":"Max characters to return (default: 50000)"}},"required":["path"]})),
+        ToolDefinition::new("list_dir", "List the contents of a directory. Returns file and subdirectory names with types and sizes. Use this to explore project structure.", serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"Directory path (relative to cwd or absolute). Defaults to current directory."},"depth":{"type":"integer","description":"Maximum depth to recurse (default: 1, max: 3)"},"include_hidden":{"type":"boolean","description":"Include hidden files/dirs (default: false)"}}})),
     ];
 
     if config.web.enabled {
@@ -1444,6 +1552,7 @@ mod tests {
         assert!(names.contains(&"run_shell"));
         assert!(names.contains(&"read_pdf"));
         assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"list_dir"));
         assert!(names.contains(&"manage_tasks"));
         // Consolidated: no longer separate tools
         assert!(!names.contains(&"list_tools"));
@@ -1781,24 +1890,24 @@ mod tests {
     fn core_tool_definitions_count_reduced() {
         // With all defaults enabled (web, browser, security_audit):
         // write_memory, read_memory, memory_search, list, apply_patch, run_shell, read_pdf,
-        // read_file, web_fetch, web_search, manage_tasks, browser, security_audit = 13
+        // read_file, list_dir, web_fetch, web_search, manage_tasks, browser, security_audit = 14
         let config = Config::default();
         let defs = core_tool_definitions(&config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert_eq!(
             names.len(),
-            13,
-            "expected 13 core tools (all enabled), got: {names:?}"
+            14,
+            "expected 14 core tools (all enabled), got: {names:?}"
         );
 
-        // With everything disabled: 8 base tools
+        // With everything disabled: 9 base tools + list_dir
         let mut minimal_config = Config::default();
         minimal_config.web.enabled = false;
         minimal_config.browser.enabled = false;
         minimal_config.security.host_audit = false;
         let defs = core_tool_definitions(&minimal_config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert_eq!(names.len(), 9, "expected 9 base tools, got: {names:?}");
+        assert_eq!(names.len(), 10, "expected 10 base tools, got: {names:?}");
     }
 
     #[test]
@@ -1966,6 +2075,104 @@ mod tests {
         let blocked = vec![".ssh".to_string()];
         let path = std::path::Path::new("/tmp/.ssh/id_rsa");
         assert!(!is_blocked_path(path, &blocked));
+    }
+
+    // -- handle_list_dir --
+
+    #[test]
+    fn handle_list_dir_current_directory() {
+        let config = Config::default();
+        let result = handle_list_dir(&json!({}), &config).unwrap();
+        // Should list crates/ directory since we're in the borg repo
+        assert!(result.contains("[dir]") || result.contains("[file]"));
+    }
+
+    #[test]
+    fn handle_list_dir_not_a_directory() {
+        let config = Config::default();
+        let tmp = std::env::temp_dir().join(format!("borg_listdir_file_{}", std::process::id()));
+        std::fs::write(&tmp, "hello").unwrap();
+        let result =
+            handle_list_dir(&json!({"path": tmp.to_string_lossy().as_ref()}), &config).unwrap();
+        assert!(result.contains("Not a directory"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn handle_list_dir_hidden_files_excluded_by_default() {
+        let config = Config::default();
+        let tmp = std::env::temp_dir().join(format!("borg_listdir_hidden_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join(".hidden"), "secret").unwrap();
+        std::fs::write(tmp.join("visible.txt"), "hello").unwrap();
+
+        let result =
+            handle_list_dir(&json!({"path": tmp.to_string_lossy().as_ref()}), &config).unwrap();
+        assert!(result.contains("visible.txt"));
+        assert!(!result.contains(".hidden"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn handle_list_dir_hidden_files_included_when_requested() {
+        let config = Config::default();
+        let tmp =
+            std::env::temp_dir().join(format!("borg_listdir_showhidden_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join(".hidden"), "secret").unwrap();
+        std::fs::write(tmp.join("visible.txt"), "hello").unwrap();
+
+        let result = handle_list_dir(
+            &json!({"path": tmp.to_string_lossy().as_ref(), "include_hidden": true}),
+            &config,
+        )
+        .unwrap();
+        assert!(result.contains("visible.txt"));
+        assert!(result.contains(".hidden"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn handle_list_dir_depth_limiting() {
+        let config = Config::default();
+        let tmp = std::env::temp_dir().join(format!("borg_listdir_depth_{}", std::process::id()));
+        let deep = tmp.join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("deep.txt"), "deep").unwrap();
+
+        // depth=1 should show 'a/' but not 'b/' inside it
+        let result = handle_list_dir(
+            &json!({"path": tmp.to_string_lossy().as_ref(), "depth": 1}),
+            &config,
+        )
+        .unwrap();
+        assert!(result.contains("a/"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn handle_list_dir_empty_directory() {
+        let config = Config::default();
+        let tmp = std::env::temp_dir().join(format!("borg_listdir_empty_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let result =
+            handle_list_dir(&json!({"path": tmp.to_string_lossy().as_ref()}), &config).unwrap();
+        assert_eq!(result, "(empty directory)");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn format_size_units() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GiB");
     }
 
     // -- handle_read_file (additional) --

@@ -398,14 +398,16 @@ impl<'a> App<'a> {
                     return Ok(AppAction::Continue);
                 }
 
-                // Shift+Tab — toggle plan mode
+                // Shift+Tab — cycle collaboration mode (default → execute → plan → default)
                 if key.code == KeyCode::BackTab {
-                    self.plan_mode = !self.plan_mode;
-                    if self.plan_mode {
-                        self.push_system_message("[plan mode on]".to_string());
-                    } else {
-                        self.push_system_message("[plan mode off]".to_string());
-                    }
+                    use borg_core::config::CollaborationMode;
+                    let next = match self.config.conversation.collaboration_mode {
+                        CollaborationMode::Default => CollaborationMode::Execute,
+                        CollaborationMode::Execute => CollaborationMode::Plan,
+                        CollaborationMode::Plan => CollaborationMode::Default,
+                    };
+                    self.config.conversation.collaboration_mode = next;
+                    self.push_system_message(format!("[mode: {next}]"));
                     return Ok(AppAction::Continue);
                 }
 
@@ -529,7 +531,7 @@ impl<'a> App<'a> {
                          Enter        — Queue message while streaming\n  \
                          Alt+Up       — Edit last queued message\n  \
                          Ctrl+C       — Cancel / Quit\n  \
-                         Shift+Tab    — Toggle plan mode\n  \
+                         Shift+Tab    — Cycle mode (default/execute/plan)\n  \
                          PageUp/Down  — Scroll transcript\n  \
                          Mouse wheel  — Scroll transcript\n  \
                          /            — Show command menu"
@@ -609,6 +611,7 @@ impl<'a> App<'a> {
                      /schedule-tasks - Manage scheduled tasks\n  \
                      /restart   - Restart services\n  \
                      /logs      - Show recent logs\n  \
+                     /mode      - Switch collaboration mode (default/execute/plan)\n  \
                      /plan      - Send message in plan mode\n  \
                      quit/exit  - Exit"
                         .to_string(),
@@ -629,6 +632,8 @@ impl<'a> App<'a> {
                         "apply_skill_patch",
                         "Create/modify skill files via patch DSL",
                     ),
+                    ("read_file", "Read file contents with line numbers"),
+                    ("list_dir", "List directory contents"),
                     ("read_pdf", "Extract text from a PDF file"),
                     ("create_channel", "Create/modify channel integrations"),
                     ("list_channels", "List messaging channels"),
@@ -853,6 +858,28 @@ impl<'a> App<'a> {
                 return Ok(AppAction::NewSession);
             }
             _ => {}
+        }
+
+        // /mode — switch collaboration mode
+        if trimmed == "/mode" {
+            let current = self.config.conversation.collaboration_mode;
+            self.push_system_message(format!(
+                "Current collaboration mode: {current}\nUsage: /mode <default|execute|plan>"
+            ));
+            return Ok(AppAction::Continue);
+        }
+        if let Some(rest) = trimmed.strip_prefix("/mode ") {
+            let mode_str = rest.trim();
+            match mode_str.parse::<borg_core::config::CollaborationMode>() {
+                Ok(mode) => {
+                    self.config.conversation.collaboration_mode = mode;
+                    self.push_system_message(format!("[collaboration mode: {mode}]"));
+                }
+                Err(e) => {
+                    self.push_system_message(format!("Error: {e}"));
+                }
+            }
+            return Ok(AppAction::Continue);
         }
 
         // /plan — toggle plan mode or send message in plan mode

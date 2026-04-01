@@ -102,7 +102,35 @@ Plugin marketplace for one-click installation of channel and tool integrations. 
 - **Message persistence**: Each message is written to SQLite (`messages` table) immediately when added to history, enabling crash recovery
 - **Message timestamps**: All messages carry RFC3339 timestamps for temporal reasoning and compaction summaries
 
-System prompt assembled each turn: `IDENTITY.md` + current time + memory context + skills context (all token-budgeted).
+System prompt assembled each turn: `IDENTITY.md` + current time + git context + collaboration mode + memory context + project docs + coding instructions + skills context (all token-budgeted).
+
+## Collaboration Modes
+
+Three modes that change how the agent interacts, set via config, `/mode` TUI command, or `--mode` CLI flag:
+
+- **Default** — Standard collaborative mode. Asks questions when needed.
+- **Execute** — Autonomous mode. Makes assumptions, executes independently, reports progress via checklists.
+- **Plan** — Read-only exploration mode. Gathers info, asks questions, produces a `<proposed_plan>`, blocks all mutating tools.
+
+Templates in `crates/core/templates/collaboration_mode/`. Mode is injected into system prompt as `<collaboration_mode>`.
+
+Plan mode uses an allowlist of non-mutating tools — new tools default to blocked.
+
+**Config:** `[conversation] collaboration_mode = "default"` (or `execute`, `plan`)
+**TUI:** `/mode execute`, `/mode plan`, `/mode default`
+**CLI:** `borg ask --mode execute "do the thing"`
+
+## Git Utilities
+
+`crates/core/src/git.rs` — coding agent safety net.
+
+- **Ghost commits**: On session start, creates a snapshot of the entire repo using a temp git index (never touches HEAD or user's index). Enables atomic undo via `restore_ghost_commit`.
+- **Git context**: Enriches system prompt with branch, commit hash, recent commits, uncommitted changes status.
+- **Turn diff tracking**: `capture_turn_diff()` reports files added/modified/deleted since a baseline.
+
+## Project Doc Discovery
+
+`crates/core/src/project_doc.rs` — walks from CWD up to git root, collects `AGENTS.md` and `CLAUDE.md` files (first match per directory), concatenates root-first, injects into system prompt as `<project_instructions>`. Budget: 32 KiB.
 
 ## Built-in Tools
 
@@ -117,6 +145,8 @@ System prompt assembled each turn: `IDENTITY.md` + current time + memory context
 | `list_skills` | List all skills with status and source |
 | `apply_skill_patch` | Create/modify files in `~/.borg/skills/` via patch DSL |
 | `read_pdf` | Extract text from a PDF file with token-aware truncation |
+| `read_file` | Read file contents with line numbers, image rendering, PDF extraction |
+| `list_dir` | List directory contents with types and sizes. Supports depth recursion (max 3) and hidden files. Security: checks blocked paths on every entry |
 | `create_channel` | Create/modify channel integrations in `~/.borg/channels/` via patch DSL |
 | `list_channels` | List all messaging channels with status and webhook paths |
 | `browser` | Headless Chrome automation (navigate, click, type, screenshot, get_text, evaluate_js, close). Requires `browser.enabled = true` |
@@ -521,6 +551,8 @@ Six-layer defense against prompt injection attacks:
 | `crates/core/src/doctor.rs` | Diagnostic checks and report formatting |
 | `crates/core/src/browser.rs` | Chrome detection, CDP session management, browser automation |
 | `crates/core/src/host_audit.rs` | Host security audit checks (firewall, ports, SSH, permissions, encryption, updates, services) |
+| `crates/core/src/git.rs` | Git utilities: ghost commits, git context, turn diff tracking |
+| `crates/core/src/project_doc.rs` | Project doc discovery (AGENTS.md / CLAUDE.md) for system prompt |
 | `crates/core/src/sanitize.rs` | Prompt injection detection (scoring-based, regex patterns, untrusted content wrapping) |
 | `crates/core/src/rate_guard.rs` | Per-session rate limiting for tool calls, shell commands, file/memory writes, web requests |
 | `crates/core/src/db.rs` | SQLite database with versioned migrations |
