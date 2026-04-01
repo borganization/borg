@@ -87,12 +87,7 @@ impl<'a> ChannelExecutor<'a> {
         blocked_paths: &[String],
     ) -> Result<String> {
         let script_path = self.validated_script_path(script_name)?;
-        let sandbox_policy = self
-            .manifest
-            .sandbox_policy()
-            .with_borg_dir_protected()
-            .with_tildes_expanded()
-            .with_blocked_paths_filtered(blocked_paths);
+        let sandbox_policy = self.manifest.sandbox_policy().configured(blocked_paths);
 
         // Collect auth env vars
         let mut extra_env = Vec::new();

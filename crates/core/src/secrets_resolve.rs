@@ -104,6 +104,17 @@ pub enum SecretRef {
     Keychain { service: String, account: String },
 }
 
+/// Check that a command succeeded and return its stdout as a trimmed string.
+fn extract_secret(output: std::process::Output, fail_context: &str) -> Result<String> {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("{fail_context}: {stderr}");
+    }
+    String::from_utf8(output.stdout)
+        .map(|s| s.trim().to_string())
+        .context("Command output is not valid UTF-8")
+}
+
 impl SecretRef {
     /// Resolve the secret reference to its plaintext value.
     pub fn resolve(&self) -> Result<String> {
@@ -141,17 +152,11 @@ impl SecretRef {
                     .output()
                     .with_context(|| format!("Failed to execute: {command}"))?;
 
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    bail!(
-                        "Secret command `{command}` failed (exit {}): {stderr}",
-                        output.status.code().unwrap_or(-1)
-                    );
-                }
-
-                let secret = String::from_utf8(output.stdout)
-                    .context("Secret command output is not valid UTF-8")?;
-                Ok(secret.trim().to_string())
+                let exit_code = output.status.code().unwrap_or(-1);
+                extract_secret(
+                    output,
+                    &format!("Secret command `{command}` failed (exit {exit_code})"),
+                )
             }
 
             SecretRef::Keychain { service, account } => {
@@ -160,13 +165,10 @@ impl SecretRef {
                         .args(["find-generic-password", "-s", service, "-a", account, "-w"])
                         .output()
                         .with_context(|| format!("Failed to query macOS Keychain for service={service} account={account}"))?;
-                    if !output.status.success() {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        bail!("Keychain lookup failed for service={service} account={account}: {stderr}");
-                    }
-                    let secret = String::from_utf8(output.stdout)
-                        .context("Keychain value is not valid UTF-8")?;
-                    Ok(secret.trim().to_string())
+                    extract_secret(
+                        output,
+                        &format!("Keychain lookup failed for service={service} account={account}"),
+                    )
                 } else if cfg!(target_os = "linux") {
                     let output = Command::new("secret-tool")
                         .args(["lookup", "service", service, "key", account])
@@ -176,13 +178,10 @@ impl SecretRef {
                                 "Failed to query secret-tool for service={service} key={account}"
                             )
                         })?;
-                    if !output.status.success() {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        bail!("secret-tool lookup failed for service={service} key={account}: {stderr}");
-                    }
-                    let secret = String::from_utf8(output.stdout)
-                        .context("secret-tool value is not valid UTF-8")?;
-                    Ok(secret.trim().to_string())
+                    extract_secret(
+                        output,
+                        &format!("secret-tool lookup failed for service={service} key={account}"),
+                    )
                 } else {
                     bail!(
                         "Keychain lookup is not supported on this platform (only macOS and Linux)"

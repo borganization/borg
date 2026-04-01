@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use borg_core::config::HeartbeatConfig;
+use borg_core::tasks::parse_interval;
 
 /// Minimum allowed heartbeat interval (60 seconds) to prevent API waste.
 const MIN_INTERVAL_SECS: u64 = 60;
@@ -224,63 +225,9 @@ impl HeartbeatScheduler {
     }
 }
 
-pub fn parse_interval(s: &str) -> Option<std::time::Duration> {
-    let s = s.trim();
-    if let Some(mins) = s.strip_suffix('m') {
-        mins.parse::<u64>()
-            .ok()
-            .map(|m| std::time::Duration::from_secs(m * 60))
-    } else if let Some(hours) = s.strip_suffix('h') {
-        hours
-            .parse::<u64>()
-            .ok()
-            .map(|h| std::time::Duration::from_secs(h * 3600))
-    } else if let Some(secs) = s.strip_suffix('s') {
-        secs.parse::<u64>().ok().map(std::time::Duration::from_secs)
-    } else {
-        s.parse::<u64>().ok().map(std::time::Duration::from_secs)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_interval_minutes() {
-        let d = parse_interval("30m").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(30 * 60));
-    }
-
-    #[test]
-    fn parse_interval_hours() {
-        let d = parse_interval("2h").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(2 * 3600));
-    }
-
-    #[test]
-    fn parse_interval_seconds() {
-        let d = parse_interval("45s").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(45));
-    }
-
-    #[test]
-    fn parse_interval_bare_number() {
-        let d = parse_interval("120").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(120));
-    }
-
-    #[test]
-    fn parse_interval_with_whitespace() {
-        let d = parse_interval("  10m  ").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(600));
-    }
-
-    #[test]
-    fn parse_interval_invalid() {
-        assert!(parse_interval("abc").is_none());
-        assert!(parse_interval("").is_none());
-    }
 
     fn test_scheduler(config: HeartbeatConfig, tz: Tz) -> HeartbeatScheduler {
         let (_tx, rx) = mpsc::channel(1);
@@ -342,24 +289,6 @@ mod tests {
         assert_eq!(config.quiet_hours_start, Some("00:00".to_string()));
         assert_eq!(config.quiet_hours_end, Some("06:00".to_string()));
         assert!(config.channels.is_empty());
-    }
-
-    #[test]
-    fn parse_interval_zero_seconds() {
-        let d = parse_interval("0s").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(0));
-    }
-
-    #[test]
-    fn parse_interval_zero_bare() {
-        let d = parse_interval("0").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(0));
-    }
-
-    #[test]
-    fn parse_interval_large_hours() {
-        let d = parse_interval("24h").unwrap();
-        assert_eq!(d, std::time::Duration::from_secs(24 * 3600));
     }
 
     #[test]

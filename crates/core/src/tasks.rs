@@ -218,8 +218,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_interval_with_whitespace() {
+        let d = parse_interval("  10m  ").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(600));
+    }
+
+    #[test]
+    fn parse_interval_zero() {
+        assert_eq!(
+            parse_interval("0s").unwrap(),
+            std::time::Duration::from_secs(0)
+        );
+        assert_eq!(
+            parse_interval("0").unwrap(),
+            std::time::Duration::from_secs(0)
+        );
+    }
+
+    #[test]
+    fn parse_interval_large_hours() {
+        let d = parse_interval("24h").unwrap();
+        assert_eq!(d, std::time::Duration::from_secs(24 * 3600));
+    }
+
+    #[test]
     fn parse_interval_invalid() {
         assert!(parse_interval("abc").is_none());
+        assert!(parse_interval("").is_none());
     }
 
     #[test]

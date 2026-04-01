@@ -1,33 +1,10 @@
 use borg_core::constants;
 
-use crate::dedup::BoundedDedup;
-
-const DEFAULT_CAPACITY: usize = constants::TELEGRAM_DEDUP_CAPACITY;
-
-/// Bounded deduplicator for Telegram update IDs.
-pub struct UpdateDeduplicator(BoundedDedup<i64>);
-
-impl UpdateDeduplicator {
-    pub fn new() -> Self {
-        Self(BoundedDedup::new(DEFAULT_CAPACITY))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
-        Self(BoundedDedup::new(capacity))
-    }
-
-    /// Returns `true` if this update_id has been seen before.
-    pub fn is_duplicate(&mut self, update_id: i64) -> bool {
-        self.0.is_duplicate(&update_id)
-    }
-}
-
-impl Default for UpdateDeduplicator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+crate::dedup_wrapper!(
+    /// Bounded deduplicator for Telegram update IDs.
+    pub struct UpdateDeduplicator(i64, constants::TELEGRAM_DEDUP_CAPACITY);
+    is_duplicate(update_id: i64) => update_id;
+);
 
 #[cfg(test)]
 mod tests {
