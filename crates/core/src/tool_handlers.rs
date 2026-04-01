@@ -1146,7 +1146,7 @@ pub async fn handle_browser(
         }
     }
 
-    let browser = session.as_ref().context("Browser session not available")?;
+    let browser = session.as_mut().context("Browser session not available")?;
     let timeout = Duration::from_millis(config.browser.timeout_ms);
 
     /// Wrap a browser action result into a ToolOutput.
@@ -1157,19 +1157,40 @@ pub async fn handle_browser(
         }
     }
 
+    /// Run a browser action with automatic recovery: try once, and if it fails
+    /// with a recoverable error, attempt recovery then retry.
+    macro_rules! browser_action_with_recovery {
+        ($browser:expr, $name:expr, $action:expr) => {{
+            let result = $action;
+            if let Err(e) = &result {
+                if crate::browser::health::is_recoverable_error(e) {
+                    tracing::warn!("{} failed with recoverable error: {e}", $name);
+                    if $browser.try_recover().await.is_ok() {
+                        return browser_result($action);
+                    }
+                }
+            }
+            browser_result(result)
+        }};
+    }
+
     match action {
         "navigate" => {
             let url = require_str_param(args, "url")?;
-            browser_result(browser.navigate(url, timeout).await)
+            browser_action_with_recovery!(browser, "navigate", browser.navigate(url, timeout).await)
         }
         "click" => {
             let selector = require_str_param(args, "selector")?;
-            browser_result(browser.click(selector, timeout).await)
+            browser_action_with_recovery!(browser, "click", browser.click(selector, timeout).await)
         }
         "type" => {
             let selector = require_str_param(args, "selector")?;
             let text = require_str_param(args, "text")?;
-            browser_result(browser.type_text(selector, text, timeout).await)
+            browser_action_with_recovery!(
+                browser,
+                "type",
+                browser.type_text(selector, text, timeout).await
+            )
         }
         "screenshot" => {
             let selector = args.get("selector").and_then(|v| v.as_str());
@@ -1222,12 +1243,86 @@ pub async fn handle_browser(
         }
         "get_text" => {
             let selector = args.get("selector").and_then(|v| v.as_str());
-            browser_result(browser.get_text(selector, timeout).await)
+            browser_action_with_recovery!(
+                browser,
+                "get_text",
+                browser.get_text(selector, timeout).await
+            )
         }
         "evaluate_js" => {
             let expression = require_str_param(args, "expression")?;
-            browser_result(browser.evaluate_js(expression, timeout).await)
+            browser_action_with_recovery!(
+                browser,
+                "evaluate_js",
+                browser.evaluate_js(expression, timeout).await
+            )
         }
+        "hover" => {
+            let selector = require_str_param(args, "selector")?;
+            browser_action_with_recovery!(browser, "hover", browser.hover(selector, timeout).await)
+        }
+        "select" => {
+            let selector = require_str_param(args, "selector")?;
+            let value = require_str_param(args, "value")?;
+            browser_action_with_recovery!(
+                browser,
+                "select",
+                browser.select(selector, value, timeout).await
+            )
+        }
+        "press" => {
+            let key = require_str_param(args, "key")?;
+            browser_action_with_recovery!(browser, "press", browser.press(key, timeout).await)
+        }
+        "drag" => {
+            let source = require_str_param(args, "source")?;
+            let target = require_str_param(args, "target")?;
+            browser_action_with_recovery!(
+                browser,
+                "drag",
+                browser.drag(source, target, timeout).await
+            )
+        }
+        "fill" => {
+            let fields = args
+                .get("fields")
+                .and_then(|v| v.as_object())
+                .context("fill requires 'fields' parameter (object)")?
+                .clone();
+            browser_action_with_recovery!(browser, "fill", browser.fill(&fields, timeout).await)
+        }
+        "wait" => {
+            browser_action_with_recovery!(browser, "wait", browser.wait_for(args, timeout).await)
+        }
+        "resize" => {
+            let width = args
+                .get("width")
+                .and_then(serde_json::Value::as_u64)
+                .context("resize requires 'width'")? as u32;
+            let height = args
+                .get("height")
+                .and_then(serde_json::Value::as_u64)
+                .context("resize requires 'height'")? as u32;
+            browser_action_with_recovery!(
+                browser,
+                "resize",
+                browser.resize(width, height, timeout).await
+            )
+        }
+        "new_tab" => {
+            let url = args.get("url").and_then(serde_json::Value::as_str);
+            browser_result(browser.new_tab(url).await)
+        }
+        "list_tabs" => browser_result(browser.list_tabs().await),
+        "switch_tab" => {
+            let index = args
+                .get("tab_index")
+                .and_then(serde_json::Value::as_u64)
+                .context("switch_tab requires 'tab_index'")? as usize;
+            browser_result(browser.switch_tab(index))
+        }
+        "close_tab" => browser_result(browser.close_tab().await),
+        "get_console_logs" => Ok(ToolOutput::Text(browser.get_console_logs())),
         _ => Ok(ToolOutput::Text(format!(
             "Unknown browser action: {action}"
         ))),
@@ -1257,19 +1352,28 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     if config.browser.enabled {
         defs.push(ToolDefinition::new(
             "browser",
-            "Control a headless Chrome browser. Actions: navigate (go to URL), click (CSS selector), type (type text into element), screenshot (capture page or element), get_text (extract text), evaluate_js (run JavaScript), close (shut down browser).",
+            "Control a headless Chrome browser. Actions: navigate, click, type, screenshot, get_text, evaluate_js, hover, select, press, drag, fill, wait, resize, new_tab, list_tabs, switch_tab, close_tab, get_console_logs, close.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["navigate", "click", "type", "screenshot", "get_text", "evaluate_js", "close"],
+                        "enum": ["navigate", "click", "type", "screenshot", "get_text", "evaluate_js", "hover", "select", "press", "drag", "fill", "wait", "resize", "new_tab", "list_tabs", "switch_tab", "close_tab", "get_console_logs", "close"],
                         "description": "Browser action to perform"
                     },
-                    "url": { "type": "string", "description": "URL to navigate to (for navigate)" },
-                    "selector": { "type": "string", "description": "CSS selector (for click, type, get_text, screenshot)" },
+                    "url": { "type": "string", "description": "URL (for navigate, new_tab)" },
+                    "selector": { "type": "string", "description": "CSS selector (for click, type, hover, select, get_text, screenshot)" },
                     "text": { "type": "string", "description": "Text to type (for type action)" },
-                    "expression": { "type": "string", "description": "JavaScript expression (for evaluate_js)" }
+                    "expression": { "type": "string", "description": "JavaScript expression (for evaluate_js)" },
+                    "value": { "type": "string", "description": "Value to select or wait for (for select, wait)" },
+                    "key": { "type": "string", "description": "Key name to press (for press, e.g. 'Enter', 'Tab')" },
+                    "source": { "type": "string", "description": "Source CSS selector (for drag)" },
+                    "target": { "type": "string", "description": "Target CSS selector (for drag)" },
+                    "fields": { "type": "object", "description": "Map of CSS selector to value (for fill)" },
+                    "condition": { "type": "string", "enum": ["text", "element", "url", "load", "js"], "description": "Wait condition type (for wait)" },
+                    "width": { "type": "integer", "description": "Viewport width (for resize)" },
+                    "height": { "type": "integer", "description": "Viewport height (for resize)" },
+                    "tab_index": { "type": "integer", "description": "Tab index (for switch_tab)" }
                 },
                 "required": ["action"]
             }),
