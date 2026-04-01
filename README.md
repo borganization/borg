@@ -1,26 +1,12 @@
 # Borg
 
+[![CI](https://github.com/borganization/borg/actions/workflows/ci.yml/badge.svg)](https://github.com/borganization/borg/actions/workflows/ci.yml)
+[![Release](https://github.com/borganization/borg/actions/workflows/release.yml/badge.svg)](https://github.com/borganization/borg/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Next generation personal AI assistant.**
+**Personal AI assistant that runs locally, remembers you, and gets better over time.**
 
-## What is Borg?
-
-Borg is a personal AI assistant that runs locally on your machine, remembers you across conversations, and gets better over time. Unlike cloud-only chatbots, it develops its own personality, learns your preferences, and is infinitely customizable through plugins.
-
-## Features
-
-- **Remembers you** — maintains memory across every conversation so it never forgets what matters to you
-- **Multiple AI providers** — works with OpenRouter, OpenAI, Anthropic, and Gemini so you can use the model you prefer
-- **Connects to your apps** — integrates with Slack, Telegram, and your favorite messaging platforms
-- **Built-in skills** — comes with skills for weather, calendar, notes, GitHub, search, Docker, and more
-- **Proactive check-ins** — can reach out on its own with reminders, ideas, or just to say hello (with quiet hours so it won't bother you at night)
-- **Evolving personality** — develops its own voice and style over time based on how you interact
-- **Safe and sandboxed** — all tools run in a secure sandbox so nothing can touch your files without permission
-
-## Quick Start
-
-**Install with one command:**
+## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/borganization/borg/main/scripts/install.sh | bash
@@ -28,34 +14,54 @@ curl -fsSL https://raw.githubusercontent.com/borganization/borg/main/scripts/ins
 
 The installer detects your OS, downloads the right binary, and walks you through setup.
 
-Or download manually from [Releases](https://github.com/borganization/borg/releases) and run:
+Or download manually from [Releases](https://github.com/borganization/borg/releases).
+
+## Build from Source
 
 ```sh
-borg
+git clone https://github.com/borganization/borg.git
+cd borg
+cargo build --release
+./target/release/borg init
+```
+
+Requires [Rust 1.87+](https://rustup.rs/) and one of: `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, or a running [Ollama](https://ollama.ai) instance.
+
+## Usage
+
+```sh
+borg                    # start interactive conversation
+borg ask "..."          # one-shot question
+borg doctor             # check configuration
 ```
 
 ## Plugins
 
-Connect Borg to the apps you already use. Add a plugin in one command:
+Connect Borg to the apps you already use:
 
 ```sh
 borg add telegram
 borg add gmail
-borg plugins             # see all available plugins
+borg plugins            # see all available plugins
 ```
 
-**Available plugins:** Telegram, Slack, Twilio (WhatsApp + SMS), Gmail, Outlook, Google Calendar, Notion, Linear. iMessage works automatically on macOS.
+**Available:** Telegram, Slack, Discord, Teams, Google Chat, Twilio (WhatsApp + SMS), Gmail, Outlook, Google Calendar, Notion, Linear. iMessage works automatically on macOS.
 
 ## Commands
 
-| Command              | What it does                                   |
-| -------------------- | ---------------------------------------------- |
-| `borg`               | Start an interactive conversation              |
-| `borg ask "..."`     | Ask a quick question and get a one-shot answer |
-| `borg add <name>`    | Set up a plugin (e.g. `borg add telegram`)     |
-| `borg remove <name>` | Remove a plugin's credentials                  |
-| `borg plugins`       | See all available plugins and their status     |
-| `borg doctor`        | Check that everything is configured correctly  |
+| Command | What it does |
+|---------|-------------|
+| `borg` | Start an interactive conversation |
+| `borg ask "..."` | One-shot question |
+| `borg add <name>` | Set up a plugin |
+| `borg remove <name>` | Remove a plugin |
+| `borg plugins` | List all plugins and their status |
+| `borg doctor` | Run diagnostics |
+| `borg tasks list` | List scheduled tasks |
+
+## Documentation
+
+See the [docs/](docs/) directory for detailed guides on configuration, architecture, memory, skills, tools, sandboxing, and provider setup.
 
 ## Contributing
 
