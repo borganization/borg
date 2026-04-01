@@ -9,6 +9,7 @@ pub const BORDER: Color = Color::Rgb(3, 113, 113);
 
 pub const BULLET: &str = "●";
 pub const CHEVRON: &str = "❯";
+pub const TREE_MID: &str = "├";
 pub const TREE_END: &str = "└";
 
 pub const TOOL_ACTIVE_GREEN: Color = Color::Rgb(0, 200, 0);

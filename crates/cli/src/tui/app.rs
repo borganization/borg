@@ -37,6 +37,25 @@ pub enum AppState {
     PlanReview,
 }
 
+/// A message queued during streaming, preserving both text and image attachments.
+pub struct QueuedMessage {
+    pub text: String,
+    pub images: Vec<super::composer::ImageAttachment>,
+}
+
+/// State machine for conversation backtracking (rewinding to a past user message).
+pub enum BacktrackPhase {
+    /// Not in backtrack mode.
+    Inactive,
+    /// User is selecting a past message to rewind to.
+    Selecting {
+        /// Indices into `App::cells` that are `HistoryCell::User` messages, ordered oldest-first.
+        user_message_indices: Vec<usize>,
+        /// Cursor position within `user_message_indices` (0 = most recent, at the end).
+        cursor: usize,
+    },
+}
+
 pub enum AppAction {
     Continue,
     Quit,
@@ -51,6 +70,10 @@ pub enum AppAction {
     ClearHistory,
     ShowUsage,
     UndoLastTurn,
+    /// Rewind conversation to the Nth user message (0-indexed, oldest-first).
+    RewindTo {
+        nth_user_message: usize,
+    },
     LaunchExternalEditor,
     UpdateSetting {
         key: String,
@@ -93,11 +116,13 @@ pub struct App<'a> {
     pub session_prompt_tokens: u64,
     pub session_completion_tokens: u64,
     /// Messages queued by Enter during streaming, auto-submitted FIFO on turn complete
-    pub queued_messages: VecDeque<String>,
+    pub queued_messages: VecDeque<QueuedMessage>,
     /// Whether the last agent turn ended with an error (pauses queue drain)
     pub last_turn_errored: bool,
     /// Whether the "[queue paused]" message has already been shown (prevents duplicates)
     pub queue_pause_notified: bool,
+    /// Conversation backtrack state machine
+    pub backtrack: BacktrackPhase,
     pub plan_overlay: PlanOverlay,
     pub plan_mode: bool,
     pub schedule_popup: SchedulePopup,
@@ -133,6 +158,7 @@ impl<'a> App<'a> {
             queued_messages: VecDeque::new(),
             last_turn_errored: false,
             queue_pause_notified: false,
+            backtrack: BacktrackPhase::Inactive,
             plan_overlay: PlanOverlay::new(),
             plan_mode: false,
             schedule_popup: SchedulePopup::new(),
@@ -297,22 +323,65 @@ impl<'a> App<'a> {
                         token.cancel();
                     }
                     self.event_rx = None;
-                    self.queued_messages.clear();
                     for cell in self.cells.iter_mut().rev() {
                         if let HistoryCell::Assistant { streaming, .. } = cell {
                             *streaming = false;
                             break;
                         }
                     }
-                    self.cells.push(HistoryCell::System {
-                        text: "[interrupted]".to_string(),
-                    });
+                    // Restore queued messages to composer instead of discarding
+                    if !self.queued_messages.is_empty() {
+                        let mut dropped_images = 0usize;
+                        let mut messages: Vec<QueuedMessage> =
+                            self.queued_messages.drain(..).collect();
+                        let queued_text: String = messages
+                            .iter()
+                            .map(|qm| qm.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let current = self.composer.text();
+                        let restored = if current.trim().is_empty() {
+                            queued_text
+                        } else {
+                            format!("{}\n{}", current.trim(), queued_text)
+                        };
+                        self.composer.set_text(&restored);
+                        // Restore images if only one queued message had them
+                        if messages.len() == 1 {
+                            let qm = messages.remove(0);
+                            if !qm.images.is_empty() {
+                                self.composer.set_image_attachments(qm.images);
+                            }
+                        } else {
+                            for qm in &messages {
+                                dropped_images += qm.images.len();
+                            }
+                        }
+                        if dropped_images > 0 {
+                            self.cells.push(HistoryCell::System {
+                                text: format!(
+                                    "[interrupted — queued messages restored to composer ({dropped_images} image{} discarded)]",
+                                    if dropped_images == 1 { "" } else { "s" }
+                                ),
+                            });
+                        } else {
+                            self.cells.push(HistoryCell::System {
+                                text: "[interrupted — queued messages restored to composer]"
+                                    .to_string(),
+                            });
+                        }
+                    } else {
+                        self.cells.push(HistoryCell::System {
+                            text: "[interrupted]".to_string(),
+                        });
+                    }
                     self.plan_mode = false;
                     self.state = AppState::Idle;
                 } else if key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::ALT) {
                     // Pop last queued message back into composer for editing
-                    if let Some(msg) = self.queued_messages.pop_back() {
-                        self.composer.set_text(&msg);
+                    if let Some(qm) = self.queued_messages.pop_back() {
+                        self.composer.set_text(&qm.text);
+                        self.composer.set_image_attachments(qm.images);
                         // Remove the User + System cells that were added when it was queued
                         let len = self.cells.len();
                         if len >= 2
@@ -326,12 +395,14 @@ impl<'a> App<'a> {
                     // Queue current composer text to auto-submit after turn completes
                     let text = self.composer.text().trim().to_string();
                     if !text.is_empty() {
+                        let images = self.composer.take_image_attachments();
                         // Show the queued message in the transcript immediately
                         self.cells.push(HistoryCell::User { text: text.clone() });
                         self.cells.push(HistoryCell::System {
                             text: format!("[queued — {} in queue]", self.queued_messages.len() + 1),
                         });
-                        self.queued_messages.push_back(text);
+                        self.queued_messages
+                            .push_back(QueuedMessage { text, images });
                         self.composer.set_text("");
                         self.auto_scroll = true;
                     }
@@ -347,14 +418,63 @@ impl<'a> App<'a> {
                     return Ok(AppAction::Quit);
                 }
 
+                // Handle backtrack mode (selecting a past user message to rewind to)
+                if let BacktrackPhase::Selecting {
+                    ref user_message_indices,
+                    ref mut cursor,
+                } = self.backtrack
+                {
+                    match key.code {
+                        KeyCode::Up => {
+                            if *cursor + 1 < user_message_indices.len() {
+                                *cursor += 1;
+                            }
+                        }
+                        KeyCode::Down => {
+                            if *cursor > 0 {
+                                *cursor -= 1;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            let indices = user_message_indices.clone();
+                            let cur = *cursor;
+                            // cursor 0 = most recent, which is the last element
+                            let cell_idx = indices[indices.len() - 1 - cur];
+                            let text = if let HistoryCell::User { text } = &self.cells[cell_idx] {
+                                text.clone()
+                            } else {
+                                String::new()
+                            };
+                            // Count which user message this is (0-indexed, oldest-first)
+                            let nth = self.cells[..=cell_idx]
+                                .iter()
+                                .filter(|c| matches!(c, HistoryCell::User { .. }))
+                                .count()
+                                - 1;
+                            self.backtrack = BacktrackPhase::Inactive;
+                            self.cells.truncate(cell_idx);
+                            self.composer.set_text(&text);
+                            self.auto_scroll = true;
+                            return Ok(AppAction::RewindTo {
+                                nth_user_message: nth,
+                            });
+                        }
+                        KeyCode::Esc => {
+                            self.backtrack = BacktrackPhase::Inactive;
+                        }
+                        _ => {}
+                    }
+                    return Ok(AppAction::Continue);
+                }
+
                 // Handle error-paused queue: Enter resumes, Esc clears
                 if self.last_turn_errored && !self.queued_messages.is_empty() {
                     match key.code {
                         KeyCode::Enter => {
                             self.last_turn_errored = false;
                             self.queue_pause_notified = false;
-                            if let Some(queued) = self.queued_messages.pop_front() {
-                                return self.handle_queued_submit(&queued);
+                            if let Some(qm) = self.queued_messages.pop_front() {
+                                return self.handle_queued_submit(qm);
                             }
                             return Ok(AppAction::Continue);
                         }
@@ -366,6 +486,24 @@ impl<'a> App<'a> {
                             return Ok(AppAction::Continue);
                         }
                         _ => {}
+                    }
+                }
+
+                // Esc with empty composer enters backtrack mode
+                if key.code == KeyCode::Esc && self.composer.is_empty() && !self.last_turn_errored {
+                    let user_indices: Vec<usize> = self
+                        .cells
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| matches!(c, HistoryCell::User { .. }))
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !user_indices.is_empty() {
+                        self.backtrack = BacktrackPhase::Selecting {
+                            user_message_indices: user_indices,
+                            cursor: 0, // 0 = most recent
+                        };
+                        return Ok(AppAction::Continue);
                     }
                 }
 
@@ -524,7 +662,7 @@ impl<'a> App<'a> {
                          Shift+Enter  — New line\n  \
                          Up / Ctrl+P  — Previous history entry\n  \
                          Down / Ctrl+N — Next history entry\n  \
-                         Esc          — Clear input\n  \
+                         Esc          — Clear input / Rewind (when empty)\n  \
                          Ctrl+L       — Clear screen\n  \
                          Ctrl+D       — Quit (when empty)\n  \
                          Ctrl+G       — Open external editor ($EDITOR)\n  \
@@ -1237,6 +1375,12 @@ impl<'a> App<'a> {
         }
         self.plan_mode = false;
         if !matches!(self.state, AppState::Idle) {
+            // If queued messages exist, treat unexpected close as an error so queue-pause
+            // gives the user a chance to resume or clear instead of silently losing input.
+            if !self.queued_messages.is_empty() {
+                self.last_turn_errored = true;
+                self.push_system_message("[agent disconnected — queue paused]".to_string());
+            }
             self.state = AppState::Idle;
         }
     }
@@ -1386,14 +1530,14 @@ impl<'a> App<'a> {
     }
 
     /// Pop the next queued message (FIFO) for dispatch.
-    pub fn pop_next_queued(&mut self) -> Option<String> {
+    pub fn pop_next_queued(&mut self) -> Option<QueuedMessage> {
         self.queued_messages.pop_front()
     }
 
     /// Submit a queued message (called from the event loop when a turn completes).
     /// The user message was already shown in the transcript when it was queued,
     /// so we skip the User cell push and only add Separator + Assistant cell.
-    pub fn handle_queued_submit(&mut self, input: &str) -> Result<AppAction> {
+    pub fn handle_queued_submit(&mut self, qm: QueuedMessage) -> Result<AppAction> {
         // Add separator between turns (User cell was already shown when queued)
         if !self.cells.is_empty() {
             self.cells.push(HistoryCell::Separator);
@@ -1415,8 +1559,8 @@ impl<'a> App<'a> {
         self.auto_scroll = true;
 
         Ok(AppAction::SendMessage {
-            input: input.to_string(),
-            images: Vec::new(),
+            input: qm.text,
+            images: qm.images,
             event_tx,
             cancel,
         })
@@ -1424,8 +1568,17 @@ impl<'a> App<'a> {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let left = match &self.state {
+            AppState::Idle if matches!(self.backtrack, BacktrackPhase::Selecting { .. }) => {
+                "↑/↓ select message  •  enter to rewind  •  esc to cancel".to_string()
+            }
+            AppState::Idle if self.last_turn_errored && !self.queued_messages.is_empty() => {
+                "enter to resume queue  •  esc to clear queue".to_string()
+            }
             AppState::Idle if self.plan_mode => {
                 "[plan]  •  shift+tab to toggle off  •  ? for shortcuts".to_string()
+            }
+            AppState::Idle if self.composer.is_empty() => {
+                "esc to rewind  •  ? for shortcuts  •  quit to exit".to_string()
             }
             AppState::Idle => {
                 "? for shortcuts  •  pgup/pgdn to scroll  •  quit to exit".to_string()
@@ -1433,7 +1586,9 @@ impl<'a> App<'a> {
             AppState::Streaming { .. } => {
                 let count = self.queued_messages.len();
                 if count > 0 {
-                    format!("esc to cancel  •  ({count} queued)")
+                    format!(
+                        "esc to cancel (queue preserved)  •  alt+↑ edit last  •  ({count} queued)"
+                    )
                 } else {
                     "esc to cancel  •  enter to queue".to_string()
                 }
@@ -1471,21 +1626,43 @@ impl<'a> App<'a> {
 
         let count = self.queued_messages.len();
         let shown = count.min(3);
-        for msg in self.queued_messages.iter().take(shown) {
-            let truncated = if msg.len() > 60 {
-                let end = msg
+        for (i, qm) in self.queued_messages.iter().take(shown).enumerate() {
+            let is_last_shown = i + 1 == shown && count <= 3;
+            let truncated = if qm.text.len() > 50 {
+                let end = qm
+                    .text
                     .char_indices()
-                    .map(|(i, _)| i)
-                    .take_while(|&i| i <= 57)
+                    .map(|(idx, _)| idx)
+                    .take_while(|&idx| idx <= 47)
                     .last()
                     .unwrap_or(0);
-                format!("{}...", &msg[..end])
+                format!("{}...", &qm.text[..end])
             } else {
-                msg.clone()
+                qm.text.clone()
+            };
+            let img_badge = if !qm.images.is_empty() {
+                format!(
+                    " [{} image{}]",
+                    qm.images.len(),
+                    if qm.images.len() == 1 { "" } else { "s" }
+                )
+            } else {
+                String::new()
+            };
+            let prefix = if is_last_shown {
+                theme::TREE_END
+            } else {
+                theme::TREE_MID
+            };
+            let style = if i + 1 == count {
+                // Last item overall: underline to hint Alt+Up editability
+                dim_italic.add_modifier(Modifier::UNDERLINED)
+            } else {
+                dim_italic
             };
             lines.push(Line::from(Span::styled(
-                format!("  {} {truncated}", theme::TREE_END),
-                dim_italic,
+                format!("  {prefix} {}. {truncated}{img_badge}", i + 1),
+                style,
             )));
         }
 
@@ -2004,25 +2181,32 @@ mod tests {
         assert!(app.auto_scroll);
     }
 
+    fn qm(text: &str) -> QueuedMessage {
+        QueuedMessage {
+            text: text.to_string(),
+            images: Vec::new(),
+        }
+    }
+
     #[test]
     fn test_tab_queues_multiple() {
         let mut app = make_app();
-        app.queued_messages.push_back("first".to_string());
-        app.queued_messages.push_back("second".to_string());
-        app.queued_messages.push_back("third".to_string());
+        app.queued_messages.push_back(qm("first"));
+        app.queued_messages.push_back(qm("second"));
+        app.queued_messages.push_back(qm("third"));
 
         assert_eq!(app.queued_messages.len(), 3);
-        assert_eq!(app.pop_next_queued(), Some("first".to_string()));
-        assert_eq!(app.pop_next_queued(), Some("second".to_string()));
-        assert_eq!(app.pop_next_queued(), Some("third".to_string()));
-        assert_eq!(app.pop_next_queued(), None);
+        assert_eq!(app.pop_next_queued().unwrap().text, "first");
+        assert_eq!(app.pop_next_queued().unwrap().text, "second");
+        assert_eq!(app.pop_next_queued().unwrap().text, "third");
+        assert!(app.pop_next_queued().is_none());
     }
 
     #[test]
     fn test_esc_clears_queue() {
         let mut app = make_app();
-        app.queued_messages.push_back("a".to_string());
-        app.queued_messages.push_back("b".to_string());
+        app.queued_messages.push_back(qm("a"));
+        app.queued_messages.push_back(qm("b"));
 
         app.queued_messages.clear();
 
@@ -2032,27 +2216,27 @@ mod tests {
     #[test]
     fn test_alt_up_pops_last() {
         let mut app = make_app();
-        app.queued_messages.push_back("a".to_string());
-        app.queued_messages.push_back("b".to_string());
-        app.queued_messages.push_back("c".to_string());
+        app.queued_messages.push_back(qm("a"));
+        app.queued_messages.push_back(qm("b"));
+        app.queued_messages.push_back(qm("c"));
 
-        let last = app.queued_messages.pop_back();
-        assert_eq!(last, Some("c".to_string()));
+        let last = app.queued_messages.pop_back().unwrap();
+        assert_eq!(last.text, "c");
         assert_eq!(app.queued_messages.len(), 2);
-        assert_eq!(app.queued_messages[0], "a");
-        assert_eq!(app.queued_messages[1], "b");
+        assert_eq!(app.queued_messages[0].text, "a");
+        assert_eq!(app.queued_messages[1].text, "b");
     }
 
     #[test]
     fn test_drain_pops_front() {
         let mut app = make_app();
-        app.queued_messages.push_back("first".to_string());
-        app.queued_messages.push_back("second".to_string());
+        app.queued_messages.push_back(qm("first"));
+        app.queued_messages.push_back(qm("second"));
 
-        let popped = app.pop_next_queued();
-        assert_eq!(popped, Some("first".to_string()));
+        let popped = app.pop_next_queued().unwrap();
+        assert_eq!(popped.text, "first");
         assert_eq!(app.queued_messages.len(), 1);
-        assert_eq!(app.queued_messages[0], "second");
+        assert_eq!(app.queued_messages[0].text, "second");
     }
 
     #[test]
@@ -2063,18 +2247,200 @@ mod tests {
         assert_eq!(app.compute_queue_preview_height(), 0);
 
         // 1 message: header(1) + shown(1) + hint(1) = 3
-        app.queued_messages.push_back("a".to_string());
+        app.queued_messages.push_back(qm("a"));
         assert_eq!(app.compute_queue_preview_height(), 3);
 
         // 3 messages: header(1) + shown(3) + hint(1) = 5
-        app.queued_messages.push_back("b".to_string());
-        app.queued_messages.push_back("c".to_string());
+        app.queued_messages.push_back(qm("b"));
+        app.queued_messages.push_back(qm("c"));
         assert_eq!(app.compute_queue_preview_height(), 5);
 
         // 5 messages: header(1) + shown(3) + overflow(1) + hint(1) = 6
-        app.queued_messages.push_back("d".to_string());
-        app.queued_messages.push_back("e".to_string());
+        app.queued_messages.push_back(qm("d"));
+        app.queued_messages.push_back(qm("e"));
         assert_eq!(app.compute_queue_preview_height(), 6);
+    }
+
+    // --- Interrupt preserves queued messages ---
+
+    #[test]
+    fn interrupt_restores_queued_to_composer() {
+        let mut app = make_app();
+        app.state = AppState::Streaming {
+            start: Instant::now(),
+        };
+        app.cancel_token = Some(CancellationToken::new());
+        app.queued_messages.push_back(qm("msg1"));
+        app.queued_messages.push_back(qm("msg2"));
+        app.queued_messages.push_back(qm("msg3"));
+
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+
+        assert!(app.queued_messages.is_empty());
+        assert_eq!(app.composer.text(), "msg1\nmsg2\nmsg3");
+        let sys = last_system_text(&app).unwrap();
+        assert!(sys.contains("restored to composer"));
+    }
+
+    #[test]
+    fn interrupt_empty_queue_shows_interrupted() {
+        let mut app = make_app();
+        app.state = AppState::Streaming {
+            start: Instant::now(),
+        };
+        app.cancel_token = Some(CancellationToken::new());
+
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+
+        let sys = last_system_text(&app).unwrap();
+        assert_eq!(sys, "[interrupted]");
+    }
+
+    #[test]
+    fn interrupt_with_existing_composer_text() {
+        let mut app = make_app();
+        app.state = AppState::Streaming {
+            start: Instant::now(),
+        };
+        app.cancel_token = Some(CancellationToken::new());
+        app.composer.set_text("draft");
+        app.queued_messages.push_back(qm("queued"));
+
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+
+        assert_eq!(app.composer.text(), "draft\nqueued");
+    }
+
+    // --- Channel close robustness ---
+
+    #[test]
+    fn channel_close_with_queue_pauses() {
+        let mut app = make_app();
+        app.state = AppState::Streaming {
+            start: Instant::now(),
+        };
+        app.queued_messages.push_back(qm("pending"));
+
+        app.handle_agent_channel_closed();
+
+        assert!(app.last_turn_errored);
+        assert_eq!(app.queued_messages.len(), 1);
+        let sys = last_system_text(&app).unwrap();
+        assert!(sys.contains("queue paused"));
+    }
+
+    #[test]
+    fn channel_close_empty_queue_no_error() {
+        let mut app = make_app();
+        app.state = AppState::Streaming {
+            start: Instant::now(),
+        };
+
+        app.handle_agent_channel_closed();
+
+        assert!(!app.last_turn_errored);
+    }
+
+    // --- Backtrack mode ---
+
+    #[test]
+    fn backtrack_enters_on_esc_empty_composer() {
+        let mut app = make_app();
+        app.cells.push(HistoryCell::User {
+            text: "hello".to_string(),
+        });
+        app.cells.push(HistoryCell::Assistant {
+            text: "hi".to_string(),
+            streaming: false,
+        });
+        app.cells.push(HistoryCell::User {
+            text: "world".to_string(),
+        });
+
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+
+        assert!(matches!(
+            app.backtrack,
+            BacktrackPhase::Selecting { cursor: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn backtrack_no_user_messages_noop() {
+        let mut app = make_app();
+        app.cells.push(HistoryCell::System {
+            text: "welcome".to_string(),
+        });
+
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+
+        assert!(matches!(app.backtrack, BacktrackPhase::Inactive));
+    }
+
+    #[test]
+    fn backtrack_esc_cancels() {
+        let mut app = make_app();
+        app.cells.push(HistoryCell::User {
+            text: "hello".to_string(),
+        });
+
+        app.handle_key(key(KeyCode::Esc)).unwrap(); // enter backtrack
+        assert!(matches!(app.backtrack, BacktrackPhase::Selecting { .. }));
+
+        app.handle_key(key(KeyCode::Esc)).unwrap(); // cancel
+        assert!(matches!(app.backtrack, BacktrackPhase::Inactive));
+    }
+
+    #[test]
+    fn backtrack_navigate_and_select() {
+        let mut app = make_app();
+        app.cells.push(HistoryCell::User {
+            text: "first".to_string(),
+        });
+        app.cells.push(HistoryCell::Assistant {
+            text: "resp1".to_string(),
+            streaming: false,
+        });
+        app.cells.push(HistoryCell::User {
+            text: "second".to_string(),
+        });
+        app.cells.push(HistoryCell::Assistant {
+            text: "resp2".to_string(),
+            streaming: false,
+        });
+
+        // Enter backtrack (cursor starts at 0 = most recent)
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+
+        // Navigate up to select first (older) message
+        app.handle_key(key(KeyCode::Up)).unwrap();
+
+        // Select it
+        let action = app.handle_key(key(KeyCode::Enter)).unwrap();
+
+        assert!(matches!(
+            action,
+            AppAction::RewindTo {
+                nth_user_message: 0
+            }
+        ));
+        assert_eq!(app.composer.text(), "first");
+        // Cells should be truncated to before the first user message
+        assert_eq!(app.cells.len(), 0);
+        assert!(matches!(app.backtrack, BacktrackPhase::Inactive));
+    }
+
+    #[test]
+    fn backtrack_not_triggered_with_text_in_composer() {
+        let mut app = make_app();
+        app.cells.push(HistoryCell::User {
+            text: "hello".to_string(),
+        });
+        app.composer.set_text("draft");
+
+        // Esc with text in composer should NOT enter backtrack — it goes to composer's Esc handler
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+        assert!(matches!(app.backtrack, BacktrackPhase::Inactive));
     }
 
     // --- /tools command ---
