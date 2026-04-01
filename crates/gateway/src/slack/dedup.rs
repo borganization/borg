@@ -1,33 +1,10 @@
 use borg_core::constants;
 
-use crate::dedup::BoundedDedup;
-
-const DEFAULT_CAPACITY: usize = constants::SLACK_DEDUP_CAPACITY;
-
-/// Bounded deduplicator for Slack event IDs.
-pub struct EventDeduplicator(BoundedDedup<String>);
-
-impl EventDeduplicator {
-    pub fn new() -> Self {
-        Self(BoundedDedup::new(DEFAULT_CAPACITY))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
-        Self(BoundedDedup::new(capacity))
-    }
-
-    /// Returns `true` if this event_id has been seen before.
-    pub fn is_duplicate(&mut self, event_id: &str) -> bool {
-        self.0.is_duplicate(&event_id.to_string())
-    }
-}
-
-impl Default for EventDeduplicator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+crate::dedup_wrapper!(
+    /// Bounded deduplicator for Slack event IDs.
+    pub struct EventDeduplicator(String, constants::SLACK_DEDUP_CAPACITY);
+    is_duplicate(event_id: &str) => event_id.to_string();
+);
 
 #[cfg(test)]
 mod tests {

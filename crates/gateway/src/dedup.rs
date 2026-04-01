@@ -36,6 +36,49 @@ impl<K: Hash + Eq + Clone> BoundedDedup<K> {
     }
 }
 
+/// Generate a typed deduplicator wrapper around `BoundedDedup`.
+///
+/// Usage:
+/// ```ignore
+/// crate::dedup_wrapper!(
+///     /// Doc comment for the wrapper.
+///     pub struct MyDedup(KeyType, CAPACITY_CONST);
+///     is_duplicate(arg_name: ArgType) => convert_expr;
+/// );
+/// ```
+#[macro_export]
+macro_rules! dedup_wrapper {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $Name:ident($KeyType:ty, $capacity:expr);
+        is_duplicate($arg:ident : $ArgType:ty) => $convert:expr;
+    ) => {
+        $(#[$meta])*
+        $vis struct $Name($crate::dedup::BoundedDedup<$KeyType>);
+
+        impl $Name {
+            pub fn new() -> Self {
+                Self($crate::dedup::BoundedDedup::new($capacity))
+            }
+
+            #[cfg(test)]
+            pub(crate) fn with_capacity(capacity: usize) -> Self {
+                Self($crate::dedup::BoundedDedup::new(capacity))
+            }
+
+            pub fn is_duplicate(&mut self, $arg: $ArgType) -> bool {
+                self.0.is_duplicate(&$convert)
+            }
+        }
+
+        impl Default for $Name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

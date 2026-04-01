@@ -40,13 +40,7 @@ impl<'a> ToolExecutor<'a> {
         blocked_paths: &[String],
     ) -> Result<String> {
         let entrypoint = self.validated_entrypoint()?;
-        let sandbox_policy = self
-            .manifest
-            .sandbox_policy()
-            .with_borg_dir_protected()
-            .with_tildes_expanded()
-            .with_defaults_applied()
-            .with_blocked_paths_filtered(blocked_paths);
+        let sandbox_policy = self.manifest.sandbox_policy().configured(blocked_paths);
 
         let (ok, text) = run_sandboxed_script(
             &self.manifest.runtime,
@@ -77,13 +71,7 @@ impl<'a> ToolExecutor<'a> {
         F: FnMut(&str, bool) + Send,
     {
         let entrypoint = self.validated_entrypoint()?;
-        let sandbox_policy = self
-            .manifest
-            .sandbox_policy()
-            .with_borg_dir_protected()
-            .with_tildes_expanded()
-            .with_defaults_applied()
-            .with_blocked_paths_filtered(blocked_paths);
+        let sandbox_policy = self.manifest.sandbox_policy().configured(blocked_paths);
 
         let runner = ScriptRunner {
             runtime: &self.manifest.runtime,

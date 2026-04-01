@@ -106,6 +106,15 @@ impl SandboxPolicy {
         self
     }
 
+    /// Apply the standard configuration chain: protect ~/.borg, expand tildes,
+    /// apply network defaults, and filter blocked paths.
+    pub fn configured(self, blocked_paths: &[String]) -> Self {
+        self.with_borg_dir_protected()
+            .with_tildes_expanded()
+            .with_defaults_applied()
+            .with_blocked_paths_filtered(blocked_paths)
+    }
+
     /// Add `~/.borg/` to deny_write to protect agent config, consuming self.
     pub fn with_borg_dir_protected(mut self) -> Self {
         let borg_dir = dirs::home_dir()
