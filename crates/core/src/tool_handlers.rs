@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::agent::AgentEvent;
 use crate::browser::{validate_browser_args, BrowserSession};
 use crate::config::Config;
+use crate::constants;
 use crate::db::Database;
 use crate::memory::{read_memory, write_memory_scoped, WriteMode};
 use crate::policy::ExecutionPolicy;
@@ -395,117 +396,21 @@ where
 pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result<String> {
     let action = require_str_param(args, "action")?;
     match action {
-        "create" => {
-            let task_name = require_str_param(args, "name")?;
-            let prompt = require_str_param(args, "prompt")?;
-            let schedule_type = args["schedule_type"].as_str().unwrap_or("interval");
-            let schedule_expr = require_str_param(args, "schedule_expr")?;
-            let timezone = args["timezone"].as_str().unwrap_or("local");
-            if let Err(e) = tasks::validate_schedule(schedule_type, schedule_expr) {
-                return Ok(format!("Error: Invalid schedule: {e}"));
-            }
-            let next_run = match tasks::calculate_next_run(schedule_type, schedule_expr) {
-                Ok(nr) => nr,
-                Err(e) => return Ok(format!("Error: Invalid schedule: {e}")),
-            };
-            let id = uuid::Uuid::new_v4().to_string();
-            with_db(|db| match db.create_task(&crate::db::NewTask {
-                id: &id,
-                name: task_name,
-                prompt,
-                schedule_type,
-                schedule_expr,
-                timezone,
-                next_run,
-                max_retries: args["max_retries"].as_i64().map(|v| v as i32),
-                timeout_ms: args["timeout_ms"].as_i64(),
-                delivery_channel: args["delivery_channel"].as_str(),
-                delivery_target: args["delivery_target"].as_str(),
-            }) {
-                Ok(()) => Ok(format!(
-                    "Scheduled task created: {task_name} (id: {})",
-                    &id[..8]
-                )),
-                Err(e) => Ok(format!("Error creating task: {e}")),
-            })
-        }
-        "list" => with_db(|db| match db.list_tasks() {
-            Ok(tl) if tl.is_empty() => Ok("No scheduled tasks.".to_string()),
-            Ok(tl) => Ok(tl
-                .iter()
-                .map(tasks::format_task)
-                .collect::<Vec<_>>()
-                .join("\n\n")),
-            Err(e) => Ok(format!("Error listing tasks: {e}")),
-        }),
-        "get" => {
-            let task_id = require_str_param(args, "task_id")?;
-            with_db(|db| match db.get_task_by_id(task_id) {
-                Ok(Some(task)) => {
-                    let mut output = tasks::format_task(&task);
-                    if let Ok(Some(run)) = db.last_task_run(task_id) {
-                        let when = chrono::DateTime::from_timestamp(run.started_at, 0)
-                            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                            .unwrap_or_else(|| run.started_at.to_string());
-                        output.push_str(&format!(
-                            "\n    Last run: {} at {when} ({} ms)",
-                            run.status, run.duration_ms
-                        ));
-                    }
-                    Ok(output)
-                }
-                Ok(None) => Ok(format!("Task {task_id} not found.")),
-                Err(e) => Ok(format!("Error: {e}")),
-            })
-        }
-        "update" => {
-            let task_id = require_str_param(args, "task_id")?;
-            let update = crate::db::UpdateTask {
-                name: args["name"].as_str(),
-                prompt: args["prompt"].as_str(),
-                schedule_type: args["schedule_type"].as_str(),
-                schedule_expr: args["schedule_expr"].as_str(),
-                timezone: args["timezone"].as_str(),
-            };
-            if let Some(st) = update.schedule_type {
-                let expr = update.schedule_expr.unwrap_or("");
-                if let Err(e) = tasks::validate_schedule(st, expr) {
-                    return Ok(format!("Error: Invalid schedule: {e}"));
-                }
-            } else if let Some(expr) = update.schedule_expr {
-                let validation = with_db(|db| match db.get_task_by_id(task_id) {
-                    Ok(Some(existing)) => {
-                        if let Err(e) =
-                            tasks::validate_schedule(&existing.schedule_type, expr)
-                        {
-                            return Ok(format!("Error: Invalid schedule: {e}"));
-                        }
-                        Ok(String::new())
-                    }
-                    Ok(None) => Ok(format!("Task {task_id} not found.")),
-                    Err(e) => Ok(format!("Error: {e}")),
-                })?;
-                if !validation.is_empty() {
-                    return Ok(validation);
-                }
-            }
-            with_db(|db| match db.update_task(task_id, &update) {
-                Ok(true) => Ok(format!("Task {task_id} updated.")),
-                Ok(false) => Ok(format!("Task {task_id} not found.")),
-                Err(e) => Ok(format!("Error: {e}")),
-            })
-        }
+        "create" => manage_tasks_create(args),
+        "list" => manage_tasks_list(),
+        "get" => manage_tasks_get(args),
+        "update" => manage_tasks_update(args),
         "pause" => {
             let task_id = require_str_param(args, "task_id")?;
-            update_task_status(task_id, "paused", "paused")
+            update_task_status(task_id, tasks::TASK_STATUS_PAUSED, "paused")
         }
         "resume" => {
             let task_id = require_str_param(args, "task_id")?;
-            update_task_status(task_id, "active", "resumed")
+            update_task_status(task_id, tasks::TASK_STATUS_ACTIVE, "resumed")
         }
         "cancel" => {
             let task_id = require_str_param(args, "task_id")?;
-            update_task_status(task_id, "cancelled", "cancelled")
+            update_task_status(task_id, tasks::TASK_STATUS_CANCELLED, "cancelled")
         }
         "delete" => {
             let task_id = require_str_param(args, "task_id")?;
@@ -515,51 +420,158 @@ pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result
                 Err(e) => Ok(format!("Error: {e}")),
             })
         }
-        "runs" => {
-            let task_id = require_str_param(args, "task_id")?;
-            let limit = args["limit"].as_u64().unwrap_or(5) as usize;
-            with_db(|db| match db.task_run_history(task_id, limit) {
-                Ok(runs) if runs.is_empty() => Ok("No runs recorded.".to_string()),
-                Ok(runs) => {
-                    let mut out = String::new();
-                    for run in &runs {
-                        let when = chrono::DateTime::from_timestamp(run.started_at, 0)
-                            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                            .unwrap_or_else(|| run.started_at.to_string());
-                        let status = tasks::format_run_status(&run.status);
-                        out.push_str(&format!("  {when} [{status}] {}ms", run.duration_ms));
-                        if let Some(ref e) = run.error {
-                            out.push_str(&format!(
-                                "\n    Error: {}",
-                                &e[..e.len().min(200)]
-                            ));
-                        }
-                        out.push('\n');
-                    }
-                    Ok(out)
-                }
-                Err(e) => Ok(format!("Error: {e}")),
-            })
-        }
-        "run_now" => {
-            let task_id = require_str_param(args, "task_id")?;
-            with_db(|db| match db.get_task_by_id(task_id) {
-                Ok(Some(_)) => {
-                    let now = chrono::Utc::now().timestamp();
-                    if let Err(e) = db.update_task_next_run(task_id, Some(now)) {
-                        return Ok(format!("Error: {e}"));
-                    }
-                    let _ = db.clear_task_retry(task_id);
-                    Ok(format!("Task {task_id} queued for immediate execution."))
-                }
-                Ok(None) => Ok(format!("Task {task_id} not found.")),
-                Err(e) => Ok(format!("Error: {e}")),
-            })
-        }
+        "runs" => manage_tasks_runs(args),
+        "run_now" => manage_tasks_run_now(args),
         other => Ok(format!(
             "Unknown action: {other}. Use: create, list, get, update, pause, resume, cancel, delete, runs, run_now."
         )),
     }
+}
+
+fn manage_tasks_create(args: &serde_json::Value) -> Result<String> {
+    let task_name = require_str_param(args, "name")?;
+    let prompt = require_str_param(args, "prompt")?;
+    let schedule_type = args["schedule_type"].as_str().unwrap_or("interval");
+    let schedule_expr = require_str_param(args, "schedule_expr")?;
+    let timezone = args["timezone"].as_str().unwrap_or("local");
+    if let Err(e) = tasks::validate_schedule(schedule_type, schedule_expr) {
+        return Ok(format!("Error: Invalid schedule: {e}"));
+    }
+    let next_run = match tasks::calculate_next_run(schedule_type, schedule_expr) {
+        Ok(nr) => nr,
+        Err(e) => return Ok(format!("Error: Invalid schedule: {e}")),
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    with_db(|db| {
+        match db.create_task(&crate::db::NewTask {
+            id: &id,
+            name: task_name,
+            prompt,
+            schedule_type,
+            schedule_expr,
+            timezone,
+            next_run,
+            max_retries: args["max_retries"].as_i64().map(|v| v as i32),
+            timeout_ms: args["timeout_ms"].as_i64(),
+            delivery_channel: args["delivery_channel"].as_str(),
+            delivery_target: args["delivery_target"].as_str(),
+        }) {
+            Ok(()) => Ok(format!(
+                "Scheduled task created: {task_name} (id: {})",
+                &id[..8]
+            )),
+            Err(e) => Ok(format!("Error creating task: {e}")),
+        }
+    })
+}
+
+fn manage_tasks_list() -> Result<String> {
+    with_db(|db| match db.list_tasks() {
+        Ok(tl) if tl.is_empty() => Ok("No scheduled tasks.".to_string()),
+        Ok(tl) => Ok(tl
+            .iter()
+            .map(tasks::format_task)
+            .collect::<Vec<_>>()
+            .join("\n\n")),
+        Err(e) => Ok(format!("Error listing tasks: {e}")),
+    })
+}
+
+fn manage_tasks_get(args: &serde_json::Value) -> Result<String> {
+    let task_id = require_str_param(args, "task_id")?;
+    with_db(|db| match db.get_task_by_id(task_id) {
+        Ok(Some(task)) => {
+            let mut output = tasks::format_task(&task);
+            if let Ok(Some(run)) = db.last_task_run(task_id) {
+                let when = chrono::DateTime::from_timestamp(run.started_at, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                    .unwrap_or_else(|| run.started_at.to_string());
+                output.push_str(&format!(
+                    "\n    Last run: {} at {when} ({} ms)",
+                    run.status, run.duration_ms
+                ));
+            }
+            Ok(output)
+        }
+        Ok(None) => Ok(format!("Task {task_id} not found.")),
+        Err(e) => Ok(format!("Error: {e}")),
+    })
+}
+
+fn manage_tasks_update(args: &serde_json::Value) -> Result<String> {
+    let task_id = require_str_param(args, "task_id")?;
+    let update = crate::db::UpdateTask {
+        name: args["name"].as_str(),
+        prompt: args["prompt"].as_str(),
+        schedule_type: args["schedule_type"].as_str(),
+        schedule_expr: args["schedule_expr"].as_str(),
+        timezone: args["timezone"].as_str(),
+    };
+    if let Some(st) = update.schedule_type {
+        let expr = update.schedule_expr.unwrap_or("");
+        if let Err(e) = tasks::validate_schedule(st, expr) {
+            return Ok(format!("Error: Invalid schedule: {e}"));
+        }
+    } else if let Some(expr) = update.schedule_expr {
+        let validation = with_db(|db| match db.get_task_by_id(task_id) {
+            Ok(Some(existing)) => {
+                if let Err(e) = tasks::validate_schedule(&existing.schedule_type, expr) {
+                    return Ok(format!("Error: Invalid schedule: {e}"));
+                }
+                Ok(String::new())
+            }
+            Ok(None) => Ok(format!("Task {task_id} not found.")),
+            Err(e) => Ok(format!("Error: {e}")),
+        })?;
+        if !validation.is_empty() {
+            return Ok(validation);
+        }
+    }
+    with_db(|db| match db.update_task(task_id, &update) {
+        Ok(true) => Ok(format!("Task {task_id} updated.")),
+        Ok(false) => Ok(format!("Task {task_id} not found.")),
+        Err(e) => Ok(format!("Error: {e}")),
+    })
+}
+
+fn manage_tasks_runs(args: &serde_json::Value) -> Result<String> {
+    let task_id = require_str_param(args, "task_id")?;
+    let limit = args["limit"].as_u64().unwrap_or(5) as usize;
+    with_db(|db| match db.task_run_history(task_id, limit) {
+        Ok(runs) if runs.is_empty() => Ok("No runs recorded.".to_string()),
+        Ok(runs) => {
+            let mut out = String::new();
+            for run in &runs {
+                let when = chrono::DateTime::from_timestamp(run.started_at, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                    .unwrap_or_else(|| run.started_at.to_string());
+                let status = tasks::format_run_status(&run.status);
+                out.push_str(&format!("  {when} [{status}] {}ms", run.duration_ms));
+                if let Some(ref e) = run.error {
+                    out.push_str(&format!("\n    Error: {}", &e[..e.len().min(200)]));
+                }
+                out.push('\n');
+            }
+            Ok(out)
+        }
+        Err(e) => Ok(format!("Error: {e}")),
+    })
+}
+
+fn manage_tasks_run_now(args: &serde_json::Value) -> Result<String> {
+    let task_id = require_str_param(args, "task_id")?;
+    with_db(|db| match db.get_task_by_id(task_id) {
+        Ok(Some(_)) => {
+            let now = chrono::Utc::now().timestamp();
+            if let Err(e) = db.update_task_next_run(task_id, Some(now)) {
+                return Ok(format!("Error: {e}"));
+            }
+            let _ = db.clear_task_retry(task_id);
+            Ok(format!("Task {task_id} queued for immediate execution."))
+        }
+        Ok(None) => Ok(format!("Task {task_id} not found.")),
+        Err(e) => Ok(format!("Error: {e}")),
+    })
 }
 
 pub fn handle_list_dir(args: &serde_json::Value, config: &Config) -> Result<String> {
@@ -671,7 +683,9 @@ fn format_size(bytes: u64) -> String {
 
 pub fn handle_read_pdf(args: &serde_json::Value) -> Result<String> {
     let file_path = require_str_param(args, "file_path")?;
-    let max_chars = args["max_chars"].as_u64().unwrap_or(50000) as usize;
+    let max_chars = args["max_chars"]
+        .as_u64()
+        .unwrap_or(constants::DEFAULT_READ_MAX_CHARS as u64) as usize;
     let path = std::path::Path::new(file_path);
     if !path.exists() {
         return Ok(format!("File not found: {file_path}"));
@@ -717,7 +731,9 @@ pub fn handle_read_file(args: &serde_json::Value, config: &Config) -> Result<Too
     let raw_path = require_str_param(args, "path")?;
     let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
     let limit = args["limit"].as_u64().unwrap_or(0) as usize;
-    let max_chars = args["max_chars"].as_u64().unwrap_or(50000) as usize;
+    let max_chars = args["max_chars"]
+        .as_u64()
+        .unwrap_or(constants::DEFAULT_READ_MAX_CHARS as u64) as usize;
 
     // Resolve path: expand ~ and resolve relative paths
     let expanded = shellexpand::tilde(raw_path).to_string();
@@ -769,7 +785,7 @@ pub fn handle_read_file(args: &serde_json::Value, config: &Config) -> Result<Too
     if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
         // Guard against huge images (50MB max)
         if let Ok(meta) = std::fs::metadata(&canonical) {
-            if meta.len() > 50 * 1024 * 1024 {
+            if meta.len() > constants::MAX_IMAGE_FILE_SIZE as u64 {
                 return Ok(ToolOutput::Text(format!(
                     "Image too large ({} MB). Max 50 MB.",
                     meta.len() / (1024 * 1024)
@@ -800,7 +816,8 @@ pub fn handle_read_file(args: &serde_json::Value, config: &Config) -> Result<Too
 
         // Compress if needed (1MB threshold)
         let (final_b64, final_mime) =
-            crate::media::compress_image(&b64, mime, 1_048_576).unwrap_or((b64, mime.to_string()));
+            crate::media::compress_image(&b64, mime, constants::IMAGE_COMPRESSION_TARGET)
+                .unwrap_or((b64, mime.to_string()));
 
         let summary = format!(
             "Image: {} ({} bytes)",
@@ -1363,6 +1380,112 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
 /// Chunk metadata: (snippet, start_line, end_line).
 type ChunkMeta<'a> = std::collections::HashMap<(String, i64), (&'a str, Option<i64>, Option<i64>)>;
 
+/// Run hybrid FTS + vector search for a single scope, returning merged results.
+#[allow(clippy::too_many_arguments)]
+fn search_scope(
+    db: &Database,
+    scope: &str,
+    query: &str,
+    query_embedding: Option<&[f32]>,
+    max_results: usize,
+    min_score: f32,
+    vector_weight: f32,
+    bm25_weight: f32,
+) -> Vec<crate::embeddings::SearchResult> {
+    // FTS search
+    let fts_rows = match db.fts_search(scope, query, max_results * 4) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("FTS search failed for scope {scope}: {e}");
+            return Vec::new();
+        }
+    };
+    let fts_owned: Vec<(String, i64, f32)> = fts_rows
+        .iter()
+        .map(|(c, score)| (c.filename.clone(), c.chunk_index, *score))
+        .collect();
+
+    let fts_meta: ChunkMeta<'_> = fts_rows
+        .iter()
+        .map(|(c, _)| {
+            (
+                (c.filename.clone(), c.chunk_index),
+                (c.content.as_str(), c.start_line, c.end_line),
+            )
+        })
+        .collect();
+
+    // Vector search across chunks
+    let chunks = match db.get_all_chunks(scope, None) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Chunk retrieval failed for scope {scope}: {e}");
+            return Vec::new();
+        }
+    };
+    let vec_owned: Vec<(String, i64, f32)> = if let Some(query_emb) = query_embedding {
+        chunks
+            .iter()
+            .filter_map(|c| {
+                c.embedding.as_ref().and_then(|emb_bytes| {
+                    let Ok(stored) = crate::embeddings::bytes_to_embedding(emb_bytes) else {
+                        return None;
+                    };
+                    let sim = crate::embeddings::cosine_similarity(query_emb, &stored);
+                    Some((c.filename.clone(), c.chunk_index, sim))
+                })
+            })
+            // Vector threshold is halved: cosine similarity scores tend to be lower than BM25-normalized scores
+            .filter(|(_f, _ci, sim)| *sim >= min_score * 0.5)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let chunk_meta: ChunkMeta<'_> = chunks
+        .iter()
+        .map(|c| {
+            (
+                (c.filename.clone(), c.chunk_index),
+                (c.content.as_str(), c.start_line, c.end_line),
+            )
+        })
+        .collect();
+
+    // Merge hybrid scores
+    let fts_refs: Vec<(&str, i64, f32)> = fts_owned
+        .iter()
+        .map(|(f, ci, s)| (f.as_str(), *ci, *s))
+        .collect();
+    let vec_refs: Vec<(&str, i64, f32)> = vec_owned
+        .iter()
+        .map(|(f, ci, s)| (f.as_str(), *ci, *s))
+        .collect();
+    let merged =
+        crate::embeddings::merge_search_scores(&vec_refs, &fts_refs, vector_weight, bm25_weight);
+
+    merged
+        .into_iter()
+        .filter(|(_filename, _chunk_index, score)| *score >= min_score)
+        .map(|(filename, chunk_index, score)| {
+            let key = (filename.clone(), chunk_index);
+            let (snippet, start_line, end_line) = fts_meta
+                .get(&key)
+                .or_else(|| chunk_meta.get(&key))
+                .map(|(s, sl, el)| (s.to_string(), *sl, *el))
+                .unwrap_or_default();
+            crate::embeddings::SearchResult {
+                filename,
+                chunk_index,
+                start_line,
+                end_line,
+                score,
+                snippet,
+            }
+        })
+        .collect()
+}
+
 /// Execute hybrid memory search (FTS + vector) across global and local scopes.
 pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> Result<String> {
     let query = require_str_param(args, "query")?;
@@ -1384,103 +1507,16 @@ pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> 
     }
 
     for scope in &["global", "local", "extra", "sessions"] {
-        // FTS search
-        let fts_rows = match db.fts_search(scope, query, max_results * 4) {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!("FTS search failed for scope {scope}: {e}");
-                Vec::new()
-            }
-        };
-        let fts_owned: Vec<(String, i64, f32)> = fts_rows
-            .iter()
-            .map(|(c, score)| (c.filename.clone(), c.chunk_index, *score))
-            .collect();
-
-        // Build metadata maps from FTS results
-        let fts_meta: ChunkMeta<'_> = fts_rows
-            .iter()
-            .map(|(c, _)| {
-                (
-                    (c.filename.clone(), c.chunk_index),
-                    (c.content.as_str(), c.start_line, c.end_line),
-                )
-            })
-            .collect();
-
-        // Vector search across chunks
-        let chunks = match db.get_all_chunks(scope, None) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Chunk retrieval failed for scope {scope}: {e}");
-                Vec::new()
-            }
-        };
-        let vec_owned: Vec<(String, i64, f32)> = if let Some(ref query_emb) = query_embedding {
-            chunks
-                .iter()
-                .filter_map(|c| {
-                    c.embedding.as_ref().and_then(|emb_bytes| {
-                        let Ok(stored) = crate::embeddings::bytes_to_embedding(emb_bytes) else {
-                            return None;
-                        };
-                        let sim = crate::embeddings::cosine_similarity(query_emb, &stored);
-                        Some((c.filename.clone(), c.chunk_index, sim))
-                    })
-                })
-                // Vector threshold is halved: cosine similarity scores tend to be lower than BM25-normalized scores
-                .filter(|(_f, _ci, sim)| *sim >= min_score * 0.5)
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        // Build metadata map from chunk rows (snippet, line numbers)
-        let chunk_meta: ChunkMeta<'_> = chunks
-            .iter()
-            .map(|c| {
-                (
-                    (c.filename.clone(), c.chunk_index),
-                    (c.content.as_str(), c.start_line, c.end_line),
-                )
-            })
-            .collect();
-
-        // Merge hybrid scores
-        let fts_refs: Vec<(&str, i64, f32)> = fts_owned
-            .iter()
-            .map(|(f, ci, s)| (f.as_str(), *ci, *s))
-            .collect();
-        let vec_refs: Vec<(&str, i64, f32)> = vec_owned
-            .iter()
-            .map(|(f, ci, s)| (f.as_str(), *ci, *s))
-            .collect();
-        let merged = crate::embeddings::merge_search_scores(
-            &vec_refs,
-            &fts_refs,
+        all_results.extend(search_scope(
+            &db,
+            scope,
+            query,
+            query_embedding.as_deref(),
+            max_results,
+            min_score,
             vector_weight,
             bm25_weight,
-        );
-
-        for (filename, chunk_index, score) in merged {
-            if score < min_score {
-                continue;
-            }
-            let key = (filename.clone(), chunk_index);
-            let (snippet, start_line, end_line) = fts_meta
-                .get(&key)
-                .or_else(|| chunk_meta.get(&key))
-                .map(|(s, sl, el)| (s.to_string(), *sl, *el))
-                .unwrap_or_default();
-            all_results.push(crate::embeddings::SearchResult {
-                filename,
-                chunk_index,
-                start_line,
-                end_line,
-                score,
-                snippet,
-            });
-        }
+        ));
     }
 
     // If no results, try a looser FTS search with individual terms
