@@ -833,7 +833,7 @@ fn run_tasks_runs(id: &str, count: usize) -> Result<()> {
     println!("{}", "-".repeat(70));
     for run in &runs {
         let when = format_ts(run.started_at, "%Y-%m-%d %H:%M");
-        let status = if run.error.is_some() { "FAIL" } else { "OK" };
+        let status = borg_core::tasks::format_run_status(&run.status);
         let duration = format!("{}ms", run.duration_ms);
         let details = run
             .error
@@ -876,9 +876,11 @@ fn run_tasks_status(id: &str) -> Result<()> {
                 }
             }
             if let Ok(Some(run)) = db.last_task_run(id) {
-                let status = if run.error.is_some() { "error" } else { "ok" };
                 let when = format_ts(run.started_at, "%Y-%m-%d %H:%M UTC");
-                println!("    Last run: {status} at {when} ({}ms)", run.duration_ms);
+                println!(
+                    "    Last run: {} at {when} ({}ms)",
+                    run.status, run.duration_ms
+                );
             }
         }
         None => println!("Task not found: {id}"),
