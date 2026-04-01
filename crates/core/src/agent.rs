@@ -416,8 +416,29 @@ impl Agent {
 
     /// Start a new session, clearing history.
     pub fn new_session(&mut self) {
+        // Fire SessionEnd for the previous session if any turns were executed
+        if self.turn_count > 0 {
+            let hook_ctx = self.hook_ctx(
+                HookPoint::SessionEnd,
+                HookData::SessionEnd {
+                    session_id: self.session.meta.id.clone(),
+                    total_turns: self.turn_count,
+                },
+            );
+            self.hook_registry.dispatch(&hook_ctx);
+        }
+
         self.history.clear();
         self.session = Session::new();
+
+        // Fire SessionStart for the new session
+        let hook_ctx = self.hook_ctx(
+            HookPoint::SessionStart,
+            HookData::SessionStart {
+                session_id: self.session.meta.id.clone(),
+            },
+        );
+        self.hook_registry.dispatch(&hook_ctx);
     }
 
     /// Auto-save current session state.

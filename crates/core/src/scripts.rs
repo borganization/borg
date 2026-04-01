@@ -486,8 +486,7 @@ fn build_script_sandbox_policy(
             network: true,
             fs_read: vec!["/".to_string()],
             fs_write: vec!["/tmp".to_string(), dir_str()],
-            deny_read: vec![],
-            deny_write: vec![],
+            ..Default::default()
         }
         .with_borg_dir_protected(),
         "custom" => {
@@ -497,8 +496,7 @@ fn build_script_sandbox_policy(
                 network: script.network_access,
                 fs_read,
                 fs_write,
-                deny_read: vec![],
-                deny_write: vec![],
+                ..Default::default()
             }
             .with_borg_dir_protected()
             .with_tildes_expanded()
@@ -506,11 +504,9 @@ fn build_script_sandbox_policy(
         }
         // "default" and anything else
         _ => SandboxPolicy {
-            network: false,
             fs_read: vec![dir_str(), "/tmp".to_string()],
             fs_write: vec!["/tmp".to_string()],
-            deny_read: vec![],
-            deny_write: vec![],
+            ..Default::default()
         }
         .with_borg_dir_protected()
         .with_defaults_applied(),
