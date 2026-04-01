@@ -230,9 +230,13 @@ pub fn chunk_content(text: &str, chunk_size_tokens: usize, overlap_tokens: usize
 
         if !current_content.is_empty() && current_tokens > 0 {
             current_content.push_str("\n\n");
+            current_tokens += 1; // ~1 token for separator
         }
         current_content.push_str(&block.content);
-        current_tokens = estimate_tokens(&current_content);
+        // Incremental tracking: avoids O(n²) re-estimation of the full accumulated string.
+        // BPE tokenizers are not perfectly additive, so this may drift slightly from the true
+        // count. The error is bounded and acceptable for chunk sizing.
+        current_tokens += block_tokens;
         current_end = block.end_line;
     }
 
@@ -429,5 +433,74 @@ mod tests {
         let blocks = parse_markdown_blocks(text);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].kind, BlockKind::CodeFence);
+    }
+
+    #[test]
+    fn chunk_consecutive_code_fences() {
+        let text = "```\nfirst block\n```\n\n```\nsecond block\n```";
+        let chunks = chunk_content(text, 400, 0);
+        assert!(!chunks.is_empty());
+        let all_content: String = chunks
+            .iter()
+            .map(|c| c.content.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(all_content.contains("first block"));
+        assert!(all_content.contains("second block"));
+    }
+
+    #[test]
+    fn chunk_four_backtick_fence() {
+        let text = "````\ncode here\n````";
+        let blocks = parse_markdown_blocks(text);
+        // Four backticks start with "```" so they should be detected as a fence
+        assert!(!blocks.is_empty());
+    }
+
+    #[test]
+    fn chunk_overlap_exceeds_size() {
+        // overlap > chunk_size should not panic or infinite loop
+        let paragraph = "Word ".repeat(100);
+        let text = (0..5)
+            .map(|_| paragraph.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let chunks = chunk_content(&text, 50, 200);
+        assert!(!chunks.is_empty(), "should produce at least one chunk");
+    }
+
+    #[test]
+    fn chunk_empty_code_block() {
+        let text = "Before.\n\n```\n```\n\nAfter.";
+        let chunks = chunk_content(text, 400, 0);
+        assert!(!chunks.is_empty());
+        let all: String = chunks
+            .iter()
+            .map(|c| c.content.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(all.contains("Before"));
+        assert!(all.contains("After"));
+    }
+
+    #[test]
+    fn chunk_heading_as_last_line() {
+        let text = "Some content.\n\n## Final Heading";
+        let chunks = chunk_content(text, 400, 0);
+        assert!(!chunks.is_empty());
+        let all: String = chunks
+            .iter()
+            .map(|c| c.content.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(all.contains("Final Heading"));
+    }
+
+    #[test]
+    fn chunk_heading_with_special_chars() {
+        let text = "## Section @#$!\n\nContent here.";
+        let blocks = parse_markdown_blocks(text);
+        assert!(!blocks.is_empty());
+        assert_eq!(blocks[0].kind, BlockKind::Heading(2));
     }
 }

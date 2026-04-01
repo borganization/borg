@@ -1249,7 +1249,15 @@ impl Database {
     // ── Chunk CRUD ──
 
     /// Upsert a set of chunks for a given scope+filename, replacing any existing chunks for that file.
+    ///
+    /// Uses `unchecked_transaction()` because `transaction()` requires `&mut self`.
+    /// **Safety invariant:** this function must NOT be called from within another transaction,
+    /// as nesting `unchecked_transaction()` calls leads to silent data-loss or locking errors.
     pub fn upsert_chunks(&self, scope: &str, filename: &str, chunks: &[ChunkData]) -> Result<()> {
+        debug_assert!(
+            self.conn.is_autocommit(),
+            "upsert_chunks must not be called from within another transaction"
+        );
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM memory_chunks WHERE scope = ?1 AND filename = ?2",
@@ -1284,29 +1292,38 @@ impl Database {
         Ok(())
     }
 
-    /// Retrieve all chunks for a given scope.
-    pub fn get_all_chunks(&self, scope: &str) -> Result<Vec<ChunkRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, scope, filename, chunk_index, start_line, end_line, content, content_hash, embedding, created_at
-             FROM memory_chunks WHERE scope = ?1 ORDER BY filename, chunk_index",
-        )?;
-        let rows = stmt
-            .query_map(params![scope], |row| {
-                Ok(ChunkRow {
-                    id: row.get(0)?,
-                    scope: row.get(1)?,
-                    filename: row.get(2)?,
-                    chunk_index: row.get(3)?,
-                    start_line: row.get(4)?,
-                    end_line: row.get(5)?,
-                    content: row.get(6)?,
-                    content_hash: row.get(7)?,
-                    embedding: row.get(8)?,
-                    created_at: row.get(9)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+    /// Retrieve all chunks for a given scope, optionally limited to `limit` rows.
+    pub fn get_all_chunks(&self, scope: &str, limit: Option<usize>) -> Result<Vec<ChunkRow>> {
+        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<ChunkRow> {
+            Ok(ChunkRow {
+                id: row.get(0)?,
+                scope: row.get(1)?,
+                filename: row.get(2)?,
+                chunk_index: row.get(3)?,
+                start_line: row.get(4)?,
+                end_line: row.get(5)?,
+                content: row.get(6)?,
+                content_hash: row.get(7)?,
+                embedding: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        };
+        let base = "SELECT id, scope, filename, chunk_index, start_line, end_line, content, content_hash, embedding, created_at
+                     FROM memory_chunks WHERE scope = ?1 ORDER BY filename, chunk_index";
+        if let Some(n) = limit {
+            let query = format!("{base} LIMIT ?2");
+            let mut stmt = self.conn.prepare(&query)?;
+            let rows = stmt
+                .query_map(params![scope, n as i64], map_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        } else {
+            let mut stmt = self.conn.prepare(base)?;
+            let rows = stmt
+                .query_map(params![scope], map_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }
     }
 
     /// Delete all chunks for a specific file.
@@ -3482,7 +3499,7 @@ mod tests {
         ];
         db.upsert_chunks("global", "notes.md", &chunks)
             .expect("upsert");
-        let loaded = db.get_all_chunks("global").expect("get all");
+        let loaded = db.get_all_chunks("global", None).expect("get all");
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].filename, "notes.md");
         assert_eq!(loaded[0].chunk_index, 0);
@@ -3518,7 +3535,7 @@ mod tests {
         db.upsert_chunks("global", "notes.md", &chunks_v2)
             .expect("v2");
 
-        let loaded = db.get_all_chunks("global").expect("get");
+        let loaded = db.get_all_chunks("global", None).expect("get");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].content, "New content");
     }
@@ -3598,10 +3615,10 @@ mod tests {
             .expect("upsert a");
         db.upsert_chunks("global", "b.md", &chunks)
             .expect("upsert b");
-        assert_eq!(db.get_all_chunks("global").unwrap().len(), 2);
+        assert_eq!(db.get_all_chunks("global", None).unwrap().len(), 2);
 
         db.delete_chunks_for_file("global", "a.md").expect("delete");
-        let remaining = db.get_all_chunks("global").unwrap();
+        let remaining = db.get_all_chunks("global", None).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].filename, "b.md");
     }
@@ -3622,8 +3639,8 @@ mod tests {
         db.upsert_chunks("global", "g.md", &chunk).expect("global");
         db.upsert_chunks("local", "l.md", &chunk).expect("local");
 
-        assert_eq!(db.get_all_chunks("global").unwrap().len(), 1);
-        assert_eq!(db.get_all_chunks("local").unwrap().len(), 1);
+        assert_eq!(db.get_all_chunks("global", None).unwrap().len(), 1);
+        assert_eq!(db.get_all_chunks("local", None).unwrap().len(), 1);
     }
 
     #[test]
@@ -4059,5 +4076,56 @@ mod tests {
             audit_count, 1,
             "should have exactly one security audit task"
         );
+    }
+
+    #[test]
+    fn get_all_chunks_with_limit() {
+        let db = test_db();
+        let chunks: Vec<ChunkData> = (0..20)
+            .map(|i| ChunkData {
+                chunk_index: i,
+                content: format!("Chunk number {i}"),
+                content_hash: format!("hash_{i}"),
+                embedding: None,
+                dimension: None,
+                model: None,
+                start_line: Some((i as i64) * 10 + 1),
+                end_line: Some((i as i64 + 1) * 10),
+            })
+            .collect();
+        db.upsert_chunks("global", "big.md", &chunks)
+            .expect("upsert");
+
+        // Without limit
+        let all = db.get_all_chunks("global", None).expect("get all");
+        assert_eq!(all.len(), 20);
+
+        // With limit
+        let limited = db.get_all_chunks("global", Some(5)).expect("get limited");
+        assert_eq!(limited.len(), 5);
+
+        // Limit larger than actual count
+        let over = db.get_all_chunks("global", Some(100)).expect("get over");
+        assert_eq!(over.len(), 20);
+    }
+
+    #[test]
+    fn fts_search_empty_query() {
+        let db = test_db();
+        let chunks = vec![ChunkData {
+            chunk_index: 0,
+            content: "Hello world of programming".into(),
+            content_hash: "h".into(),
+            embedding: None,
+            dimension: None,
+            model: None,
+            start_line: Some(1),
+            end_line: Some(1),
+        }];
+        db.upsert_chunks("global", "test.md", &chunks)
+            .expect("upsert");
+        // Empty query after sanitization should return empty
+        let results = db.fts_search("global", "", 10).expect("fts");
+        assert!(results.is_empty());
     }
 }
