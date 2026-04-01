@@ -31,6 +31,7 @@ pub mod provider;
 pub mod rate_guard;
 pub mod retry;
 pub mod sanitize;
+pub mod scripts;
 pub mod secrets;
 pub mod secrets_resolve;
 pub mod session;

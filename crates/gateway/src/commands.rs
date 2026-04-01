@@ -65,12 +65,6 @@ pub const GATEWAY_COMMANDS: &[CommandDef] = &[
         pass_through: false,
     },
     CommandDef {
-        name: "tools",
-        description: "List installed tools",
-        accepts_args: false,
-        pass_through: false,
-    },
-    CommandDef {
         name: "whoami",
         description: "Show your sender identity",
         accepts_args: false,
@@ -111,7 +105,6 @@ enum Command {
     Usage,
     Skill,
     Skills,
-    Tools,
     WhoAmI,
     Memory,
     Doctor,
@@ -137,7 +130,6 @@ impl Command {
             "/usage" => Self::Usage,
             "/skill" => Self::Skill,
             "/skills" => Self::Skills,
-            "/tools" => Self::Tools,
             "/whoami" => Self::WhoAmI,
             "/memory" => Self::Memory,
             "/doctor" => Self::Doctor,
@@ -169,7 +161,6 @@ pub fn try_handle_command(
         Command::Usage => handle_usage(db, config, session_id),
         Command::Skill => return None, // Pass through to agent
         Command::Skills => handle_skills(config),
-        Command::Tools => handle_tools(),
         Command::WhoAmI => handle_whoami(sender_id, channel_name, db),
         Command::Memory => handle_memory(),
         Command::Doctor => handle_doctor(config),
@@ -275,31 +266,6 @@ fn handle_skills(config: &Config) -> String {
     }
 }
 
-fn handle_tools() -> String {
-    match borg_tools::registry::ToolRegistry::new() {
-        Ok(mut registry) => {
-            if let Err(e) = registry.scan() {
-                warn!("Failed to scan tools: {e}");
-                return "Failed to scan tools.".to_string();
-            }
-            let tools = registry.list_tools();
-            if tools.is_empty() {
-                "No tools installed.".to_string()
-            } else {
-                let mut lines = vec![format!("Tools ({}):", tools.len())];
-                for tool in &tools {
-                    lines.push(format!("  {tool}"));
-                }
-                lines.join("\n")
-            }
-        }
-        Err(e) => {
-            warn!("Failed to initialize tool registry: {e}");
-            "Failed to list tools.".to_string()
-        }
-    }
-}
-
 fn handle_whoami(sender_id: &str, channel_name: &str, db: &Database) -> String {
     let approved = db
         .is_sender_approved(channel_name, sender_id)
@@ -397,10 +363,6 @@ mod tests {
         assert!(matches!(
             Command::parse("/skills"),
             Some((Command::Skills, _))
-        ));
-        assert!(matches!(
-            Command::parse("/tools"),
-            Some((Command::Tools, _))
         ));
         assert!(matches!(
             Command::parse("/whoami"),

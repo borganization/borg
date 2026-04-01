@@ -249,6 +249,43 @@ pub struct UpdateTask<'a> {
     pub timezone: Option<&'a str>,
 }
 
+/// Script row from SQLite.
+#[derive(Debug, Clone)]
+pub struct ScriptRow {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub runtime: String,
+    pub entrypoint: String,
+    pub sandbox_profile: String,
+    pub network_access: bool,
+    pub fs_read: String,
+    pub fs_write: String,
+    pub ephemeral: bool,
+    pub hmac: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_run_at: Option<i64>,
+    pub run_count: i64,
+}
+
+/// Parameters for creating a new script.
+pub struct NewScript<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub description: &'a str,
+    pub runtime: &'a str,
+    pub entrypoint: &'a str,
+    pub sandbox_profile: &'a str,
+    pub network_access: bool,
+    pub fs_read: &'a str,
+    pub fs_write: &'a str,
+    pub ephemeral: bool,
+    pub hmac: &'a str,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 impl Database {
     /// Get a reference to the underlying SQLite connection.
     pub fn conn(&self) -> &Connection {
@@ -290,7 +327,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 18;
+    const CURRENT_VERSION: u32 = 19;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking (outside transaction
@@ -335,6 +372,7 @@ impl Database {
             Database::migrate_v16,
             Database::migrate_v17,
             Database::migrate_v18,
+            Database::migrate_v19,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -891,6 +929,33 @@ impl Database {
                 started_at   INTEGER NOT NULL,
                 heartbeat_at INTEGER NOT NULL
             );
+            ",
+        )?;
+        Ok(())
+    }
+
+    /// V19: Add scripts table for agent-created scripts with HMAC integrity verification.
+    fn migrate_v19(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS scripts (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL UNIQUE,
+                description     TEXT NOT NULL DEFAULT '',
+                runtime         TEXT NOT NULL DEFAULT 'python',
+                entrypoint      TEXT NOT NULL,
+                sandbox_profile TEXT NOT NULL DEFAULT 'default',
+                network_access  INTEGER NOT NULL DEFAULT 0,
+                fs_read         TEXT NOT NULL DEFAULT '[]',
+                fs_write        TEXT NOT NULL DEFAULT '[]',
+                ephemeral       INTEGER NOT NULL DEFAULT 0,
+                hmac            TEXT NOT NULL,
+                created_at      INTEGER NOT NULL,
+                updated_at      INTEGER NOT NULL,
+                last_run_at     INTEGER,
+                run_count       INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_scripts_name ON scripts(name);
             ",
         )?;
         Ok(())
@@ -2581,6 +2646,106 @@ impl Database {
             params![key, value],
         )?;
         Ok(())
+    }
+    // ── Scripts CRUD ──
+
+    pub fn create_script(&self, s: &NewScript) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO scripts (id, name, description, runtime, entrypoint, sandbox_profile,
+             network_access, fs_read, fs_write, ephemeral, hmac, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                s.id,
+                s.name,
+                s.description,
+                s.runtime,
+                s.entrypoint,
+                s.sandbox_profile,
+                s.network_access as i32,
+                s.fs_read,
+                s.fs_write,
+                s.ephemeral as i32,
+                s.hmac,
+                s.created_at,
+                s.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    const SCRIPTS_SELECT: &'static str =
+        "SELECT id, name, description, runtime, entrypoint, sandbox_profile,
+                network_access, fs_read, fs_write, ephemeral, hmac,
+                created_at, updated_at, last_run_at, run_count
+         FROM scripts";
+
+    fn script_row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<ScriptRow> {
+        Ok(ScriptRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            runtime: row.get(3)?,
+            entrypoint: row.get(4)?,
+            sandbox_profile: row.get(5)?,
+            network_access: row.get::<_, i32>(6)? != 0,
+            fs_read: row.get(7)?,
+            fs_write: row.get(8)?,
+            ephemeral: row.get::<_, i32>(9)? != 0,
+            hmac: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+            last_run_at: row.get(13)?,
+            run_count: row.get(14)?,
+        })
+    }
+
+    pub fn get_script_by_name(&self, name: &str) -> Result<Option<ScriptRow>> {
+        let sql = format!("{} WHERE name = ?1", Self::SCRIPTS_SELECT);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let result = stmt
+            .query_row(params![name], Self::script_row_from_sql)
+            .optional()?;
+        Ok(result)
+    }
+
+    pub fn list_scripts(&self) -> Result<Vec<ScriptRow>> {
+        let sql = format!("{} ORDER BY name", Self::SCRIPTS_SELECT);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], Self::script_row_from_sql)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn update_script_hmac(&self, id: &str, hmac: &str, updated_at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE scripts SET hmac = ?1, updated_at = ?2 WHERE id = ?3",
+            params![hmac, updated_at, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_script_run(&self, id: &str) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "UPDATE scripts SET run_count = run_count + 1, last_run_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_script(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM scripts WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn delete_ephemeral_scripts_older_than(&self, cutoff: i64) -> Result<u64> {
+        let count = self.conn.execute(
+            "DELETE FROM scripts WHERE ephemeral = 1 AND created_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(count as u64)
     }
 }
 
@@ -4608,5 +4773,182 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM daemon_lock", [], |r| r.get(0))
             .expect("daemon_lock table should exist");
         assert_eq!(count, 0);
+    }
+
+    // ── Scripts CRUD tests ──
+
+    #[test]
+    fn scripts_crud() {
+        let db = test_db();
+        let s = NewScript {
+            id: "s1",
+            name: "test-script",
+            description: "A test script",
+            runtime: "python",
+            entrypoint: "main.py",
+            sandbox_profile: "default",
+            network_access: false,
+            fs_read: "[]",
+            fs_write: "[]",
+            ephemeral: false,
+            hmac: "abc123",
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        db.create_script(&s).unwrap();
+
+        // get by name
+        let row = db.get_script_by_name("test-script").unwrap().unwrap();
+        assert_eq!(row.name, "test-script");
+        assert_eq!(row.description, "A test script");
+        assert_eq!(row.runtime, "python");
+        assert_eq!(row.hmac, "abc123");
+        assert_eq!(row.run_count, 0);
+        assert!(!row.network_access);
+        assert!(!row.ephemeral);
+
+        // list
+        let scripts = db.list_scripts().unwrap();
+        assert_eq!(scripts.len(), 1);
+
+        // update hmac
+        db.update_script_hmac("s1", "def456", 2000).unwrap();
+        let row = db.get_script_by_name("test-script").unwrap().unwrap();
+        assert_eq!(row.hmac, "def456");
+        assert_eq!(row.updated_at, 2000);
+
+        // record run
+        db.record_script_run("s1").unwrap();
+        let row = db.get_script_by_name("test-script").unwrap().unwrap();
+        assert_eq!(row.run_count, 1);
+        assert!(row.last_run_at.is_some());
+
+        // delete
+        db.delete_script("s1").unwrap();
+        assert!(db.get_script_by_name("test-script").unwrap().is_none());
+    }
+
+    #[test]
+    fn scripts_name_uniqueness() {
+        let db = test_db();
+        let s = NewScript {
+            id: "s1",
+            name: "dup",
+            description: "",
+            runtime: "python",
+            entrypoint: "main.py",
+            sandbox_profile: "default",
+            network_access: false,
+            fs_read: "[]",
+            fs_write: "[]",
+            ephemeral: false,
+            hmac: "h1",
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        db.create_script(&s).unwrap();
+
+        let s2 = NewScript {
+            id: "s2",
+            name: "dup",
+            description: "",
+            runtime: "python",
+            entrypoint: "main.py",
+            sandbox_profile: "default",
+            network_access: false,
+            fs_read: "[]",
+            fs_write: "[]",
+            ephemeral: false,
+            hmac: "h2",
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        assert!(db.create_script(&s2).is_err());
+    }
+
+    #[test]
+    fn delete_ephemeral_scripts() {
+        let db = test_db();
+        // Old ephemeral
+        db.create_script(&NewScript {
+            id: "e1",
+            name: "old-ephemeral",
+            description: "",
+            runtime: "bash",
+            entrypoint: "run.sh",
+            sandbox_profile: "default",
+            network_access: false,
+            fs_read: "[]",
+            fs_write: "[]",
+            ephemeral: true,
+            hmac: "h",
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+        // Recent ephemeral
+        db.create_script(&NewScript {
+            id: "e2",
+            name: "new-ephemeral",
+            description: "",
+            runtime: "bash",
+            entrypoint: "run.sh",
+            sandbox_profile: "default",
+            network_access: false,
+            fs_read: "[]",
+            fs_write: "[]",
+            ephemeral: true,
+            hmac: "h",
+            created_at: 9999,
+            updated_at: 9999,
+        })
+        .unwrap();
+        // Non-ephemeral
+        db.create_script(&NewScript {
+            id: "p1",
+            name: "persistent",
+            description: "",
+            runtime: "bash",
+            entrypoint: "run.sh",
+            sandbox_profile: "default",
+            network_access: false,
+            fs_read: "[]",
+            fs_write: "[]",
+            ephemeral: false,
+            hmac: "h",
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+
+        let deleted = db.delete_ephemeral_scripts_older_than(5000).unwrap();
+        assert_eq!(deleted, 1);
+        let remaining = db.list_scripts().unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.iter().any(|s| s.name == "new-ephemeral"));
+        assert!(remaining.iter().any(|s| s.name == "persistent"));
+    }
+
+    #[test]
+    fn migrate_v19_creates_scripts_table() {
+        let db = test_db();
+        let version: u32 = db
+            .get_meta("schema_version")
+            .unwrap()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(version, Database::CURRENT_VERSION);
+
+        // Verify the scripts table exists
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='scripts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "scripts table should exist after migration");
     }
 }

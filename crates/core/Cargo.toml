@@ -7,8 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-borg-tools = { path = "../tools" }
 borg-apply-patch = { path = "../apply-patch" }
+borg-sandbox = { path = "../sandbox" }
+borg-tools = { path = "../tools" }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 eventsource-stream = { workspace = true }
@@ -36,6 +37,7 @@ regex = { workspace = true }
 pdf-extract = { workspace = true }
 shellexpand = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 base64 = "0.22"
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
