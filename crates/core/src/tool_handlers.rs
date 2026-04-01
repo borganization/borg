@@ -16,7 +16,6 @@ use crate::tasks;
 use crate::types::{ContentPart, MediaData, ToolDefinition, ToolOutput};
 use crate::web;
 use borg_apply_patch::apply_patch_to_dir;
-use borg_tools::registry::ToolRegistry;
 
 pub fn require_str_param<'a>(args: &'a serde_json::Value, name: &str) -> Result<&'a str> {
     args[name]
@@ -41,7 +40,7 @@ pub fn handle_read_memory(args: &serde_json::Value) -> Result<String> {
     read_memory(filename)
 }
 
-pub fn handle_list_tools(registry: &ToolRegistry, config: &Config) -> Result<String> {
+pub fn handle_list_tools(config: &Config) -> Result<String> {
     use crate::tool_catalog::{ToolProfile, ALL_GROUPS};
 
     let profile =
@@ -58,16 +57,6 @@ pub fn handle_list_tools(registry: &ToolRegistry, config: &Config) -> Result<Str
         out.push_str(&format!("\n### {}{}\n", group.label(), active));
         for name in group.tool_names() {
             out.push_str(&format!("  - {name}\n"));
-        }
-    }
-
-    let tool_list = registry.list_tools();
-    out.push_str("\n## User Tools\n");
-    if tool_list.is_empty() {
-        out.push_str("  No user tools installed.\n");
-    } else {
-        for tool in &tool_list {
-            out.push_str(&format!("  - {tool}\n"));
         }
     }
     Ok(out)
@@ -109,22 +98,18 @@ pub fn handle_apply_skill_patch(args: &serde_json::Value) -> Result<String> {
 }
 
 /// Unified apply_patch handler with `target` parameter.
-/// Supports: cwd (default), tools, skills, channels.
-pub fn handle_apply_patch_unified(
-    args: &serde_json::Value,
-    registry: &mut ToolRegistry,
-) -> Result<String> {
+/// Supports: cwd (default), skills, channels.
+pub fn handle_apply_patch_unified(args: &serde_json::Value) -> Result<String> {
     // Validate patch param exists before dispatching
     let _patch = require_str_param(args, "patch")?;
     let target = args["target"].as_str().unwrap_or("cwd");
 
     match target {
         "cwd" => handle_apply_patch(args),
-        "tools" => handle_create_tool(args, registry),
         "skills" => handle_apply_skill_patch(args),
         "channels" => handle_create_channel(args),
         other => Ok(format!(
-            "Unknown target: {other}. Use: cwd, tools, skills, channels."
+            "Unknown target: {other}. Use: cwd, skills, channels."
         )),
     }
 }
@@ -142,22 +127,6 @@ pub fn handle_apply_patch(args: &serde_json::Value) -> Result<String> {
     }
 }
 
-pub fn handle_create_tool(args: &serde_json::Value, registry: &mut ToolRegistry) -> Result<String> {
-    let patch = require_str_param(args, "patch")?;
-    let base_dir = Config::tools_dir()?;
-    std::fs::create_dir_all(&base_dir)?;
-    match apply_patch_to_dir(patch, &base_dir) {
-        Ok(affected) => {
-            *registry = ToolRegistry::new()?;
-            Ok(format!(
-                "Patch applied successfully. Tool registry reloaded.\n{}",
-                affected.format_summary()
-            ))
-        }
-        Err(e) => Ok(format!("Error applying patch: {e}")),
-    }
-}
-
 pub fn handle_create_channel(args: &serde_json::Value) -> Result<String> {
     apply_patch_to(args, &Config::channels_dir()?, "Channel")
 }
@@ -165,13 +134,12 @@ pub fn handle_create_channel(args: &serde_json::Value) -> Result<String> {
 /// Unified list handler: dispatches based on `what` parameter.
 pub fn handle_list(
     args: &serde_json::Value,
-    registry: &ToolRegistry,
     config: &Config,
     agent_control: Option<&crate::multi_agent::AgentControl>,
 ) -> Result<String> {
     let what = require_str_param(args, "what")?;
     match what {
-        "tools" => handle_list_tools(registry, config),
+        "tools" => handle_list_tools(config),
         "skills" => handle_list_skills(config),
         "channels" => handle_list_channels(config),
         "agents" => {
@@ -909,6 +877,90 @@ pub fn handle_read_file(args: &serde_json::Value, config: &Config) -> Result<Too
     Ok(ToolOutput::Text(output))
 }
 
+// ── Scripts ──
+
+pub fn handle_manage_scripts(args: &serde_json::Value, config: &Config) -> Result<String> {
+    if !config.scripts.enabled {
+        return Ok("Scripts system is disabled.".to_string());
+    }
+    let action = require_str_param(args, "action")?;
+    let db = Database::open()?;
+
+    match action {
+        "create" => {
+            let name = require_str_param(args, "name")?;
+            let patch = require_str_param(args, "patch")?;
+            let description = args["description"].as_str().unwrap_or("");
+            let runtime = args["runtime"].as_str().unwrap_or("python");
+            let entrypoint = args["entrypoint"].as_str().unwrap_or("main.py");
+            let sandbox_profile = args["sandbox_profile"]
+                .as_str()
+                .unwrap_or(&config.scripts.default_sandbox_profile);
+            let network_access = args["network_access"].as_bool().unwrap_or(false);
+            let fs_read: Vec<String> = args["fs_read"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let fs_write: Vec<String> = args["fs_write"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let ephemeral = args["ephemeral"].as_bool().unwrap_or(false);
+
+            crate::scripts::create_script(
+                &db,
+                &crate::scripts::CreateScriptParams {
+                    name,
+                    description,
+                    patch,
+                    runtime,
+                    entrypoint,
+                    sandbox_profile,
+                    network_access,
+                    fs_read: &fs_read,
+                    fs_write: &fs_write,
+                    ephemeral,
+                    max_scripts: config.scripts.max_scripts,
+                },
+            )
+        }
+        "update" => {
+            let name = require_str_param(args, "name")?;
+            let patch = require_str_param(args, "patch")?;
+            crate::scripts::update_script(&db, name, patch)
+        }
+        "delete" => {
+            let name = require_str_param(args, "name")?;
+            crate::scripts::delete_script(&db, name)
+        }
+        "get" => {
+            let name = require_str_param(args, "name")?;
+            crate::scripts::get_script(&db, name)
+        }
+        "list" => crate::scripts::list_scripts(&db),
+        other => Ok(format!(
+            "Unknown action: {other}. Use: create, list, get, update, delete."
+        )),
+    }
+}
+
+pub async fn handle_run_script(args: &serde_json::Value, config: &Config) -> Result<String> {
+    if !config.scripts.enabled {
+        return Ok("Scripts system is disabled.".to_string());
+    }
+    let name = require_str_param(args, "name")?;
+    let script_args = args.get("args").cloned().unwrap_or(serde_json::json!({}));
+    crate::scripts::execute_script(config, name, &script_args.to_string()).await
+}
+
 pub fn handle_security_audit(args: &serde_json::Value, config: &Config) -> Result<String> {
     if !config.security.host_audit {
         return Ok(
@@ -1030,49 +1082,6 @@ pub async fn handle_text_to_speech(
             }
         }
         Err(e) => ToolOutput::Text(format!("TTS error: {e}")),
-    }
-}
-
-pub async fn handle_user_tool(
-    name: &str,
-    args_json: &str,
-    config: &Config,
-    registry: &ToolRegistry,
-    event_tx: &mpsc::Sender<AgentEvent>,
-) -> Result<String> {
-    let cred_names = registry.tool_credentials(name);
-    let extra_env: Vec<(String, String)> = cred_names
-        .iter()
-        .filter_map(|cred_name| {
-            config.credentials.get(cred_name).and_then(|cred_val| {
-                cred_val
-                    .resolve()
-                    .ok()
-                    .map(|val| (cred_name.to_uppercase(), val))
-            })
-        })
-        .collect();
-    let tool_name = name.to_string();
-    let tx = event_tx.clone();
-    let on_output = move |line: &str, is_stderr: bool| {
-        let _ = tx.try_send(AgentEvent::ToolOutputDelta {
-            name: tool_name.clone(),
-            delta: line.to_string(),
-            is_stderr,
-        });
-    };
-    match registry
-        .execute_tool_streaming(
-            name,
-            args_json,
-            &extra_env,
-            &config.security.blocked_paths,
-            on_output,
-        )
-        .await
-    {
-        Ok(result) => Ok(result),
-        Err(e) => Ok(format!("Error executing tool '{name}': {e}")),
     }
 }
 
@@ -1212,8 +1221,8 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'IDENTITY.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories. Use scope='local' to write to project-local memory (.borg/ in CWD).", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false},"scope":{"type":"string","enum":["global","local"],"description":"Memory scope: 'global' (default, ~/.borg/) or 'local' (CWD/.borg/)","default":"global"}},"required":["filename","content"]})),
         ToolDefinition::new("read_memory", "Read a memory file.", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file to read"}},"required":["filename"]})),
         ToolDefinition::new("memory_search", "Search memory files semantically. Use before answering questions about prior work, decisions, preferences, or anything previously discussed.", serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"Search query"},"max_results":{"type":"integer","description":"Maximum results to return (default: 5)","default":5},"min_score":{"type":"number","description":"Minimum relevance score 0-1 (default: 0.2)","default":0.2}},"required":["query"]})),
-        ToolDefinition::new("list", "List resources. Specify what to list: tools, skills, channels, or agents.", serde_json::json!({"type":"object","properties":{"what":{"type":"string","enum":["tools","skills","channels","agents"],"description":"What to list"}},"required":["what"]})),
-        ToolDefinition::new("apply_patch", "Create, update, or delete files using the patch DSL. Use target to choose location: cwd (default), tools (~/.borg/tools/), skills (~/.borg/skills/), channels (~/.borg/channels/).", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"},"target":{"type":"string","enum":["cwd","tools","skills","channels"],"description":"Where to apply the patch (default: cwd)","default":"cwd"}},"required":["patch"]})),
+        ToolDefinition::new("list", "List resources. Specify what to list: tools (built-in), skills, channels, or agents.", serde_json::json!({"type":"object","properties":{"what":{"type":"string","enum":["tools","skills","channels","agents"],"description":"What to list"}},"required":["what"]})),
+        ToolDefinition::new("apply_patch", "Create, update, or delete files using the patch DSL. Use target to choose location: cwd (default), skills (~/.borg/skills/), channels (~/.borg/channels/).", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"},"target":{"type":"string","enum":["cwd","skills","channels"],"description":"Where to apply the patch (default: cwd)","default":"cwd"}},"required":["patch"]})),
         ToolDefinition::new("run_shell", "Execute a shell command. Requires user confirmation before execution.", serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]})),
         ToolDefinition::new("read_pdf", "Read and extract text from a PDF file.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the PDF file"},"max_chars":{"type":"integer","description":"Maximum characters to return (default: 50000)","default":50000}},"required":["file_path"]})),
         ToolDefinition::new("read_file", "Read a file's contents. Returns text with line numbers for code files, renders images visually, and extracts text from PDFs. Use offset/limit to read specific line ranges of large files.", serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path (relative to cwd or absolute)"},"offset":{"type":"integer","description":"Start line, 1-based (default: 1)"},"limit":{"type":"integer","description":"Max lines to read (default: all, truncated at max_chars)"},"max_chars":{"type":"integer","description":"Max characters to return (default: 50000)"}},"required":["path"]})),
@@ -1305,6 +1314,46 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
             "security_audit",
             "Run a host security audit. Returns diagnostic findings about firewall, open ports, SSH config, file permissions, disk encryption, OS updates, and running services. Review findings and suggest fixes — the user must approve each change.",
             serde_json::json!({"type":"object","properties":{"category":{"type":"string","description":"Run only a specific check (omit for all)","enum":["firewall","ports","ssh","permissions","encryption","updates","services"]}}}),
+        ));
+    }
+
+    if config.scripts.enabled {
+        defs.push(ToolDefinition::new(
+            "manage_scripts",
+            "Manage agent-created scripts for cron jobs and one-off tasks. Actions: create, list, get, update, delete. Scripts are sandboxed and integrity-verified via HMAC.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "list", "get", "update", "delete"],
+                        "description": "Action to perform"
+                    },
+                    "name": { "type": "string", "description": "Script name (required for create/get/update/delete)" },
+                    "description": { "type": "string", "description": "What the script does (for create)" },
+                    "patch": { "type": "string", "description": "Patch DSL content to create/update script files" },
+                    "runtime": { "type": "string", "enum": ["python", "node", "deno", "bash"], "description": "Script runtime (default: python)" },
+                    "entrypoint": { "type": "string", "description": "Main script filename (default: main.py)" },
+                    "sandbox_profile": { "type": "string", "enum": ["default", "trusted", "custom"], "description": "Sandbox profile (default: default)" },
+                    "network_access": { "type": "boolean", "description": "Allow network access (for custom profile)" },
+                    "fs_read": { "type": "array", "items": { "type": "string" }, "description": "Readable paths (for custom profile)" },
+                    "fs_write": { "type": "array", "items": { "type": "string" }, "description": "Writable paths (for custom profile)" },
+                    "ephemeral": { "type": "boolean", "description": "Auto-cleanup eligible (default: false)" }
+                },
+                "required": ["action"]
+            }),
+        ));
+        defs.push(ToolDefinition::new(
+            "run_script",
+            "Execute a previously created script. Verifies integrity (HMAC) before running. Returns script output.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Script name to execute" },
+                    "args": { "type": "object", "description": "Arguments passed as JSON to script stdin" }
+                },
+                "required": ["name"]
+            }),
         ));
     }
 
@@ -1801,36 +1850,27 @@ mod tests {
         assert!(result.is_err());
     }
 
-    fn empty_registry() -> ToolRegistry {
-        let dir = std::env::temp_dir().join(format!("borg_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        ToolRegistry::with_dir(dir).unwrap()
-    }
-
     // -- consolidated apply_patch --
 
     #[test]
     fn apply_patch_unified_unknown_target() {
-        let mut registry = empty_registry();
         let args = json!({"patch": "*** Begin Patch\n*** End Patch", "target": "invalid"});
-        let result = handle_apply_patch_unified(&args, &mut registry).unwrap();
+        let result = handle_apply_patch_unified(&args).unwrap();
         assert!(result.contains("Unknown target"));
     }
 
     #[test]
     fn apply_patch_unified_missing_patch() {
-        let mut registry = empty_registry();
         let args = json!({"target": "cwd"});
-        let result = handle_apply_patch_unified(&args, &mut registry);
+        let result = handle_apply_patch_unified(&args);
         assert!(result.is_err());
     }
 
     #[test]
     fn apply_patch_unified_default_target_is_cwd() {
-        let mut registry = empty_registry();
         // Empty patch is still valid
         let args = json!({"patch": "*** Begin Patch\n*** End Patch"});
-        let result = handle_apply_patch_unified(&args, &mut registry);
+        let result = handle_apply_patch_unified(&args);
         assert!(result.is_ok());
     }
 
@@ -1838,37 +1878,33 @@ mod tests {
 
     #[test]
     fn list_unknown_what() {
-        let registry = empty_registry();
         let config = Config::default();
         let args = json!({"what": "unknown"});
-        let result = handle_list(&args, &registry, &config, None).unwrap();
+        let result = handle_list(&args, &config, None).unwrap();
         assert!(result.contains("Unknown list target"));
     }
 
     #[test]
     fn list_missing_what() {
-        let registry = empty_registry();
         let config = Config::default();
         let args = json!({});
-        let result = handle_list(&args, &registry, &config, None);
+        let result = handle_list(&args, &config, None);
         assert!(result.is_err());
     }
 
     #[test]
-    fn list_tools_returns_no_tools() {
-        let registry = empty_registry();
+    fn list_tools_shows_builtins() {
         let config = Config::default();
         let args = json!({"what": "tools"});
-        let result = handle_list(&args, &registry, &config, None).unwrap();
-        assert!(result.contains("No user tools"));
+        let result = handle_list(&args, &config, None).unwrap();
+        assert!(result.contains("Built-in Tools"));
     }
 
     #[test]
     fn list_agents_without_control() {
-        let registry = empty_registry();
         let config = Config::default();
         let args = json!({"what": "agents"});
-        let result = handle_list(&args, &registry, &config, None).unwrap();
+        let result = handle_list(&args, &config, None).unwrap();
         assert!(result.contains("not enabled"));
     }
 
@@ -1906,16 +1942,17 @@ mod tests {
 
     #[test]
     fn core_tool_definitions_count_reduced() {
-        // With all defaults enabled (web, browser, security_audit):
+        // With all defaults enabled (web, browser, security_audit, scripts):
         // write_memory, read_memory, memory_search, list, apply_patch, run_shell, read_pdf,
-        // read_file, list_dir, web_fetch, web_search, manage_tasks, browser, security_audit = 14
+        // read_file, list_dir, web_fetch, web_search, manage_tasks, browser, security_audit,
+        // manage_scripts, run_script = 16
         let config = Config::default();
         let defs = core_tool_definitions(&config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert_eq!(
             names.len(),
-            14,
-            "expected 14 core tools (all enabled), got: {names:?}"
+            16,
+            "expected 16 core tools (all enabled), got: {names:?}"
         );
 
         // With everything disabled: 9 base tools + list_dir
@@ -1923,6 +1960,7 @@ mod tests {
         minimal_config.web.enabled = false;
         minimal_config.browser.enabled = false;
         minimal_config.security.host_audit = false;
+        minimal_config.scripts.enabled = false;
         let defs = core_tool_definitions(&minimal_config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert_eq!(names.len(), 10, "expected 10 base tools, got: {names:?}");
@@ -2013,13 +2051,12 @@ mod tests {
         }
     }
 
-    // -- handle_list_tools (enhanced with built-ins) --
+    // -- handle_list_tools (built-ins only) --
 
     #[test]
     fn handle_list_tools_includes_builtins() {
-        let registry = empty_registry();
         let config = Config::default();
-        let result = handle_list_tools(&registry, &config).unwrap();
+        let result = handle_list_tools(&config).unwrap();
         assert!(result.contains("Memory"), "should include Memory group");
         assert!(
             result.contains("Filesystem"),
@@ -2037,21 +2074,9 @@ mod tests {
 
     #[test]
     fn handle_list_tools_shows_profile() {
-        let registry = empty_registry();
         let config = Config::default();
-        let result = handle_list_tools(&registry, &config).unwrap();
+        let result = handle_list_tools(&config).unwrap();
         assert!(result.contains("Full"), "should show current profile name");
-    }
-
-    #[test]
-    fn handle_list_tools_has_user_tools_section() {
-        let registry = empty_registry();
-        let config = Config::default();
-        let result = handle_list_tools(&registry, &config).unwrap();
-        assert!(
-            result.contains("User Tools"),
-            "should have User Tools section"
-        );
     }
 
     // -- is_blocked_path --
@@ -2303,10 +2328,9 @@ mod tests {
 
     #[test]
     fn list_skills_dispatches() {
-        let registry = empty_registry();
         let config = Config::default();
         let args = json!({"what": "skills"});
-        let result = handle_list(&args, &registry, &config, None);
+        let result = handle_list(&args, &config, None);
         assert!(result.is_ok());
     }
 
@@ -2338,10 +2362,9 @@ mod tests {
 
     #[test]
     fn list_channels_dispatches() {
-        let registry = empty_registry();
         let config = Config::default();
         let args = json!({"what": "channels"});
-        let result = handle_list(&args, &registry, &config, None);
+        let result = handle_list(&args, &config, None);
         assert!(result.is_ok());
     }
 
@@ -2378,10 +2401,9 @@ mod tests {
 
     #[test]
     fn handle_list_tools_minimal_profile_disables_groups() {
-        let registry = empty_registry();
         let mut config = Config::default();
         config.tools.policy.profile = "minimal".to_string();
-        let result = handle_list_tools(&registry, &config).unwrap();
+        let result = handle_list_tools(&config).unwrap();
         assert!(
             result.contains("(disabled)"),
             "minimal profile should mark most groups as disabled, got: {result}"

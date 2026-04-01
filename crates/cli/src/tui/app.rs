@@ -623,9 +623,7 @@ impl<'a> App<'a> {
                 let builtins = [
                     ("write_memory", "Write/append to memory files"),
                     ("read_memory", "Read a memory file"),
-                    ("list_tools", "List user-created tools"),
                     ("apply_patch", "Create/update/delete files via patch DSL"),
-                    ("create_tool", "Create/modify user tools via patch DSL"),
                     ("run_shell", "Execute a shell command"),
                     ("list_skills", "List skills with status"),
                     (
@@ -653,22 +651,6 @@ impl<'a> App<'a> {
                     ));
                 }
 
-                text.push_str("\nUser tools:\n");
-                match borg_tools::registry::ToolRegistry::new() {
-                    Ok(registry) => {
-                        let tools = registry.list_tools();
-                        if tools.is_empty() {
-                            text.push_str("  (none installed)");
-                        } else {
-                            for t in &tools {
-                                text.push_str(&format!("  {t}\n"));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        text.push_str(&format!("  Error loading tools: {e}"));
-                    }
-                }
                 self.push_system_message(text.trim_end().to_string());
                 return Ok(AppAction::Continue);
             }
@@ -2119,15 +2101,6 @@ mod tests {
         assert!(text.contains("apply_patch"));
         assert!(text.contains("read_pdf"));
         assert!(text.contains("manage_tasks"));
-    }
-
-    #[test]
-    fn tools_command_shows_user_tools_section() {
-        let mut app = make_app();
-        app.handle_submit("/tools").unwrap();
-
-        let text = last_system_text(&app).expect("should have system message");
-        assert!(text.contains("User tools:"));
     }
 
     #[test]

@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, trace, warn, Instrument};
 
 use crate::config::Config;
+use crate::constants;
 use crate::conversation::{
     compact_history, compact_tool_results, enforce_tool_result_share_limit, history_tokens,
     normalize_history, undo_last_turn,
@@ -28,9 +29,6 @@ use crate::template::Template;
 use crate::tool_handlers;
 use crate::truncate::truncate_output;
 use crate::types::{ContentPart, FunctionCall, Message, ToolCall, ToolDefinition, ToolOutput};
-use borg_tools::registry::ToolRegistry;
-
-use crate::constants;
 
 use std::sync::LazyLock;
 
@@ -94,57 +92,6 @@ const SECURITY_POLICY: &str = "\
 ## Action Constraints
 - Before executing destructive operations (DROP DATABASE, rm -rf, format disk), always confirm with the user.
 - Never encode sensitive data (API keys, passwords) into URLs, tool arguments, or outbound messages unless explicitly requested for a legitimate purpose.";
-
-/// Check integrity of a plugin-installed tool. Returns a block message if tampered.
-/// Fails closed: any error during verification blocks the tool (except when
-/// the tool simply has no plugin tracking, in which case it passes).
-fn check_tool_integrity(name: &str) -> Option<String> {
-    let db = match Database::open() {
-        Ok(db) => db,
-        Err(e) => {
-            warn!("Integrity check for tool '{name}' failed to open DB: {e}");
-            return Some(format!(
-                "Blocked: tool '{name}' integrity check failed (database unavailable). Re-install via /plugins to fix."
-            ));
-        }
-    };
-    let cust_id = match db.get_tool_plugin_id(name) {
-        Ok(Some(id)) => id,
-        Ok(None) => return None, // Tool has no plugin tracking — pass
-        Err(e) => {
-            warn!("Integrity check for tool '{name}' failed to query plugin id: {e}");
-            return Some(format!(
-                "Blocked: tool '{name}' integrity check failed (query error). Re-install via /plugins to fix."
-            ));
-        }
-    };
-    let data_dir = match Config::data_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            warn!("Integrity check for tool '{name}' failed to resolve data dir: {e}");
-            return Some(format!(
-                "Blocked: tool '{name}' integrity check failed (data dir unavailable). Re-install via /plugins to fix."
-            ));
-        }
-    };
-    let result = match crate::integrity::verify_integrity(&db, &cust_id, &data_dir) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Integrity check for tool '{name}' failed during verification: {e}");
-            return Some(format!(
-                "Blocked: tool '{name}' integrity check failed (verification error). Re-install via /plugins to fix."
-            ));
-        }
-    };
-    if result.ok {
-        return None;
-    }
-    let tampered_files = [&result.tampered[..], &result.missing[..]].concat();
-    Some(format!(
-        "Blocked: tool '{name}' failed integrity check. Tampered files: {}. Re-install via /plugins to fix.",
-        tampered_files.join(", ")
-    ))
-}
 
 /// Strip `<internal>...</internal>` blocks from text to prevent chain-of-thought leakage.
 fn strip_internal_tags(text: &str) -> String {
@@ -280,7 +227,6 @@ pub enum AgentEvent {
 pub struct Agent {
     config: Config,
     history: Vec<Message>,
-    tool_registry: ToolRegistry,
     session: Session,
     policy: ExecutionPolicy,
     hook_registry: HookRegistry,
@@ -309,7 +255,6 @@ pub struct Agent {
 
 /// Common state produced by `build_common`, consumed by both `new()` and `new_sub_agent()`.
 struct AgentCommon {
-    tool_registry: ToolRegistry,
     policy: ExecutionPolicy,
     rate_guard: SessionRateGuard,
     session: Session,
@@ -321,7 +266,6 @@ struct AgentCommon {
 /// Build the shared initialization state used by both `Agent::new` and `Agent::new_sub_agent`.
 fn build_common(config: &Config) -> Result<AgentCommon> {
     let _ = LlmClient::new(config)?;
-    let tool_registry = ToolRegistry::new()?;
     let policy = config.policy.clone();
     let rate_guard = SessionRateGuard::new(config.security.action_limits.clone());
     let session = Session::new();
@@ -337,7 +281,6 @@ fn build_common(config: &Config) -> Result<AgentCommon> {
         crate::skills::collect_required_env_vars(&resolved_creds, &config.skills);
     let tts_synthesizer = crate::tts::TtsSynthesizer::from_config(config);
     Ok(AgentCommon {
-        tool_registry,
         policy,
         rate_guard,
         session,
@@ -365,7 +308,6 @@ impl Agent {
         Ok(Self {
             config,
             history: Vec::new(),
-            tool_registry: common.tool_registry,
             session: common.session,
             policy: common.policy,
             hook_registry: HookRegistry::new(),
@@ -428,7 +370,6 @@ impl Agent {
         Ok(Self {
             config,
             history: Vec::new(),
-            tool_registry: common.tool_registry,
             session: common.session,
             policy: common.policy,
             hook_registry: HookRegistry::new(),
@@ -872,13 +813,6 @@ impl Agent {
 
     fn build_tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut tools = tool_handlers::core_tool_definitions(&self.config);
-        for td in self.tool_registry.tool_definitions() {
-            tools.push(ToolDefinition::new(
-                &td.function.name,
-                &td.function.description,
-                td.function.parameters.clone(),
-            ));
-        }
         // Append credential-gated integration tools (gmail, outlook, etc.)
         tools.extend(crate::integrations::enabled_tool_definitions(&self.config));
         if self.agent_control.is_some() {
@@ -1622,23 +1556,14 @@ impl Agent {
             "read_memory" => tool_handlers::handle_read_memory(&args),
             "memory_search" => tool_handlers::handle_memory_search(&args, &self.config).await,
             // Consolidated list tool
-            "list" => tool_handlers::handle_list(
-                &args,
-                &self.tool_registry,
-                &self.config,
-                self.agent_control.as_ref(),
-            ),
+            "list" => tool_handlers::handle_list(&args, &self.config, self.agent_control.as_ref()),
             // Legacy aliases for list
-            "list_tools" => tool_handlers::handle_list_tools(&self.tool_registry, &self.config),
             "list_skills" => tool_handlers::handle_list_skills(&self.config),
             "list_channels" => tool_handlers::handle_list_channels(&self.config),
             // Consolidated apply_patch with target param
-            "apply_patch" => {
-                tool_handlers::handle_apply_patch_unified(&args, &mut self.tool_registry)
-            }
+            "apply_patch" => tool_handlers::handle_apply_patch_unified(&args),
             // Legacy aliases for patch tools
             "apply_skill_patch" => tool_handlers::handle_apply_skill_patch(&args),
-            "create_tool" => tool_handlers::handle_create_tool(&args, &mut self.tool_registry),
             "create_channel" => tool_handlers::handle_create_channel(&args),
             "run_shell" => {
                 tool_handlers::handle_run_shell(
@@ -1723,6 +1648,8 @@ impl Agent {
                 }
             }
             "manage_roles" => crate::multi_agent::tools::handle_manage_roles(&args),
+            "manage_scripts" => tool_handlers::handle_manage_scripts(&args, &self.config),
+            "run_script" => tool_handlers::handle_run_script(&args, &self.config).await,
             _ => {
                 // Try integration tools first
                 if let Some(result) =
@@ -1731,17 +1658,7 @@ impl Agent {
                     return result.map(ToolOutput::Text);
                 }
 
-                if let Some(block_msg) = check_tool_integrity(name) {
-                    return Ok(ToolOutput::Text(block_msg));
-                }
-                tool_handlers::handle_user_tool(
-                    name,
-                    args_json,
-                    &self.config,
-                    &self.tool_registry,
-                    event_tx,
-                )
-                .await
+                Err(anyhow::anyhow!("Unknown tool: {name}"))
             }
         };
         text_result.map(ToolOutput::Text)
@@ -2076,12 +1993,37 @@ fn requires_confirmation(tool_name: &str, args: Option<&serde_json::Value>) -> O
             }
             None
         }
-        "create_tool" => Some("Will create/modify executable tool in ~/.borg/tools/".to_string()),
         "create_channel" => {
             Some("Will create/modify webhook channel integration in ~/.borg/channels/".to_string())
         }
         "apply_skill_patch" => {
             Some("Will create/modify agent skill instructions in ~/.borg/skills/".to_string())
+        }
+        "manage_scripts" => {
+            if let Some(args) = args {
+                let action = args.get("action").and_then(|v| v.as_str());
+                if action == Some("create") {
+                    let profile = args
+                        .get("sandbox_profile")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("default");
+                    if profile == "trusted" {
+                        return Some(
+                            "Will create script with UNRESTRICTED (unsandboxed) execution"
+                                .to_string(),
+                        );
+                    }
+                    return Some("Will create executable script in ~/.borg/scripts/".to_string());
+                }
+            }
+            None
+        }
+        "run_script" => {
+            let name = args
+                .and_then(|a| a.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            Some(format!("Will execute script: {name}"))
         }
         _ => None,
     }
@@ -2115,9 +2057,10 @@ fn is_mutating_tool(name: &str) -> bool {
 fn classify_action(tool_name: &str) -> ActionType {
     match tool_name {
         "run_shell" => ActionType::ShellCommand,
-        "apply_patch" | "create_tool" | "apply_skill_patch" | "create_channel" => {
+        "apply_patch" | "apply_skill_patch" | "create_channel" | "manage_scripts" => {
             ActionType::FileWrite
         }
+        "run_script" => ActionType::ShellCommand,
         "write_memory" => ActionType::MemoryWrite,
         "memory_search" | "read_memory" => ActionType::ToolCall,
         "web_fetch" | "web_search" | "browser" | "text_to_speech" | "generate_image" => {

@@ -13,7 +13,6 @@ path = "src/main.rs"
 [dependencies]
 borg-core = { path = "../core" }
 borg-heartbeat = { path = "../heartbeat" }
-borg-tools = { path = "../tools" }
 borg-gateway = { path = "../gateway" }
 borg-plugins = { path = "../plugins" }
 tokio = { workspace = true }

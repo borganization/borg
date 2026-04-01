@@ -54,6 +54,7 @@ scraper = "0.22"
 pdf-extract = "0.7"
 shellexpand = "3"
 sha2 = "0.10"
+hmac = "0.12"
 axum = "0.8"
 tower = { version = "0.5", features = ["limit"] }
 tracing-appender = "0.2"

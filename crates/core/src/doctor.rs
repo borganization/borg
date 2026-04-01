@@ -136,9 +136,6 @@ pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
     // Sandbox checks
     check_sandbox(&mut checks);
 
-    // Tools checks
-    check_tools(&mut checks);
-
     // Skills checks
     check_skills(config, &mut checks);
 
@@ -362,46 +359,6 @@ fn check_sandbox(checks: &mut Vec<DiagnosticCheck>) {
             "sandbox support",
             "not available on this platform",
         ));
-    }
-}
-
-fn check_tools(checks: &mut Vec<DiagnosticCheck>) {
-    match Config::tools_dir() {
-        Ok(tools_dir) => {
-            if tools_dir.exists() {
-                checks.push(DiagnosticCheck::pass("Tools", "tools directory exists"));
-            } else {
-                checks.push(DiagnosticCheck::warn(
-                    "Tools",
-                    "tools directory exists",
-                    "not found",
-                ));
-            }
-        }
-        Err(e) => {
-            checks.push(DiagnosticCheck::fail(
-                "Tools",
-                "tools directory",
-                format!("{e}"),
-            ));
-        }
-    }
-
-    match borg_tools::registry::ToolRegistry::new() {
-        Ok(registry) => {
-            let tools = registry.list_tools();
-            checks.push(DiagnosticCheck::pass(
-                "Tools",
-                format!("tool manifests valid ({} tools)", tools.len()),
-            ));
-        }
-        Err(e) => {
-            checks.push(DiagnosticCheck::fail(
-                "Tools",
-                "tool manifests valid",
-                format!("{e}"),
-            ));
-        }
     }
 }
 

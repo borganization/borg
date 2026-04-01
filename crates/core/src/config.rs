@@ -128,6 +128,8 @@ pub struct Config {
     #[serde(default)]
     pub image_gen: ImageGenConfig,
     #[serde(default)]
+    pub scripts: ScriptsConfig,
+    #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
     /// Transient identity override (not serialized). Set by gateway routing.
     #[serde(skip)]
@@ -278,6 +280,33 @@ pub struct ToolsConfig {
     pub default_timeout_ms: u64,
     #[serde(default)]
     pub policy: ToolPolicyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScriptsConfig {
+    /// Enable the scripts system (default: true)
+    pub enabled: bool,
+    /// Default sandbox profile for new scripts: "default", "trusted", or "custom"
+    pub default_sandbox_profile: String,
+    /// Auto-cleanup ephemeral scripts older than this (seconds, default: 86400 = 24h)
+    pub ephemeral_ttl_secs: u64,
+    /// Maximum number of scripts allowed (default: 100)
+    pub max_scripts: usize,
+    /// Default timeout for script execution in ms (default: 60000)
+    pub default_timeout_ms: u64,
+}
+
+impl Default for ScriptsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_sandbox_profile: "default".to_string(),
+            ephemeral_ttl_secs: 86400,
+            max_scripts: 100,
+            default_timeout_ms: 60000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1045,12 +1074,12 @@ impl Config {
         Ok(Self::data_dir()?.join("skills"))
     }
 
-    pub fn tools_dir() -> Result<PathBuf> {
-        Ok(Self::data_dir()?.join("tools"))
-    }
-
     pub fn channels_dir() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("channels"))
+    }
+
+    pub fn scripts_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("scripts"))
     }
 
     pub fn logs_dir() -> Result<PathBuf> {
@@ -1878,9 +1907,6 @@ agent_name = "Buddy"
 
         let skills = Config::skills_dir().unwrap();
         assert_eq!(skills, data.join("skills"));
-
-        let tools = Config::tools_dir().unwrap();
-        assert_eq!(tools, data.join("tools"));
 
         let logs = Config::logs_dir().unwrap();
         assert_eq!(logs, data.join("logs"));
