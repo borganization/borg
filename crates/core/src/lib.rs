@@ -38,6 +38,7 @@ pub mod session;
 pub mod session_indexer;
 pub mod settings;
 pub mod skills;
+pub mod sleep_inhibitor;
 pub mod tasks;
 pub mod telemetry;
 pub mod template;

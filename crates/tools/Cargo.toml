@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 which = { workspace = true }
 dirs = { workspace = true }
+strsim = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

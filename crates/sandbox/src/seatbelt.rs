@@ -302,11 +302,8 @@ mod tests {
     #[test]
     fn profile_includes_deny_read_rules() {
         let policy = SandboxPolicy {
-            network: false,
-            fs_read: vec![],
-            fs_write: vec![],
             deny_read: vec!["/secret/data".to_string()],
-            deny_write: vec![],
+            ..Default::default()
         };
         let profile = generate_profile(&policy, Path::new("/tmp/tool"), None).unwrap();
         assert!(profile.contains("(deny file-read* (subpath \"/secret/data\"))"));
@@ -335,11 +332,8 @@ mod tests {
     #[test]
     fn profile_includes_deny_write_rules() {
         let policy = SandboxPolicy {
-            network: false,
-            fs_read: vec![],
-            fs_write: vec![],
-            deny_read: vec![],
             deny_write: vec!["/home/user/.borg".to_string()],
+            ..Default::default()
         };
         let profile = generate_profile(&policy, Path::new("/tmp/tool"), None).unwrap();
         assert!(profile.contains("(deny file-write* (subpath \"/home/user/.borg\"))"));

@@ -301,22 +301,24 @@ impl Database {
         }
         let conn =
             Connection::open(&path).with_context(|| format!("Failed to open DB at {path:?}"))?;
-        // WAL pragma returns a result row — use query_row to avoid execute_batch error
-        let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-        let _: i64 = conn.query_row("PRAGMA busy_timeout=5000", [], |row| row.get(0))?;
-        let db = Self { conn };
-        db.run_migrations()?;
-        Ok(db)
+        Self::init_connection(conn)
     }
 
     /// Create a Database from an existing connection. Runs migrations.
     /// Useful for testing with in-memory databases.
     pub fn from_connection(conn: Connection) -> Result<Self> {
-        // WAL pragma returns a result row — use query_row to avoid execute_batch error
+        Self::init_connection(conn)
+    }
+
+    /// Common connection initialization: pragmas + migrations.
+    fn init_connection(conn: Connection) -> Result<Self> {
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         let _: i64 = conn.query_row("PRAGMA busy_timeout=5000", [], |row| row.get(0))?;
+        // Incremental auto-vacuum prevents unbounded DB growth from message history,
+        // embeddings cache, and task runs. Requires running PRAGMA incremental_vacuum
+        // periodically (done in run_migrations after schema changes).
+        conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
         let db = Self { conn };
         db.run_migrations()?;
         Ok(db)
@@ -390,6 +392,10 @@ impl Database {
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
         tx.commit().context("Failed to commit migrations")?;
+
+        // Run incremental vacuum after migrations to reclaim freed pages.
+        self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
+
         Ok(())
     }
 
@@ -2755,15 +2761,7 @@ mod tests {
 
     fn test_db() -> Database {
         let conn = Connection::open_in_memory().expect("open in-memory db");
-        // WAL mode returns a result row, so use query_row instead of execute_batch
-        let _: String = conn
-            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-            .expect("journal_mode pragma");
-        conn.execute_batch("PRAGMA foreign_keys=ON;")
-            .expect("foreign_keys pragma");
-        let db = Database { conn };
-        db.run_migrations().expect("migrations");
-        db
+        Database::from_connection(conn).expect("init test db")
     }
 
     fn simple_task<'a>(
@@ -4950,5 +4948,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "scripts table should exist after migration");
+    }
+
+    #[test]
+    fn auto_vacuum_is_set() {
+        let db = test_db();
+        let mode: i64 = db
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .expect("auto_vacuum pragma");
+        // 2 = INCREMENTAL
+        assert_eq!(mode, 2, "auto_vacuum should be INCREMENTAL (2)");
     }
 }
