@@ -52,6 +52,14 @@ pub struct TaskRunRow {
     pub duration_ms: i64,
     pub result: Option<String>,
     pub error: Option<String>,
+    pub status: String,
+}
+
+/// A task that has been atomically claimed for execution, with its associated run ID.
+#[derive(Debug, Clone)]
+pub struct ClaimedTask {
+    pub task: ScheduledTaskRow,
+    pub run_id: i64,
 }
 
 /// Persisted message row from SQLite.
@@ -242,6 +250,11 @@ pub struct UpdateTask<'a> {
 }
 
 impl Database {
+    /// Get a reference to the underlying SQLite connection.
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Open (or create) the database at `~/.borg/borg.db`.
     #[instrument(skip_all)]
     pub fn open() -> Result<Self> {
@@ -277,7 +290,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 17;
+    const CURRENT_VERSION: u32 = 18;
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking (outside transaction
@@ -321,6 +334,7 @@ impl Database {
             Database::migrate_v15,
             Database::migrate_v16,
             Database::migrate_v17,
+            Database::migrate_v18,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -849,6 +863,33 @@ impl Database {
                 session_id    TEXT PRIMARY KEY,
                 indexed_at    INTEGER NOT NULL,
                 message_count INTEGER NOT NULL DEFAULT 0
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
+    /// V18: Add status column to task_runs and daemon_lock table.
+    fn migrate_v18(&self) -> Result<()> {
+        // Check if status column already exists (idempotent migration)
+        let has_status: bool = self
+            .conn
+            .prepare("SELECT status FROM task_runs LIMIT 0")
+            .is_ok();
+        if !has_status {
+            self.conn.execute_batch(
+                "ALTER TABLE task_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'success';",
+            )?;
+            self.conn
+                .execute_batch("UPDATE task_runs SET status = 'failed' WHERE error IS NOT NULL;")?;
+        }
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS daemon_lock (
+                id           INTEGER PRIMARY KEY CHECK (id = 1),
+                pid          INTEGER NOT NULL,
+                started_at   INTEGER NOT NULL,
+                heartbeat_at INTEGER NOT NULL
             );
             ",
         )?;
@@ -2059,17 +2100,22 @@ impl Database {
         result: Option<&str>,
         error: Option<&str>,
     ) -> Result<()> {
+        let status = if error.is_some() {
+            crate::tasks::RUN_STATUS_FAILED
+        } else {
+            crate::tasks::RUN_STATUS_SUCCESS
+        };
         self.conn.execute(
-            "INSERT INTO task_runs (task_id, started_at, duration_ms, result, error)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![task_id, started_at, duration_ms, result, error],
+            "INSERT INTO task_runs (task_id, started_at, duration_ms, result, error, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![task_id, started_at, duration_ms, result, error, status],
         )?;
         Ok(())
     }
 
     pub fn task_run_history(&self, task_id: &str, limit: usize) -> Result<Vec<TaskRunRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, started_at, duration_ms, result, error
+            "SELECT id, task_id, started_at, duration_ms, result, error, status
              FROM task_runs WHERE task_id = ?1 ORDER BY started_at DESC LIMIT ?2",
         )?;
         let rows = stmt
@@ -2081,6 +2127,7 @@ impl Database {
                     duration_ms: row.get(3)?,
                     result: row.get(4)?,
                     error: row.get(5)?,
+                    status: row.get(6)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2155,6 +2202,177 @@ impl Database {
             .query_map(params![now], Self::map_task_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Atomically claim all due tasks: advances next_run and inserts a 'running' task_run
+    /// row in a single IMMEDIATE transaction. Returns claimed tasks with their run IDs.
+    pub fn claim_due_tasks(&self, now: i64) -> Result<Vec<ClaimedTask>> {
+        // BEGIN IMMEDIATE acquires a reserved lock, preventing concurrent writers.
+        // Rollback guard ensures we don't leave an open transaction on error.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = self.claim_due_tasks_inner(now);
+        if result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        result
+    }
+
+    fn claim_due_tasks_inner(&self, now: i64) -> Result<Vec<ClaimedTask>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target
+             FROM scheduled_tasks
+             WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?1
+               AND retry_after IS NULL
+             ORDER BY next_run ASC",
+        )?;
+        let tasks: Vec<ScheduledTaskRow> = stmt
+            .query_map(params![now], Self::map_task_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let mut claimed = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            crate::tasks::advance_next_run_raw(&self.conn, &task)?;
+
+            // Insert a 'running' task_run row
+            self.conn.execute(
+                "INSERT INTO task_runs (task_id, started_at, duration_ms, status)
+                 VALUES (?1, ?2, 0, ?3)",
+                params![task.id, now, crate::tasks::RUN_STATUS_RUNNING],
+            )?;
+            let run_id = self.conn.last_insert_rowid();
+            claimed.push(ClaimedTask { task, run_id });
+        }
+
+        self.conn.execute_batch("COMMIT")?;
+        Ok(claimed)
+    }
+
+    /// Insert a 'running' task_run row (used for retry path). Returns the run ID.
+    pub fn start_task_run(&self, task_id: &str, started_at: i64) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO task_runs (task_id, started_at, duration_ms, status)
+             VALUES (?1, ?2, 0, ?3)",
+            params![task_id, started_at, crate::tasks::RUN_STATUS_RUNNING],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Update a task_run row from 'running' to its final status.
+    /// Returns Ok(true) if the row was updated, Ok(false) if no matching run was found.
+    pub fn complete_task_run(
+        &self,
+        run_id: i64,
+        duration_ms: i64,
+        result: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let status = if error.is_some() {
+            crate::tasks::RUN_STATUS_FAILED
+        } else {
+            crate::tasks::RUN_STATUS_SUCCESS
+        };
+        let updated = self.conn.execute(
+            "UPDATE task_runs SET status = ?1, duration_ms = ?2, result = ?3, error = ?4
+             WHERE id = ?5",
+            params![status, duration_ms, result, error, run_id],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Mark any 'running' task_runs as 'failed' (from a crashed daemon). Returns count.
+    pub fn recover_stale_runs(&self, error_msg: &str) -> Result<u64> {
+        let updated = self.conn.execute(
+            "UPDATE task_runs SET status = ?1, error = ?2
+             WHERE status = ?3",
+            params![
+                crate::tasks::RUN_STATUS_FAILED,
+                error_msg,
+                crate::tasks::RUN_STATUS_RUNNING
+            ],
+        )?;
+        Ok(updated as u64)
+    }
+
+    // ── Daemon Lock ──
+
+    /// Attempt to acquire the daemon lock. Returns Ok(true) if acquired.
+    /// A lock is considered stale after 300s without heartbeat refresh.
+    /// Uses IMMEDIATE transaction to prevent TOCTOU races.
+    pub fn acquire_daemon_lock(&self, pid: u32, now: i64) -> Result<bool> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = self.acquire_daemon_lock_inner(pid, now);
+        match &result {
+            Ok(_) => {
+                self.conn.execute_batch("COMMIT")?;
+            }
+            Err(_) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+            }
+        }
+        result
+    }
+
+    fn acquire_daemon_lock_inner(&self, pid: u32, now: i64) -> Result<bool> {
+        let existing: Option<(i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT pid, heartbeat_at FROM daemon_lock WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        match existing {
+            None => {
+                self.conn.execute(
+                    "INSERT INTO daemon_lock (id, pid, started_at, heartbeat_at) VALUES (1, ?1, ?2, ?2)",
+                    params![pid as i64, now],
+                )?;
+                Ok(true)
+            }
+            Some((existing_pid, heartbeat_at)) => {
+                if existing_pid == pid as i64 {
+                    // Same PID (daemon restart) — take over
+                    self.conn.execute(
+                        "UPDATE daemon_lock SET started_at = ?1, heartbeat_at = ?1 WHERE id = 1",
+                        params![now],
+                    )?;
+                    Ok(true)
+                } else if now - heartbeat_at > 300 {
+                    // Stale lock — take over
+                    self.conn.execute(
+                        "UPDATE daemon_lock SET pid = ?1, started_at = ?2, heartbeat_at = ?2 WHERE id = 1",
+                        params![pid as i64, now],
+                    )?;
+                    Ok(true)
+                } else {
+                    // Another live daemon holds the lock
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    /// Refresh the daemon lock heartbeat timestamp.
+    pub fn refresh_daemon_lock(&self, pid: u32, now: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE daemon_lock SET heartbeat_at = ?1 WHERE id = 1 AND pid = ?2",
+            params![now, pid as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Release the daemon lock on shutdown.
+    pub fn release_daemon_lock(&self, pid: u32) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM daemon_lock WHERE id = 1 AND pid = ?1",
+            params![pid as i64],
+        )?;
+        Ok(())
     }
 
     pub fn delete_task(&self, id: &str) -> Result<bool> {
@@ -4127,5 +4345,268 @@ mod tests {
         // Empty query after sanitization should return empty
         let results = db.fts_search("global", "", 10).expect("fts");
         assert!(results.is_empty());
+    }
+
+    // ── V18: Atomic claim, status tracking, daemon lock tests ──
+
+    #[test]
+    fn claim_due_tasks_returns_claimed_with_run_id() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "task1",
+            "prompt",
+            "interval",
+            "30m",
+            Some(50),
+        ))
+        .expect("create");
+
+        let claimed = db.claim_due_tasks(100).expect("claim");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].task.id, "t1");
+        assert!(claimed[0].run_id > 0);
+
+        // Verify a 'running' task_run row was created
+        let runs = db.task_run_history("t1", 10).expect("history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "running");
+        assert_eq!(runs[0].id, claimed[0].run_id);
+    }
+
+    #[test]
+    fn claim_due_tasks_is_idempotent() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "task1",
+            "prompt",
+            "interval",
+            "30m",
+            Some(50),
+        ))
+        .expect("create");
+
+        let first = db.claim_due_tasks(100).expect("first claim");
+        assert_eq!(first.len(), 1);
+
+        // Second claim with same time should return empty (next_run was advanced)
+        let second = db.claim_due_tasks(100).expect("second claim");
+        assert_eq!(second.len(), 0);
+    }
+
+    #[test]
+    fn claim_due_tasks_once_marks_completed() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "once-task",
+            "prompt",
+            "once",
+            "",
+            Some(50),
+        ))
+        .expect("create");
+
+        let claimed = db.claim_due_tasks(100).expect("claim");
+        assert_eq!(claimed.len(), 1);
+
+        // Task should be marked completed with no next_run
+        let task = db.get_task_by_id("t1").expect("get").expect("exists");
+        assert_eq!(task.status, "completed");
+        assert!(task.next_run.is_none());
+    }
+
+    #[test]
+    fn complete_task_run_success() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "task1",
+            "prompt",
+            "interval",
+            "30m",
+            Some(50),
+        ))
+        .expect("create");
+
+        let run_id = db.start_task_run("t1", 1000).expect("start");
+        let runs = db.task_run_history("t1", 10).expect("history");
+        assert_eq!(runs[0].status, "running");
+
+        let updated = db
+            .complete_task_run(run_id, 500, Some("result text"), None)
+            .expect("complete");
+        assert!(updated, "should have updated the run row");
+
+        let runs = db.task_run_history("t1", 10).expect("history");
+        assert_eq!(runs[0].status, "success");
+        assert_eq!(runs[0].duration_ms, 500);
+        assert_eq!(runs[0].result.as_deref(), Some("result text"));
+        assert!(runs[0].error.is_none());
+    }
+
+    #[test]
+    fn complete_task_run_failure() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "task1",
+            "prompt",
+            "interval",
+            "30m",
+            Some(50),
+        ))
+        .expect("create");
+
+        let run_id = db.start_task_run("t1", 1000).expect("start");
+        let updated = db
+            .complete_task_run(run_id, 200, None, Some("timeout error"))
+            .expect("complete");
+        assert!(updated);
+
+        let runs = db.task_run_history("t1", 10).expect("history");
+        assert_eq!(runs[0].status, "failed");
+        assert_eq!(runs[0].error.as_deref(), Some("timeout error"));
+        assert!(runs[0].result.is_none());
+    }
+
+    #[test]
+    fn recover_stale_runs_marks_failed() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "task1",
+            "prompt",
+            "interval",
+            "30m",
+            Some(50),
+        ))
+        .expect("create");
+
+        db.start_task_run("t1", 1000).expect("start");
+        db.start_task_run("t1", 2000).expect("start");
+
+        let count = db.recover_stale_runs("Daemon crashed").expect("recover");
+        assert_eq!(count, 2);
+
+        let runs = db.task_run_history("t1", 10).expect("history");
+        for run in &runs {
+            assert_eq!(run.status, "failed");
+            assert_eq!(run.error.as_deref(), Some("Daemon crashed"));
+        }
+    }
+
+    #[test]
+    fn recover_stale_runs_ignores_completed() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "task1",
+            "prompt",
+            "interval",
+            "30m",
+            Some(50),
+        ))
+        .expect("create");
+
+        // Insert completed runs (not running)
+        db.record_task_run("t1", 1000, 500, Some("ok"), None)
+            .expect("record");
+        db.record_task_run("t1", 2000, 300, None, Some("err"))
+            .expect("record");
+
+        let count = db.recover_stale_runs("Daemon crashed").expect("recover");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn daemon_lock_acquire_release() {
+        let db = test_db();
+        let now = 1000;
+
+        assert!(db.acquire_daemon_lock(100, now).expect("acquire"));
+        db.release_daemon_lock(100).expect("release");
+
+        // After release, different PID can acquire
+        assert!(db
+            .acquire_daemon_lock(200, now)
+            .expect("acquire after release"));
+    }
+
+    #[test]
+    fn daemon_lock_prevents_duplicate() {
+        let db = test_db();
+        let now = 1000;
+
+        assert!(db.acquire_daemon_lock(100, now).expect("first acquire"));
+
+        // Different PID with recent heartbeat should fail
+        assert!(!db
+            .acquire_daemon_lock(200, now + 10)
+            .expect("second acquire"));
+    }
+
+    #[test]
+    fn daemon_lock_stale_takeover() {
+        let db = test_db();
+
+        assert!(db.acquire_daemon_lock(100, 1000).expect("first acquire"));
+
+        // 400s later (> 300s staleness threshold), different PID should succeed
+        assert!(db.acquire_daemon_lock(200, 1400).expect("stale takeover"));
+    }
+
+    #[test]
+    fn start_task_run_creates_running_row() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t1",
+            "task1",
+            "prompt",
+            "interval",
+            "30m",
+            Some(50),
+        ))
+        .expect("create");
+
+        let run_id = db.start_task_run("t1", 5000).expect("start");
+        assert!(run_id > 0);
+
+        let runs = db.task_run_history("t1", 10).expect("history");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "running");
+        assert_eq!(runs[0].started_at, 5000);
+        assert_eq!(runs[0].duration_ms, 0);
+    }
+
+    #[test]
+    fn migrate_v18_adds_status_and_daemon_lock() {
+        let db = test_db();
+        let version = db.schema_version().expect("get version");
+        assert_eq!(version, Database::CURRENT_VERSION);
+
+        // Verify status column exists on task_runs
+        let run_id = {
+            db.create_task(&simple_task(
+                "t1",
+                "task1",
+                "prompt",
+                "interval",
+                "30m",
+                Some(50),
+            ))
+            .expect("create");
+            db.start_task_run("t1", 1000).expect("start")
+        };
+        let runs = db.task_run_history("t1", 1).expect("history");
+        assert_eq!(runs[0].status, "running");
+
+        // Verify daemon_lock table exists
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM daemon_lock", [], |r| r.get(0))
+            .expect("daemon_lock table should exist");
+        assert_eq!(count, 0);
     }
 }

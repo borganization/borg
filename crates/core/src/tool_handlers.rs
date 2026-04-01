@@ -476,13 +476,12 @@ pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result
                 Ok(Some(task)) => {
                     let mut output = tasks::format_task(&task);
                     if let Ok(Some(run)) = db.last_task_run(task_id) {
-                        let status = if run.error.is_some() { "error" } else { "ok" };
                         let when = chrono::DateTime::from_timestamp(run.started_at, 0)
                             .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
                             .unwrap_or_else(|| run.started_at.to_string());
                         output.push_str(&format!(
-                            "\n    Last run: {status} at {when} ({} ms)",
-                            run.duration_ms
+                            "\n    Last run: {} at {when} ({} ms)",
+                            run.status, run.duration_ms
                         ));
                     }
                     Ok(output)
@@ -559,7 +558,7 @@ pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result
                         let when = chrono::DateTime::from_timestamp(run.started_at, 0)
                             .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
                             .unwrap_or_else(|| run.started_at.to_string());
-                        let status = if run.error.is_some() { "FAIL" } else { "OK" };
+                        let status = tasks::format_run_status(&run.status);
                         out.push_str(&format!("  {when} [{status}] {}ms", run.duration_ms));
                         if let Some(ref e) = run.error {
                             out.push_str(&format!(
