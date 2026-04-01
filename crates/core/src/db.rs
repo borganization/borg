@@ -280,7 +280,8 @@ impl Database {
     const CURRENT_VERSION: u32 = 17;
 
     fn run_migrations(&self) -> Result<()> {
-        // Ensure meta table exists for version tracking
+        // Ensure meta table exists for version tracking (outside transaction
+        // so schema_version() can read it)
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
@@ -289,6 +290,18 @@ impl Database {
         )?;
 
         let current = self.schema_version()?;
+        if current >= Self::CURRENT_VERSION {
+            return Ok(());
+        }
+
+        // Run all pending migrations in a single transaction for atomicity.
+        // SQLite supports transactional DDL (CREATE TABLE, ALTER TABLE).
+        // unchecked_transaction avoids rusqlite's borrow-check restriction
+        // while still giving us automatic ROLLBACK on drop if not committed.
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("Failed to begin migration transaction")?;
 
         if current < 1 {
             self.migrate_v1()?;
@@ -343,6 +356,7 @@ impl Database {
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
+        tx.commit().context("Failed to commit migrations")?;
         Ok(())
     }
 

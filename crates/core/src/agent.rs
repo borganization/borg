@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{info_span, instrument, warn, Instrument};
+use tracing::{info_span, instrument, trace, warn, Instrument};
 
 use crate::config::Config;
 use crate::conversation::{
@@ -1192,7 +1192,9 @@ impl Agent {
                             }
                             Some(StreamEvent::Done) => break,
                             Some(StreamEvent::Error(e)) => {
-                                let _ = event_tx.send(AgentEvent::Error(e)).await;
+                                if event_tx.send(AgentEvent::Error(e)).await.is_err() {
+                                    trace!("Event channel closed, could not deliver stream error");
+                                }
                                 break;
                             }
                             Some(StreamEvent::ThinkingDelta(delta)) => {
@@ -1370,7 +1372,13 @@ impl Agent {
 
             // HITL for dangerous operations
             if self.config.security.hitl_dangerous_ops {
-                let args_value: Option<serde_json::Value> = serde_json::from_str(args).ok();
+                let args_value: Option<serde_json::Value> = match serde_json::from_str(args) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(tool = %name, "Failed to parse tool args for HITL check: {e}");
+                        None
+                    }
+                };
                 if let Some(reason) = requires_confirmation(name, args_value.as_ref()) {
                     let (confirm_tx, confirm_rx) = oneshot::channel();
                     let _ = event_tx
@@ -1826,12 +1834,20 @@ mod tests {
 
     #[test]
     fn requires_confirmation_apply_patch_no_args() {
-        assert!(requires_confirmation("apply_patch", None).is_none());
+        // Fail safe: require confirmation when args are unparseable
+        assert!(requires_confirmation("apply_patch", None).is_some());
     }
 
     #[test]
     fn requires_confirmation_write_memory_no_args() {
-        assert!(requires_confirmation("write_memory", None).is_none());
+        // Fail safe: require confirmation when args are unparseable
+        assert!(requires_confirmation("write_memory", None).is_some());
+    }
+
+    #[test]
+    fn requires_confirmation_browser_no_args() {
+        // Fail safe: require confirmation when args are unparseable
+        assert!(requires_confirmation("browser", None).is_some());
     }
 
     // ── classify_action tests ──
@@ -1881,28 +1897,32 @@ mod tests {
 fn requires_confirmation(tool_name: &str, args: Option<&serde_json::Value>) -> Option<String> {
     match tool_name {
         "apply_patch" => {
-            if let Some(args) = args {
-                if let Some(patch) = args.get("patch").and_then(|v| v.as_str()) {
-                    if patch.contains("*** Delete File:") {
-                        return Some("Will delete file(s) in working directory".to_string());
-                    }
+            let Some(args) = args else {
+                // Fail safe: require confirmation when args are unparseable
+                return Some("Will modify files (args unparseable)".to_string());
+            };
+            if let Some(patch) = args.get("patch").and_then(|v| v.as_str()) {
+                if patch.contains("*** Delete File:") {
+                    return Some("Will delete file(s) in working directory".to_string());
                 }
             }
             None
         }
         "write_memory" => {
-            if let Some(args) = args {
-                if args.get("filename").and_then(|v| v.as_str()) == Some("IDENTITY.md") {
-                    return Some("Will modify agent identity (IDENTITY.md)".to_string());
-                }
+            let Some(args) = args else {
+                return Some("Will modify memory (args unparseable)".to_string());
+            };
+            if args.get("filename").and_then(|v| v.as_str()) == Some("IDENTITY.md") {
+                return Some("Will modify agent identity (IDENTITY.md)".to_string());
             }
             None
         }
         "browser" => {
-            if let Some(args) = args {
-                if args.get("action").and_then(|v| v.as_str()) == Some("evaluate_js") {
-                    return Some("Will execute JavaScript in browser".to_string());
-                }
+            let Some(args) = args else {
+                return Some("Will execute browser action (args unparseable)".to_string());
+            };
+            if args.get("action").and_then(|v| v.as_str()) == Some("evaluate_js") {
+                return Some("Will execute JavaScript in browser".to_string());
             }
             None
         }

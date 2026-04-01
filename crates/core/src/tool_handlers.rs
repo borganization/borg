@@ -1045,10 +1045,19 @@ pub async fn handle_browser(
                     // Save to disk
                     let saved_path = Config::data_dir().ok().and_then(|data_dir| {
                         let dir = data_dir.join("screenshots");
-                        std::fs::create_dir_all(&dir).ok()?;
+                        if let Err(e) = std::fs::create_dir_all(&dir) {
+                            tracing::warn!(
+                                "Failed to create screenshot dir {}: {e}",
+                                dir.display()
+                            );
+                            return None;
+                        }
                         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%3f");
                         let path = dir.join(format!("screenshot_{ts}.png"));
-                        std::fs::write(&path, &png_bytes).ok()?;
+                        if let Err(e) = std::fs::write(&path, &png_bytes) {
+                            tracing::warn!("Failed to save screenshot to {}: {e}", path.display());
+                            return None;
+                        }
                         Some(path)
                     });
 

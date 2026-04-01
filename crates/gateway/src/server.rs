@@ -2133,7 +2133,9 @@ async fn drain_pending_deliveries(
                     "Drain loop: channel '{}' not found, marking failed",
                     delivery.channel_name
                 );
-                let _ = db.mark_failed(&delivery.id, "channel not found", None);
+                if let Err(e) = db.mark_failed(&delivery.id, "channel not found", None) {
+                    warn!(delivery_id = %delivery.id, "Failed to persist delivery failure status: {e}");
+                }
                 continue;
             }
         };
@@ -2160,11 +2162,15 @@ async fn drain_pending_deliveries(
         .await
         {
             crate::retry::RetryOutcome::Success(_) => {
-                let _ = db.mark_delivered(&delivery.id);
+                if let Err(e) = db.mark_delivered(&delivery.id) {
+                    warn!(delivery_id = %delivery.id, "Failed to persist delivery success status: {e}");
+                }
                 health.write().await.record_outbound(&delivery.channel_name);
             }
             crate::retry::RetryOutcome::PermanentFailure(e) => {
-                let _ = db.mark_failed(&delivery.id, &e, None);
+                if let Err(db_err) = db.mark_failed(&delivery.id, &e, None) {
+                    warn!(delivery_id = %delivery.id, "Failed to persist delivery failure status: {db_err}");
+                }
                 health
                     .write()
                     .await
@@ -2172,7 +2178,9 @@ async fn drain_pending_deliveries(
             }
             crate::retry::RetryOutcome::Exhausted(e) => {
                 let next_retry = chrono::Utc::now().timestamp() + 60;
-                let _ = db.mark_failed(&delivery.id, &e, Some(next_retry));
+                if let Err(db_err) = db.mark_failed(&delivery.id, &e, Some(next_retry)) {
+                    warn!(delivery_id = %delivery.id, "Failed to persist delivery failure status: {db_err}");
+                }
                 health
                     .write()
                     .await
