@@ -788,7 +788,8 @@ impl Agent {
             crate::types::Message::user(format!("Extract key information from:\n\n{transcript}")),
         ];
 
-        let llm = match LlmClient::new(&self.config) {
+        let compaction_config = self.config.with_compaction_overrides();
+        let llm = match LlmClient::new(&compaction_config) {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!("Pre-compaction flush LLM init failed: {e}");
@@ -1106,7 +1107,8 @@ impl Agent {
                         }
                     }
                 }
-                let compaction_llm = LlmClient::new(&self.config)?;
+                let compaction_config = self.config.with_compaction_overrides();
+                let compaction_llm = LlmClient::new(&compaction_config)?;
                 compact_history(&mut self.history, max_hist, &compaction_llm).await;
             }
 

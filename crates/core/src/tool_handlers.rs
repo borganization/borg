@@ -455,6 +455,7 @@ fn manage_tasks_create(args: &serde_json::Value) -> Result<String> {
             timeout_ms: args["timeout_ms"].as_i64(),
             delivery_channel: args["delivery_channel"].as_str(),
             delivery_target: args["delivery_target"].as_str(),
+            allowed_tools: args["allowed_tools"].as_str(),
         }) {
             Ok(()) => Ok(format!(
                 "Scheduled task created: {task_name} (id: {})",

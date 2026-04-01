@@ -41,6 +41,22 @@ pub struct ScheduledTaskRow {
     pub timeout_ms: i64,
     pub delivery_channel: Option<String>,
     pub delivery_target: Option<String>,
+    /// Comma-separated list of allowed tools for this task. None = all tools allowed.
+    pub allowed_tools: Option<String>,
+}
+
+impl ScheduledTaskRow {
+    /// Parse the allowed_tools field into a set of tool names.
+    /// Returns `None` if no allowlist is configured (all tools allowed).
+    pub fn allowed_tools_set(&self) -> Option<std::collections::HashSet<String>> {
+        self.allowed_tools.as_ref().map(|tools| {
+            tools
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+    }
 }
 
 /// Task run log row from SQLite.
@@ -227,6 +243,8 @@ pub struct NewTask<'a> {
     pub timeout_ms: Option<i64>,
     pub delivery_channel: Option<&'a str>,
     pub delivery_target: Option<&'a str>,
+    /// Comma-separated tool allowlist. None = all tools allowed.
+    pub allowed_tools: Option<&'a str>,
 }
 
 /// Parameters for enqueuing a delivery.
@@ -329,7 +347,21 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 19;
+    const CURRENT_VERSION: u32 = 20;
+
+    /// Check if a column exists on a table via `PRAGMA table_info`.
+    /// Safer than catching ALTER TABLE errors by string matching.
+    fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        let mut stmt = match conn.prepare(&format!("PRAGMA table_info(\"{table}\")")) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let names: Vec<String> = match stmt.query_map([], |row| row.get::<_, String>(1)) {
+            Ok(rows) => rows.flatten().collect(),
+            Err(_) => return false,
+        };
+        names.iter().any(|name| name == column)
+    }
 
     fn run_migrations(&self) -> Result<()> {
         // Ensure meta table exists for version tracking (outside transaction
@@ -375,6 +407,7 @@ impl Database {
             Database::migrate_v17,
             Database::migrate_v18,
             Database::migrate_v19,
+            Database::migrate_v20,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -472,9 +505,8 @@ impl Database {
 
     /// V2: Add messages table for message persistence + retry_count for tasks
     fn migrate_v2(&self) -> Result<()> {
-        self.conn
-            .execute_batch(
-                "
+        self.conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -486,20 +518,13 @@ impl Database {
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
-
-            -- Add retry_count to scheduled_tasks if not present
-            ALTER TABLE scheduled_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
             ",
-            )
-            .or_else(|e| {
-                // ALTER TABLE fails if column already exists — that's OK
-                let msg = e.to_string();
-                if msg.contains("duplicate column") || msg.contains("already exists") {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })?;
+        )?;
+        if !Self::has_column(&self.conn, "scheduled_tasks", "retry_count") {
+            self.conn.execute_batch(
+                "ALTER TABLE scheduled_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
         Ok(())
     }
 
@@ -664,22 +689,44 @@ impl Database {
                 ON sub_agent_runs(parent_session_id);
             ",
         )?;
-        crate::multi_agent::roles::seed_builtin_roles(self)?;
+        // Seed built-in roles as frozen SQL (not calling live code, so migration is immutable).
+        let now = chrono::Utc::now().timestamp();
+        let builtin_roles: &[(&str, &str, f64, &str)] = &[
+            (
+                "researcher",
+                "Information gathering and analysis. Use this role for tasks that require searching, reading, and synthesizing information.",
+                0.3,
+                r#"["run_shell","web_fetch","web_search","read_memory","write_memory"]"#,
+            ),
+            (
+                "coder",
+                "Code writing and modification. Use this role for tasks that require creating or modifying code files.",
+                0.2,
+                r#"["run_shell","apply_patch","create_tool","read_memory"]"#,
+            ),
+            (
+                "writer",
+                "Documentation and content writing. Use this role for tasks that require writing documentation, notes, or creative content.",
+                0.7,
+                r#"["run_shell","apply_patch","read_memory","write_memory","web_search"]"#,
+            ),
+        ];
+        for (name, desc, temp, tools_json) in builtin_roles {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO agent_roles (name, description, temperature, tools_allowed, is_builtin, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)",
+                params![name, desc, temp, tools_json, now],
+            )?;
+        }
         Ok(())
     }
 
     /// V8: Add content_parts_json column to messages for multimodal content
     fn migrate_v8(&self) -> Result<()> {
-        self.conn
-            .execute_batch("ALTER TABLE messages ADD COLUMN content_parts_json TEXT;")
-            .or_else(|e| {
-                let msg = e.to_string();
-                if msg.contains("duplicate column") || msg.contains("already exists") {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })?;
+        if !Self::has_column(&self.conn, "messages", "content_parts_json") {
+            self.conn
+                .execute_batch("ALTER TABLE messages ADD COLUMN content_parts_json TEXT;")?;
+        }
         Ok(())
     }
 
@@ -720,18 +767,16 @@ impl Database {
 
     fn migrate_v11(&self) -> Result<()> {
         // Add provider, model, cost_usd columns to token_usage.
-        // Use try-execute to handle "duplicate column" gracefully on re-runs.
-        let alters = [
-            "ALTER TABLE token_usage ADD COLUMN provider TEXT",
-            "ALTER TABLE token_usage ADD COLUMN model TEXT",
-            "ALTER TABLE token_usage ADD COLUMN cost_usd REAL",
+        let new_columns = [
+            ("token_usage", "provider", "TEXT"),
+            ("token_usage", "model", "TEXT"),
+            ("token_usage", "cost_usd", "REAL"),
         ];
-        for sql in &alters {
-            if let Err(e) = self.conn.execute_batch(sql) {
-                let msg = e.to_string();
-                if !msg.contains("duplicate column") {
-                    return Err(e.into());
-                }
+        for (table, col, col_type) in &new_columns {
+            if !Self::has_column(&self.conn, table, col) {
+                self.conn.execute_batch(&format!(
+                    "ALTER TABLE \"{table}\" ADD COLUMN \"{col}\" {col_type}"
+                ))?;
             }
         }
         self.conn.execute_batch(
@@ -824,23 +869,28 @@ impl Database {
     /// V14: Add retry, timeout, and delivery columns to scheduled_tasks
     fn migrate_v14(&self) -> Result<()> {
         // retry_count already exists from V2, add remaining columns
-        let alters = [
-            "ALTER TABLE scheduled_tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3",
-            "ALTER TABLE scheduled_tasks ADD COLUMN retry_after INTEGER",
-            "ALTER TABLE scheduled_tasks ADD COLUMN last_error TEXT",
-            "ALTER TABLE scheduled_tasks ADD COLUMN timeout_ms INTEGER NOT NULL DEFAULT 300000",
-            "ALTER TABLE scheduled_tasks ADD COLUMN delivery_channel TEXT",
-            "ALTER TABLE scheduled_tasks ADD COLUMN delivery_target TEXT",
+        let new_columns = [
+            (
+                "scheduled_tasks",
+                "max_retries",
+                "INTEGER NOT NULL DEFAULT 3",
+            ),
+            ("scheduled_tasks", "retry_after", "INTEGER"),
+            ("scheduled_tasks", "last_error", "TEXT"),
+            (
+                "scheduled_tasks",
+                "timeout_ms",
+                "INTEGER NOT NULL DEFAULT 300000",
+            ),
+            ("scheduled_tasks", "delivery_channel", "TEXT"),
+            ("scheduled_tasks", "delivery_target", "TEXT"),
         ];
-        for sql in &alters {
-            self.conn.execute(sql, []).or_else(|e| {
-                let msg = e.to_string();
-                if msg.contains("duplicate column") || msg.contains("already exists") {
-                    Ok(0)
-                } else {
-                    Err(e)
-                }
-            })?;
+        for (table, col, col_type) in &new_columns {
+            if !Self::has_column(&self.conn, table, col) {
+                self.conn.execute_batch(&format!(
+                    "ALTER TABLE \"{table}\" ADD COLUMN \"{col}\" {col_type}"
+                ))?;
+            }
         }
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_tasks_retry ON scheduled_tasks(status, retry_after);",
@@ -964,6 +1014,24 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_scripts_name ON scripts(name);
             ",
         )?;
+        Ok(())
+    }
+
+    /// V20: Add allowed_tools column to scheduled_tasks for tool allowlists.
+    fn migrate_v20(&self) -> Result<()> {
+        // Check if column already exists (idempotent migration)
+        let has_column = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(scheduled_tasks)")?;
+            let rows: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows.iter().any(|name| name == "allowed_tools")
+        };
+        if !has_column {
+            self.conn
+                .execute_batch("ALTER TABLE scheduled_tasks ADD COLUMN allowed_tools TEXT;")?;
+        }
         Ok(())
     }
 
@@ -2113,9 +2181,9 @@ impl Database {
         let max_retries = task.max_retries.unwrap_or(3);
         let timeout_ms = task.timeout_ms.unwrap_or(300_000);
         self.conn.execute(
-            "INSERT INTO scheduled_tasks (id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at, max_retries, timeout_ms, delivery_channel, delivery_target)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![task.id, task.name, task.prompt, task.schedule_type, task.schedule_expr, task.timezone, task.next_run, now, max_retries, timeout_ms, task.delivery_channel, task.delivery_target],
+            "INSERT INTO scheduled_tasks (id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at, max_retries, timeout_ms, delivery_channel, delivery_target, allowed_tools)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![task.id, task.name, task.prompt, task.schedule_type, task.schedule_expr, task.timezone, task.next_run, now, max_retries, timeout_ms, task.delivery_channel, task.delivery_target, task.allowed_tools],
         )?;
         Ok(())
     }
@@ -2123,7 +2191,7 @@ impl Database {
     pub fn list_tasks(&self) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
-                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools
              FROM scheduled_tasks ORDER BY created_at DESC",
         )?;
         let rows = stmt
@@ -2135,7 +2203,7 @@ impl Database {
     pub fn get_due_tasks(&self, now: i64) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
-                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools
              FROM scheduled_tasks
              WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?1
                AND retry_after IS NULL
@@ -2208,7 +2276,7 @@ impl Database {
     pub fn get_task_by_id(&self, id: &str) -> Result<Option<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
-                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools
              FROM scheduled_tasks WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], Self::map_task_row)?;
@@ -2236,6 +2304,7 @@ impl Database {
             timeout_ms: row.get(13)?,
             delivery_channel: row.get(14)?,
             delivery_target: row.get(15)?,
+            allowed_tools: row.get(16)?,
         })
     }
 
@@ -2264,7 +2333,7 @@ impl Database {
     pub fn get_tasks_pending_retry(&self, now: i64) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
-                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools
              FROM scheduled_tasks
              WHERE status = 'active' AND retry_after IS NOT NULL AND retry_after <= ?1
              ORDER BY retry_after ASC",
@@ -2292,7 +2361,7 @@ impl Database {
     fn claim_due_tasks_inner(&self, now: i64) -> Result<Vec<ClaimedTask>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
-                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools
              FROM scheduled_tasks
              WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?1
                AND retry_after IS NULL
@@ -2784,6 +2853,7 @@ mod tests {
             timeout_ms: None,
             delivery_channel: None,
             delivery_target: None,
+            allowed_tools: None,
         }
     }
 
@@ -4323,6 +4393,7 @@ mod tests {
             timeout_ms: Some(60_000),
             delivery_channel: Some("telegram"),
             delivery_target: Some("12345"),
+            allowed_tools: None,
         })
         .expect("create");
         let task = db.get_task_by_id("t1").expect("get").expect("some");
@@ -4330,6 +4401,70 @@ mod tests {
         assert_eq!(task.timeout_ms, 60_000);
         assert_eq!(task.delivery_channel.as_deref(), Some("telegram"));
         assert_eq!(task.delivery_target.as_deref(), Some("12345"));
+    }
+
+    #[test]
+    fn create_task_with_allowed_tools() {
+        let db = test_db();
+        db.create_task(&NewTask {
+            id: "t-tools",
+            name: "restricted task",
+            prompt: "check weather",
+            schedule_type: "interval",
+            schedule_expr: "1h",
+            timezone: "local",
+            next_run: Some(100),
+            max_retries: None,
+            timeout_ms: None,
+            delivery_channel: None,
+            delivery_target: None,
+            allowed_tools: Some("run_shell,read_file"),
+        })
+        .expect("create");
+        let task = db.get_task_by_id("t-tools").expect("get").expect("some");
+        assert_eq!(task.allowed_tools.as_deref(), Some("run_shell,read_file"));
+    }
+
+    #[test]
+    fn create_task_without_allowed_tools() {
+        let db = test_db();
+        db.create_task(&simple_task(
+            "t-no-tools",
+            "open task",
+            "do anything",
+            "interval",
+            "1h",
+            Some(100),
+        ))
+        .expect("create");
+        let task = db.get_task_by_id("t-no-tools").expect("get").expect("some");
+        assert!(task.allowed_tools.is_none());
+    }
+
+    #[test]
+    fn allowed_tools_survives_list_tasks() {
+        let db = test_db();
+        db.create_task(&NewTask {
+            id: "t-list",
+            name: "listed task",
+            prompt: "check stuff",
+            schedule_type: "interval",
+            schedule_expr: "30m",
+            timezone: "local",
+            next_run: Some(100),
+            max_retries: None,
+            timeout_ms: None,
+            delivery_channel: None,
+            delivery_target: None,
+            allowed_tools: Some("read_memory,write_memory"),
+        })
+        .expect("create");
+        let tasks = db.list_tasks().expect("list");
+        let task = tasks.iter().find(|t| t.id == "t-list").expect("find");
+        assert_eq!(
+            task.allowed_tools.as_deref(),
+            Some("read_memory,write_memory")
+        );
     }
 
     #[test]
