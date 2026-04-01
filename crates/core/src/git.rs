@@ -397,4 +397,133 @@ mod tests {
         assert!(diff.added_files.is_empty());
         assert!(diff.deleted_files.is_empty());
     }
+
+    #[test]
+    fn format_git_context_branch_only() {
+        let ctx = GitContext {
+            branch: Some("feature/foo".into()),
+            ..Default::default()
+        };
+        let out = format_git_context(&ctx);
+        assert!(out.contains("Git branch: feature/foo"));
+        assert!(!out.contains("Uncommitted changes"));
+        assert!(!out.contains("Recent commits"));
+    }
+
+    #[test]
+    fn format_git_context_uncommitted_only() {
+        let ctx = GitContext {
+            has_uncommitted_changes: true,
+            ..Default::default()
+        };
+        let out = format_git_context(&ctx);
+        assert!(out.contains("Uncommitted changes: yes"));
+        assert!(!out.contains("Git branch"));
+    }
+
+    #[test]
+    fn format_git_context_no_uncommitted_changes() {
+        let ctx = GitContext {
+            branch: Some("main".into()),
+            has_uncommitted_changes: false,
+            ..Default::default()
+        };
+        let out = format_git_context(&ctx);
+        assert!(!out.contains("Uncommitted changes"));
+    }
+
+    #[test]
+    fn format_git_context_recent_commits_listed() {
+        let ctx = GitContext {
+            recent_commits: vec!["abc Fix".into(), "def Add".into(), "ghi Refactor".into()],
+            ..Default::default()
+        };
+        let out = format_git_context(&ctx);
+        assert!(out.contains("Recent commits:"));
+        assert!(out.contains("abc Fix"));
+        assert!(out.contains("def Add"));
+        assert!(out.contains("ghi Refactor"));
+    }
+
+    #[test]
+    fn ghost_commit_serializable() {
+        let gc = GhostCommit {
+            commit_id: "abc123".to_string(),
+            parent_id: Some("def456".to_string()),
+            preexisting_untracked: vec![PathBuf::from("file.txt"), PathBuf::from("dir/other.rs")],
+        };
+        let json = serde_json::to_string(&gc).unwrap();
+        let deserialized: GhostCommit = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.commit_id, "abc123");
+        assert_eq!(deserialized.parent_id, Some("def456".to_string()));
+        assert_eq!(deserialized.preexisting_untracked.len(), 2);
+    }
+
+    #[test]
+    fn ghost_commit_no_parent() {
+        let gc = GhostCommit {
+            commit_id: "abc123".to_string(),
+            parent_id: None,
+            preexisting_untracked: vec![],
+        };
+        let json = serde_json::to_string(&gc).unwrap();
+        let deserialized: GhostCommit = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.parent_id.is_none());
+        assert!(deserialized.preexisting_untracked.is_empty());
+    }
+
+    #[test]
+    fn git_context_default_has_no_repo() {
+        let ctx = GitContext::default();
+        assert!(ctx.repo_root.is_none());
+        assert!(ctx.branch.is_none());
+        assert!(ctx.commit_hash.is_none());
+        assert!(ctx.recent_commits.is_empty());
+        assert!(!ctx.has_uncommitted_changes);
+        assert!(ctx.remote_url.is_none());
+    }
+
+    #[test]
+    fn find_repo_root_in_temp_dir_without_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = find_repo_root(tmp.path());
+        // No .git in temp dir, but might find one in parent. Just don't panic.
+        let _ = root;
+    }
+
+    #[test]
+    fn find_repo_root_with_fake_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let root = find_repo_root(tmp.path());
+        assert_eq!(root, Some(tmp.path().to_path_buf()));
+    }
+
+    #[test]
+    fn find_repo_root_from_nested_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let sub = tmp.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&sub).unwrap();
+        let root = find_repo_root(&sub);
+        assert_eq!(root, Some(tmp.path().to_path_buf()));
+    }
+
+    #[tokio::test]
+    async fn collect_git_context_in_repo() {
+        let cwd = std::env::current_dir().unwrap();
+        let ctx = collect_git_context(&cwd).await;
+        // We're in a git repo, so should have some context
+        assert!(ctx.repo_root.is_some());
+        assert!(ctx.branch.is_some() || ctx.commit_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn collect_git_context_outside_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = collect_git_context(tmp.path()).await;
+        // No git repo, so branch/commit should be None
+        assert!(ctx.branch.is_none());
+        assert!(ctx.commit_hash.is_none());
+    }
 }
