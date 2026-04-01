@@ -243,18 +243,20 @@ pub fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
 }
 
 /// Unpack little-endian bytes into f32 embedding.
-pub fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
+pub fn bytes_to_embedding(bytes: &[u8]) -> Result<Vec<f32>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
     if bytes.len() % 4 != 0 {
-        tracing::warn!(
-            "Corrupted embedding data: length {} not aligned to 4 bytes, returning empty",
+        anyhow::bail!(
+            "Corrupted embedding data: length {} not aligned to 4 bytes",
             bytes.len()
         );
-        return Vec::new();
     }
-    bytes
+    Ok(bytes
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
+        .collect())
 }
 
 /// SHA-256 hash of content.
@@ -284,7 +286,7 @@ pub async fn generate_embedding_cached(
             db.get_cached_embedding(&provider.endpoint, &provider.model, &hash)
         {
             debug!("Embedding cache hit for hash {}", &hash[..8]);
-            return Ok(bytes_to_embedding(&cached_bytes));
+            return bytes_to_embedding(&cached_bytes);
         }
     }
 
@@ -384,7 +386,10 @@ pub fn rank_embeddings_by_similarity(
     let mut scored: Vec<(String, f32)> = stored
         .iter()
         .map(|row| {
-            let stored_emb = bytes_to_embedding(&row.embedding);
+            let stored_emb = match bytes_to_embedding(&row.embedding) {
+                Ok(emb) => emb,
+                Err(_) => return (row.filename.clone(), 0.0),
+            };
             let similarity = cosine_similarity(query_embedding, &stored_emb);
             let recency_score = if time_range > 0.0 {
                 (row.created_at - min_time) as f32 / time_range
@@ -444,6 +449,7 @@ pub async fn embed_memory_file_chunked(
         .collect();
 
     let mut chunk_data = Vec::new();
+    let model = Some(provider.model.clone());
 
     for (i, chunk) in chunks.iter().enumerate() {
         let hash = content_hash(&chunk.content);
@@ -477,7 +483,7 @@ pub async fn embed_memory_file_chunked(
             content_hash: hash,
             embedding,
             dimension: Some(provider.dimension),
-            model: Some(provider.model.clone()),
+            model: model.clone(),
             start_line: Some(chunk.start_line as i64),
             end_line: Some(chunk.end_line as i64),
         });
@@ -516,24 +522,32 @@ pub fn merge_search_scores(
 
     // Normalize scores to [0, 1] within each set, filtering non-finite values
     let normalize = |results: &[(&str, i64, f32)]| -> Vec<(String, i64, f32)> {
-        let finite: Vec<_> = results.iter().filter(|r| r.2.is_finite()).collect();
-        if finite.is_empty() {
+        let mut min_s = f32::INFINITY;
+        let mut max_s = f32::NEG_INFINITY;
+        let mut has_finite = false;
+        for r in results {
+            if r.2.is_finite() {
+                min_s = min_s.min(r.2);
+                max_s = max_s.max(r.2);
+                has_finite = true;
+            }
+        }
+        if !has_finite {
             return Vec::new();
         }
-        let max_score = finite.iter().map(|r| r.2).fold(f32::NEG_INFINITY, f32::max);
-        let min_score = finite.iter().map(|r| r.2).fold(f32::INFINITY, f32::min);
-        let range = max_score - min_score;
-        if range == 0.0 {
-            finite
-                .iter()
-                .map(|r| (r.0.to_string(), r.1, 1.0f32))
-                .collect()
-        } else {
-            finite
-                .iter()
-                .map(|r| (r.0.to_string(), r.1, (r.2 - min_score) / range))
-                .collect()
-        }
+        let range = max_s - min_s;
+        results
+            .iter()
+            .filter(|r| r.2.is_finite())
+            .map(|r| {
+                let norm = if range > 0.0 {
+                    (r.2 - min_s) / range
+                } else {
+                    1.0
+                };
+                (r.0.to_string(), r.1, norm)
+            })
+            .collect()
     };
 
     let norm_vec = normalize(vector_results);
@@ -625,7 +639,7 @@ mod tests {
     fn embedding_bytes_roundtrip() {
         let original = vec![1.0f32, -2.5, 3.14159, 0.0, f32::MIN, f32::MAX];
         let bytes = embedding_to_bytes(&original);
-        let recovered = bytes_to_embedding(&bytes);
+        let recovered = bytes_to_embedding(&bytes).unwrap();
         assert_eq!(original, recovered);
     }
 
@@ -836,12 +850,12 @@ mod tests {
     #[test]
     fn bytes_to_embedding_unaligned_returns_empty() {
         let result = bytes_to_embedding(&[1, 2, 3]); // 3 bytes, not aligned to 4
-        assert!(result.is_empty());
+        assert!(result.is_err());
     }
 
     #[test]
     fn bytes_to_embedding_empty() {
-        let result = bytes_to_embedding(&[]);
+        let result = bytes_to_embedding(&[]).unwrap();
         assert!(result.is_empty());
     }
 
@@ -896,5 +910,31 @@ mod tests {
         let fts: Vec<(&str, i64, f32)> = vec![];
         let merged = merge_search_scores(&vector, &fts, 0.7, 0.3);
         assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn bytes_to_embedding_various_unaligned() {
+        for len in [1, 2, 3, 5, 7, 9, 11] {
+            let data = vec![0u8; len];
+            assert!(
+                bytes_to_embedding(&data).is_err(),
+                "length {len} should fail"
+            );
+        }
+    }
+
+    #[test]
+    fn bytes_to_embedding_nan_inf_values() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&f32::NAN.to_le_bytes());
+        bytes.extend_from_slice(&f32::INFINITY.to_le_bytes());
+        bytes.extend_from_slice(&f32::NEG_INFINITY.to_le_bytes());
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        let result = bytes_to_embedding(&bytes).unwrap();
+        assert_eq!(result.len(), 4);
+        assert!(result[0].is_nan());
+        assert!(result[1].is_infinite());
+        assert!(result[2].is_infinite());
+        assert!((result[3] - 1.0).abs() < 1e-6);
     }
 }

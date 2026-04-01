@@ -217,4 +217,50 @@ mod tests {
         let reordered = mmr_rerank(&results, 0.7, 2);
         assert_eq!(reordered.len(), 2);
     }
+
+    #[test]
+    fn mmr_all_identical_scores() {
+        let results = vec![
+            (0, 0.8, "alpha beta gamma"),
+            (1, 0.8, "delta epsilon zeta"),
+            (2, 0.8, "alpha beta gamma"),
+        ];
+        let reordered = mmr_rerank(&results, 0.7, 3);
+        assert_eq!(reordered.len(), 3);
+        // All should be included despite identical scores
+    }
+
+    #[test]
+    fn mmr_lambda_zero_pure_diversity() {
+        let results = vec![
+            (0, 0.95, "the quick brown fox"),
+            (1, 0.90, "the quick brown cat"),
+            (2, 0.50, "rust programming language"),
+        ];
+        let reordered = mmr_rerank(&results, 0.0, 3);
+        assert_eq!(reordered.len(), 3);
+        // With lambda=0, after picking first, diversity should push the unique item up
+    }
+
+    #[test]
+    fn mmr_large_result_set() {
+        let results: Vec<(usize, f32, &str)> = (0..500)
+            .map(|i| (i, 1.0 - (i as f32 / 500.0), "some text content for testing"))
+            .collect();
+        let reordered = mmr_rerank(&results, 0.7, 10);
+        assert_eq!(reordered.len(), 10);
+    }
+
+    #[test]
+    fn mmr_lambda_boundary_clamped() {
+        let results = vec![(0, 0.9, "hello world"), (1, 0.5, "goodbye world")];
+        // Lambda > 1.0 should clamp to 1.0 (pure relevance)
+        let clamped_high = mmr_rerank(&results, 1.5, 2);
+        let at_one = mmr_rerank(&results, 1.0, 2);
+        assert_eq!(clamped_high, at_one, "lambda > 1.0 should clamp to 1.0");
+        // Lambda < 0.0 should clamp to 0.0 (pure diversity)
+        let clamped_low = mmr_rerank(&results, -0.5, 2);
+        let at_zero = mmr_rerank(&results, 0.0, 2);
+        assert_eq!(clamped_low, at_zero, "lambda < 0.0 should clamp to 0.0");
+    }
 }

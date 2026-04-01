@@ -509,7 +509,14 @@ pub fn scan_extra_paths(
             .to_string_lossy()
             .to_string();
         if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::debug!("Failed to read entry in {}: {e}", dir.display());
+                        continue;
+                    }
+                };
                 let path = entry.path();
                 if path.is_file() && path.extension().is_some_and(|e| e == "md") {
                     let rel = path
@@ -538,17 +545,22 @@ pub fn load_extra_paths(
         if *estimated_tokens >= max_tokens {
             break;
         }
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            let tokens = estimate_tokens(&content);
-            if *estimated_tokens + tokens > max_tokens {
-                continue;
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                let tokens = estimate_tokens(&content);
+                if *estimated_tokens + tokens > max_tokens {
+                    continue;
+                }
+                let safe_name = escape_xml_attr(&name);
+                parts.push(format!(
+                    "<memory_file name=\"{safe_name}\">\n{content}\n</memory_file>"
+                ));
+                *estimated_tokens += tokens;
+                debug!("Loaded extra path {name} ({tokens} tokens)");
             }
-            let safe_name = escape_xml_attr(&name);
-            parts.push(format!(
-                "<memory_file name=\"{safe_name}\">\n{content}\n</memory_file>"
-            ));
-            *estimated_tokens += tokens;
-            debug!("Loaded extra path {name} ({tokens} tokens)");
+            Err(e) => {
+                tracing::debug!("Failed to read extra path {name}: {e}");
+            }
         }
     }
 }
@@ -987,5 +999,60 @@ mod tests {
         );
         // Either the file fits or it doesn't, but we shouldn't exceed budget
         assert!(tokens <= 100 || parts.is_empty());
+    }
+
+    #[test]
+    fn load_extra_paths_budget_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("note.md"), "some content").unwrap();
+        let mut tokens = 0;
+        let mut parts = Vec::new();
+        load_extra_paths(
+            &[tmp.path().to_string_lossy().to_string()],
+            &[],
+            0,
+            &mut tokens,
+            &mut parts,
+        );
+        assert!(parts.is_empty(), "zero budget should load nothing");
+    }
+
+    #[test]
+    fn scan_extra_paths_ignores_non_md_extensions() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("notes.md"), "lowercase ext").unwrap();
+        std::fs::write(tmp.path().join("data.txt"), "not md").unwrap();
+        std::fs::write(tmp.path().join("image.png"), "not md either").unwrap();
+        let files = scan_extra_paths(&[tmp.path().to_string_lossy().to_string()], &[]);
+        // Only .md files should be included
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.contains("notes.md"));
+    }
+
+    #[test]
+    fn load_memory_files_ranked_missing_files_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("exists.md"), "real content").unwrap();
+
+        // Rank includes a non-existent file
+        let rankings = vec![
+            ("nonexistent.md".to_string(), 1.0),
+            ("exists.md".to_string(), 0.5),
+        ];
+
+        let mut parts = Vec::new();
+        let mut tokens = 0;
+        load_memory_files_ranked(dir, "Test", &rankings, 100_000, &mut tokens, &mut parts).unwrap();
+
+        let combined = parts.join("\n");
+        assert!(
+            combined.contains("real content"),
+            "existing file should be loaded"
+        );
+        assert!(
+            !combined.contains("nonexistent"),
+            "missing file should be skipped"
+        );
     }
 }

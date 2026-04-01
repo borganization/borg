@@ -64,23 +64,32 @@ pub async fn index_pending_sessions(config: &Config, batch_size: usize) -> Resul
     Ok(total)
 }
 
+/// Maximum total transcript size in characters to prevent memory pressure.
+const MAX_TRANSCRIPT_CHARS: usize = 500_000;
+
 /// Build a text transcript from message rows suitable for chunking and embedding.
 fn build_transcript(messages: &[crate::db::MessageRow]) -> String {
     let mut transcript = String::new();
     for msg in messages {
-        // Skip tool messages (noisy, not useful for search)
         if msg.role == "tool" || msg.role == "system" {
             continue;
         }
         if let Some(ref content) = msg.content {
+            if content.is_empty() {
+                continue;
+            }
             let role_label = match msg.role.as_str() {
                 "user" => "User",
                 "assistant" => "Assistant",
                 _ => &msg.role,
             };
-            // Truncate very long messages
             let truncated: String = content.chars().take(2000).collect();
             transcript.push_str(&format!("{role_label}: {truncated}\n\n"));
+
+            if transcript.len() >= MAX_TRANSCRIPT_CHARS {
+                debug!("Transcript truncated at {} chars", transcript.len());
+                break;
+            }
         }
     }
     transcript
@@ -175,6 +184,56 @@ mod tests {
         // Re-mark (upsert)
         db.mark_session_indexed("sess-1", 15).unwrap();
         assert!(db.is_session_indexed("sess-1").unwrap());
+    }
+
+    #[test]
+    fn build_transcript_empty_content_skipped() {
+        let msg = MessageRow {
+            content: Some(String::new()),
+            ..make_message("user", "")
+        };
+        let transcript = build_transcript(&[msg]);
+        // Empty content messages are skipped to avoid wasting embedding tokens
+        assert!(transcript.is_empty());
+    }
+
+    #[test]
+    fn build_transcript_none_content() {
+        let msg = MessageRow {
+            content: None,
+            ..make_message("user", "ignored")
+        };
+        let transcript = build_transcript(&[msg]);
+        assert!(transcript.is_empty());
+    }
+
+    #[test]
+    fn build_transcript_large_session_bounded() {
+        let messages: Vec<MessageRow> = (0..1000)
+            .map(|i| {
+                make_message(
+                    "user",
+                    &format!("Message number {i} with some padding text to make it longer"),
+                )
+            })
+            .collect();
+        let transcript = build_transcript(&messages);
+        assert!(
+            transcript.len() <= MAX_TRANSCRIPT_CHARS + 2100,
+            "transcript should be bounded: got {} chars",
+            transcript.len()
+        );
+    }
+
+    #[test]
+    fn build_transcript_all_system_and_tool() {
+        let messages = vec![
+            make_message("system", "system prompt"),
+            make_message("tool", "tool output"),
+            make_message("system", "another system"),
+        ];
+        let transcript = build_transcript(&messages);
+        assert!(transcript.trim().is_empty());
     }
 
     #[test]

@@ -1337,9 +1337,13 @@ pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> 
 
     for scope in &["global", "local", "extra", "sessions"] {
         // FTS search
-        let fts_rows = db
-            .fts_search(scope, query, max_results * 4)
-            .unwrap_or_default();
+        let fts_rows = match db.fts_search(scope, query, max_results * 4) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("FTS search failed for scope {scope}: {e}");
+                Vec::new()
+            }
+        };
         let fts_owned: Vec<(String, i64, f32)> = fts_rows
             .iter()
             .map(|(c, score)| (c.filename.clone(), c.chunk_index, *score))
@@ -1357,17 +1361,26 @@ pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> 
             .collect();
 
         // Vector search across chunks
-        let chunks = db.get_all_chunks(scope).unwrap_or_default();
+        let chunks = match db.get_all_chunks(scope, None) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Chunk retrieval failed for scope {scope}: {e}");
+                Vec::new()
+            }
+        };
         let vec_owned: Vec<(String, i64, f32)> = if let Some(ref query_emb) = query_embedding {
             chunks
                 .iter()
                 .filter_map(|c| {
-                    c.embedding.as_ref().map(|emb_bytes| {
-                        let stored = crate::embeddings::bytes_to_embedding(emb_bytes);
+                    c.embedding.as_ref().and_then(|emb_bytes| {
+                        let Ok(stored) = crate::embeddings::bytes_to_embedding(emb_bytes) else {
+                            return None;
+                        };
                         let sim = crate::embeddings::cosine_similarity(query_emb, &stored);
-                        (c.filename.clone(), c.chunk_index, sim)
+                        Some((c.filename.clone(), c.chunk_index, sim))
                     })
                 })
+                // Vector threshold is halved: cosine similarity scores tend to be lower than BM25-normalized scores
                 .filter(|(_f, _ci, sim)| *sim >= min_score * 0.5)
                 .collect()
         } else {
@@ -1430,7 +1443,13 @@ pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> 
                 std::collections::HashSet::new();
             for scope in &["global", "local", "extra", "sessions"] {
                 for term in &terms {
-                    let fts_rows = db.fts_search(scope, term, max_results).unwrap_or_default();
+                    let fts_rows = match db.fts_search(scope, term, max_results) {
+                        Ok(rows) => rows,
+                        Err(e) => {
+                            tracing::warn!("FTS fallback search failed for term '{term}' in scope {scope}: {e}");
+                            continue;
+                        }
+                    };
                     for (c, score) in fts_rows {
                         let key = (c.filename.clone(), c.chunk_index);
                         if score >= min_score && seen.insert(key) {

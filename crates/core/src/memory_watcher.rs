@@ -149,6 +149,10 @@ pub fn resolve_scope_and_filename(path: &Path, config: &Config) -> (String, Stri
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
+    tracing::debug!(
+        "Could not determine scope for path {}, falling back to global",
+        path.display()
+    );
     ("global".to_string(), filename)
 }
 
@@ -243,6 +247,33 @@ mod tests {
         let watcher = MemoryWatcher::start(config);
         assert!(watcher.is_ok());
         if let Ok(w) = watcher {
+            w.stop();
+        }
+    }
+
+    #[test]
+    fn resolve_scope_unknown_path_returns_global() {
+        let config = Config::default();
+        let path = std::path::PathBuf::from("/some/completely/unknown/path/file.md");
+        let (scope, filename) = resolve_scope_and_filename(&path, &config);
+        assert_eq!(scope, "global");
+        assert_eq!(filename, "file.md");
+    }
+
+    #[tokio::test]
+    async fn watcher_nonexistent_directory_graceful() {
+        // MemoryWatcher::start should not fail even if memory dirs don't exist
+        let config = Config {
+            memory: crate::config::MemoryConfig {
+                extra_paths: vec!["/nonexistent/path/xyz123".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Should start without error (non-existent paths are skipped)
+        let result = MemoryWatcher::start(config);
+        assert!(result.is_ok());
+        if let Ok(w) = result {
             w.stop();
         }
     }
