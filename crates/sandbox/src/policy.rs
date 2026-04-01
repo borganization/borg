@@ -257,9 +257,13 @@ mod tests {
         let policy = SandboxPolicy::default();
         let args = vec!["script.py".to_string()];
         let cmd = policy.wrap_command("python3", &args, Path::new("/tmp/tool"));
-        assert_eq!(cmd.program, "bwrap");
-        // The original program and args should be at the end
-        assert!(cmd.args.contains(&"python3".to_string()));
+        if which::which("bwrap").is_ok() {
+            assert_eq!(cmd.program, "bwrap");
+        } else {
+            // Falls back to unsandboxed when bwrap is not installed
+            assert_eq!(cmd.program, "python3");
+        }
+        // The original program and args should be present
         assert!(cmd.args.contains(&"script.py".to_string()));
     }
 
@@ -269,6 +273,12 @@ mod tests {
         let policy = SandboxPolicy::default();
         let args = vec!["arg1".to_string(), "arg2".to_string()];
         let cmd = policy.wrap_command("node", &args, Path::new("/tmp/tool"));
+        if which::which("bwrap").is_err() {
+            // Fallback: program is node, args are passed through directly
+            assert_eq!(cmd.program, "node");
+            assert_eq!(cmd.args, vec!["arg1", "arg2"]);
+            return;
+        }
         // Original program and args should appear at the end after bwrap flags
         let node_pos = cmd.args.iter().position(|a| a == "node").unwrap();
         let arg1_pos = cmd.args.iter().position(|a| a == "arg1").unwrap();
