@@ -199,4 +199,73 @@ mod tests {
         let content = result.unwrap();
         assert!(content.len() <= MAX_PROJECT_DOC_BYTES + 200); // some overhead for path comment
     }
+
+    #[test]
+    fn floor_char_boundary_ascii() {
+        let s = "hello world";
+        assert_eq!(floor_char_boundary(s, 5), 5);
+        assert_eq!(floor_char_boundary(s, 100), s.len());
+        assert_eq!(floor_char_boundary(s, 0), 0);
+    }
+
+    #[test]
+    fn floor_char_boundary_multibyte() {
+        let s = "hello 🌍 world";
+        let emoji_start = s.find('🌍').unwrap();
+        // Trying to cut in the middle of the emoji should back up
+        let mid_emoji = emoji_start + 2;
+        let result = floor_char_boundary(s, mid_emoji);
+        assert!(s.is_char_boundary(result));
+        assert!(result <= mid_emoji);
+    }
+
+    #[test]
+    fn floor_char_boundary_empty() {
+        assert_eq!(floor_char_boundary("", 0), 0);
+        assert_eq!(floor_char_boundary("", 10), 0);
+    }
+
+    #[test]
+    fn collect_doc_paths_when_cwd_is_root() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "root docs").unwrap();
+
+        let paths = collect_doc_paths(tmp.path(), tmp.path());
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn collect_doc_paths_no_docs() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        let paths = collect_doc_paths(tmp.path(), tmp.path());
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn discover_content_contains_path_comment() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "content").unwrap();
+
+        let result = discover_project_docs(tmp.path()).unwrap().unwrap();
+        assert!(result.contains("<!--"));
+        assert!(result.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn discover_multiple_docs_separated_by_hr() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "root content").unwrap();
+
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("CLAUDE.md"), "sub content").unwrap();
+
+        let result = discover_project_docs(&sub).unwrap().unwrap();
+        assert!(result.contains("---")); // HR separator between docs
+    }
 }

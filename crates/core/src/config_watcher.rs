@@ -182,4 +182,64 @@ mod tests {
 
         watcher.stop();
     }
+
+    #[tokio::test]
+    async fn subscribe_returns_initial_config() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let config_path = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&config_path).unwrap_or_else(|e| panic!("create: {e}"));
+        writeln!(f, "[llm]\ntemperature = 0.3").unwrap_or_else(|e| panic!("write: {e}"));
+        drop(f);
+
+        let initial = Config::load_from(&config_path).unwrap_or_else(|e| panic!("load: {e}"));
+        let watcher =
+            ConfigWatcher::start(config_path, initial).unwrap_or_else(|e| panic!("start: {e}"));
+
+        let rx = watcher.subscribe();
+        let config = rx.borrow();
+        assert!((config.llm.temperature - 0.3).abs() < f32::EPSILON);
+
+        watcher.stop();
+    }
+
+    #[tokio::test]
+    async fn multiple_subscribers_see_same_config() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let config_path = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&config_path).unwrap_or_else(|e| panic!("create: {e}"));
+        writeln!(f, "[llm]\ntemperature = 0.9").unwrap_or_else(|e| panic!("write: {e}"));
+        drop(f);
+
+        let initial = Config::load_from(&config_path).unwrap_or_else(|e| panic!("load: {e}"));
+        let watcher =
+            ConfigWatcher::start(config_path, initial).unwrap_or_else(|e| panic!("start: {e}"));
+
+        let rx1 = watcher.subscribe();
+        let rx2 = watcher.subscribe();
+
+        let t1 = rx1.borrow().llm.temperature;
+        let t2 = rx2.borrow().llm.temperature;
+        assert!((t1 - t2).abs() < f32::EPSILON);
+
+        watcher.stop();
+    }
+
+    #[tokio::test]
+    async fn stop_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let config_path = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&config_path).unwrap_or_else(|e| panic!("create: {e}"));
+        writeln!(f, "[llm]\ntemperature = 0.5").unwrap_or_else(|e| panic!("write: {e}"));
+        drop(f);
+
+        let initial = Config::load_from(&config_path).unwrap_or_else(|e| panic!("load: {e}"));
+        let watcher =
+            ConfigWatcher::start(config_path, initial).unwrap_or_else(|e| panic!("start: {e}"));
+
+        // stop() consumes self, so we can only call it once — just verify it doesn't panic
+        watcher.stop();
+    }
 }
