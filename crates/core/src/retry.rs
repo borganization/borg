@@ -7,9 +7,17 @@ use rand::Rng;
 /// `attempt` is 0-indexed: attempt 0 → `initial`, attempt 1 → `initial * factor`, etc.
 /// Jitter adds ±10% randomness to prevent thundering-herd.
 pub fn backoff_delay(attempt: u32, initial: Duration, factor: f64) -> Duration {
+    const MAX_DELAY_MS: f64 = 300_000.0; // 5 minutes
     let base = initial.as_millis() as f64 * factor.powi(attempt as i32);
     let jitter = rand::rng().random_range(0.9..=1.1);
-    Duration::from_millis((base * jitter) as u64)
+    let raw = base * jitter;
+    // Guard against NaN/Infinity from overflow, then clamp to max delay
+    let delay_ms = if raw.is_finite() {
+        raw.clamp(0.0, MAX_DELAY_MS)
+    } else {
+        MAX_DELAY_MS
+    };
+    Duration::from_millis(delay_ms as u64)
 }
 
 #[cfg(test)]
@@ -39,5 +47,19 @@ mod tests {
         let delay = backoff_delay(5, Duration::from_millis(200), 2.0);
         // 200 * 2^5 = 6400ms, with jitter ≤ ~7040ms
         assert!(delay.as_millis() <= 8000);
+    }
+
+    #[test]
+    fn backoff_caps_at_max_delay() {
+        // Very high attempt count would overflow without capping
+        let delay = backoff_delay(1000, Duration::from_millis(200), 2.0);
+        assert!(delay.as_millis() <= 300_000); // 5 min cap
+        assert!(delay.as_millis() > 0);
+    }
+
+    #[test]
+    fn backoff_handles_zero_initial() {
+        let delay = backoff_delay(5, Duration::from_millis(0), 2.0);
+        assert_eq!(delay.as_millis(), 0);
     }
 }

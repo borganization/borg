@@ -1157,6 +1157,9 @@ impl Config {
                 let v: u32 = value
                     .parse()
                     .with_context(|| "Invalid integer for max_tokens")?;
+                if v == 0 {
+                    anyhow::bail!("max_tokens must be greater than 0");
+                }
                 self.llm.max_tokens = v;
                 Ok(format!("max_tokens = {v}"))
             }
@@ -1165,6 +1168,10 @@ impl Config {
                 Ok(format!("provider = {value}"))
             }
             "sandbox.mode" => {
+                match value {
+                    "strict" | "permissive" => {}
+                    other => anyhow::bail!("Unknown sandbox mode '{other}'. Valid: strict, permissive"),
+                }
                 self.sandbox.mode = value.to_string();
                 Ok(format!("sandbox.mode = {value}"))
             }
@@ -1177,6 +1184,9 @@ impl Config {
             }
             "memory.max_context_tokens" => {
                 let v: usize = value.parse().with_context(|| "Invalid integer")?;
+                if v == 0 {
+                    anyhow::bail!("memory.max_context_tokens must be greater than 0");
+                }
                 self.memory.max_context_tokens = v;
                 Ok(format!("memory.max_context_tokens = {v}"))
             }
@@ -1749,6 +1759,26 @@ agent_name = "Buddy"
     fn apply_setting_unknown_key_errors() {
         let mut cfg = Config::default();
         assert!(cfg.apply_setting("nonexistent", "value").is_err());
+    }
+
+    #[test]
+    fn apply_setting_max_tokens_rejects_zero() {
+        let mut cfg = Config::default();
+        assert!(cfg.apply_setting("max_tokens", "0").is_err());
+    }
+
+    #[test]
+    fn apply_setting_memory_max_context_tokens_rejects_zero() {
+        let mut cfg = Config::default();
+        assert!(cfg.apply_setting("memory.max_context_tokens", "0").is_err());
+    }
+
+    #[test]
+    fn apply_setting_sandbox_mode_rejects_invalid() {
+        let mut cfg = Config::default();
+        assert!(cfg.apply_setting("sandbox.mode", "bogus").is_err());
+        assert!(cfg.apply_setting("sandbox.mode", "strict").is_ok());
+        assert!(cfg.apply_setting("sandbox.mode", "permissive").is_ok());
     }
 
     #[test]
