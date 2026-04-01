@@ -191,6 +191,8 @@ pub struct LlmConfig {
     pub max_retries: u32,
     pub initial_retry_delay_ms: u64,
     pub request_timeout_ms: u64,
+    /// Timeout in seconds for receiving each SSE chunk during streaming. 0 = no timeout.
+    pub stream_chunk_timeout_secs: u64,
     /// Override the provider's default API URL (e.g., for Ollama on a remote host, Azure OpenAI, or proxies).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -1045,6 +1047,7 @@ impl Default for LlmConfig {
             max_retries: 3,
             initial_retry_delay_ms: 200,
             request_timeout_ms: 60000,
+            stream_chunk_timeout_secs: 30,
             base_url: None,
             fallback: Vec::new(),
             thinking: ThinkingLevel::Off,

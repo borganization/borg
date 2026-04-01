@@ -310,29 +310,44 @@ impl Database {
         &self.conn
     }
 
-    /// Open (or create) the database at `~/.borg/borg.db`.
+    /// Default busy timeout for CLI usage (5 seconds).
+    const DEFAULT_BUSY_TIMEOUT_MS: u64 = 5000;
+    /// Recommended busy timeout for gateway/concurrent workloads (30 seconds).
+    pub const GATEWAY_BUSY_TIMEOUT_MS: u64 = 30000;
+
+    /// Open (or create) the database at `~/.borg/borg.db` with default busy timeout.
     #[instrument(skip_all)]
     pub fn open() -> Result<Self> {
+        Self::open_with_timeout(Self::DEFAULT_BUSY_TIMEOUT_MS)
+    }
+
+    /// Open (or create) the database with a custom busy timeout (in milliseconds).
+    #[instrument(skip_all)]
+    pub fn open_with_timeout(busy_timeout_ms: u64) -> Result<Self> {
         let path = Self::db_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn =
             Connection::open(&path).with_context(|| format!("Failed to open DB at {path:?}"))?;
-        Self::init_connection(conn)
+        Self::init_connection_with_timeout(conn, busy_timeout_ms)
     }
 
     /// Create a Database from an existing connection. Runs migrations.
     /// Useful for testing with in-memory databases.
     pub fn from_connection(conn: Connection) -> Result<Self> {
-        Self::init_connection(conn)
+        Self::init_connection_with_timeout(conn, Self::DEFAULT_BUSY_TIMEOUT_MS)
     }
 
     /// Common connection initialization: pragmas + migrations.
-    fn init_connection(conn: Connection) -> Result<Self> {
+    fn init_connection_with_timeout(conn: Connection, busy_timeout_ms: u64) -> Result<Self> {
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-        let _: i64 = conn.query_row("PRAGMA busy_timeout=5000", [], |row| row.get(0))?;
+        let _: i64 = conn.query_row(
+            &format!("PRAGMA busy_timeout={busy_timeout_ms}"),
+            [],
+            |row| row.get(0),
+        )?;
         // Incremental auto-vacuum prevents unbounded DB growth from message history,
         // embeddings cache, and task runs. Requires running PRAGMA incremental_vacuum
         // periodically (done in run_migrations after schema changes).
@@ -5465,5 +5480,31 @@ mod tests {
         assert!(role.system_instructions.is_none());
         assert!(role.tools_allowed.is_none());
         assert!(role.max_iterations.is_none());
+    }
+
+    #[test]
+    fn open_with_custom_timeout() {
+        // Verify that a custom busy timeout is accepted
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        let db = Database::init_connection_with_timeout(conn, Database::GATEWAY_BUSY_TIMEOUT_MS)
+            .expect("init with gateway timeout");
+        // Verify the timeout was applied by reading it back
+        let timeout: i64 = db
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("read busy_timeout pragma");
+        assert_eq!(timeout, Database::GATEWAY_BUSY_TIMEOUT_MS as i64);
+    }
+
+    #[test]
+    fn default_open_uses_5s_timeout() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        let db =
+            Database::init_connection_with_timeout(conn, 5000).expect("init with default timeout");
+        let timeout: i64 = db
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("read busy_timeout pragma");
+        assert_eq!(timeout, 5000);
     }
 }
