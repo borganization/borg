@@ -60,6 +60,24 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
     // Open database for task scheduling
     let db = borg_core::db::Database::open()?;
 
+    // Acquire singleton daemon lock
+    let daemon_pid = std::process::id();
+    let now = chrono::Utc::now().timestamp();
+    if !db.acquire_daemon_lock(daemon_pid, now)? {
+        anyhow::bail!(
+            "Another daemon instance is already running. Only one daemon can run at a time."
+        );
+    }
+
+    // Recover any stale 'running' task_runs from a previous crashed daemon
+    match db.recover_stale_runs("Daemon crashed during execution") {
+        Ok(count) if count > 0 => {
+            tracing::warn!("Recovered {count} stale task run(s) from previous daemon crash");
+        }
+        Err(e) => tracing::warn!("Failed to recover stale runs: {e}"),
+        _ => {}
+    }
+
     // Validate that LLM client can be constructed
     let _ = borg_core::llm::LlmClient::new(&config)?;
 
@@ -171,6 +189,7 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                 for _ in 0..max_concurrent {
                     let _ = semaphore.acquire().await;
                 }
+                let _ = db.release_daemon_lock(daemon_pid);
                 println!("All tasks drained. Goodbye.");
                 return Ok(());
             }
@@ -186,25 +205,41 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
 
         let now = chrono::Utc::now().timestamp();
 
-        // Process due tasks (normal scheduled runs)
-        match db.get_due_tasks(now) {
-            Ok(tasks) => {
-                for task in tasks {
-                    // Advance next_run immediately to prevent re-execution
-                    if let Err(e) = borg_core::tasks::advance_next_run(&task, &db) {
-                        tracing::warn!("Failed to advance task next_run: {e}");
-                    }
-                    spawn_task_execution(&task, false, semaphore.clone(), config.clone()).await;
+        // Refresh daemon lock heartbeat
+        if let Err(e) = db.refresh_daemon_lock(daemon_pid, now) {
+            tracing::warn!("Failed to refresh daemon lock heartbeat: {e}");
+        }
+
+        // Process due tasks (atomic claim: advances next_run + creates running task_run in one transaction)
+        match db.claim_due_tasks(now) {
+            Ok(claimed) => {
+                for ct in claimed {
+                    spawn_task_execution(
+                        &ct.task,
+                        ct.run_id,
+                        false,
+                        semaphore.clone(),
+                        config.clone(),
+                    )
+                    .await;
                 }
             }
-            Err(e) => tracing::warn!("Failed to check due tasks: {e}"),
+            Err(e) => tracing::warn!("Failed to claim due tasks: {e}"),
         }
 
         // Process tasks pending retry
         match db.get_tasks_pending_retry(now) {
             Ok(retries) => {
                 for task in retries {
-                    spawn_task_execution(&task, true, semaphore.clone(), config.clone()).await;
+                    let run_id = match db.start_task_run(&task.id, now) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            tracing::warn!("Failed to start task run for '{}': {e}", task.name);
+                            continue;
+                        }
+                    };
+                    spawn_task_execution(&task, run_id, true, semaphore.clone(), config.clone())
+                        .await;
                 }
             }
             Err(e) => tracing::warn!("Failed to check retry tasks: {e}"),
@@ -214,6 +249,7 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
 
 async fn spawn_task_execution(
     task: &borg_core::db::ScheduledTaskRow,
+    run_id: i64,
     is_retry: bool,
     semaphore: std::sync::Arc<tokio::sync::Semaphore>,
     config: Config,
@@ -258,6 +294,9 @@ async fn spawn_task_execution(
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!("Failed to create LLM client for task '{task_name}': {e}");
+                if let Ok(db) = borg_core::db::Database::open() {
+                    let _ = db.complete_task_run(run_id, 0, None, Some(&format!("{e}")));
+                }
                 return;
             }
         };
@@ -268,14 +307,10 @@ async fn spawn_task_execution(
                 let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
                 let result_text = response.text_content().unwrap_or("");
                 if let Ok(db) = borg_core::db::Database::open() {
-                    if let Err(e) = db.record_task_run(
-                        &task_id,
-                        started_at,
-                        duration_ms,
-                        Some(result_text),
-                        None,
-                    ) {
-                        tracing::warn!("Failed to record task run for '{task_name}': {e}");
+                    if let Err(e) =
+                        db.complete_task_run(run_id, duration_ms, Some(result_text), None)
+                    {
+                        tracing::warn!("Failed to complete task run for '{task_name}': {e}");
                     }
                     if let Err(e) = db.clear_task_retry(&task_id) {
                         tracing::warn!("Failed to clear retry state for '{task_name}': {e}");
@@ -294,7 +329,7 @@ async fn spawn_task_execution(
                 let ctx = TaskFailureContext {
                     task_id: &task_id,
                     task_name: &task_name,
-                    started_at,
+                    run_id,
                     duration_ms,
                     retry_count,
                     max_retries,
@@ -310,7 +345,7 @@ async fn spawn_task_execution(
                 let ctx = TaskFailureContext {
                     task_id: &task_id,
                     task_name: &task_name,
-                    started_at,
+                    run_id,
                     duration_ms,
                     retry_count,
                     max_retries,
@@ -328,7 +363,7 @@ async fn spawn_task_execution(
 struct TaskFailureContext<'a> {
     task_id: &'a str,
     task_name: &'a str,
-    started_at: i64,
+    run_id: i64,
     duration_ms: i64,
     retry_count: i32,
     max_retries: i32,
@@ -342,7 +377,7 @@ async fn handle_task_failure(ctx: &TaskFailureContext<'_>, error: &str) {
     let TaskFailureContext {
         task_id,
         task_name,
-        started_at,
+        run_id,
         duration_ms,
         retry_count,
         max_retries,
@@ -351,40 +386,42 @@ async fn handle_task_failure(ctx: &TaskFailureContext<'_>, error: &str) {
         delivery_target,
         config,
     } = ctx;
-    if borg_core::tasks::is_transient_error(error) && *retry_count < *max_retries {
-        let next_attempt = *retry_count + 1;
-        let delay = borg_core::tasks::retry_delay_secs(next_attempt);
-        let retry_at = chrono::Utc::now().timestamp() + delay;
-        if let Ok(db) = borg_core::db::Database::open() {
+
+    // Open DB for failure handling (Connection is not Send, so we can't share across spawn)
+    if let Ok(db) = borg_core::db::Database::open() {
+        // Always mark the run as failed
+        if let Err(e) = db.complete_task_run(*run_id, *duration_ms, None, Some(error)) {
+            tracing::warn!("Failed to complete task run for '{task_name}': {e}");
+        }
+
+        if borg_core::tasks::is_transient_error(error) && *retry_count < *max_retries {
+            let next_attempt = *retry_count + 1;
+            let delay = borg_core::tasks::retry_delay_secs(next_attempt);
+            let retry_at = chrono::Utc::now().timestamp() + delay;
             if let Err(e) = db.set_task_retry(task_id, next_attempt, error, retry_at) {
                 tracing::warn!("Failed to set retry state for '{task_name}': {e}");
             }
+            tracing::warn!(
+                "Task '{task_name}' failed (transient), retry {next_attempt}/{max_retries} in {delay}s: {error}"
+            );
+            return;
         }
-        tracing::warn!(
-            "Task '{task_name}' failed (transient), retry {next_attempt}/{max_retries} in {delay}s: {error}"
-        );
-    } else {
-        if let Ok(db) = borg_core::db::Database::open() {
-            if let Err(e) =
-                db.record_task_run(task_id, *started_at, *duration_ms, None, Some(error))
-            {
-                tracing::warn!("Failed to record task failure for '{task_name}': {e}");
-            }
-            if let Err(e) = db.clear_task_retry(task_id) {
-                tracing::warn!("Failed to clear retry state for '{task_name}': {e}");
-            }
-            if *schedule_type == "once" {
-                if let Err(e) = db.update_task_status(task_id, "completed") {
-                    tracing::warn!("Failed to mark task '{task_name}' completed: {e}");
-                }
-            }
-        }
-        tracing::warn!("Task '{task_name}' failed: {error}");
 
-        if let (Some(ch), Some(tgt)) = (delivery_channel, delivery_target) {
-            let msg = format!("Error: {error}");
-            deliver_task_result(ch, tgt, &format!("{task_name} [FAILED]"), &msg, config).await;
+        if let Err(e) = db.clear_task_retry(task_id) {
+            tracing::warn!("Failed to clear retry state for '{task_name}': {e}");
         }
+        if *schedule_type == "once" {
+            if let Err(e) = db.update_task_status(task_id, "completed") {
+                tracing::warn!("Failed to mark task '{task_name}' completed: {e}");
+            }
+        }
+    }
+
+    tracing::warn!("Task '{task_name}' failed: {error}");
+
+    if let (Some(ch), Some(tgt)) = (delivery_channel, delivery_target) {
+        let msg = format!("Error: {error}");
+        deliver_task_result(ch, tgt, &format!("{task_name} [FAILED]"), &msg, config).await;
     }
 }
 

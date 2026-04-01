@@ -1,9 +1,48 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use cron::Schedule;
+use rusqlite::params;
 use std::str::FromStr;
 
 use crate::db::{Database, ScheduledTaskRow};
+
+// ── Run status constants ──
+
+pub const RUN_STATUS_RUNNING: &str = "running";
+pub const RUN_STATUS_SUCCESS: &str = "success";
+pub const RUN_STATUS_FAILED: &str = "failed";
+
+/// Format a run status for CLI/tool display.
+pub fn format_run_status(status: &str) -> &str {
+    match status {
+        RUN_STATUS_RUNNING => "RUNNING",
+        RUN_STATUS_SUCCESS => "OK",
+        RUN_STATUS_FAILED => "FAIL",
+        other => other,
+    }
+}
+
+/// Advance a task's next_run using raw SQL on a connection (for use within transactions).
+/// Returns Ok(()) on success.
+pub fn advance_next_run_raw(conn: &rusqlite::Connection, task: &ScheduledTaskRow) -> Result<()> {
+    match task.schedule_type.as_str() {
+        "once" => {
+            conn.execute(
+                "UPDATE scheduled_tasks SET status = 'completed', next_run = NULL WHERE id = ?1",
+                params![task.id],
+            )?;
+        }
+        "cron" | "interval" => {
+            let next = calculate_next_run(&task.schedule_type, &task.schedule_expr).unwrap_or(None);
+            conn.execute(
+                "UPDATE scheduled_tasks SET next_run = ?1 WHERE id = ?2",
+                params![next, task.id],
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
 /// Calculate the next run time for a task based on its schedule.
 pub fn calculate_next_run(schedule_type: &str, schedule_expr: &str) -> Result<Option<i64>> {
@@ -31,23 +70,7 @@ pub fn calculate_next_run(schedule_type: &str, schedule_expr: &str) -> Result<Op
 
 /// Advance a task's next_run after execution.
 pub fn advance_next_run(task: &ScheduledTaskRow, db: &Database) -> Result<()> {
-    match task.schedule_type.as_str() {
-        "once" => {
-            // One-shot: mark as completed
-            db.update_task_status(&task.id, "completed")?;
-            db.update_task_next_run(&task.id, None)?;
-        }
-        "cron" => {
-            let next = calculate_next_run("cron", &task.schedule_expr)?;
-            db.update_task_next_run(&task.id, next)?;
-        }
-        "interval" => {
-            let next = calculate_next_run("interval", &task.schedule_expr)?;
-            db.update_task_next_run(&task.id, next)?;
-        }
-        _ => {}
-    }
-    Ok(())
+    advance_next_run_raw(db.conn(), task)
 }
 
 /// Format a task row for display.
