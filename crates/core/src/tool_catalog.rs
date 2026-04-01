@@ -61,7 +61,7 @@ impl ToolGroup {
     pub fn tool_names(&self) -> &[&str] {
         match self {
             Self::Memory => &["write_memory", "read_memory"],
-            Self::Fs => &["apply_patch", "read_file"],
+            Self::Fs => &["apply_patch", "read_file", "list_dir"],
             Self::Runtime => &["run_shell"],
             Self::Discovery => &["list"],
             Self::Web => &["web_fetch", "web_search"],
@@ -165,9 +165,8 @@ pub const ALL_GROUPS: &[ToolGroup] = &[
 pub fn tool_group(name: &str) -> Option<ToolGroup> {
     match name {
         "write_memory" | "read_memory" => Some(ToolGroup::Memory),
-        "apply_patch" | "create_tool" | "apply_skill_patch" | "create_channel" | "read_file" => {
-            Some(ToolGroup::Fs)
-        }
+        "apply_patch" | "create_tool" | "apply_skill_patch" | "create_channel" | "read_file"
+        | "list_dir" => Some(ToolGroup::Fs),
         "run_shell" => Some(ToolGroup::Runtime),
         "list" | "list_tools" | "list_skills" | "list_channels" | "list_agents" => {
             Some(ToolGroup::Discovery)
@@ -235,6 +234,7 @@ mod tests {
         assert_eq!(tool_group("create_tool"), Some(ToolGroup::Fs));
         assert_eq!(tool_group("apply_skill_patch"), Some(ToolGroup::Fs));
         assert_eq!(tool_group("create_channel"), Some(ToolGroup::Fs));
+        assert_eq!(tool_group("list_dir"), Some(ToolGroup::Fs));
     }
 
     #[test]

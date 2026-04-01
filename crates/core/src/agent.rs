@@ -57,6 +57,11 @@ static SETUP_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
     parse_template("\n<first_conversation>\n{{ setup }}\n</first_conversation>\n")
 });
 
+// Collaboration mode templates
+const COLLAB_MODE_DEFAULT: &str = include_str!("../templates/collaboration_mode/default.md");
+const COLLAB_MODE_EXECUTE: &str = include_str!("../templates/collaboration_mode/execute.md");
+const COLLAB_MODE_PLAN: &str = include_str!("../templates/collaboration_mode/plan.md");
+
 /// Maximum number of parallel tool calls allowed in a single LLM response.
 /// Prevents OOM from malformed stream events with huge indices.
 const MAX_TOOL_CALLS: usize = 128;
@@ -294,6 +299,12 @@ pub struct Agent {
     db: Mutex<Option<Database>>,
     /// Cached skills context string, invalidated on config reload.
     cached_skills_context: Option<String>,
+    /// Ghost commit created at session start for atomic undo (coding agent).
+    ghost_commit: Option<crate::git::GhostCommit>,
+    /// Git repo root (if CWD is inside a git repo).
+    git_repo_root: Option<std::path::PathBuf>,
+    /// Cached project doc contents (AGENTS.md / CLAUDE.md), loaded once.
+    cached_project_docs: Option<Option<String>>,
 }
 
 /// Common state produced by `build_common`, consumed by both `new()` and `new_sub_agent()`.
@@ -348,6 +359,9 @@ impl Agent {
         } else {
             None
         };
+        let git_repo_root = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::git::find_repo_root(&cwd));
         Ok(Self {
             config,
             history: Vec::new(),
@@ -367,6 +381,9 @@ impl Agent {
             config_rx: None,
             db: Mutex::new(common.db),
             cached_skills_context: None,
+            ghost_commit: None,
+            git_repo_root,
+            cached_project_docs: None,
         })
     }
 
@@ -405,6 +422,9 @@ impl Agent {
         } else {
             None
         };
+        let git_repo_root = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::git::find_repo_root(&cwd));
         Ok(Self {
             config,
             history: Vec::new(),
@@ -424,6 +444,9 @@ impl Agent {
             config_rx: None,
             db: Mutex::new(common.db),
             cached_skills_context: None,
+            ghost_commit: None,
+            git_repo_root,
+            cached_project_docs: None,
         })
     }
 
@@ -595,21 +618,17 @@ impl Agent {
 
         let mut system = format!("<system_instructions>\n{identity}\n</system_instructions>\n\n");
 
-        // Environment section
+        // Environment section with rich git context
         system.push_str("<environment>\n");
         system.push_str(&format!("Current Time: {now}\n"));
         if let Ok(cwd) = std::env::current_dir() {
             system.push_str(&format!("Working directory: {}\n", cwd.display()));
         }
-        if let Ok(output) = std::process::Command::new("git")
-            .args(["branch", "--show-current"])
-            .output()
-        {
-            if output.status.success() {
-                let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !branch.is_empty() {
-                    system.push_str(&format!("Git branch: {branch}\n"));
-                }
+        if let Some(ref root) = self.git_repo_root {
+            let git_ctx = crate::git::collect_git_context(root).await;
+            let formatted = crate::git::format_git_context(&git_ctx);
+            if !formatted.is_empty() {
+                system.push_str(&formatted);
             }
         }
         system.push_str(&format!(
@@ -618,6 +637,16 @@ impl Agent {
             std::env::consts::ARCH
         ));
         system.push_str("</environment>\n");
+
+        // Collaboration mode
+        let mode_template = match self.config.conversation.collaboration_mode {
+            crate::config::CollaborationMode::Default => COLLAB_MODE_DEFAULT,
+            crate::config::CollaborationMode::Execute => COLLAB_MODE_EXECUTE,
+            crate::config::CollaborationMode::Plan => COLLAB_MODE_PLAN,
+        };
+        system.push_str(&format!(
+            "\n<collaboration_mode>\n{mode_template}\n</collaboration_mode>\n"
+        ));
 
         if !memory.is_empty() {
             system.push_str(
@@ -649,6 +678,31 @@ impl Agent {
                 );
             }
         }
+
+        // Project documentation (AGENTS.md / CLAUDE.md)
+        let project_docs = match &self.cached_project_docs {
+            Some(cached) => cached.clone(),
+            None => std::env::current_dir().ok().and_then(|cwd| {
+                crate::project_doc::discover_project_docs(&cwd)
+                    .ok()
+                    .flatten()
+            }),
+        };
+        if let Some(ref docs) = project_docs {
+            system.push_str(&format!(
+                "\n<project_instructions trust=\"stored\">\n{docs}\n</project_instructions>\n"
+            ));
+        }
+
+        // Coding instructions (when filesystem and runtime tools are available)
+        system.push_str("\n<coding_instructions>\n\
+            - Use list_dir to explore project structure before making changes.\n\
+            - Use read_file to understand code before editing. Always read what you plan to change.\n\
+            - Use apply_patch to make file changes. Never use run_shell to write files.\n\
+            - After making changes, verify correctness by reading the modified file or running tests.\n\
+            - If in a git repo, prefer small, atomic changes. Do not commit unless asked.\n\
+            - When you encounter errors, read the relevant code and error context before attempting fixes.\n\
+            </coding_instructions>\n");
 
         system.push_str(&format!(
             "\n<security_policy>\n{SECURITY_POLICY}\n</security_policy>\n"
@@ -887,6 +941,29 @@ impl Agent {
     ) -> Result<()> {
         let max_iterations = self.config.conversation.max_iterations as usize;
         let mut iteration: usize = 0;
+
+        // Create ghost commit for coding safety (lazy, one-time)
+        if self.ghost_commit.is_none() {
+            if let Some(ref root) = self.git_repo_root {
+                match crate::git::create_ghost_commit(root).await {
+                    Ok(gc) => {
+                        tracing::info!(commit_id = %gc.commit_id, "Created ghost commit for session");
+                        self.ghost_commit = Some(gc);
+                    }
+                    Err(e) => tracing::debug!("Skipping ghost commit: {e}"),
+                }
+            }
+        }
+
+        // Cache project docs on first run
+        if self.cached_project_docs.is_none() {
+            let docs = std::env::current_dir().ok().and_then(|cwd| {
+                crate::project_doc::discover_project_docs(&cwd)
+                    .ok()
+                    .flatten()
+            });
+            self.cached_project_docs = Some(docs);
+        }
 
         // Background: index extra paths and pending sessions on first run
         if self.config.memory.embeddings.enabled {
@@ -1356,6 +1433,21 @@ impl Agent {
                 continue;
             }
 
+            // Plan mode: block mutating tool calls
+            if self
+                .config
+                .conversation
+                .collaboration_mode
+                .blocks_mutations()
+                && is_mutating_tool(name)
+            {
+                self.skip_tool_call(
+                    &tool_call.id,
+                    "Plan mode: mutating operations are not allowed. Use read-only tools (read_file, list_dir, list, memory_search, web_fetch, web_search) to explore the codebase and formulate your plan.",
+                );
+                continue;
+            }
+
             // Rate limiting
             let action_type = classify_action(name);
             match self.rate_guard.record(action_type) {
@@ -1552,6 +1644,7 @@ impl Agent {
             "read_file" => {
                 return tool_handlers::handle_read_file(&args, &self.config);
             }
+            "list_dir" => tool_handlers::handle_list_dir(&args, &self.config),
             "security_audit" => tool_handlers::handle_security_audit(&args, &self.config),
             "browser" => {
                 return tool_handlers::handle_browser(
@@ -1891,6 +1984,43 @@ mod tests {
             ActionType::ToolCall
         ));
     }
+
+    // -- is_mutating_tool (allowlist-based) --
+
+    #[test]
+    fn mutating_tools_are_blocked_in_plan_mode() {
+        // These should be considered mutating
+        assert!(is_mutating_tool("apply_patch"));
+        assert!(is_mutating_tool("create_tool"));
+        assert!(is_mutating_tool("apply_skill_patch"));
+        assert!(is_mutating_tool("create_channel"));
+        assert!(is_mutating_tool("run_shell"));
+        assert!(is_mutating_tool("write_memory"));
+        assert!(is_mutating_tool("browser"));
+        assert!(is_mutating_tool("manage_tasks"));
+        assert!(is_mutating_tool("generate_image"));
+    }
+
+    #[test]
+    fn non_mutating_tools_allowed_in_plan_mode() {
+        // These should be allowed (non-mutating)
+        assert!(!is_mutating_tool("read_file"));
+        assert!(!is_mutating_tool("list_dir"));
+        assert!(!is_mutating_tool("list"));
+        assert!(!is_mutating_tool("read_memory"));
+        assert!(!is_mutating_tool("memory_search"));
+        assert!(!is_mutating_tool("read_pdf"));
+        assert!(!is_mutating_tool("web_fetch"));
+        assert!(!is_mutating_tool("web_search"));
+        assert!(!is_mutating_tool("security_audit"));
+    }
+
+    #[test]
+    fn unknown_tools_default_to_mutating() {
+        // New/unknown tools should be blocked by default (safety)
+        assert!(is_mutating_tool("some_new_tool"));
+        assert!(is_mutating_tool(""));
+    }
 }
 
 /// Check if a tool call requires user confirmation before execution.
@@ -1938,6 +2068,30 @@ fn requires_confirmation(tool_name: &str, args: Option<&serde_json::Value>) -> O
 }
 
 /// Map a tool name to an action type for rate limiting.
+/// Returns true if the tool performs mutations (file writes, shell commands, etc.).
+/// Used to block mutating tools in Plan mode.
+///
+/// Uses an allowlist of known-safe tools so that new tools default to blocked,
+/// preventing accidental mutation in plan mode.
+fn is_mutating_tool(name: &str) -> bool {
+    !matches!(
+        name,
+        "read_file"
+            | "list_dir"
+            | "list"
+            | "list_tools"
+            | "list_skills"
+            | "list_channels"
+            | "list_agents"
+            | "read_memory"
+            | "memory_search"
+            | "read_pdf"
+            | "web_fetch"
+            | "web_search"
+            | "security_audit"
+    )
+}
+
 fn classify_action(tool_name: &str) -> ActionType {
     match tool_name {
         "run_shell" => ActionType::ShellCommand,

@@ -10,8 +10,16 @@ pub async fn run() -> Result<()> {
     crate::tui::run().await
 }
 
-pub async fn one_shot(message: &str, auto_approve: bool, json_output: bool) -> Result<()> {
-    let config = Config::load()?;
+pub async fn one_shot(
+    message: &str,
+    auto_approve: bool,
+    json_output: bool,
+    mode: Option<&str>,
+) -> Result<()> {
+    let mut config = Config::load()?;
+    if let Some(mode_str) = mode {
+        config.conversation.collaboration_mode = mode_str.parse()?;
+    }
     let metrics = BorgMetrics::from_config(&config);
     let mut agent = Agent::new(config, metrics)?;
 
