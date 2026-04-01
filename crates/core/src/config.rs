@@ -575,6 +575,14 @@ pub struct BrowserConfig {
     pub no_sandbox: bool,
     pub timeout_ms: u64,
     pub startup_timeout_ms: u64,
+    /// Max console log entries to buffer (default: 500).
+    pub console_buffer_size: usize,
+    /// Max page error entries to buffer (default: 200).
+    pub error_buffer_size: usize,
+    /// Max network request entries to buffer (default: 500).
+    pub network_buffer_size: usize,
+    /// Inner JS evaluation timeout in ms for Promise.race wrapper (default: 10000).
+    pub js_eval_timeout_ms: u64,
 }
 
 impl Default for BrowserConfig {
@@ -587,6 +595,10 @@ impl Default for BrowserConfig {
             no_sandbox: false,
             timeout_ms: 30000,
             startup_timeout_ms: 15000,
+            console_buffer_size: 500,
+            error_buffer_size: 200,
+            network_buffer_size: 500,
+            js_eval_timeout_ms: 10000,
         }
     }
 }
