@@ -537,7 +537,12 @@ pub async fn invoke_agent_with_auto_reply(
                     }
                 }
                 AgentEvent::Error(e) => {
-                    warn!("Agent error on channel '{}': {e}", channel_name)
+                    warn!("Agent error on channel '{}': {e}", channel_name);
+                    // If no response text yet, provide a friendly error message
+                    // instead of leaving the user with no reply.
+                    if response_text.is_empty() {
+                        response_text = borg_core::error_format::format_friendly_error(&e);
+                    }
                 }
                 AgentEvent::ToolConfirmation {
                     respond,
@@ -707,6 +712,12 @@ fn record_delivery_failure_sync(db: &Database, delivery_id: &str, error: &str) {
     if let Err(db_err) = db.mark_failed(delivery_id, error, None) {
         warn!("Failed to mark delivery '{delivery_id}' as failed: {db_err}");
     }
+}
+
+/// Format an error from `invoke_agent` into a user-friendly message suitable for
+/// sending back to a messaging channel. Wraps `borg_core::error_format::format_friendly_error`.
+pub fn format_gateway_error(err: &anyhow::Error) -> String {
+    borg_core::error_format::format_friendly_error(&err.to_string())
 }
 
 #[cfg(test)]

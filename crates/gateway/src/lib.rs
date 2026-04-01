@@ -6,6 +6,7 @@ pub mod constants;
 pub mod crypto;
 pub mod dedup;
 pub mod discord;
+pub mod error_dedup;
 pub mod executor;
 pub mod google_chat;
 pub mod handler;

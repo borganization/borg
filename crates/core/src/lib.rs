@@ -8,6 +8,7 @@ pub mod conversation;
 pub mod db;
 pub mod doctor;
 pub mod embeddings;
+pub mod error_format;
 pub mod git;
 pub mod hooks;
 pub mod host_audit;

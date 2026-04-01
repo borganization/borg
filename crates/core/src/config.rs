@@ -130,6 +130,8 @@ pub struct Config {
     #[serde(default)]
     pub scripts: ScriptsConfig,
     #[serde(default)]
+    pub compaction: CompactionConfig,
+    #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
     /// Transient identity override (not serialized). Set by gateway routing.
     #[serde(skip)]
@@ -306,6 +308,75 @@ impl Default for ScriptsConfig {
             max_scripts: 100,
             default_timeout_ms: 60000,
         }
+    }
+}
+
+/// Configuration for the compaction model — use a different (cheaper/faster)
+/// model for context compaction than the primary conversation model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompactionConfig {
+    /// Override provider for compaction (e.g., "openrouter", "anthropic").
+    /// If omitted, uses the primary LLM provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Override model for compaction (e.g., "anthropic/claude-haiku-4-5").
+    /// If omitted, uses the primary LLM model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Override API key env var for compaction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Override temperature for compaction (default: primary LLM temperature).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Override max tokens for compaction (default: primary LLM max_tokens).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Timeout for compaction requests in ms (default: primary LLM timeout).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+impl CompactionConfig {
+    /// Returns true if any compaction override is configured.
+    pub fn has_overrides(&self) -> bool {
+        self.provider.is_some()
+            || self.model.is_some()
+            || self.api_key_env.is_some()
+            || self.temperature.is_some()
+            || self.max_tokens.is_some()
+            || self.timeout_ms.is_some()
+    }
+}
+
+impl Config {
+    /// Build a config with compaction overrides applied to the LLM section.
+    /// If no compaction overrides are set, returns a clone of self.
+    pub fn with_compaction_overrides(&self) -> Config {
+        if !self.compaction.has_overrides() {
+            return self.clone();
+        }
+        let mut cfg = self.clone();
+        if let Some(ref provider) = self.compaction.provider {
+            cfg.llm.provider = Some(provider.clone());
+        }
+        if let Some(ref model) = self.compaction.model {
+            cfg.llm.model = model.clone();
+        }
+        if let Some(ref api_key_env) = self.compaction.api_key_env {
+            cfg.llm.api_key_env = api_key_env.clone();
+        }
+        if let Some(temp) = self.compaction.temperature {
+            cfg.llm.temperature = temp;
+        }
+        if let Some(max_tok) = self.compaction.max_tokens {
+            cfg.llm.max_tokens = max_tok;
+        }
+        if let Some(timeout) = self.compaction.timeout_ms {
+            cfg.llm.request_timeout_ms = timeout;
+        }
+        cfg
     }
 }
 
@@ -570,6 +641,16 @@ pub struct GatewayConfig {
     /// Link understanding: auto-extract and fetch URLs from inbound messages.
     #[serde(default)]
     pub link_understanding: LinkUnderstandingConfig,
+    /// Error policy for external channels: always, once, silent.
+    #[serde(default)]
+    pub error_policy: ErrorPolicy,
+    /// Error dedup cooldown in milliseconds (default 4 hours).
+    /// When error_policy is "once", duplicate errors within this window are suppressed.
+    #[serde(default = "default_error_cooldown_ms")]
+    pub error_cooldown_ms: u64,
+    /// Per-channel error policy overrides. Key = channel name.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub channel_error_policies: std::collections::HashMap<String, ErrorPolicy>,
 }
 
 /// Activation mode for group chats.
@@ -581,6 +662,46 @@ pub enum ActivationMode {
     /// Bot only responds when @mentioned in groups.
     #[default]
     Mention,
+}
+
+/// Error delivery policy for external channels.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ErrorPolicy {
+    /// Send every error to the user (no suppression).
+    Always,
+    /// Send the first error, then suppress duplicates within the cooldown window.
+    #[default]
+    Once,
+    /// Never send errors to the user.
+    Silent,
+}
+
+impl FromStr for ErrorPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "always" => Ok(Self::Always),
+            "once" => Ok(Self::Once),
+            "silent" => Ok(Self::Silent),
+            other => anyhow::bail!("Unknown error policy '{other}'. Valid: always, once, silent"),
+        }
+    }
+}
+
+impl fmt::Display for ErrorPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Always => write!(f, "always"),
+            Self::Once => write!(f, "once"),
+            Self::Silent => write!(f, "silent"),
+        }
+    }
+}
+
+fn default_error_cooldown_ms() -> u64 {
+    14_400_000 // 4 hours
 }
 
 /// Route a gateway channel to specific agent configuration overrides.
@@ -655,6 +776,9 @@ impl Default for GatewayConfig {
             group_activation: ActivationMode::default(),
             auto_reply: AutoReplyConfig::default(),
             link_understanding: LinkUnderstandingConfig::default(),
+            error_policy: ErrorPolicy::default(),
+            error_cooldown_ms: default_error_cooldown_ms(),
+            channel_error_policies: std::collections::HashMap::new(),
         }
     }
 }
@@ -3235,5 +3359,213 @@ collaboration_mode = "execute"
             cfg.conversation.collaboration_mode,
             CollaborationMode::Execute
         );
+    }
+
+    // ── ErrorPolicy tests ──
+
+    #[test]
+    fn error_policy_default_is_once() {
+        assert_eq!(ErrorPolicy::default(), ErrorPolicy::Once);
+    }
+
+    #[test]
+    fn error_policy_from_str() {
+        assert_eq!(
+            "always".parse::<ErrorPolicy>().unwrap(),
+            ErrorPolicy::Always
+        );
+        assert_eq!("once".parse::<ErrorPolicy>().unwrap(), ErrorPolicy::Once);
+        assert_eq!(
+            "silent".parse::<ErrorPolicy>().unwrap(),
+            ErrorPolicy::Silent
+        );
+        assert_eq!(
+            "ALWAYS".parse::<ErrorPolicy>().unwrap(),
+            ErrorPolicy::Always
+        );
+        assert!("invalid".parse::<ErrorPolicy>().is_err());
+    }
+
+    #[test]
+    fn error_policy_display() {
+        assert_eq!(ErrorPolicy::Always.to_string(), "always");
+        assert_eq!(ErrorPolicy::Once.to_string(), "once");
+        assert_eq!(ErrorPolicy::Silent.to_string(), "silent");
+    }
+
+    #[test]
+    fn gateway_config_error_policy_defaults() {
+        let cfg = GatewayConfig::default();
+        assert_eq!(cfg.error_policy, ErrorPolicy::Once);
+        assert_eq!(cfg.error_cooldown_ms, 14_400_000);
+        assert!(cfg.channel_error_policies.is_empty());
+    }
+
+    #[test]
+    fn gateway_config_error_policy_serde() {
+        let toml_str = r#"
+[gateway]
+error_policy = "silent"
+error_cooldown_ms = 3600000
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.gateway.error_policy, ErrorPolicy::Silent);
+        assert_eq!(cfg.gateway.error_cooldown_ms, 3_600_000);
+    }
+
+    #[test]
+    fn gateway_config_channel_error_policies_serde() {
+        let toml_str = r#"
+[gateway.channel_error_policies]
+telegram = "once"
+slack = "always"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.gateway.channel_error_policies.get("telegram"),
+            Some(&ErrorPolicy::Once)
+        );
+        assert_eq!(
+            cfg.gateway.channel_error_policies.get("slack"),
+            Some(&ErrorPolicy::Always)
+        );
+    }
+
+    // ── CompactionConfig tests ──
+
+    #[test]
+    fn compaction_config_default_has_no_overrides() {
+        let cfg = CompactionConfig::default();
+        assert!(!cfg.has_overrides());
+        assert!(cfg.provider.is_none());
+        assert!(cfg.model.is_none());
+        assert!(cfg.api_key_env.is_none());
+        assert!(cfg.temperature.is_none());
+        assert!(cfg.max_tokens.is_none());
+        assert!(cfg.timeout_ms.is_none());
+    }
+
+    #[test]
+    fn compaction_config_has_overrides_when_model_set() {
+        let cfg = CompactionConfig {
+            model: Some("anthropic/claude-haiku-4-5".to_string()),
+            ..Default::default()
+        };
+        assert!(cfg.has_overrides());
+    }
+
+    #[test]
+    fn compaction_config_has_overrides_when_provider_set() {
+        let cfg = CompactionConfig {
+            provider: Some("openrouter".to_string()),
+            ..Default::default()
+        };
+        assert!(cfg.has_overrides());
+    }
+
+    #[test]
+    fn with_compaction_overrides_no_overrides_returns_same() {
+        let cfg = Config::default();
+        let result = cfg.with_compaction_overrides();
+        assert_eq!(result.llm.model, cfg.llm.model);
+        assert_eq!(result.llm.temperature, cfg.llm.temperature);
+    }
+
+    #[test]
+    fn with_compaction_overrides_applies_model() {
+        let mut cfg = Config::default();
+        cfg.compaction.model = Some("fast-model".to_string());
+        let result = cfg.with_compaction_overrides();
+        assert_eq!(result.llm.model, "fast-model");
+        // Original config should be unchanged
+        assert_ne!(cfg.llm.model, "fast-model");
+    }
+
+    #[test]
+    fn with_compaction_overrides_applies_provider() {
+        let mut cfg = Config::default();
+        cfg.compaction.provider = Some("openai".to_string());
+        let result = cfg.with_compaction_overrides();
+        assert_eq!(result.llm.provider, Some("openai".to_string()));
+    }
+
+    #[test]
+    fn with_compaction_overrides_applies_temperature() {
+        let mut cfg = Config::default();
+        cfg.compaction.temperature = Some(0.2);
+        let result = cfg.with_compaction_overrides();
+        assert!((result.llm.temperature - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn with_compaction_overrides_applies_max_tokens() {
+        let mut cfg = Config::default();
+        cfg.compaction.max_tokens = Some(2048);
+        let result = cfg.with_compaction_overrides();
+        assert_eq!(result.llm.max_tokens, 2048);
+    }
+
+    #[test]
+    fn with_compaction_overrides_applies_api_key_env() {
+        let mut cfg = Config::default();
+        cfg.compaction.api_key_env = Some("COMPACTION_KEY".to_string());
+        let result = cfg.with_compaction_overrides();
+        assert_eq!(result.llm.api_key_env, "COMPACTION_KEY");
+    }
+
+    #[test]
+    fn with_compaction_overrides_applies_timeout() {
+        let mut cfg = Config::default();
+        cfg.compaction.timeout_ms = Some(90000);
+        let result = cfg.with_compaction_overrides();
+        assert_eq!(result.llm.request_timeout_ms, 90000);
+    }
+
+    #[test]
+    fn with_compaction_overrides_applies_all() {
+        let mut cfg = Config::default();
+        cfg.compaction = CompactionConfig {
+            provider: Some("openrouter".to_string()),
+            model: Some("anthropic/claude-haiku-4-5".to_string()),
+            api_key_env: Some("COMPACTION_KEY".to_string()),
+            temperature: Some(0.3),
+            max_tokens: Some(1024),
+            timeout_ms: Some(60000),
+        };
+        let result = cfg.with_compaction_overrides();
+        assert_eq!(result.llm.provider, Some("openrouter".to_string()));
+        assert_eq!(result.llm.model, "anthropic/claude-haiku-4-5");
+        assert_eq!(result.llm.api_key_env, "COMPACTION_KEY");
+        assert!((result.llm.temperature - 0.3).abs() < f32::EPSILON);
+        assert_eq!(result.llm.max_tokens, 1024);
+        assert_eq!(result.llm.request_timeout_ms, 60000);
+    }
+
+    #[test]
+    fn compaction_config_serde() {
+        let toml_str = r#"
+[compaction]
+provider = "openrouter"
+model = "anthropic/claude-haiku-4-5"
+temperature = 0.3
+max_tokens = 1024
+timeout_ms = 60000
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.compaction.provider, Some("openrouter".to_string()));
+        assert_eq!(
+            cfg.compaction.model,
+            Some("anthropic/claude-haiku-4-5".to_string())
+        );
+        assert!((cfg.compaction.temperature.unwrap() - 0.3).abs() < f32::EPSILON);
+        assert_eq!(cfg.compaction.max_tokens, Some(1024));
+        assert_eq!(cfg.compaction.timeout_ms, Some(60000));
+    }
+
+    #[test]
+    fn compaction_config_empty_serde() {
+        let toml_str = "";
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.compaction.has_overrides());
     }
 }

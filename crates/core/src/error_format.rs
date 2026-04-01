@@ -1,0 +1,755 @@
+//! Friendly error message formatting for external channels.
+//!
+//! Classifies raw provider/agent errors and returns human-readable messages
+//! suitable for sending to Telegram, Slack, Discord, etc. instead of leaking
+//! raw JSON blobs, HTML Cloudflare pages, or internal error details.
+
+use std::fmt;
+
+/// Classified category of an error for user-facing formatting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCategory {
+    /// Provider returned 429 — rate limited.
+    RateLimit,
+    /// Provider returned 402 — billing/quota exhausted.
+    Billing,
+    /// Provider returned 401/403 — authentication error.
+    Auth,
+    /// Provider returned 500/502/503/504 — server overloaded.
+    Overloaded,
+    /// Network-level failure (DNS, connection refused, reset).
+    Transport,
+    /// Context window exceeded.
+    ContextOverflow,
+    /// Request timed out.
+    Timeout,
+    /// Unclassified error.
+    Unknown,
+}
+
+impl fmt::Display for ErrorCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RateLimit => write!(f, "rate_limit"),
+            Self::Billing => write!(f, "billing"),
+            Self::Auth => write!(f, "auth"),
+            Self::Overloaded => write!(f, "overloaded"),
+            Self::Transport => write!(f, "transport"),
+            Self::ContextOverflow => write!(f, "context_overflow"),
+            Self::Timeout => write!(f, "timeout"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// Classify a raw error string into an `ErrorCategory`.
+///
+/// Uses pattern matching on common provider error patterns, HTTP status codes,
+/// and network error signatures.
+pub fn classify_error(raw: &str) -> ErrorCategory {
+    let lower = raw.to_lowercase();
+
+    // Rate limit patterns
+    if lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("too many requests")
+        || lower.contains("throttl")
+    {
+        // Distinguish TPM (tokens per minute) rate limits from context overflow
+        if is_context_overflow(&lower) && !lower.contains("tokens per minute") {
+            return ErrorCategory::ContextOverflow;
+        }
+        return ErrorCategory::RateLimit;
+    }
+
+    // Billing patterns
+    if lower.contains("402")
+        || lower.contains("billing")
+        || lower.contains("payment required")
+        || lower.contains("insufficient_quota")
+        || lower.contains("quota exceeded")
+        || lower.contains("out of credits")
+        || lower.contains("no credits")
+        || lower.contains("exceeded your current quota")
+    {
+        return ErrorCategory::Billing;
+    }
+
+    // Auth patterns
+    if lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("invalid api key")
+        || lower.contains("invalid_api_key")
+        || lower.contains("auth error")
+        || lower.contains("authentication failed")
+    {
+        return ErrorCategory::Auth;
+    }
+
+    // Context overflow patterns (check before overloaded since 400 can overlap)
+    if is_context_overflow(&lower) {
+        return ErrorCategory::ContextOverflow;
+    }
+
+    // Server overloaded patterns
+    if lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
+        || lower.contains("overloaded")
+        || lower.contains("server error")
+        || lower.contains("service unavailable")
+        || lower.contains("bad gateway")
+        || lower.contains("internal server error")
+    {
+        return ErrorCategory::Overloaded;
+    }
+
+    // Transport / network patterns
+    if lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("dns")
+        || lower.contains("network unreachable")
+        || lower.contains("no route to host")
+        || lower.contains("broken pipe")
+        || lower.contains("connect timeout")
+        || lower.contains("tls")
+        || lower.contains("ssl")
+        || lower.contains("certificate")
+    {
+        return ErrorCategory::Transport;
+    }
+
+    // Timeout patterns
+    if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("request timed out")
+        || lower.contains("deadline exceeded")
+    {
+        return ErrorCategory::Timeout;
+    }
+
+    ErrorCategory::Unknown
+}
+
+/// Check if an error message indicates a context window overflow.
+fn is_context_overflow(lower: &str) -> bool {
+    lower.contains("context window")
+        || lower.contains("context length")
+        || lower.contains("context_length")
+        || lower.contains("maximum context")
+        || lower.contains("request too large")
+        || lower.contains("prompt too long")
+        || lower.contains("prompt is too long")
+        || lower.contains("maximum token")
+        || lower.contains("exceeds the model")
+        || lower.contains("input too long")
+}
+
+/// Strip HTML content from error messages (e.g., Cloudflare error pages).
+///
+/// Returns the raw string if it doesn't look like HTML.
+fn strip_html(raw: &str) -> &str {
+    if raw.contains("<!DOCTYPE") || raw.contains("<html") || raw.contains("<HTML") {
+        // Don't send HTML to users — use a generic indicator
+        return "(HTML error page)";
+    }
+    raw
+}
+
+/// Format a friendly, user-facing error message from a raw error string.
+///
+/// The returned message is safe to send to external messaging channels.
+/// It never leaks raw JSON, HTML, or internal error details.
+pub fn format_friendly_error(raw: &str) -> String {
+    let category = classify_error(raw);
+    let _cleaned = strip_html(raw);
+
+    match category {
+        ErrorCategory::RateLimit => {
+            let hint = extract_retry_hint(raw);
+            match hint {
+                Some(h) => format!(
+                    "The AI provider is temporarily rate-limited. {h} Please try again shortly."
+                ),
+                None => {
+                    "The AI provider is temporarily rate-limited. Please try again in a moment."
+                        .to_string()
+                }
+            }
+        }
+
+        ErrorCategory::Billing => {
+            let provider = extract_provider_name(raw);
+            match provider {
+                Some(p) => format!(
+                    "The {p} API key has run out of credits or exceeded its quota. \
+                     Please check the billing dashboard and top up."
+                ),
+                None => "The AI provider API key has run out of credits or exceeded its quota. \
+                         Please check the billing dashboard."
+                    .to_string(),
+            }
+        }
+
+        ErrorCategory::Auth => {
+            let provider = extract_provider_name(raw);
+            match provider {
+                Some(p) => format!(
+                    "Authentication with {p} failed. The API key may be invalid or expired. \
+                     Please check your configuration."
+                ),
+                None => "Authentication with the AI provider failed. The API key may be invalid \
+                         or expired. Please check your configuration."
+                    .to_string(),
+            }
+        }
+
+        ErrorCategory::Overloaded => "The AI provider is currently experiencing high load. \
+             The request will be retried automatically, or you can try again in a moment."
+            .to_string(),
+
+        ErrorCategory::Transport => {
+            let detail = extract_transport_detail(raw);
+            match detail {
+                Some(d) => format!(
+                    "Could not reach the AI provider: {d}. \
+                     Please check network connectivity."
+                ),
+                None => "Could not reach the AI provider. Please check network connectivity."
+                    .to_string(),
+            }
+        }
+
+        ErrorCategory::ContextOverflow => {
+            "The conversation has exceeded the model's context window. \
+             Try starting a new conversation or clearing history."
+                .to_string()
+        }
+
+        ErrorCategory::Timeout => {
+            "The request to the AI provider timed out. Please try again.".to_string()
+        }
+
+        ErrorCategory::Unknown => {
+            // For unknown errors, give a safe generic message
+            // Truncate to avoid leaking huge error blobs
+            let safe = strip_html(raw);
+            let truncated = if safe.len() > 200 {
+                let mut end = 200;
+                while end > 0 && !safe.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("An unexpected error occurred: {}...", &safe[..end])
+            } else {
+                format!("An unexpected error occurred: {safe}")
+            };
+            truncated
+        }
+    }
+}
+
+/// Try to extract a retry-after hint from an error message.
+fn extract_retry_hint(raw: &str) -> Option<String> {
+    let lower = raw.to_lowercase();
+
+    // Look for "retry after X seconds" patterns
+    for pattern in &["retry after", "retry_after", "retry in"] {
+        if let Some(pos) = lower.find(pattern) {
+            let after = &raw[pos..];
+            // Extract a reasonable snippet (up to 60 chars)
+            let snippet: String = after.chars().take(60).collect();
+            // Only use if it contains a number (likely a time indicator)
+            if snippet.chars().any(|c| c.is_ascii_digit()) {
+                return Some(format!("({})", snippet.trim()));
+            }
+        }
+    }
+
+    None
+}
+
+/// Try to extract the provider name from a raw error message.
+fn extract_provider_name(raw: &str) -> Option<&str> {
+    let lower = raw.to_lowercase();
+    if lower.contains("anthropic") {
+        Some("Anthropic")
+    } else if lower.contains("openai") {
+        Some("OpenAI")
+    } else if lower.contains("openrouter") {
+        Some("OpenRouter")
+    } else if lower.contains("gemini") || lower.contains("google") {
+        Some("Gemini")
+    } else if lower.contains("deepseek") {
+        Some("DeepSeek")
+    } else if lower.contains("groq") {
+        Some("Groq")
+    } else if lower.contains("ollama") {
+        Some("Ollama")
+    } else {
+        None
+    }
+}
+
+/// Extract a user-friendly transport error detail.
+fn extract_transport_detail(raw: &str) -> Option<&str> {
+    let lower = raw.to_lowercase();
+    if lower.contains("connection refused") {
+        Some("connection refused by the provider endpoint")
+    } else if lower.contains("connection reset") {
+        Some("network connection was interrupted")
+    } else if lower.contains("dns") {
+        Some("DNS lookup for the provider endpoint failed")
+    } else if lower.contains("network unreachable") || lower.contains("no route to host") {
+        Some("the provider endpoint is unreachable from this host")
+    } else if lower.contains("tls") || lower.contains("ssl") || lower.contains("certificate") {
+        Some("TLS/SSL connection failed")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── classify_error tests ──
+
+    #[test]
+    fn classify_rate_limit_429() {
+        assert_eq!(
+            classify_error("OpenRouter returned 429 (rate limited): too many requests"),
+            ErrorCategory::RateLimit
+        );
+    }
+
+    #[test]
+    fn classify_rate_limit_text() {
+        assert_eq!(
+            classify_error("Rate limit exceeded for this model"),
+            ErrorCategory::RateLimit
+        );
+    }
+
+    #[test]
+    fn classify_billing_402() {
+        assert_eq!(
+            classify_error("OpenAI returned 402 (billing error): payment required"),
+            ErrorCategory::Billing
+        );
+    }
+
+    #[test]
+    fn classify_billing_quota() {
+        assert_eq!(
+            classify_error("You exceeded your current quota, please check your plan"),
+            ErrorCategory::Billing
+        );
+    }
+
+    #[test]
+    fn classify_billing_insufficient_quota() {
+        assert_eq!(
+            classify_error("Error: insufficient_quota"),
+            ErrorCategory::Billing
+        );
+    }
+
+    #[test]
+    fn classify_auth_401() {
+        assert_eq!(
+            classify_error("Anthropic returned 401 (auth error): bad key"),
+            ErrorCategory::Auth
+        );
+    }
+
+    #[test]
+    fn classify_auth_403() {
+        assert_eq!(
+            classify_error("returned 403 (auth error): forbidden"),
+            ErrorCategory::Auth
+        );
+    }
+
+    #[test]
+    fn classify_auth_invalid_key() {
+        assert_eq!(
+            classify_error("Invalid API key provided"),
+            ErrorCategory::Auth
+        );
+    }
+
+    #[test]
+    fn classify_overloaded_503() {
+        assert_eq!(
+            classify_error("Anthropic returned 503 (overloaded)"),
+            ErrorCategory::Overloaded
+        );
+    }
+
+    #[test]
+    fn classify_overloaded_502() {
+        assert_eq!(
+            classify_error("returned 502: bad gateway"),
+            ErrorCategory::Overloaded
+        );
+    }
+
+    #[test]
+    fn classify_overloaded_500() {
+        assert_eq!(
+            classify_error("returned 500: internal server error"),
+            ErrorCategory::Overloaded
+        );
+    }
+
+    #[test]
+    fn classify_transport_connection_refused() {
+        assert_eq!(
+            classify_error("error sending request: connection refused"),
+            ErrorCategory::Transport
+        );
+    }
+
+    #[test]
+    fn classify_transport_dns() {
+        assert_eq!(
+            classify_error("DNS lookup failed for api.openai.com"),
+            ErrorCategory::Transport
+        );
+    }
+
+    #[test]
+    fn classify_transport_tls() {
+        assert_eq!(
+            classify_error("TLS handshake failed: certificate verify failed"),
+            ErrorCategory::Transport
+        );
+    }
+
+    #[test]
+    fn classify_context_overflow() {
+        assert_eq!(
+            classify_error("This request exceeds the model's maximum context length"),
+            ErrorCategory::ContextOverflow
+        );
+    }
+
+    #[test]
+    fn classify_context_overflow_prompt_too_long() {
+        assert_eq!(
+            classify_error("prompt is too long: 150000 tokens > 128000 maximum"),
+            ErrorCategory::ContextOverflow
+        );
+    }
+
+    #[test]
+    fn classify_timeout() {
+        assert_eq!(
+            classify_error("request timed out after 30s"),
+            ErrorCategory::Timeout
+        );
+    }
+
+    #[test]
+    fn classify_timeout_deadline() {
+        assert_eq!(
+            classify_error("deadline exceeded waiting for response"),
+            ErrorCategory::Timeout
+        );
+    }
+
+    #[test]
+    fn classify_unknown() {
+        assert_eq!(
+            classify_error("something completely unexpected happened"),
+            ErrorCategory::Unknown
+        );
+    }
+
+    // ── format_friendly_error tests ──
+
+    #[test]
+    fn friendly_rate_limit() {
+        let msg =
+            format_friendly_error("OpenRouter returned 429 (rate limited): too many requests");
+        assert!(msg.contains("rate-limited"));
+        assert!(msg.contains("try again"));
+        assert!(!msg.contains("429"));
+    }
+
+    #[test]
+    fn friendly_rate_limit_with_retry_hint() {
+        let msg = format_friendly_error(
+            "OpenAI returned 429: rate limited, retry after 30 seconds please",
+        );
+        assert!(msg.contains("rate-limited"));
+        assert!(msg.contains("retry after"));
+    }
+
+    #[test]
+    fn friendly_billing() {
+        let msg =
+            format_friendly_error("OpenAI returned 402 (billing error): insufficient credits");
+        assert!(msg.contains("OpenAI"));
+        assert!(msg.contains("credits"));
+        assert!(msg.contains("billing"));
+        assert!(!msg.contains("402"));
+    }
+
+    #[test]
+    fn friendly_billing_no_provider() {
+        let msg = format_friendly_error("returned 402: payment required");
+        assert!(msg.contains("credits"));
+        assert!(!msg.contains("402"));
+    }
+
+    #[test]
+    fn friendly_auth() {
+        let msg = format_friendly_error("Anthropic returned 401 (auth error): invalid key");
+        assert!(msg.contains("Anthropic"));
+        assert!(msg.contains("API key"));
+        assert!(!msg.contains("401"));
+    }
+
+    #[test]
+    fn friendly_overloaded() {
+        let msg = format_friendly_error("returned 503: service unavailable, server overloaded");
+        assert!(msg.contains("high load"));
+        assert!(!msg.contains("503"));
+    }
+
+    #[test]
+    fn friendly_transport_connection_refused() {
+        let msg = format_friendly_error("error: connection refused to api.openai.com:443");
+        assert!(msg.contains("connection refused"));
+        assert!(msg.contains("network"));
+    }
+
+    #[test]
+    fn friendly_transport_dns() {
+        let msg = format_friendly_error("DNS lookup failed for api.anthropic.com");
+        assert!(msg.contains("DNS"));
+        assert!(msg.contains("network"));
+    }
+
+    #[test]
+    fn friendly_context_overflow() {
+        let msg = format_friendly_error("maximum context length exceeded: 200000 > 128000 tokens");
+        assert!(msg.contains("context window"));
+        assert!(msg.contains("new conversation"));
+    }
+
+    #[test]
+    fn friendly_timeout() {
+        let msg = format_friendly_error("request timed out after 120s");
+        assert!(msg.contains("timed out"));
+    }
+
+    #[test]
+    fn friendly_unknown_truncates_long_errors() {
+        let long_error = "x".repeat(500);
+        let msg = format_friendly_error(&long_error);
+        assert!(msg.len() < 300);
+        assert!(msg.ends_with("..."));
+    }
+
+    #[test]
+    fn friendly_strips_html() {
+        let html_error = "<!DOCTYPE html><html><body><h1>502 Bad Gateway</h1></body></html>";
+        let msg = format_friendly_error(html_error);
+        assert!(!msg.contains("<html"));
+        assert!(!msg.contains("DOCTYPE"));
+    }
+
+    // ── strip_html tests ──
+
+    #[test]
+    fn strip_html_detects_doctype() {
+        assert_eq!(
+            strip_html("<!DOCTYPE html><html><body>error</body></html>"),
+            "(HTML error page)"
+        );
+    }
+
+    #[test]
+    fn strip_html_passes_through_non_html() {
+        assert_eq!(strip_html("just a normal error"), "just a normal error");
+    }
+
+    #[test]
+    fn strip_html_detects_html_tag() {
+        assert_eq!(
+            strip_html("<html><head></head><body>Cloudflare</body></html>"),
+            "(HTML error page)"
+        );
+    }
+
+    // ── extract_provider_name tests ──
+
+    #[test]
+    fn extract_provider_anthropic() {
+        assert_eq!(
+            extract_provider_name("Anthropic returned 401"),
+            Some("Anthropic")
+        );
+    }
+
+    #[test]
+    fn extract_provider_openai() {
+        assert_eq!(extract_provider_name("OpenAI returned 429"), Some("OpenAI"));
+    }
+
+    #[test]
+    fn extract_provider_openrouter() {
+        assert_eq!(
+            extract_provider_name("OpenRouter returned 503"),
+            Some("OpenRouter")
+        );
+    }
+
+    #[test]
+    fn extract_provider_gemini() {
+        assert_eq!(extract_provider_name("Gemini API error"), Some("Gemini"));
+    }
+
+    #[test]
+    fn extract_provider_deepseek() {
+        assert_eq!(
+            extract_provider_name("DeepSeek rate limited"),
+            Some("DeepSeek")
+        );
+    }
+
+    #[test]
+    fn extract_provider_groq() {
+        assert_eq!(extract_provider_name("Groq error"), Some("Groq"));
+    }
+
+    #[test]
+    fn extract_provider_ollama() {
+        assert_eq!(
+            extract_provider_name("Ollama connection failed"),
+            Some("Ollama")
+        );
+    }
+
+    #[test]
+    fn extract_provider_unknown() {
+        assert_eq!(extract_provider_name("some error"), None);
+    }
+
+    // ── extract_transport_detail tests ──
+
+    #[test]
+    fn transport_detail_connection_refused() {
+        assert_eq!(
+            extract_transport_detail("connection refused"),
+            Some("connection refused by the provider endpoint")
+        );
+    }
+
+    #[test]
+    fn transport_detail_connection_reset() {
+        assert_eq!(
+            extract_transport_detail("connection reset by peer"),
+            Some("network connection was interrupted")
+        );
+    }
+
+    #[test]
+    fn transport_detail_dns() {
+        assert_eq!(
+            extract_transport_detail("DNS resolution failed"),
+            Some("DNS lookup for the provider endpoint failed")
+        );
+    }
+
+    #[test]
+    fn transport_detail_unreachable() {
+        assert_eq!(
+            extract_transport_detail("network unreachable"),
+            Some("the provider endpoint is unreachable from this host")
+        );
+    }
+
+    #[test]
+    fn transport_detail_tls() {
+        assert_eq!(
+            extract_transport_detail("TLS handshake error"),
+            Some("TLS/SSL connection failed")
+        );
+    }
+
+    #[test]
+    fn transport_detail_unknown() {
+        assert_eq!(extract_transport_detail("broken pipe"), None);
+    }
+
+    // ── ErrorCategory display tests ──
+
+    #[test]
+    fn error_category_display() {
+        assert_eq!(ErrorCategory::RateLimit.to_string(), "rate_limit");
+        assert_eq!(ErrorCategory::Billing.to_string(), "billing");
+        assert_eq!(ErrorCategory::Auth.to_string(), "auth");
+        assert_eq!(ErrorCategory::Overloaded.to_string(), "overloaded");
+        assert_eq!(ErrorCategory::Transport.to_string(), "transport");
+        assert_eq!(
+            ErrorCategory::ContextOverflow.to_string(),
+            "context_overflow"
+        );
+        assert_eq!(ErrorCategory::Timeout.to_string(), "timeout");
+        assert_eq!(ErrorCategory::Unknown.to_string(), "unknown");
+    }
+
+    // ── Edge cases ──
+
+    #[test]
+    fn empty_error_classifies_as_unknown() {
+        assert_eq!(classify_error(""), ErrorCategory::Unknown);
+    }
+
+    #[test]
+    fn friendly_empty_error() {
+        let msg = format_friendly_error("");
+        assert!(msg.contains("unexpected error"));
+    }
+
+    #[test]
+    fn classify_case_insensitive() {
+        assert_eq!(
+            classify_error("RATE LIMIT EXCEEDED"),
+            ErrorCategory::RateLimit
+        );
+        assert_eq!(
+            classify_error("Connection Refused"),
+            ErrorCategory::Transport
+        );
+    }
+
+    #[test]
+    fn context_overflow_not_confused_with_rate_limit_tpm() {
+        // "tokens per minute" is a rate limit, not context overflow
+        assert_eq!(
+            classify_error("429: Rate limit reached. Limit: 100000 tokens per minute"),
+            ErrorCategory::RateLimit
+        );
+    }
+
+    #[test]
+    fn extract_retry_hint_with_seconds() {
+        let hint = extract_retry_hint("Rate limit: retry after 30 seconds");
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("30"));
+    }
+
+    #[test]
+    fn extract_retry_hint_none_when_no_number() {
+        let hint = extract_retry_hint("please wait a moment");
+        assert!(hint.is_none());
+    }
+}
