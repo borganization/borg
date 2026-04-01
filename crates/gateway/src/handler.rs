@@ -301,7 +301,8 @@ pub async fn invoke_agent_with_auto_reply(
     let sid = inbound.sender_id.clone();
     let cfg = config.clone();
     let access = tokio::task::spawn_blocking(move || {
-        let db = Database::open().context("Failed to open database for pairing check")?;
+        let db = Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS)
+            .context("Failed to open database for pairing check")?;
         borg_core::pairing::check_sender_access(&db, &cfg, &ch, &sid)
     })
     .await
@@ -342,7 +343,8 @@ pub async fn invoke_agent_with_auto_reply(
     let channel_name_owned = channel_name.to_string();
     let session_key_clone = session_key.clone();
     let (db, session_id) = tokio::task::spawn_blocking(move || {
-        let db = Database::open().context("Failed to open database")?;
+        let db = Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS)
+            .context("Failed to open database")?;
         let session_id = db
             .resolve_channel_session(&channel_name_owned, &session_key_clone)
             .context("Failed to resolve channel session")?;
@@ -530,7 +532,8 @@ pub async fn invoke_agent_with_auto_reply(
                                 channel_name,
                                 constants::MAX_RESPONSE_SIZE / 1024
                             );
-                            agent_cancel.cancel();
+                            // Don't cancel the agent — let it finish its turn naturally.
+                            // The outer tokio::time::timeout handles hard timeout.
                         } else {
                             response_text.push_str(&delta);
                         }
@@ -643,7 +646,8 @@ async fn process_message(
     };
     let total_chunks = chunks.len();
 
-    let db = Database::open().context("Failed to open database")?;
+    let db = Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS)
+        .context("Failed to open database")?;
 
     for (i, chunk) in chunks.iter().enumerate() {
         // Build payload without secrets for persistence

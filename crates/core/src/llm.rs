@@ -717,6 +717,7 @@ impl LlmClient {
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
+        let chunk_timeout_secs = self.llm_config.stream_chunk_timeout_secs;
 
         loop {
             let chunk = tokio::select! {
@@ -724,19 +725,35 @@ impl LlmClient {
                     let _ = tx.send(StreamEvent::Done).await;
                     return Ok(());
                 }
-                maybe_chunk = stream.next() => {
+                maybe_chunk = async {
+                    if chunk_timeout_secs > 0 {
+                        tokio::time::timeout(
+                            Duration::from_secs(chunk_timeout_secs),
+                            stream.next(),
+                        ).await
+                    } else {
+                        Ok(stream.next().await)
+                    }
+                } => {
                     match maybe_chunk {
-                        Some(Ok(c)) => c,
-                        Some(Err(e)) => {
+                        Ok(Some(Ok(c))) => c,
+                        Ok(Some(Err(e))) => {
                             return Err(LlmError::Retryable {
                                 source: anyhow::anyhow!("Stream read error: {e}"),
                                 retry_after: None,
                                 reason: FailoverReason::Timeout,
                             });
                         }
-                        None => {
+                        Ok(None) => {
                             let _ = tx.send(StreamEvent::Done).await;
                             return Ok(());
+                        }
+                        Err(_) => {
+                            return Err(LlmError::Retryable {
+                                source: anyhow::anyhow!("No data received for {chunk_timeout_secs}s"),
+                                retry_after: None,
+                                reason: FailoverReason::Timeout,
+                            });
                         }
                     }
                 }
@@ -772,7 +789,7 @@ impl LlmClient {
                         Ok(chunk) => {
                             // Parse usage data if present
                             if let Some(usage) = chunk.usage {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::Usage(UsageData {
                                         prompt_tokens: usage.prompt_tokens.unwrap_or(0),
                                         completion_tokens: usage.completion_tokens.unwrap_or(0),
@@ -780,17 +797,29 @@ impl LlmClient {
                                         provider: self.provider.as_str().to_string(),
                                         model: self.llm_config.model.clone(),
                                     }))
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    debug!("Stream receiver dropped, stopping SSE processing");
+                                    return Ok(());
+                                }
                             }
                             if let Some(choices) = chunk.choices {
                                 for choice in choices {
                                     if let Some(delta) = choice.delta {
                                         if let Some(content) = delta.content {
-                                            let _ = tx.send(StreamEvent::TextDelta(content)).await;
+                                            if tx
+                                                .send(StreamEvent::TextDelta(content))
+                                                .await
+                                                .is_err()
+                                            {
+                                                debug!("Stream receiver dropped, stopping SSE processing");
+                                                return Ok(());
+                                            }
                                         }
                                         if let Some(tool_calls) = delta.tool_calls {
                                             for tc in tool_calls {
-                                                let _ = tx
+                                                if tx
                                                     .send(StreamEvent::ToolCallDelta {
                                                         index: tc.index.unwrap_or(0),
                                                         id: tc.id,
@@ -804,7 +833,12 @@ impl LlmClient {
                                                             .and_then(|f| f.arguments.clone())
                                                             .unwrap_or_default(),
                                                     })
-                                                    .await;
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    debug!("Stream receiver dropped, stopping SSE processing");
+                                                    return Ok(());
+                                                }
                                             }
                                         }
                                     }
@@ -971,6 +1005,7 @@ impl LlmClient {
         let mut current_tool_index: usize = 0;
         let mut current_block_is_tool = false;
         let mut current_block_is_thinking = false;
+        let chunk_timeout_secs = self.llm_config.stream_chunk_timeout_secs;
 
         loop {
             let chunk = tokio::select! {
@@ -978,19 +1013,35 @@ impl LlmClient {
                     let _ = tx.send(StreamEvent::Done).await;
                     return Ok(());
                 }
-                maybe_chunk = stream.next() => {
+                maybe_chunk = async {
+                    if chunk_timeout_secs > 0 {
+                        tokio::time::timeout(
+                            Duration::from_secs(chunk_timeout_secs),
+                            stream.next(),
+                        ).await
+                    } else {
+                        Ok(stream.next().await)
+                    }
+                } => {
                     match maybe_chunk {
-                        Some(Ok(c)) => c,
-                        Some(Err(e)) => {
+                        Ok(Some(Ok(c))) => c,
+                        Ok(Some(Err(e))) => {
                             return Err(LlmError::Retryable {
                                 source: anyhow::anyhow!("Stream read error: {e}"),
                                 retry_after: None,
                                 reason: FailoverReason::Timeout,
                             });
                         }
-                        None => {
+                        Ok(None) => {
                             let _ = tx.send(StreamEvent::Done).await;
                             return Ok(());
+                        }
+                        Err(_) => {
+                            return Err(LlmError::Retryable {
+                                source: anyhow::anyhow!("No data received for {chunk_timeout_secs}s"),
+                                retry_after: None,
+                                reason: FailoverReason::Timeout,
+                            });
                         }
                     }
                 }
@@ -1032,14 +1083,21 @@ impl LlmClient {
                                         current_block_is_tool = true;
                                         let id = block["id"].as_str().map(String::from);
                                         let name = block["name"].as_str().map(String::from);
-                                        let _ = tx
+                                        if tx
                                             .send(StreamEvent::ToolCallDelta {
                                                 index: current_tool_index,
                                                 id,
                                                 name,
                                                 arguments_delta: String::new(),
                                             })
-                                            .await;
+                                            .await
+                                            .is_err()
+                                        {
+                                            debug!(
+                                                "Stream receiver dropped, stopping SSE processing"
+                                            );
+                                            return Ok(());
+                                        }
                                     }
                                     "thinking" => {
                                         current_block_is_thinking = true;
@@ -1052,39 +1110,59 @@ impl LlmClient {
                                 match delta["type"].as_str() {
                                     Some("text_delta") => {
                                         if let Some(text) = delta["text"].as_str() {
-                                            let _ = tx
+                                            if tx
                                                 .send(StreamEvent::TextDelta(text.to_string()))
-                                                .await;
+                                                .await
+                                                .is_err()
+                                            {
+                                                debug!("Stream receiver dropped, stopping SSE processing");
+                                                return Ok(());
+                                            }
                                         }
                                     }
                                     Some("thinking_delta") => {
                                         if let Some(text) = delta["thinking"].as_str() {
-                                            let _ = tx
+                                            if tx
                                                 .send(StreamEvent::ThinkingDelta(text.to_string()))
-                                                .await;
+                                                .await
+                                                .is_err()
+                                            {
+                                                debug!("Stream receiver dropped, stopping SSE processing");
+                                                return Ok(());
+                                            }
                                         }
                                     }
                                     Some("input_json_delta") => {
                                         if let Some(json_delta) = delta["partial_json"].as_str() {
-                                            let _ = tx
+                                            if tx
                                                 .send(StreamEvent::ToolCallDelta {
                                                     index: current_tool_index,
                                                     id: None,
                                                     name: None,
                                                     arguments_delta: json_delta.to_string(),
                                                 })
-                                                .await;
+                                                .await
+                                                .is_err()
+                                            {
+                                                debug!("Stream receiver dropped, stopping SSE processing");
+                                                return Ok(());
+                                            }
                                         }
                                     }
                                     _ => {
                                         // For thinking blocks, text comes as text_delta
                                         if current_block_is_thinking {
                                             if let Some(text) = delta["text"].as_str() {
-                                                let _ = tx
+                                                if tx
                                                     .send(StreamEvent::ThinkingDelta(
                                                         text.to_string(),
                                                     ))
-                                                    .await;
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    debug!("Stream receiver dropped, stopping SSE processing");
+                                                    return Ok(());
+                                                }
                                             }
                                         }
                                     }
@@ -1110,7 +1188,7 @@ impl LlmClient {
                                         .get("output_tokens")
                                         .and_then(serde_json::Value::as_u64)
                                         .unwrap_or(0);
-                                    let _ = tx
+                                    if tx
                                         .send(StreamEvent::Usage(UsageData {
                                             prompt_tokens: input,
                                             completion_tokens: output,
@@ -1118,7 +1196,12 @@ impl LlmClient {
                                             provider: self.provider.as_str().to_string(),
                                             model: self.llm_config.model.clone(),
                                         }))
-                                        .await;
+                                        .await
+                                        .is_err()
+                                    {
+                                        debug!("Stream receiver dropped, stopping SSE processing");
+                                        return Ok(());
+                                    }
                                 }
                                 // message_delta with stop_reason indicates end
                                 if event["delta"]["stop_reason"].as_str().is_some() {
