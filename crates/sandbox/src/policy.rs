@@ -194,6 +194,14 @@ impl SandboxPolicy {
         args: &[String],
         tool_dir: &std::path::Path,
     ) -> SandboxCommand {
+        // Fall back to unsandboxed if bwrap is not installed
+        if which::which("bwrap").is_err() {
+            tracing::warn!("bwrap not found; running without sandbox");
+            return SandboxCommand {
+                program: program.to_string(),
+                args: args.to_vec(),
+            };
+        }
         use crate::bubblewrap::build_bwrap_args;
         let mut bwrap_args = build_bwrap_args(self, tool_dir);
         bwrap_args.push(program.to_string());
