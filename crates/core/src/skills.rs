@@ -576,7 +576,11 @@ pub fn install_skill_deps(skill: &Skill) -> Result<Vec<String>> {
 }
 
 /// Format detailed info about a skill.
-pub fn format_skill_info(skill: &Skill) -> String {
+#[cfg(test)]
+fn format_skill_info(
+    skill: &Skill,
+    resolved_creds: &std::collections::HashMap<String, String>,
+) -> String {
     let mut out = String::new();
     let source = match skill.source {
         SkillSource::BuiltIn => "built-in",
@@ -617,7 +621,7 @@ pub fn format_skill_info(skill: &Skill) -> String {
     if !skill.manifest.requires.env.is_empty() {
         out.push_str("Env vars:\n");
         for var in &skill.manifest.requires.env {
-            let found = std::env::var(var).is_ok();
+            let found = std::env::var(var).is_ok() || resolved_creds.contains_key(var);
             let mark = if found { "✓" } else { "✗" };
             out.push_str(&format!("  [{mark}] {var}\n"));
         }
@@ -648,71 +652,6 @@ pub fn format_skill_info(skill: &Skill) -> String {
     }
 
     out
-}
-
-/// Check all skills and produce a diagnostic report.
-pub fn check_all_skills(
-    resolved_creds: &std::collections::HashMap<String, String>,
-    skills_config: &SkillsConfig,
-) -> Result<String> {
-    let skills = load_all_skills(resolved_creds, skills_config)?;
-    let mut lines = Vec::new();
-    for skill in &skills {
-        let label = if skill.disabled {
-            "OFF "
-        } else if skill.available {
-            " OK "
-        } else if !check_os_requirements(&skill.manifest.os) {
-            "SKIP"
-        } else {
-            "MISS"
-        };
-        let mut detail = skill.manifest.description.clone();
-        if !skill.available && !skill.disabled {
-            let mut missing = Vec::new();
-            for bin in &skill.manifest.requires.bins {
-                if which::which(bin).is_err() {
-                    let install_hint =
-                        skill
-                            .manifest
-                            .install
-                            .get(bin)
-                            .and_then(|s| match std::env::consts::OS {
-                                "macos" => s.brew.as_ref().map(|b| format!("brew install {b}")),
-                                "linux" => s.apt.as_ref().map(|a| format!("apt install {a}")),
-                                _ => None,
-                            });
-                    match install_hint {
-                        Some(hint) => missing.push(format!("binary: {bin} ({hint})")),
-                        None => missing.push(format!("binary: {bin}")),
-                    }
-                }
-            }
-            if !skill.manifest.requires.any_bins.is_empty()
-                && !skill
-                    .manifest
-                    .requires
-                    .any_bins
-                    .iter()
-                    .any(|b| which::which(b).is_ok())
-            {
-                missing.push(format!(
-                    "any of: {}",
-                    skill.manifest.requires.any_bins.join(", ")
-                ));
-            }
-            for var in &skill.manifest.requires.env {
-                if std::env::var(var).is_err() && !resolved_creds.contains_key(var) {
-                    missing.push(format!("env: {var}"));
-                }
-            }
-            if !missing.is_empty() {
-                detail = format!("missing {}", missing.join("; "));
-            }
-        }
-        lines.push(format!("  [{label}] {} — {detail}", skill.manifest.name));
-    }
-    Ok(lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -1486,5 +1425,158 @@ Use docker commands.
             !line.contains("Install:"),
             "available skill should not show install hint, got: {line}"
         );
+    }
+
+    #[test]
+    fn test_collect_required_env_vars() {
+        let creds = std::collections::HashMap::new();
+        let config = SkillsConfig::default();
+        let env_vars = collect_required_env_vars(&creds, &config);
+        // Built-in skills declare env vars like SLACK_BOT_TOKEN, DISCORD_BOT_TOKEN, etc.
+        // At minimum, slack skill requires SLACK_BOT_TOKEN
+        assert!(
+            env_vars.contains("SLACK_BOT_TOKEN"),
+            "should contain SLACK_BOT_TOKEN, got: {env_vars:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_skill_empty_body() {
+        let content = "---\nname: empty\ndescription: \"No body.\"\n---\n";
+        let (manifest, body) = parse_skill_md(content).unwrap();
+        assert_eq!(manifest.name, "empty");
+        assert!(body.is_empty() || body.trim().is_empty());
+    }
+
+    #[test]
+    fn test_check_requirements_bins_and_any_bins() {
+        let reqs = SkillRequires {
+            bins: vec!["sh".to_string()],
+            env: vec![],
+            any_bins: vec!["nonexistent_xyz".to_string(), "sh".to_string()],
+        };
+        assert!(check_requirements(
+            &reqs,
+            &[],
+            &std::collections::HashMap::new()
+        ));
+    }
+
+    #[test]
+    fn test_load_skills_context_empty_when_all_disabled() {
+        let mut entries = std::collections::HashMap::new();
+        // Disable all built-in skills
+        for &(name, _) in BUNDLED_SKILLS {
+            entries.insert(
+                name.to_string(),
+                crate::config::SkillEntryConfig {
+                    enabled: false,
+                    env: std::collections::HashMap::new(),
+                },
+            );
+        }
+        let config = SkillsConfig {
+            enabled: true,
+            max_context_tokens: 4000,
+            entries,
+        };
+        let context =
+            load_skills_context(4000, &std::collections::HashMap::new(), &config).unwrap();
+        assert!(
+            context.is_empty(),
+            "all disabled skills should produce empty context, got: {context}"
+        );
+    }
+
+    #[test]
+    fn test_summary_line_unavailable_no_install() {
+        let skill = Skill {
+            manifest: SkillManifest {
+                name: "no-install".to_string(),
+                description: "Missing deps.".to_string(),
+                requires: SkillRequires {
+                    bins: vec!["nonexistent_xyz".to_string()],
+                    env: vec![],
+                    any_bins: vec![],
+                },
+                os: vec![],
+                install: std::collections::HashMap::new(),
+            },
+            body: "body".to_string(),
+            source: SkillSource::BuiltIn,
+            available: false,
+            disabled: false,
+            references: Vec::new(),
+            scripts: Vec::new(),
+        };
+        let line = skill.summary_line();
+        assert!(line.contains("[✗]"));
+        assert!(
+            !line.contains("Install:"),
+            "no install specs should mean no Install line, got: {line}"
+        );
+    }
+
+    #[test]
+    fn test_format_skill_info_cred_check() {
+        let skill = Skill {
+            manifest: SkillManifest {
+                name: "cred-test".to_string(),
+                description: "Tests credential resolution.".to_string(),
+                requires: SkillRequires {
+                    bins: vec![],
+                    env: vec!["MY_CRED_VAR_XYZ".to_string()],
+                    any_bins: vec![],
+                },
+                os: vec![],
+                install: std::collections::HashMap::new(),
+            },
+            body: "body".to_string(),
+            source: SkillSource::User,
+            available: true,
+            disabled: false,
+            references: Vec::new(),
+            scripts: Vec::new(),
+        };
+        // Without creds, env var shows as missing
+        let info_no_creds = format_skill_info(&skill, &std::collections::HashMap::new());
+        assert!(
+            info_no_creds.contains("[✗] MY_CRED_VAR_XYZ"),
+            "should show missing without creds, got: {info_no_creds}"
+        );
+
+        // With creds, env var shows as found
+        let mut creds = std::collections::HashMap::new();
+        creds.insert("MY_CRED_VAR_XYZ".to_string(), "secret".to_string());
+        let info_with_creds = format_skill_info(&skill, &creds);
+        assert!(
+            info_with_creds.contains("[✓] MY_CRED_VAR_XYZ"),
+            "should show found with creds, got: {info_with_creds}"
+        );
+    }
+
+    #[test]
+    fn test_format_skill_info_fields() {
+        let skill = Skill {
+            manifest: SkillManifest {
+                name: "info-test".to_string(),
+                description: "Info format test.".to_string(),
+                requires: SkillRequires::default(),
+                os: vec![],
+                install: std::collections::HashMap::new(),
+            },
+            body: "# Title\n\nFirst paragraph.".to_string(),
+            source: SkillSource::BuiltIn,
+            available: true,
+            disabled: false,
+            references: Vec::new(),
+            scripts: Vec::new(),
+        };
+        let info = format_skill_info(&skill, &std::collections::HashMap::new());
+        assert!(info.contains("Name:        info-test"));
+        assert!(info.contains("Description: Info format test."));
+        assert!(info.contains("Source:      built-in"));
+        assert!(info.contains("Status:      available"));
+        assert!(info.contains("# Title"));
     }
 }

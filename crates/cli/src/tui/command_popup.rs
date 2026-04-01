@@ -93,6 +93,10 @@ const COMMANDS: &[SlashCommandDef] = &[
         description: "Send message in plan mode (review before proceeding)",
     },
     SlashCommandDef {
+        name: "/mode",
+        description: "Switch collaboration mode",
+    },
+    SlashCommandDef {
         name: "/pairing",
         description: "Manage sender pairing",
     },
@@ -310,5 +314,16 @@ mod tests {
         let mut popup = CommandPopup::new();
         popup.update_filter("/settings foo");
         assert!(!popup.is_visible());
+    }
+
+    #[test]
+    fn mode_command_in_list() {
+        let mut popup = CommandPopup::new();
+        popup.update_filter("/mode");
+        let items = popup.filtered();
+        assert!(
+            items.iter().any(|c| c.name == "/mode"),
+            "/mode should appear in filtered commands"
+        );
     }
 }
