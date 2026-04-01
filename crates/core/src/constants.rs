@@ -123,3 +123,107 @@ pub const MAX_TOOL_NAME_LEN: usize = 256;
 pub const MAX_TOOL_ARGS_LEN: usize = 1_000_000;
 /// Max number of tool calls allowed in a single LLM response.
 pub const MAX_TOOL_CALLS_PER_RESPONSE: usize = 50;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_warn_less_than_block() {
+        assert!(RATE_TOOL_CALLS_WARN < RATE_TOOL_CALLS_BLOCK);
+        assert!(RATE_SHELL_COMMANDS_WARN < RATE_SHELL_COMMANDS_BLOCK);
+        assert!(RATE_FILE_WRITES_WARN < RATE_FILE_WRITES_BLOCK);
+        assert!(RATE_MEMORY_WRITES_WARN < RATE_MEMORY_WRITES_BLOCK);
+        assert!(RATE_WEB_REQUESTS_WARN < RATE_WEB_REQUESTS_BLOCK);
+    }
+
+    #[test]
+    fn gateway_rate_warn_less_than_block() {
+        assert!(GW_RATE_TOOL_CALLS_WARN < GW_RATE_TOOL_CALLS_BLOCK);
+        assert!(GW_RATE_SHELL_COMMANDS_WARN < GW_RATE_SHELL_COMMANDS_BLOCK);
+        assert!(GW_RATE_FILE_WRITES_WARN < GW_RATE_FILE_WRITES_BLOCK);
+        assert!(GW_RATE_MEMORY_WRITES_WARN < GW_RATE_MEMORY_WRITES_BLOCK);
+        assert!(GW_RATE_WEB_REQUESTS_WARN < GW_RATE_WEB_REQUESTS_BLOCK);
+    }
+
+    #[test]
+    fn gateway_rates_stricter_than_interactive() {
+        assert!(GW_RATE_TOOL_CALLS_BLOCK < RATE_TOOL_CALLS_BLOCK);
+        assert!(GW_RATE_SHELL_COMMANDS_BLOCK < RATE_SHELL_COMMANDS_BLOCK);
+        assert!(GW_RATE_FILE_WRITES_BLOCK < RATE_FILE_WRITES_BLOCK);
+        assert!(GW_RATE_MEMORY_WRITES_BLOCK < RATE_MEMORY_WRITES_BLOCK);
+        assert!(GW_RATE_WEB_REQUESTS_BLOCK < RATE_WEB_REQUESTS_BLOCK);
+    }
+
+    #[test]
+    fn injection_thresholds_ordered() {
+        assert!(INJECTION_FLAGGED_THRESHOLD < INJECTION_HIGH_RISK_THRESHOLD);
+    }
+
+    #[test]
+    fn telegram_backoff_min_less_than_max() {
+        assert!(TELEGRAM_MIN_BACKOFF < TELEGRAM_MAX_BACKOFF);
+    }
+
+    #[test]
+    fn signal_sse_backoff_min_less_than_max() {
+        assert!(SIGNAL_SSE_MIN_BACKOFF < SIGNAL_SSE_MAX_BACKOFF);
+    }
+
+    #[test]
+    fn retry_initial_less_than_max() {
+        assert!(RETRY_INITIAL_DELAY_MS < RETRY_MAX_DELAY_MS);
+    }
+
+    #[test]
+    fn tool_output_max_tokens_positive() {
+        assert!(TOOL_OUTPUT_MAX_TOKENS > 0);
+    }
+
+    #[test]
+    fn compaction_safety_margin_in_range() {
+        assert!(COMPACTION_SAFETY_MARGIN > 0.0);
+        assert!(COMPACTION_SAFETY_MARGIN < 1.0);
+    }
+
+    #[test]
+    fn gateway_max_body_size_reasonable() {
+        assert!(GATEWAY_MAX_BODY_SIZE >= 1024 * 1024); // at least 1 MB
+    }
+
+    #[test]
+    fn max_tool_name_len_and_args_positive() {
+        assert!(MAX_TOOL_NAME_LEN > 0);
+        assert!(MAX_TOOL_ARGS_LEN > 0);
+        assert!(MAX_TOOL_CALLS_PER_RESPONSE > 0);
+    }
+
+    #[test]
+    fn backoff_factors_greater_than_one() {
+        assert!(TELEGRAM_BACKOFF_FACTOR > 1.0);
+        assert!(SIGNAL_SSE_BACKOFF_FACTOR > 1.0);
+        assert!(RETRY_BACKOFF_FACTOR > 1.0);
+    }
+
+    #[test]
+    fn jitter_fractions_in_zero_one_range() {
+        assert!(TELEGRAM_JITTER_FRACTION > 0.0 && TELEGRAM_JITTER_FRACTION < 1.0);
+        assert!(SIGNAL_SSE_JITTER_FRACTION > 0.0 && SIGNAL_SSE_JITTER_FRACTION < 1.0);
+        assert!(RETRY_JITTER_FACTOR > 0.0 && RETRY_JITTER_FACTOR < 1.0);
+    }
+
+    #[test]
+    fn echo_cache_ttls_positive() {
+        assert!(!ECHO_CACHE_TEXT_TTL.is_zero());
+        assert!(!ECHO_CACHE_ID_TTL.is_zero());
+        assert!(!SELF_CHAT_CACHE_TTL.is_zero());
+    }
+
+    #[test]
+    fn dedup_capacities_positive() {
+        assert!(TELEGRAM_DEDUP_CAPACITY > 0);
+        assert!(SLACK_DEDUP_CAPACITY > 0);
+        assert!(SLACK_ECHO_CACHE_CAPACITY > 0);
+        assert!(SELF_CHAT_CACHE_MAX_ENTRIES > 0);
+    }
+}
