@@ -13,6 +13,7 @@ use super::app::AppAction;
 use super::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SettingKind {
     Bool,
     Text,
@@ -47,6 +48,7 @@ pub struct SettingsPopup {
 }
 
 const SETTINGS: &[SettingEntry] = &[
+    // — LLM —
     SettingEntry {
         key: "provider",
         label: "Provider",
@@ -67,49 +69,20 @@ const SETTINGS: &[SettingEntry] = &[
     },
     SettingEntry {
         key: "max_tokens",
-        label: "Max tokens",
+        label: "Response length",
         kind: SettingKind::Uint,
         category: "LLM",
     },
-    SettingEntry {
-        key: "sandbox.enabled",
-        label: "Enabled",
-        kind: SettingKind::Bool,
-        category: "Sandbox",
-    },
-    SettingEntry {
-        key: "sandbox.mode",
-        label: "Mode",
-        kind: SettingKind::Text,
-        category: "Sandbox",
-    },
-    SettingEntry {
-        key: "memory.max_context_tokens",
-        label: "Max context tokens",
-        kind: SettingKind::Uint,
-        category: "Memory",
-    },
-    SettingEntry {
-        key: "skills.enabled",
-        label: "Enabled",
-        kind: SettingKind::Bool,
-        category: "Skills",
-    },
-    SettingEntry {
-        key: "skills.max_context_tokens",
-        label: "Max context tokens",
-        kind: SettingKind::Uint,
-        category: "Skills",
-    },
+    // — Conversation —
     SettingEntry {
         key: "conversation.max_iterations",
-        label: "Max iterations",
+        label: "Max agent steps",
         kind: SettingKind::Uint,
         category: "Conversation",
     },
     SettingEntry {
         key: "conversation.show_thinking",
-        label: "Show thinking",
+        label: "Show reasoning",
         kind: SettingKind::Bool,
         category: "Conversation",
     },
@@ -119,6 +92,19 @@ const SETTINGS: &[SettingEntry] = &[
         kind: SettingKind::Select,
         category: "Conversation",
     },
+    // — Security —
+    SettingEntry {
+        key: "sandbox.enabled",
+        label: "Sandbox",
+        kind: SettingKind::Bool,
+        category: "Security",
+    },
+    SettingEntry {
+        key: "skills.enabled",
+        label: "Allow skills",
+        kind: SettingKind::Bool,
+        category: "Security",
+    },
     SettingEntry {
         key: "security.secret_detection",
         label: "Secret detection",
@@ -127,10 +113,11 @@ const SETTINGS: &[SettingEntry] = &[
     },
     SettingEntry {
         key: "security.hitl_dangerous_ops",
-        label: "Confirm dangerous ops",
+        label: "Confirm risky actions",
         kind: SettingKind::Bool,
         category: "Security",
     },
+    // — Budget —
     SettingEntry {
         key: "budget.monthly_token_limit",
         label: "Monthly token limit",
@@ -139,58 +126,11 @@ const SETTINGS: &[SettingEntry] = &[
     },
     SettingEntry {
         key: "budget.warning_threshold",
-        label: "Warning threshold",
+        label: "Budget warning (%)",
         kind: SettingKind::Float,
         category: "Budget",
     },
-    SettingEntry {
-        key: "conversation.tool_output_max_tokens",
-        label: "Tool output max tokens",
-        kind: SettingKind::Uint,
-        category: "Agent",
-    },
-    SettingEntry {
-        key: "conversation.compaction_marker_tokens",
-        label: "Compaction marker tokens",
-        kind: SettingKind::Uint,
-        category: "Agent",
-    },
-    SettingEntry {
-        key: "conversation.max_transcript_chars",
-        label: "Max transcript chars",
-        kind: SettingKind::Uint,
-        category: "Agent",
-    },
-    SettingEntry {
-        key: "gateway.max_body_size",
-        label: "Max body size (bytes)",
-        kind: SettingKind::Uint,
-        category: "Gateway",
-    },
-    SettingEntry {
-        key: "gateway.telegram_poll_timeout_secs",
-        label: "Telegram poll timeout (s)",
-        kind: SettingKind::Uint,
-        category: "Gateway",
-    },
-    SettingEntry {
-        key: "gateway.telegram_circuit_failure_threshold",
-        label: "Circuit breaker threshold",
-        kind: SettingKind::Uint,
-        category: "Gateway",
-    },
-    SettingEntry {
-        key: "gateway.telegram_circuit_suspension_secs",
-        label: "Circuit suspension (s)",
-        kind: SettingKind::Uint,
-        category: "Gateway",
-    },
-    SettingEntry {
-        key: "gateway.telegram_dedup_capacity",
-        label: "Dedup capacity",
-        kind: SettingKind::Uint,
-        category: "Gateway",
-    },
+    // — Voice —
     SettingEntry {
         key: "tts.enabled",
         label: "Enabled",
@@ -201,18 +141,6 @@ const SETTINGS: &[SettingEntry] = &[
         key: "tts.auto_mode",
         label: "Auto voice reply",
         kind: SettingKind::Bool,
-        category: "Voice",
-    },
-    SettingEntry {
-        key: "tts.default_voice",
-        label: "Default voice",
-        kind: SettingKind::Text,
-        category: "Voice",
-    },
-    SettingEntry {
-        key: "tts.default_format",
-        label: "Output format",
-        kind: SettingKind::Text,
         category: "Voice",
     },
 ];
@@ -652,7 +580,7 @@ impl SettingsPopup {
             return;
         }
 
-        let content_height = (inner.height as usize).saturating_sub(2); // reserve footer + status
+        let content_height = (inner.height as usize).saturating_sub(3); // reserve footer + hint + status
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         let mut last_category: Option<&str> = None;
@@ -738,13 +666,24 @@ impl SettingsPopup {
             } else {
                 theme::error_style()
             };
-            let status_y = inner.y + inner.height - 2;
+            let status_y = inner.y + inner.height - 3;
             let status_area = Rect::new(inner.x, status_y, inner.width, 1);
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(format!(" {msg}"), style))),
                 status_area,
             );
         }
+
+        // CLI hint
+        let cli_hint_y = inner.y + inner.height - 2;
+        let cli_hint_area = Rect::new(inner.x, cli_hint_y, inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " More settings: borg settings set <key> <value>".to_string(),
+                theme::dim(),
+            ))),
+            cli_hint_area,
+        );
 
         // Footer hint (context-sensitive)
         let hint = match self.mode {
@@ -811,9 +750,9 @@ mod tests {
         let cfg = Config::default();
         popup.show(&cfg);
 
-        // Find sandbox.enabled (index 4)
-        popup.selected = 4;
-        assert_eq!(popup.entries[4].key, "sandbox.enabled");
+        // Find sandbox.enabled (index 7 — under Security)
+        popup.selected = 7;
+        assert_eq!(popup.entries[7].key, "sandbox.enabled");
 
         let mut cfg = Config::default();
         assert!(cfg.sandbox.enabled);
@@ -890,7 +829,7 @@ mod tests {
     #[test]
     fn all_settings_covered() {
         let popup = SettingsPopup::new();
-        assert_eq!(popup.entries.len(), 28);
+        assert_eq!(popup.entries.len(), 15);
 
         let cfg = Config::default();
         for entry in popup.entries {
@@ -1109,14 +1048,14 @@ mod tests {
     }
 
     #[test]
-    fn left_right_noop_on_text_fields() {
+    fn left_right_noop_on_uint_fields() {
         let mut popup = SettingsPopup::new();
         let mut cfg = Config::default();
         popup.show(&cfg);
 
-        // sandbox.mode is a Text field (index 5)
-        popup.selected = 5;
-        assert_eq!(popup.entries[5].key, "sandbox.mode");
+        // conversation.max_iterations is a Uint field (index 4)
+        popup.selected = 4;
+        assert_eq!(popup.entries[4].key, "conversation.max_iterations");
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);

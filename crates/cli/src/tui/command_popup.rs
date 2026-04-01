@@ -12,6 +12,7 @@ pub struct SlashCommandDef {
 }
 
 const COMMANDS: &[SlashCommandDef] = &[
+    // Essentials
     SlashCommandDef {
         name: "/help",
         description: "Show available commands",
@@ -25,6 +26,11 @@ const COMMANDS: &[SlashCommandDef] = &[
         description: "Show usage stats",
     },
     SlashCommandDef {
+        name: "/plan",
+        description: "Toggle plan mode (review before proceeding)",
+    },
+    // Conversation
+    SlashCommandDef {
         name: "/compact",
         description: "Compact conversation history",
     },
@@ -36,6 +42,7 @@ const COMMANDS: &[SlashCommandDef] = &[
         name: "/undo",
         description: "Undo last agent turn",
     },
+    // Context
     SlashCommandDef {
         name: "/tools",
         description: "List installed tools",
@@ -52,13 +59,10 @@ const COMMANDS: &[SlashCommandDef] = &[
         name: "/doctor",
         description: "Run diagnostics",
     },
-    SlashCommandDef {
-        name: "/history",
-        description: "Show recent history",
-    },
+    // Sessions
     SlashCommandDef {
         name: "/sessions",
-        description: "List saved sessions",
+        description: "Browse saved sessions",
     },
     SlashCommandDef {
         name: "/save",
@@ -68,37 +72,14 @@ const COMMANDS: &[SlashCommandDef] = &[
         name: "/new",
         description: "Start new session",
     },
-    SlashCommandDef {
-        name: "/load",
-        description: "Load session by ID",
-    },
+    // Integrations
     SlashCommandDef {
         name: "/plugins",
-        description: "Integration marketplace",
+        description: "Browse integrations",
     },
     SlashCommandDef {
-        name: "/schedule-tasks",
+        name: "/schedule",
         description: "Manage scheduled tasks",
-    },
-    SlashCommandDef {
-        name: "/restart",
-        description: "Restart services",
-    },
-    SlashCommandDef {
-        name: "/logs",
-        description: "Show recent logs",
-    },
-    SlashCommandDef {
-        name: "/plan",
-        description: "Send message in plan mode (review before proceeding)",
-    },
-    SlashCommandDef {
-        name: "/mode",
-        description: "Switch collaboration mode",
-    },
-    SlashCommandDef {
-        name: "/pairing",
-        description: "Manage sender pairing",
     },
 ];
 
@@ -317,13 +298,13 @@ mod tests {
     }
 
     #[test]
-    fn mode_command_in_list() {
+    fn schedule_command_in_list() {
         let mut popup = CommandPopup::new();
-        popup.update_filter("/mode");
+        popup.update_filter("/schedule");
         let items = popup.filtered();
         assert!(
-            items.iter().any(|c| c.name == "/mode"),
-            "/mode should appear in filtered commands"
+            items.iter().any(|c| c.name == "/schedule"),
+            "/schedule should appear in filtered commands"
         );
     }
 }
