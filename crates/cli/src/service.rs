@@ -291,59 +291,68 @@ async fn spawn_task_execution(
             }
             Ok(Err(e)) => {
                 let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
-                let err_str = format!("{e}");
-                handle_task_failure(
-                    &task_id,
-                    &task_name,
-                    &err_str,
+                let ctx = TaskFailureContext {
+                    task_id: &task_id,
+                    task_name: &task_name,
                     started_at,
                     duration_ms,
                     retry_count,
                     max_retries,
-                    &schedule_type,
-                    &delivery_channel,
-                    &delivery_target,
-                    &config,
-                )
-                .await;
+                    schedule_type: &schedule_type,
+                    delivery_channel: &delivery_channel,
+                    delivery_target: &delivery_target,
+                    config: &config,
+                };
+                handle_task_failure(&ctx, &format!("{e}")).await;
             }
             Err(_) => {
                 let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
-                handle_task_failure(
-                    &task_id,
-                    &task_name,
-                    "Task timed out",
+                let ctx = TaskFailureContext {
+                    task_id: &task_id,
+                    task_name: &task_name,
                     started_at,
                     duration_ms,
                     retry_count,
                     max_retries,
-                    &schedule_type,
-                    &delivery_channel,
-                    &delivery_target,
-                    &config,
-                )
-                .await;
+                    schedule_type: &schedule_type,
+                    delivery_channel: &delivery_channel,
+                    delivery_target: &delivery_target,
+                    config: &config,
+                };
+                handle_task_failure(&ctx, "Task timed out").await;
             }
         }
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_task_failure(
-    task_id: &str,
-    task_name: &str,
-    error: &str,
+struct TaskFailureContext<'a> {
+    task_id: &'a str,
+    task_name: &'a str,
     started_at: i64,
     duration_ms: i64,
     retry_count: i32,
     max_retries: i32,
-    schedule_type: &str,
-    delivery_channel: &Option<String>,
-    delivery_target: &Option<String>,
-    config: &Config,
-) {
-    if borg_core::tasks::is_transient_error(error) && retry_count < max_retries {
-        let next_attempt = retry_count + 1;
+    schedule_type: &'a str,
+    delivery_channel: &'a Option<String>,
+    delivery_target: &'a Option<String>,
+    config: &'a Config,
+}
+
+async fn handle_task_failure(ctx: &TaskFailureContext<'_>, error: &str) {
+    let TaskFailureContext {
+        task_id,
+        task_name,
+        started_at,
+        duration_ms,
+        retry_count,
+        max_retries,
+        schedule_type,
+        delivery_channel,
+        delivery_target,
+        config,
+    } = ctx;
+    if borg_core::tasks::is_transient_error(error) && *retry_count < *max_retries {
+        let next_attempt = *retry_count + 1;
         let delay = borg_core::tasks::retry_delay_secs(next_attempt);
         let retry_at = chrono::Utc::now().timestamp() + delay;
         if let Ok(db) = borg_core::db::Database::open() {
@@ -356,14 +365,15 @@ async fn handle_task_failure(
         );
     } else {
         if let Ok(db) = borg_core::db::Database::open() {
-            if let Err(e) = db.record_task_run(task_id, started_at, duration_ms, None, Some(error))
+            if let Err(e) =
+                db.record_task_run(task_id, *started_at, *duration_ms, None, Some(error))
             {
                 tracing::warn!("Failed to record task failure for '{task_name}': {e}");
             }
             if let Err(e) = db.clear_task_retry(task_id) {
                 tracing::warn!("Failed to clear retry state for '{task_name}': {e}");
             }
-            if schedule_type == "once" {
+            if *schedule_type == "once" {
                 if let Err(e) = db.update_task_status(task_id, "completed") {
                     tracing::warn!("Failed to mark task '{task_name}' completed: {e}");
                 }
@@ -387,47 +397,9 @@ async fn deliver_task_result(
 ) {
     let msg = format!("[Task: {task_name}]\n{text}");
     let result = match channel {
-        "telegram" => {
-            let token = config.resolve_credential_or_env("TELEGRAM_BOT_TOKEN");
-            match (token, target.parse::<i64>()) {
-                (Some(t), Ok(chat_id)) => {
-                    match borg_gateway::telegram::api::TelegramClient::new(&t) {
-                        Ok(client) => client.send_message(chat_id, &msg, None, None, None).await,
-                        Err(e) => Err(e),
-                    }
-                }
-                _ => {
-                    tracing::warn!("Telegram delivery: missing token or invalid chat_id");
-                    return;
-                }
-            }
-        }
-        "slack" => {
-            let token = config.resolve_credential_or_env("SLACK_BOT_TOKEN");
-            match token {
-                Some(t) => match borg_gateway::slack::api::SlackClient::new(&t) {
-                    Ok(client) => client.post_message(target, &msg, None).await.map(|_| ()),
-                    Err(e) => Err(e),
-                },
-                None => {
-                    tracing::warn!("Slack delivery: missing SLACK_BOT_TOKEN");
-                    return;
-                }
-            }
-        }
-        "discord" => {
-            let token = config.resolve_credential_or_env("DISCORD_BOT_TOKEN");
-            match token {
-                Some(t) => match borg_gateway::discord::api::DiscordClient::new(&t) {
-                    Ok(client) => client.send_message(target, &msg).await,
-                    Err(e) => Err(e),
-                },
-                None => {
-                    tracing::warn!("Discord delivery: missing DISCORD_BOT_TOKEN");
-                    return;
-                }
-            }
-        }
+        "telegram" => send_telegram(config, target, &msg).await,
+        "slack" => send_slack(config, target, &msg).await,
+        "discord" => send_discord(config, target, &msg).await,
         _ => {
             tracing::warn!("Unknown delivery channel: {channel}");
             return;
@@ -436,6 +408,33 @@ async fn deliver_task_result(
     if let Err(e) = result {
         tracing::warn!("Failed to deliver task result via {channel}: {e}");
     }
+}
+
+async fn send_telegram(config: &Config, target: &str, msg: &str) -> anyhow::Result<()> {
+    let token = config
+        .resolve_credential_or_env("TELEGRAM_BOT_TOKEN")
+        .ok_or_else(|| anyhow::anyhow!("missing TELEGRAM_BOT_TOKEN"))?;
+    let chat_id: i64 = target
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid chat_id"))?;
+    let client = borg_gateway::telegram::api::TelegramClient::new(&token)?;
+    client.send_message(chat_id, msg, None, None, None).await
+}
+
+async fn send_slack(config: &Config, target: &str, msg: &str) -> anyhow::Result<()> {
+    let token = config
+        .resolve_credential_or_env("SLACK_BOT_TOKEN")
+        .ok_or_else(|| anyhow::anyhow!("missing SLACK_BOT_TOKEN"))?;
+    let client = borg_gateway::slack::api::SlackClient::new(&token)?;
+    client.post_message(target, msg, None).await.map(|_| ())
+}
+
+async fn send_discord(config: &Config, target: &str, msg: &str) -> anyhow::Result<()> {
+    let token = config
+        .resolve_credential_or_env("DISCORD_BOT_TOKEN")
+        .ok_or_else(|| anyhow::anyhow!("missing DISCORD_BOT_TOKEN"))?;
+    let client = borg_gateway::discord::api::DiscordClient::new(&token)?;
+    client.send_message(target, msg).await
 }
 
 /// Run a heartbeat agent turn in the daemon and deliver to configured channels.

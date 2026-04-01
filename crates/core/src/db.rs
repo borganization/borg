@@ -303,56 +303,37 @@ impl Database {
             .unchecked_transaction()
             .context("Failed to begin migration transaction")?;
 
-        if current < 1 {
-            self.migrate_v1()?;
-        }
-        if current < 2 {
-            self.migrate_v2()?;
-        }
-        if current < 3 {
-            self.migrate_v3()?;
-        }
-        if current < 4 {
-            self.migrate_v4()?;
-        }
-        if current < 5 {
-            self.migrate_v5()?;
-        }
-        if current < 6 {
-            self.migrate_v6()?;
-        }
-        if current < 7 {
-            self.migrate_v7()?;
-        }
-        if current < 8 {
-            self.migrate_v8()?;
-        }
-        if current < 9 {
-            self.migrate_v9()?;
-        }
-        if current < 10 {
-            self.migrate_v10()?;
-        }
-        if current < 11 {
-            self.migrate_v11()?;
-        }
-        if current < 12 {
-            self.migrate_v12()?;
-        }
-        if current < 13 {
-            self.migrate_v13()?;
-        }
-        if current < 14 {
-            self.migrate_v14()?;
-        }
-        if current < 15 {
-            self.migrate_v15()?;
-        }
-        if current < 16 {
-            self.migrate_v16()?;
-        }
-        if current < 17 {
-            self.migrate_v17()?;
+        const MIGRATIONS: &[fn(&Database) -> Result<()>] = &[
+            Database::migrate_v1,
+            Database::migrate_v2,
+            Database::migrate_v3,
+            Database::migrate_v4,
+            Database::migrate_v5,
+            Database::migrate_v6,
+            Database::migrate_v7,
+            Database::migrate_v8,
+            Database::migrate_v9,
+            Database::migrate_v10,
+            Database::migrate_v11,
+            Database::migrate_v12,
+            Database::migrate_v13,
+            Database::migrate_v14,
+            Database::migrate_v15,
+            Database::migrate_v16,
+            Database::migrate_v17,
+        ];
+        // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
+        // will fail the build.
+        const _: () = assert!(
+            MIGRATIONS.len() == Database::CURRENT_VERSION as usize,
+            "MIGRATIONS array length must match CURRENT_VERSION"
+        );
+
+        for (i, migrate_fn) in MIGRATIONS.iter().enumerate() {
+            let version = (i + 1) as u32;
+            if current < version {
+                migrate_fn(self)?;
+            }
         }
 
         self.set_meta("schema_version", &Self::CURRENT_VERSION.to_string())?;
