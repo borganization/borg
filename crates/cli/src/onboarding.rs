@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use std::str::FromStr;
 
@@ -258,9 +258,53 @@ max_tokens = 4096
     ))
 }
 
+/// Write content to a temporary file in the same directory, then atomically rename.
+/// This prevents partial writes from leaving corrupted files.
+fn atomic_write(path: &std::path::Path, content: &str) -> Result<()> {
+    let tmp_path = tmp_path_for(path);
+    std::fs::write(&tmp_path, content)
+        .with_context(|| format!("Failed to write temp file {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "Failed to rename {} to {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Build the .tmp path for a given file by appending ".tmp" to the full name.
+/// e.g. "config.toml" → "config.toml.tmp"
+fn tmp_path_for(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".tmp");
+    std::path::PathBuf::from(name)
+}
+
+/// Clean up any leftover .tmp files from a failed onboarding attempt.
+fn cleanup_tmp_files(data_dir: &std::path::Path) {
+    for name in [
+        "config.toml.tmp",
+        "IDENTITY.md.tmp",
+        "MEMORY.md.tmp",
+        "SETUP.md.tmp",
+        ".env.tmp",
+    ] {
+        let tmp = data_dir.join(name);
+        if tmp.exists() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
 /// Apply onboarding results: create directories, write config and identity files.
+/// Uses atomic writes (write to .tmp then rename) to prevent partial setups.
 pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     let data_dir = Config::data_dir()?;
+
+    // Clean up any leftover temp files from a prior failed attempt
+    cleanup_tmp_files(&data_dir);
 
     // Create directory structure
     for sub in BORG_SUBDIRS {
@@ -289,7 +333,10 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
             &result.agent_name,
             use_keychain,
         )?;
-        std::fs::write(&config_path, &config_content)?;
+        if let Err(e) = atomic_write(&config_path, &config_content) {
+            cleanup_tmp_files(&data_dir);
+            return Err(e.context("Failed to write config.toml during onboarding"));
+        }
         println!("  Created {}", config_path.display());
     }
 
@@ -299,7 +346,10 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
         println!("  Skipped {} (already exists)", identity_path.display());
     } else {
         let identity_content = generate_identity(&result.agent_name, &result.user_name);
-        std::fs::write(&identity_path, &identity_content)?;
+        if let Err(e) = atomic_write(&identity_path, &identity_content) {
+            cleanup_tmp_files(&data_dir);
+            return Err(e.context("Failed to write IDENTITY.md during onboarding"));
+        }
         println!("  Created {}", identity_path.display());
     }
 
@@ -308,7 +358,10 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     if memory_path.exists() {
         println!("  Skipped {} (already exists)", memory_path.display());
     } else {
-        std::fs::write(&memory_path, "# Memory Index\n\nNo memories yet.\n")?;
+        if let Err(e) = atomic_write(&memory_path, "# Memory Index\n\nNo memories yet.\n") {
+            cleanup_tmp_files(&data_dir);
+            return Err(e.context("Failed to write MEMORY.md during onboarding"));
+        }
         println!("  Created {}", memory_path.display());
     }
 
@@ -316,7 +369,10 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
     let setup_path = data_dir.join("SETUP.md");
     if !setup_path.exists() {
         let setup_content = generate_setup(&result.agent_name, &result.user_name);
-        std::fs::write(&setup_path, &setup_content)?;
+        if let Err(e) = atomic_write(&setup_path, &setup_content) {
+            cleanup_tmp_files(&data_dir);
+            return Err(e.context("Failed to write SETUP.md during onboarding"));
+        }
         println!("  Created {}", setup_path.display());
     }
 
@@ -340,12 +396,12 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
                         &result.agent_name,
                         false,
                     )?;
-                    std::fs::write(&config_path, &fallback_config)?;
+                    atomic_write(&config_path, &fallback_config)?;
                     let provider = Provider::from_str(&result.provider)?;
                     let env_var = provider.default_env_var();
                     let env_path = data_dir.join(".env");
                     let clean_key = api_key.trim().replace(['\n', '\r'], "");
-                    std::fs::write(&env_path, format!("{env_var}={clean_key}\n"))?;
+                    atomic_write(&env_path, &format!("{env_var}={clean_key}\n"))?;
                     println!("  Updated config to use .env file");
                     println!("  Created {}", env_path.display());
                 }
@@ -355,7 +411,7 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
             let env_var = provider.default_env_var();
             let env_path = data_dir.join(".env");
             let clean_key = api_key.trim().replace(['\n', '\r'], "");
-            std::fs::write(&env_path, format!("{env_var}={clean_key}\n"))?;
+            atomic_write(&env_path, &format!("{env_var}={clean_key}\n"))?;
             // Restrict permissions on .env file
             #[cfg(unix)]
             {
@@ -599,5 +655,47 @@ mod tests {
             OPENROUTER_MODELS.len() >= 5,
             "OpenRouter models should have at least 5"
         );
+    }
+
+    #[test]
+    fn atomic_write_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        atomic_write(&path, "key = \"value\"").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "key = \"value\"");
+        // No .tmp file should remain (test.toml.tmp, not test.tmp)
+        assert!(!dir.path().join("test.toml.tmp").exists());
+    }
+
+    #[test]
+    fn tmp_path_appends_suffix() {
+        let path = std::path::Path::new("/data/config.toml");
+        assert_eq!(
+            tmp_path_for(path),
+            std::path::PathBuf::from("/data/config.toml.tmp")
+        );
+        let path2 = std::path::Path::new("/data/IDENTITY.md");
+        assert_eq!(
+            tmp_path_for(path2),
+            std::path::PathBuf::from("/data/IDENTITY.md.tmp")
+        );
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        std::fs::write(&path, "old content").unwrap();
+        atomic_write(&path, "new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+    }
+
+    #[test]
+    fn cleanup_tmp_files_removes_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("config.toml.tmp");
+        std::fs::write(&tmp, "partial").unwrap();
+        cleanup_tmp_files(dir.path());
+        assert!(!tmp.exists());
     }
 }

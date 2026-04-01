@@ -392,7 +392,7 @@ impl GatewayServer {
         info!("Gateway listening on {addr} with {channel_count} channel(s)");
 
         // Replay unfinished deliveries from previous run
-        if let Ok(db) = Database::open() {
+        if let Ok(db) = Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS) {
             match db.replay_unfinished() {
                 Ok(0) => {}
                 Ok(n) => info!("Reset {n} in-flight delivery(ies) to pending"),
@@ -768,7 +768,7 @@ async fn readyz_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
     let mut ready = true;
 
     // Check database connectivity
-    match Database::open() {
+    match Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS) {
         Ok(_) => {
             checks.insert("database".into(), serde_json::json!("ok"));
         }
@@ -2160,7 +2160,7 @@ async fn drain_pending_deliveries(
     state: &Arc<AppState>,
     health: &Arc<RwLock<ChannelHealthRegistry>>,
 ) {
-    let mut db = match Database::open() {
+    let mut db = match Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS) {
         Ok(db) => db,
         Err(e) => {
             warn!("Drain loop: failed to open database: {e}");

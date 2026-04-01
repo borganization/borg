@@ -32,6 +32,16 @@ use crate::types::{ContentPart, FunctionCall, Message, ToolCall, ToolDefinition,
 
 use std::sync::LazyLock;
 
+/// Spawn a background task that logs panics instead of silently swallowing them.
+fn spawn_logged(name: &'static str, fut: impl std::future::Future<Output = ()> + Send + 'static) {
+    let handle = tokio::spawn(fut);
+    tokio::spawn(async move {
+        if let Err(e) = handle.await {
+            tracing::error!("Background task '{name}' panicked: {e}");
+        }
+    });
+}
+
 /// Max tokens for tool output before truncation (head + tail preserved).
 const TOOL_OUTPUT_MAX_TOKENS: usize = constants::TOOL_OUTPUT_MAX_TOKENS;
 
@@ -298,6 +308,19 @@ fn build_common(config: &Config) -> Result<AgentCommon> {
 }
 
 impl Agent {
+    /// Acquire the database lock, recovering from poison if a prior holder panicked.
+    fn db_guard(&self) -> std::sync::MutexGuard<'_, Option<Database>> {
+        match self.db.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!(
+                    "Database mutex poisoned — a prior operation panicked while holding the lock"
+                );
+                poisoned.into_inner()
+            }
+        }
+    }
+
     pub fn new(config: Config, metrics: BorgMetrics) -> Result<Self> {
         let common = build_common(&config)?;
         let agent_control = if config.agents.enabled {
@@ -508,7 +531,8 @@ impl Agent {
             }
             _ => (msg.text_content().map(str::to_string), None),
         };
-        if let Ok(guard) = self.db.lock() {
+        {
+            let guard = self.db_guard();
             if let Some(ref db) = *guard {
                 if let Err(e) = db.insert_message(
                     &session_id,
@@ -825,19 +849,27 @@ impl Agent {
                         // Index the daily log so it's immediately searchable
                         let config = self.config.clone();
                         let fname = filename.clone();
-                        let full_content = crate::memory::read_memory(&fname).unwrap_or_default();
-                        tokio::spawn(async move {
-                            if let Err(e) = crate::embeddings::embed_memory_file_chunked(
-                                &config,
-                                &fname,
-                                &full_content,
-                                "global",
-                            )
-                            .await
-                            {
-                                tracing::warn!("Failed to embed daily log {fname}: {e}");
+                        match crate::memory::read_memory(&fname) {
+                            Ok(full_content) => {
+                                spawn_logged("embed_daily_log", async move {
+                                    if let Err(e) = crate::embeddings::embed_memory_file_chunked(
+                                        &config,
+                                        &fname,
+                                        &full_content,
+                                        "global",
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!("Failed to embed daily log {fname}: {e}");
+                                    }
+                                });
                             }
-                        });
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to read memory file {fname} for embedding: {e}"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -940,7 +972,7 @@ impl Agent {
         if self.config.memory.embeddings.enabled {
             if !self.config.memory.extra_paths.is_empty() {
                 let config = self.config.clone();
-                tokio::spawn(async move {
+                spawn_logged("embed_extra_paths", async move {
                     let files = crate::memory::scan_extra_paths(
                         &config.memory.extra_paths,
                         &config.security.blocked_paths,
@@ -961,7 +993,7 @@ impl Agent {
                 .is_ok()
             {
                 let config = self.config.clone();
-                tokio::spawn(async move {
+                spawn_logged("index_sessions", async move {
                     struct IndexGuard;
                     impl Drop for IndexGuard {
                         fn drop(&mut self) {
@@ -1211,7 +1243,11 @@ impl Agent {
                             self.log_and_persist(Message::assistant(&content));
                         }
                         let _ = event_tx.send(AgentEvent::TurnComplete).await;
-                        let _ = stream_handle.await;
+                        if let Err(e) = stream_handle.await {
+                            if e.is_panic() {
+                                tracing::error!("LLM stream task panicked during cancel: {e}");
+                            }
+                        }
                         return Ok(());
                     }
                     event = stream_rx.recv() => {
@@ -1247,7 +1283,8 @@ impl Agent {
                                 let total = usage.prompt_tokens + usage.completion_tokens;
                                 if total > 0 {
                                     self.metrics.llm_tokens.add(total, &[]);
-                                    if let Ok(guard) = self.db.lock() {
+                                    {
+                                        let guard = self.db_guard();
                                         if let Some(ref db) = *guard {
                                             let cost = crate::pricing::estimate_cost(
                                                 &usage.model,
@@ -1287,7 +1324,17 @@ impl Agent {
                 }
             }
 
-            let _ = stream_handle.await;
+            if let Err(e) = stream_handle.await {
+                if e.is_panic() {
+                    tracing::error!("LLM stream task panicked: {e}");
+                    let _ = event_tx
+                        .send(AgentEvent::Error(
+                            "Internal error: streaming task crashed".into(),
+                        ))
+                        .await;
+                    return Err(anyhow::anyhow!("LLM stream task panicked"));
+                }
+            }
             self.metrics
                 .llm_duration
                 .record(llm_start.elapsed().as_secs_f64(), &[]);
@@ -1578,10 +1625,16 @@ impl Agent {
                     let config = self.config.clone();
                     let filename = args["filename"].as_str().unwrap_or_default().to_string();
                     let scope = args["scope"].as_str().unwrap_or("global").to_string();
-                    let full_content = crate::secrets::redact_secrets(
-                        &crate::memory::read_memory(&filename).unwrap_or_default(),
-                    );
-                    tokio::spawn(async move {
+                    let full_content = match crate::memory::read_memory(&filename) {
+                        Ok(content) => crate::secrets::redact_secrets(&content),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to read memory file {filename} for embedding: {e}"
+                            );
+                            String::new()
+                        }
+                    };
+                    spawn_logged("embed_memory_write", async move {
                         // Generate whole-file embedding (legacy, for backward compat)
                         if let Err(e) = crate::embeddings::embed_memory_file(
                             &config,
@@ -2012,6 +2065,28 @@ mod tests {
         // New/unknown tools should be blocked by default (safety)
         assert!(is_mutating_tool("some_new_tool"));
         assert!(is_mutating_tool(""));
+    }
+
+    #[tokio::test]
+    async fn spawn_logged_completes_normally() {
+        // A non-panicking task should complete without issues
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        spawn_logged("test_normal", async move {
+            let _ = tx.send(42);
+        });
+        let result = rx.await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn spawn_logged_handles_panic() {
+        // A panicking task should not propagate the panic to the caller
+        spawn_logged("test_panic", async {
+            panic!("intentional test panic");
+        });
+        // Give the spawned task time to run and panic
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // If we get here, the panic was handled (not propagated)
     }
 }
 
