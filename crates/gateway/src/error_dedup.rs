@@ -95,7 +95,7 @@ impl ErrorDedupStore {
 
     /// Remove expired entries to prevent unbounded growth.
     fn prune_if_needed(&mut self) {
-        let total: usize = self.entries.values().map(|v| v.len()).sum();
+        let total: usize = self.entries.values().map(Vec::len).sum();
         if total <= MAX_STORE_SIZE {
             return;
         }
