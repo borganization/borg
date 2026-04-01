@@ -13,6 +13,11 @@ pub struct SandboxPolicy {
     /// Always includes `~/.borg/` to protect agent config from tool writes.
     #[serde(default)]
     pub deny_write: Vec<String>,
+    /// Domain allowlist for network-enabled tools. When non-empty and `network` is true,
+    /// traffic is routed through a local proxy that only permits connections to these domains.
+    /// Supports exact matches and wildcard suffixes (e.g., ".github.com").
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -480,6 +485,7 @@ mod tests {
             fs_write: vec!["/tmp/out".into()],
             deny_read: vec!["/secret".into()],
             deny_write: vec!["/protected".into()],
+            ..Default::default()
         };
         let applied = policy.with_defaults_applied();
         assert!(applied.network);

@@ -2,6 +2,10 @@ use tracing::debug;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookPoint {
+    /// Fired once when a new session begins (before any turns).
+    SessionStart,
+    /// Fired when a session ends (graceful shutdown or explicit close).
+    SessionEnd,
     BeforeAgentStart,
     BeforeLlmCall,
     AfterLlmResponse,
@@ -21,6 +25,13 @@ pub struct HookContext {
 
 #[derive(Debug, Clone)]
 pub enum HookData {
+    SessionStart {
+        session_id: String,
+    },
+    SessionEnd {
+        session_id: String,
+        total_turns: u32,
+    },
     AgentStart {
         user_message: String,
     },
@@ -372,5 +383,76 @@ mod tests {
     fn hook_point_equality() {
         assert_eq!(HookPoint::BeforeAgentStart, HookPoint::BeforeAgentStart);
         assert_ne!(HookPoint::BeforeAgentStart, HookPoint::TurnComplete);
+    }
+
+    #[test]
+    fn session_start_hook_fires() {
+        let mut registry = HookRegistry::new();
+        registry.register(Box::new(TestHook {
+            name: "session_start".to_string(),
+            points: vec![HookPoint::SessionStart],
+            action: HookAction::InjectContext("session started".to_string()),
+        }));
+
+        let ctx = HookContext {
+            point: HookPoint::SessionStart,
+            session_id: "s1".to_string(),
+            turn_count: 0,
+            data: HookData::SessionStart {
+                session_id: "s1".to_string(),
+            },
+        };
+        match registry.dispatch(&ctx) {
+            HookAction::InjectContext(text) => assert_eq!(text, "session started"),
+            other => panic!("Expected InjectContext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_end_hook_fires() {
+        let mut registry = HookRegistry::new();
+        registry.register(Box::new(TestHook {
+            name: "session_end".to_string(),
+            points: vec![HookPoint::SessionEnd],
+            action: HookAction::InjectContext("session ended".to_string()),
+        }));
+
+        let ctx = HookContext {
+            point: HookPoint::SessionEnd,
+            session_id: "s1".to_string(),
+            turn_count: 5,
+            data: HookData::SessionEnd {
+                session_id: "s1".to_string(),
+                total_turns: 5,
+            },
+        };
+        match registry.dispatch(&ctx) {
+            HookAction::InjectContext(text) => assert_eq!(text, "session ended"),
+            other => panic!("Expected InjectContext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_hooks_do_not_fire_on_other_points() {
+        let mut registry = HookRegistry::new();
+        registry.register(Box::new(TestHook {
+            name: "session_only".to_string(),
+            points: vec![HookPoint::SessionStart, HookPoint::SessionEnd],
+            action: HookAction::InjectContext("session".to_string()),
+        }));
+
+        let ctx = make_ctx(HookPoint::BeforeAgentStart);
+        assert!(matches!(registry.dispatch(&ctx), HookAction::Continue));
+    }
+
+    #[test]
+    fn hook_data_session_variants_constructible() {
+        let _ = HookData::SessionStart {
+            session_id: "s1".to_string(),
+        };
+        let _ = HookData::SessionEnd {
+            session_id: "s1".to_string(),
+            total_turns: 10,
+        };
     }
 }

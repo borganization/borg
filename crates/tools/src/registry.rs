@@ -82,6 +82,32 @@ impl<M: ManifestItem + Clone> ManifestRegistry<M> {
     pub fn items(&self) -> impl Iterator<Item = &RegisteredItem<M>> {
         self.items.values()
     }
+
+    /// Find the best fuzzy match for a query string among registered item names.
+    /// Returns `None` if no match exceeds the similarity threshold (0.6).
+    pub fn fuzzy_find(&self, query: &str) -> Option<&RegisteredItem<M>> {
+        fuzzy_best_match(query, self.items.iter().map(|(k, v)| (k.as_str(), v)))
+    }
+}
+
+/// Minimum Jaro-Winkler similarity score to consider a match valid.
+const FUZZY_THRESHOLD: f64 = 0.6;
+
+/// Find the best fuzzy match for `query` among `(name, value)` pairs.
+/// Returns `None` if no match meets `FUZZY_THRESHOLD`.
+pub fn fuzzy_best_match<'a, T>(
+    query: &str,
+    candidates: impl Iterator<Item = (&'a str, &'a T)>,
+) -> Option<&'a T> {
+    let query_lower = query.to_lowercase();
+    candidates
+        .map(|(name, item)| {
+            let score = strsim::jaro_winkler(&query_lower, &name.to_lowercase());
+            (score, item)
+        })
+        .filter(|(score, _)| *score >= FUZZY_THRESHOLD)
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(_, item)| item)
 }
 
 // --- ManifestItem impl for ToolManifest ---
@@ -204,6 +230,11 @@ impl ToolRegistry {
             .map(|t| t.manifest.credentials.clone())
             .unwrap_or_default()
     }
+
+    /// Find a tool by fuzzy name match. Returns `None` if no good match found.
+    pub fn fuzzy_find(&self, query: &str) -> Option<&RegisteredTool> {
+        self.inner.fuzzy_find(query)
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +340,77 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
         assert!(registry.tool_credentials("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn fuzzy_find_exact_match() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tool_toml(dir.path(), "weather", "Get the weather");
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        let found = registry.fuzzy_find("weather");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().manifest.name, "weather");
+    }
+
+    #[test]
+    fn fuzzy_find_close_typo() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tool_toml(dir.path(), "weather", "Get the weather");
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        let found = registry.fuzzy_find("weathr");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().manifest.name, "weather");
+    }
+
+    #[test]
+    fn fuzzy_find_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tool_toml(dir.path(), "weather", "Get the weather");
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        let found = registry.fuzzy_find("zzzzzzz");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn fuzzy_find_empty_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert!(registry.fuzzy_find("anything").is_none());
+    }
+
+    #[test]
+    fn fuzzy_find_best_of_multiple() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tool_toml(dir.path(), "weather", "Get the weather");
+        write_tool_toml(dir.path(), "web-search", "Search the web");
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        let found = registry.fuzzy_find("weathr");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().manifest.name, "weather");
+    }
+
+    #[test]
+    fn fuzzy_find_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tool_toml(dir.path(), "Weather", "Get the weather");
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        let found = registry.fuzzy_find("weather");
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn fuzzy_best_match_standalone() {
+        let items = vec![("alpha", &1), ("beta", &2), ("gamma", &3)];
+        let result = fuzzy_best_match("alph", items.into_iter());
+        assert_eq!(result, Some(&1));
+    }
+
+    #[test]
+    fn fuzzy_best_match_empty_query() {
+        let items = vec![("alpha", &1)];
+        let result = fuzzy_best_match("", items.into_iter());
+        // Empty query has low similarity to any name
+        assert!(result.is_none());
     }
 }
 

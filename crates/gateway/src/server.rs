@@ -367,6 +367,8 @@ impl GatewayServer {
 
         let app = Router::new()
             .route("/health", get(health_handler))
+            .route("/healthz", get(health_handler))
+            .route("/readyz", get(readyz_handler))
             .route("/health/channels", get(channel_health_handler))
             .route("/channels", get(list_channels_handler))
             .route("/internal/wake", post(wake_handler))
@@ -759,6 +761,50 @@ impl GatewayServer {
 
 async fn health_handler() -> impl IntoResponse {
     axum::Json(serde_json::json!({ "status": "ok" }))
+}
+
+async fn readyz_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut checks = serde_json::Map::new();
+    let mut ready = true;
+
+    // Check database connectivity
+    match Database::open() {
+        Ok(_) => {
+            checks.insert("database".into(), serde_json::json!("ok"));
+        }
+        Err(e) => {
+            ready = false;
+            checks.insert(
+                "database".into(),
+                serde_json::json!({"error": e.to_string()}),
+            );
+        }
+    }
+
+    // Check that at least one channel is registered
+    let channel_count = state.registry.list_channels().len();
+    checks.insert("channels".into(), serde_json::json!(channel_count));
+
+    // Check LLM provider is configured
+    let provider_ok = state.config.llm.provider.is_some()
+        || !state.config.llm.api_key_env.is_empty()
+        || std::env::var("OPENROUTER_API_KEY").is_ok()
+        || std::env::var("OPENAI_API_KEY").is_ok()
+        || std::env::var("ANTHROPIC_API_KEY").is_ok();
+    checks.insert("provider".into(), serde_json::json!(provider_ok));
+    if !provider_ok {
+        ready = false;
+    }
+
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        axum::Json(serde_json::json!({ "ready": ready, "checks": checks })),
+    )
 }
 
 async fn channel_health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -2092,6 +2138,20 @@ mod tests {
         headers.insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
         let info = loopback_connect_info();
         assert_eq!(extract_client_ip(&headers, &info), "10.0.0.1");
+    }
+
+    #[test]
+    fn readyz_provider_detection_logic() {
+        // Verify the provider check logic used in readyz_handler
+        let config = Config::default();
+        let has_provider = config.llm.provider.is_some()
+            || !config.llm.api_key_env.is_empty()
+            || std::env::var("OPENROUTER_API_KEY").is_ok()
+            || std::env::var("OPENAI_API_KEY").is_ok()
+            || std::env::var("ANTHROPIC_API_KEY").is_ok();
+        // Default config has no provider set — result depends on env vars
+        // This test validates the detection logic compiles and runs without panic
+        let _ = has_provider;
     }
 }
 

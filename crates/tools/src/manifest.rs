@@ -36,8 +36,7 @@ impl SandboxSection {
             network: self.network,
             fs_read: self.fs_read.clone(),
             fs_write: self.fs_write.clone(),
-            deny_read: Vec::new(),
-            deny_write: Vec::new(),
+            ..Default::default()
         }
     }
 }
