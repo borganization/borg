@@ -347,7 +347,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 20;
+    const CURRENT_VERSION: u32 = 21;
 
     /// Check if a column exists on a table via `PRAGMA table_info`.
     /// Safer than catching ALTER TABLE errors by string matching.
@@ -408,6 +408,7 @@ impl Database {
             Database::migrate_v18,
             Database::migrate_v19,
             Database::migrate_v20,
+            Database::migrate_v21,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -1032,6 +1033,23 @@ impl Database {
             self.conn
                 .execute_batch("ALTER TABLE scheduled_tasks ADD COLUMN allowed_tools TEXT;")?;
         }
+        Ok(())
+    }
+
+    /// V21: Add missing indexes for task_runs, scheduled_tasks, and scripts query patterns.
+    fn migrate_v21(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_task_runs_task
+                ON task_runs(task_id, started_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_tasks_due
+                ON scheduled_tasks(status, next_run);
+            CREATE INDEX IF NOT EXISTS idx_task_runs_status
+                ON task_runs(status);
+            CREATE INDEX IF NOT EXISTS idx_scripts_ephemeral
+                ON scripts(ephemeral, created_at);
+            ",
+        )?;
         Ok(())
     }
 
@@ -5083,6 +5101,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "scripts table should exist after migration");
+    }
+
+    #[test]
+    fn migrate_v21_creates_indexes() {
+        let db = test_db();
+        let index_exists = |name: &str| -> bool {
+            db.conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    params![name],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        };
+        assert!(index_exists("idx_task_runs_task"));
+        assert!(index_exists("idx_tasks_due"));
+        assert!(index_exists("idx_task_runs_status"));
+        assert!(index_exists("idx_scripts_ephemeral"));
     }
 
     #[test]
