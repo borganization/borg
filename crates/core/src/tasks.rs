@@ -6,6 +6,13 @@ use std::str::FromStr;
 
 use crate::db::{Database, ScheduledTaskRow};
 
+// ── Task status constants ──
+
+pub const TASK_STATUS_ACTIVE: &str = "active";
+pub const TASK_STATUS_PAUSED: &str = "paused";
+pub const TASK_STATUS_CANCELLED: &str = "cancelled";
+pub const TASK_STATUS_COMPLETED: &str = "completed";
+
 // ── Run status constants ──
 
 pub const RUN_STATUS_RUNNING: &str = "running";
@@ -28,8 +35,8 @@ pub fn advance_next_run_raw(conn: &rusqlite::Connection, task: &ScheduledTaskRow
     match task.schedule_type.as_str() {
         "once" => {
             conn.execute(
-                "UPDATE scheduled_tasks SET status = 'completed', next_run = NULL WHERE id = ?1",
-                params![task.id],
+                "UPDATE scheduled_tasks SET status = ?1, next_run = NULL WHERE id = ?2",
+                params![TASK_STATUS_COMPLETED, task.id],
             )?;
         }
         "cron" | "interval" => {

@@ -1041,6 +1041,72 @@ impl Default for TasksConfig {
     }
 }
 
+// --- Setting parse helpers (used by Config::apply_setting) ---
+
+fn parse_bool(value: &str, key: &str) -> Result<bool> {
+    value
+        .parse()
+        .with_context(|| format!("Invalid bool for {key}"))
+}
+
+fn parse_f32_range(value: &str, key: &str, min: f32, max: f32) -> Result<f32> {
+    let v: f32 = value
+        .parse()
+        .with_context(|| format!("Invalid float for {key}"))?;
+    if !(min..=max).contains(&v) {
+        anyhow::bail!("{key} must be between {min} and {max}");
+    }
+    Ok(v)
+}
+
+fn parse_f64_range(value: &str, key: &str, min: f64, max: f64) -> Result<f64> {
+    let v: f64 = value
+        .parse()
+        .with_context(|| format!("Invalid float for {key}"))?;
+    if !(min..=max).contains(&v) {
+        anyhow::bail!("{key} must be between {min} and {max}");
+    }
+    Ok(v)
+}
+
+fn parse_u32(value: &str, key: &str) -> Result<u32> {
+    value
+        .parse()
+        .with_context(|| format!("Invalid integer for {key}"))
+}
+
+fn parse_nonzero_u32(value: &str, key: &str) -> Result<u32> {
+    let v: u32 = value
+        .parse()
+        .with_context(|| format!("Invalid integer for {key}"))?;
+    if v == 0 {
+        anyhow::bail!("{key} must be greater than 0");
+    }
+    Ok(v)
+}
+
+fn parse_usize(value: &str, key: &str) -> Result<usize> {
+    value
+        .parse()
+        .with_context(|| format!("Invalid integer for {key}"))
+}
+
+fn parse_nonzero_usize(value: &str, key: &str) -> Result<usize> {
+    let v: usize = value
+        .parse()
+        .with_context(|| format!("Invalid integer for {key}"))?;
+    if v == 0 {
+        anyhow::bail!("{key} must be greater than 0");
+    }
+    Ok(v)
+}
+
+fn parse_u64(value: &str, key: &str) -> Result<u64> {
+    value
+        .parse()
+        .with_context(|| format!("Invalid integer for {key}"))
+}
+
 impl Config {
     pub fn data_dir() -> Result<PathBuf> {
         if let Ok(dir) = std::env::var("BORG_DATA_DIR") {
@@ -1220,68 +1286,45 @@ impl Config {
         match key {
             "model" => {
                 self.llm.model = value.to_string();
-                Ok(format!("model = {value}"))
+                Ok(format!("{key} = {value}"))
             }
             "temperature" => {
-                let v: f32 = value
-                    .parse()
-                    .with_context(|| "Invalid float for temperature")?;
-                if !(0.0..=2.0).contains(&v) {
-                    anyhow::bail!("temperature must be between 0.0 and 2.0");
-                }
-                self.llm.temperature = v;
-                Ok(format!("temperature = {v}"))
+                self.llm.temperature = parse_f32_range(value, key, 0.0, 2.0)?;
+                Ok(format!("{key} = {}", self.llm.temperature))
             }
             "max_tokens" => {
-                let v: u32 = value
-                    .parse()
-                    .with_context(|| "Invalid integer for max_tokens")?;
-                if v == 0 {
-                    anyhow::bail!("max_tokens must be greater than 0");
-                }
-                self.llm.max_tokens = v;
-                Ok(format!("max_tokens = {v}"))
+                self.llm.max_tokens = parse_nonzero_u32(value, key)?;
+                Ok(format!("{key} = {}", self.llm.max_tokens))
             }
             "provider" => {
                 self.llm.provider = Some(value.to_string());
-                Ok(format!("provider = {value}"))
+                Ok(format!("{key} = {value}"))
             }
             "sandbox.mode" => {
                 match value {
                     "strict" | "permissive" => {}
-                    other => anyhow::bail!("Unknown sandbox mode '{other}'. Valid: strict, permissive"),
+                    other => {
+                        anyhow::bail!("Unknown sandbox mode '{other}'. Valid: strict, permissive")
+                    }
                 }
                 self.sandbox.mode = value.to_string();
-                Ok(format!("sandbox.mode = {value}"))
+                Ok(format!("{key} = {value}"))
             }
             "sandbox.enabled" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for sandbox.enabled")?;
-                self.sandbox.enabled = v;
-                Ok(format!("sandbox.enabled = {v}"))
+                self.sandbox.enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.sandbox.enabled))
             }
             "memory.max_context_tokens" => {
-                let v: usize = value.parse().with_context(|| "Invalid integer")?;
-                if v == 0 {
-                    anyhow::bail!("memory.max_context_tokens must be greater than 0");
-                }
-                self.memory.max_context_tokens = v;
-                Ok(format!("memory.max_context_tokens = {v}"))
+                self.memory.max_context_tokens = parse_nonzero_usize(value, key)?;
+                Ok(format!("{key} = {}", self.memory.max_context_tokens))
             }
             "memory.flush_before_compaction" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for flush_before_compaction")?;
-                self.memory.flush_before_compaction = v;
-                Ok(format!("memory.flush_before_compaction = {v}"))
+                self.memory.flush_before_compaction = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.memory.flush_before_compaction))
             }
             "memory.flush_min_messages" => {
-                let v: usize = value
-                    .parse()
-                    .with_context(|| "Invalid integer for flush_min_messages")?;
-                self.memory.flush_min_messages = v;
-                Ok(format!("memory.flush_min_messages = {v}"))
+                self.memory.flush_min_messages = parse_usize(value, key)?;
+                Ok(format!("{key} = {}", self.memory.flush_min_messages))
             }
             "memory.extra_paths" => {
                 let paths: Vec<String> = value
@@ -1290,148 +1333,88 @@ impl Config {
                     .filter(|s| !s.is_empty())
                     .collect();
                 self.memory.extra_paths = paths.clone();
-                Ok(format!("memory.extra_paths = {}", paths.join(", ")))
+                Ok(format!("{key} = {}", paths.join(", ")))
             }
             "memory.embeddings.mmr_enabled" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for mmr_enabled")?;
-                self.memory.embeddings.mmr_enabled = v;
-                Ok(format!("memory.embeddings.mmr_enabled = {v}"))
+                self.memory.embeddings.mmr_enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.memory.embeddings.mmr_enabled))
             }
             "memory.embeddings.mmr_lambda" => {
-                let v: f32 = value
-                    .parse()
-                    .with_context(|| "Invalid float for mmr_lambda")?;
-                if !(0.0..=1.0).contains(&v) {
-                    anyhow::bail!("mmr_lambda must be between 0.0 and 1.0");
-                }
-                self.memory.embeddings.mmr_lambda = v;
-                Ok(format!("memory.embeddings.mmr_lambda = {v}"))
+                self.memory.embeddings.mmr_lambda = parse_f32_range(value, key, 0.0, 1.0)?;
+                Ok(format!("{key} = {}", self.memory.embeddings.mmr_lambda))
             }
             "skills.enabled" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for skills.enabled")?;
-                self.skills.enabled = v;
-                Ok(format!("skills.enabled = {v}"))
+                self.skills.enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.skills.enabled))
             }
             "skills.max_context_tokens" => {
-                let v: usize = value
-                    .parse()
-                    .with_context(|| "Invalid integer for skills.max_context_tokens")?;
-                self.skills.max_context_tokens = v;
-                Ok(format!("skills.max_context_tokens = {v}"))
+                self.skills.max_context_tokens = parse_usize(value, key)?;
+                Ok(format!("{key} = {}", self.skills.max_context_tokens))
             }
             "conversation.max_iterations" => {
-                let v: u32 = value
-                    .parse()
-                    .with_context(|| "Invalid integer for max_iterations")?;
-                self.conversation.max_iterations = v;
-                Ok(format!("conversation.max_iterations = {v}"))
+                self.conversation.max_iterations = parse_u32(value, key)?;
+                Ok(format!("{key} = {}", self.conversation.max_iterations))
             }
             "conversation.show_thinking" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for show_thinking")?;
-                self.conversation.show_thinking = v;
-                Ok(format!("conversation.show_thinking = {v}"))
+                self.conversation.show_thinking = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.conversation.show_thinking))
             }
             "security.secret_detection" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for secret_detection")?;
-                self.security.secret_detection = v;
-                Ok(format!("security.secret_detection = {v}"))
+                self.security.secret_detection = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.security.secret_detection))
             }
             "security.hitl_dangerous_ops" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for hitl_dangerous_ops")?;
-                self.security.hitl_dangerous_ops = v;
-                Ok(format!("security.hitl_dangerous_ops = {v}"))
+                self.security.hitl_dangerous_ops = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.security.hitl_dangerous_ops))
             }
             "security.host_audit" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for host_audit")?;
-                self.security.host_audit = v;
-                Ok(format!("security.host_audit = {v}"))
+                self.security.host_audit = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.security.host_audit))
             }
             "budget.monthly_token_limit" => {
-                let v: u64 = value
-                    .parse()
-                    .with_context(|| "Invalid integer for monthly_token_limit")?;
-                self.budget.monthly_token_limit = v;
-                Ok(format!("budget.monthly_token_limit = {v}"))
+                self.budget.monthly_token_limit = parse_u64(value, key)?;
+                Ok(format!("{key} = {}", self.budget.monthly_token_limit))
             }
             "budget.warning_threshold" => {
-                let v: f64 = value
-                    .parse()
-                    .with_context(|| "Invalid float for warning_threshold")?;
-                if !(0.0..=1.0).contains(&v) {
-                    anyhow::bail!("warning_threshold must be between 0.0 and 1.0");
-                }
-                self.budget.warning_threshold = v;
-                Ok(format!("budget.warning_threshold = {v}"))
+                self.budget.warning_threshold = parse_f64_range(value, key, 0.0, 1.0)?;
+                Ok(format!("{key} = {}", self.budget.warning_threshold))
             }
             "browser.enabled" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for browser.enabled")?;
-                self.browser.enabled = v;
-                Ok(format!("browser.enabled = {v}"))
+                self.browser.enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.browser.enabled))
             }
             "browser.headless" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for browser.headless")?;
-                self.browser.headless = v;
-                Ok(format!("browser.headless = {v}"))
+                self.browser.headless = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.browser.headless))
             }
             "tts.enabled" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for tts.enabled")?;
-                self.tts.enabled = v;
-                Ok(format!("tts.enabled = {v}"))
+                self.tts.enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.tts.enabled))
             }
             "tts.auto_mode" => {
-                let v: bool = value
-                    .parse()
-                    .with_context(|| "Invalid bool for tts.auto_mode")?;
-                self.tts.auto_mode = v;
-                Ok(format!("tts.auto_mode = {v}"))
+                self.tts.auto_mode = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.tts.auto_mode))
             }
             "tts.default_voice" => {
                 self.tts.default_voice = value.to_string();
-                Ok(format!("tts.default_voice = {value}"))
+                Ok(format!("{key} = {value}"))
             }
             "tts.default_format" => {
                 let allowed = ["mp3", "opus", "aac", "flac", "wav"];
                 if !allowed.contains(&value) {
-                    anyhow::bail!(
-                        "Invalid format: {value}. Allowed: {}",
-                        allowed.join(", ")
-                    );
+                    anyhow::bail!("Invalid format: {value}. Allowed: {}", allowed.join(", "));
                 }
                 self.tts.default_format = value.to_string();
-                Ok(format!("tts.default_format = {value}"))
+                Ok(format!("{key} = {value}"))
             }
             "conversation.collaboration_mode" => {
                 let mode: CollaborationMode = value.parse()?;
                 self.conversation.collaboration_mode = mode;
-                Ok(format!("conversation.collaboration_mode = {mode}"))
+                Ok(format!("{key} = {mode}"))
             }
             _ => anyhow::bail!(
-                "Unknown setting: {key}\nAvailable: model, temperature, max_tokens, provider, \
-                 sandbox.mode, sandbox.enabled, memory.max_context_tokens, skills.enabled, \
-                 skills.max_context_tokens, conversation.max_iterations, conversation.show_thinking, \
-                 security.secret_detection, security.host_audit, \
-                 budget.monthly_token_limit, budget.warning_threshold, \
-                 browser.enabled, browser.headless, \
-                 tts.enabled, tts.auto_mode, tts.default_voice, tts.default_format, \
-                 conversation.collaboration_mode"
+                "Unknown setting: {key}\nAvailable: {}",
+                crate::settings::ALL_SETTING_KEYS.join(", ")
             ),
         }
     }

@@ -65,7 +65,7 @@ pub async fn index_pending_sessions(config: &Config, batch_size: usize) -> Resul
 }
 
 /// Maximum total transcript size in characters to prevent memory pressure.
-const MAX_TRANSCRIPT_CHARS: usize = 500_000;
+const MAX_TRANSCRIPT_CHARS: usize = crate::constants::MAX_SESSION_TRANSCRIPT_CHARS;
 
 /// Build a text transcript from message rows suitable for chunking and embedding.
 fn build_transcript(messages: &[crate::db::MessageRow]) -> String {

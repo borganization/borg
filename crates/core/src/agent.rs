@@ -184,6 +184,13 @@ fn partial_tag_overlap(text: &str) -> usize {
     0
 }
 
+/// Result of monthly token budget check.
+enum BudgetCheck {
+    Ok,
+    Warning(String),
+    Exceeded(String),
+}
+
 pub enum AgentEvent {
     TextDelta(String),
     ThinkingDelta(String),
@@ -874,14 +881,9 @@ impl Agent {
     }
 
     #[instrument(skip_all, fields(session_id = %self.session.meta.id, turn_count = self.turn_count))]
-    pub async fn run_agent_loop(
-        &mut self,
-        event_tx: mpsc::Sender<AgentEvent>,
-        cancel: CancellationToken,
-    ) -> Result<()> {
-        let max_iterations = self.config.conversation.max_iterations as usize;
-        let mut iteration: usize = 0;
-
+    /// One-time setup before entering the agent loop: ghost commit, project doc caching,
+    /// and background indexing of extra memory paths and past sessions.
+    async fn prepare_loop(&mut self) {
         // Create ghost commit for coding safety (lazy, one-time)
         if self.ghost_commit.is_none() {
             if let Some(ref root) = self.git_repo_root {
@@ -931,7 +933,6 @@ impl Agent {
             {
                 let config = self.config.clone();
                 tokio::spawn(async move {
-                    // Guard ensures the flag is reset even if the task panics
                     struct IndexGuard;
                     impl Drop for IndexGuard {
                         fn drop(&mut self) {
@@ -943,6 +944,48 @@ impl Agent {
                 });
             }
         }
+    }
+
+    /// Check monthly token budget. Returns an error message if exceeded, a warning if near limit, or None.
+    fn check_budget(&self) -> BudgetCheck {
+        let budget_limit = self.config.budget.monthly_token_limit;
+        if budget_limit == 0 {
+            return BudgetCheck::Ok;
+        }
+        let Ok(db) = Database::open() else {
+            warn!("Budget enforcement skipped: database unavailable");
+            return BudgetCheck::Ok;
+        };
+        let Ok(used) = db.monthly_token_total() else {
+            return BudgetCheck::Ok;
+        };
+        if used >= budget_limit {
+            return BudgetCheck::Exceeded(format!(
+                "Monthly token budget exceeded ({used}/{budget_limit}). \
+                 Increase budget.monthly_token_limit in /settings to continue."
+            ));
+        }
+        let threshold = self.config.budget.warning_threshold;
+        let ratio = used as f64 / budget_limit as f64;
+        if ratio >= 0.95 || ratio >= threshold {
+            let pct = (ratio * 100.0) as u64;
+            BudgetCheck::Warning(format!(
+                "Warning: {pct}% of monthly token budget used ({used}/{budget_limit})"
+            ))
+        } else {
+            BudgetCheck::Ok
+        }
+    }
+
+    pub async fn run_agent_loop(
+        &mut self,
+        event_tx: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        let max_iterations = self.config.conversation.max_iterations as usize;
+        let mut iteration: usize = 0;
+
+        self.prepare_loop().await;
 
         loop {
             // Hot-reload config between turns (in-flight keeps old config)
@@ -980,34 +1023,16 @@ impl Agent {
             }
 
             // Budget enforcement
-            let budget_limit = self.config.budget.monthly_token_limit;
-            if budget_limit > 0 {
-                if let Ok(db) = Database::open() {
-                    if let Ok(used) = db.monthly_token_total() {
-                        if used >= budget_limit {
-                            let _ = event_tx
-                                .send(AgentEvent::Error(format!(
-                                    "Monthly token budget exceeded ({used}/{budget_limit}). \
-                                     Increase budget.monthly_token_limit in /settings to continue."
-                                )))
-                                .await;
-                            let _ = event_tx.send(AgentEvent::TurnComplete).await;
-                            return Ok(());
-                        }
-                        let threshold = self.config.budget.warning_threshold;
-                        let ratio = used as f64 / budget_limit as f64;
-                        if ratio >= 0.95 || ratio >= threshold {
-                            let pct = (ratio * 100.0) as u64;
-                            let _ = event_tx
-                                .send(AgentEvent::Error(format!(
-                                    "Warning: {pct}% of monthly token budget used ({used}/{budget_limit})"
-                                )))
-                                .await;
-                        }
-                    }
-                } else {
-                    warn!("Budget enforcement skipped: database unavailable");
+            match self.check_budget() {
+                BudgetCheck::Exceeded(msg) => {
+                    let _ = event_tx.send(AgentEvent::Error(msg)).await;
+                    let _ = event_tx.send(AgentEvent::TurnComplete).await;
+                    return Ok(());
                 }
+                BudgetCheck::Warning(msg) => {
+                    let _ = event_tx.send(AgentEvent::Error(msg)).await;
+                }
+                BudgetCheck::Ok => {}
             }
 
             iteration += 1;

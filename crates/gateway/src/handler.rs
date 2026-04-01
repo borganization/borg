@@ -6,11 +6,9 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-/// Maximum response size to accumulate from the agent (256 KB).
-const MAX_RESPONSE_SIZE: usize = 256 * 1024;
-
 use borg_core::agent::{Agent, AgentEvent};
 use borg_core::config::Config;
+use borg_core::constants;
 use borg_core::db::{Database, NewDelivery};
 use borg_core::sanitize::{
     scan_for_injection, wrap_untrusted, wrap_with_injection_warning, ThreatLevel,
@@ -425,9 +423,9 @@ pub async fn invoke_agent_with_auto_reply(
     // Scan full text for injection BEFORE truncation so patterns spanning
     // the truncation boundary are still detected.
     // Cap scan input at 256 KB to prevent regex DoS on extremely large payloads.
-    const MAX_SCAN_BYTES: usize = 256 * 1024;
-    let scan_input = if cleaned_text.len() > MAX_SCAN_BYTES {
-        let mut end = MAX_SCAN_BYTES;
+    let scan_limit = constants::MAX_RESPONSE_SIZE;
+    let scan_input = if cleaned_text.len() > scan_limit {
+        let mut end = scan_limit;
         while end > 0 && !cleaned_text.is_char_boundary(end) {
             end -= 1;
         }
@@ -438,11 +436,10 @@ pub async fn invoke_agent_with_auto_reply(
     let injection_level = scan_for_injection(scan_input);
 
     // Truncate inbound text to prevent excessive LLM token consumption
-    const MAX_INBOUND_TEXT_BYTES: usize = 32 * 1024; // 32 KB
-    let text = if cleaned_text.len() > MAX_INBOUND_TEXT_BYTES {
+    let text = if cleaned_text.len() > constants::MAX_INBOUND_TEXT_BYTES {
         let original_len = cleaned_text.len();
         let mut truncated = cleaned_text;
-        truncated.truncate(MAX_INBOUND_TEXT_BYTES);
+        truncated.truncate(constants::MAX_INBOUND_TEXT_BYTES);
         // Ensure we don't split a multi-byte char
         while !truncated.is_char_boundary(truncated.len()) {
             truncated.pop();
@@ -516,8 +513,9 @@ pub async fn invoke_agent_with_auto_reply(
             match event {
                 AgentEvent::TextDelta(delta) => {
                     if !response_capped {
-                        if response_text.len() + delta.len() > MAX_RESPONSE_SIZE {
-                            let remaining = MAX_RESPONSE_SIZE.saturating_sub(response_text.len());
+                        if response_text.len() + delta.len() > constants::MAX_RESPONSE_SIZE {
+                            let remaining =
+                                constants::MAX_RESPONSE_SIZE.saturating_sub(response_text.len());
                             // Find a safe UTF-8 boundary to avoid panicking on multi-byte chars
                             let safe_end = (0..=remaining)
                                 .rev()
@@ -530,7 +528,7 @@ pub async fn invoke_agent_with_auto_reply(
                             warn!(
                                 "Agent response for channel '{}' exceeded {}KB cap, truncating",
                                 channel_name,
-                                MAX_RESPONSE_SIZE / 1024
+                                constants::MAX_RESPONSE_SIZE / 1024
                             );
                             agent_cancel.cancel();
                         } else {
