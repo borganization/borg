@@ -48,4 +48,55 @@ mod tests {
         assert!(count > 50);
         assert!(count < 200);
     }
+
+    #[test]
+    fn unicode_text_estimate() {
+        let text = "你好世界 🌍 こんにちは";
+        let count = estimate_tokens(text);
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn whitespace_only_text() {
+        let text = "   \n\t\n   ";
+        let count = estimate_tokens(text);
+        assert!(count > 0); // Whitespace still has tokens
+    }
+
+    #[test]
+    fn code_text_estimate() {
+        let text = "fn main() {\n    println!(\"Hello, world!\");\n}";
+        let count = estimate_tokens(text);
+        assert!(count > 5);
+        assert!(count < 30);
+    }
+
+    #[test]
+    fn single_character() {
+        let count = estimate_tokens("a");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn repeated_tokens() {
+        let text = "hello ".repeat(100);
+        let count = estimate_tokens(&text);
+        // Should be roughly 100 tokens (one per "hello ")
+        assert!(count >= 80 && count <= 120);
+    }
+
+    #[test]
+    fn very_long_text() {
+        let text = "word ".repeat(10000);
+        let count = estimate_tokens(&text);
+        assert!(count > 5000);
+        assert!(count < 15000);
+    }
+
+    #[test]
+    fn special_characters() {
+        let text = "!@#$%^&*()_+-=[]{}|;':\",./<>?";
+        let count = estimate_tokens(text);
+        assert!(count > 0);
+    }
 }

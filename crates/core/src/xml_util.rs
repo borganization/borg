@@ -106,4 +106,52 @@ mod tests {
         let output = sanitize_xml_boundaries(input);
         assert_eq!(output, input);
     }
+
+    #[test]
+    fn test_sanitize_xml_boundaries_with_spaces_around_tag() {
+        let input = "</  tool_output  >attack";
+        let output = sanitize_xml_boundaries(input);
+        // Should detect even with spaces
+        assert!(!output.contains("</  tool_output  >"));
+    }
+
+    #[test]
+    fn test_sanitize_xml_boundaries_multiple_occurrences() {
+        let input = "a</tool_output>b</user_memory>c</system_instructions>d";
+        let output = sanitize_xml_boundaries(input);
+        assert!(!output.contains("</tool_output>"));
+        assert!(!output.contains("</user_memory>"));
+        assert!(!output.contains("</system_instructions>"));
+        assert!(output.contains("a"));
+        assert!(output.contains("d"));
+    }
+
+    #[test]
+    fn test_sanitize_xml_boundaries_empty_input() {
+        let output = sanitize_xml_boundaries("");
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_sanitize_xml_boundaries_no_match() {
+        let input = "this is regular text with <div> tags </div>";
+        let output = sanitize_xml_boundaries(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn escape_xml_attr_unicode() {
+        assert_eq!(escape_xml_attr("hello 🌍"), "hello 🌍");
+    }
+
+    #[test]
+    fn escape_xml_attr_all_special() {
+        assert_eq!(escape_xml_attr("&<>\"'"), "&amp;&lt;&gt;&quot;&apos;");
+    }
+
+    #[test]
+    fn escape_xml_attr_multiline() {
+        let result = escape_xml_attr("line1\nline2\ttab");
+        assert_eq!(result, "line1\nline2\ttab");
+    }
 }

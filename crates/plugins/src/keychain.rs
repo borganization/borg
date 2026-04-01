@@ -88,3 +88,73 @@ pub fn check(service: &str, account: &str) -> bool {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn available_returns_bool() {
+        // On macOS CI, `security` binary should exist; on Linux, `secret-tool` may not.
+        // This test just ensures the function doesn't panic.
+        let _ = available();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn available_true_on_macos() {
+        // macOS always has the `security` binary
+        assert!(available());
+    }
+
+    #[test]
+    fn check_nonexistent_credential_returns_false() {
+        // A random service/account pair should not exist
+        let result = check("borg-test-nonexistent-svc-12345", "nonexistent-account-xyz");
+        assert!(!result);
+    }
+
+    #[test]
+    fn remove_nonexistent_does_not_panic() {
+        // Removing a credential that doesn't exist should silently succeed
+        remove("borg-test-nonexistent-svc-12345", "nonexistent-account-xyz");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn store_and_check_round_trip() {
+        let service = "borg-keychain-test";
+        let account = "test-round-trip";
+        let value = "test-secret-value";
+
+        // Clean up first in case of prior failed run
+        remove(service, account);
+
+        // Store
+        store(service, account, value).expect("store should succeed on macOS");
+
+        // Check exists
+        assert!(
+            check(service, account),
+            "credential should exist after store"
+        );
+
+        // Clean up
+        remove(service, account);
+        assert!(
+            !check(service, account),
+            "credential should not exist after remove"
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn store_fails_on_unsupported_platform() {
+        let result = store("svc", "acct", "val");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No keychain available"));
+    }
+}
