@@ -264,11 +264,7 @@ fn handle_skills(config: &Config) -> String {
         Ok(skills) => {
             let mut lines = vec![format!("Skills ({}):", skills.len())];
             for skill in &skills {
-                let status = if skill.available { "✓" } else { "✗" };
-                lines.push(format!(
-                    "  {status} {}  — {}",
-                    skill.manifest.name, skill.manifest.description
-                ));
+                lines.push(format!("  {}", skill.summary_line()));
             }
             lines.join("\n")
         }

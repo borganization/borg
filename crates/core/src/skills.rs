@@ -99,22 +99,40 @@ pub struct Skill {
 }
 
 impl Skill {
-    pub fn format_for_prompt(&self) -> String {
-        self.format_at_level(SkillLoadLevel::Full)
+    pub fn source_label(&self) -> &'static str {
+        match self.source {
+            SkillSource::BuiltIn => "built-in",
+            SkillSource::User => "user",
+        }
     }
 
-    pub fn format_at_level(&self, level: SkillLoadLevel) -> String {
-        let status = if self.disabled {
+    pub fn status_label(&self) -> &'static str {
+        if self.disabled {
             "disabled"
         } else if self.available {
             "available"
         } else {
             "unavailable (missing requirements)"
-        };
-        let source = match self.source {
-            SkillSource::BuiltIn => "built-in",
-            SkillSource::User => "user",
-        };
+        }
+    }
+
+    pub fn status_icon(&self) -> &'static str {
+        if self.disabled {
+            "—"
+        } else if self.available {
+            "✓"
+        } else {
+            "✗"
+        }
+    }
+
+    pub fn format_for_prompt(&self) -> String {
+        self.format_at_level(SkillLoadLevel::Full)
+    }
+
+    pub fn format_at_level(&self, level: SkillLoadLevel) -> String {
+        let source = self.source_label();
+        let status = self.status_label();
         match level {
             SkillLoadLevel::Metadata => {
                 format!(
@@ -143,20 +161,12 @@ impl Skill {
     }
 
     pub fn summary_line(&self) -> String {
-        let status = if self.disabled {
-            "—"
-        } else if self.available {
-            "✓"
-        } else {
-            "✗"
-        };
-        let source = match self.source {
-            SkillSource::BuiltIn => "built-in",
-            SkillSource::User => "user",
-        };
         let mut line = format!(
             "[{}] {} ({}) — {}",
-            status, self.manifest.name, source, self.manifest.description
+            self.status_icon(),
+            self.manifest.name,
+            self.source_label(),
+            self.manifest.description
         );
         if !self.available && !self.disabled {
             if let Some(hint) = self.install_hint() {
@@ -453,7 +463,8 @@ pub fn load_skills_context(
     }
 
     // Phase 2: With remaining budget, upgrade available skills to full body
-    let mut full_parts = Vec::new();
+    let mut full_overrides: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::new();
 
     for (i, skill) in sorted_skills.iter().enumerate() {
         if !skill.available {
@@ -472,23 +483,20 @@ pub fn load_skills_context(
             continue;
         }
 
-        full_parts.push((i, full));
         estimated_tokens += additional;
         debug!(
             "Included full skill '{}' ({full_tokens} estimated tokens)",
             skill.manifest.name
         );
+        full_overrides.insert(i, full);
     }
 
     // Build final output: full body for upgraded skills, metadata for the rest
-    let mut parts = Vec::new();
-    for (i, meta) in metadata_parts.iter().enumerate() {
-        if let Some((_, full)) = full_parts.iter().find(|(idx, _)| *idx == i) {
-            parts.push(full.clone());
-        } else {
-            parts.push(meta.clone());
-        }
-    }
+    let parts: Vec<String> = metadata_parts
+        .into_iter()
+        .enumerate()
+        .map(|(i, meta)| full_overrides.remove(&i).unwrap_or(meta))
+        .collect();
 
     if parts.is_empty() {
         Ok(String::new())
@@ -582,21 +590,10 @@ fn format_skill_info(
     resolved_creds: &std::collections::HashMap<String, String>,
 ) -> String {
     let mut out = String::new();
-    let source = match skill.source {
-        SkillSource::BuiltIn => "built-in",
-        SkillSource::User => "user",
-    };
-    let status = if skill.disabled {
-        "disabled"
-    } else if skill.available {
-        "available"
-    } else {
-        "unavailable"
-    };
     out.push_str(&format!("Name:        {}\n", skill.manifest.name));
     out.push_str(&format!("Description: {}\n", skill.manifest.description));
-    out.push_str(&format!("Source:      {source}\n"));
-    out.push_str(&format!("Status:      {status}\n"));
+    out.push_str(&format!("Source:      {}\n", skill.source_label()));
+    out.push_str(&format!("Status:      {}\n", skill.status_label()));
 
     if !skill.manifest.os.is_empty() {
         out.push_str(&format!("OS:          {}\n", skill.manifest.os.join(", ")));
@@ -1578,5 +1575,101 @@ Use docker commands.
         assert!(info.contains("Source:      built-in"));
         assert!(info.contains("Status:      available"));
         assert!(info.contains("# Title"));
+    }
+
+    #[test]
+    fn test_user_skill_with_references_and_scripts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        // Write SKILL.md
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: \"Test skill.\"\n---\n\n# My Skill\n\nBody.",
+        )
+        .unwrap();
+
+        // Create references
+        let refs_dir = skill_dir.join("references");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+        std::fs::write(refs_dir.join("guide.md"), "# Guide\nSome reference.").unwrap();
+        std::fs::write(refs_dir.join("notes.txt"), "not markdown").unwrap();
+
+        // Create scripts
+        let scripts_dir = skill_dir.join("scripts");
+        std::fs::create_dir_all(&scripts_dir).unwrap();
+        std::fs::write(scripts_dir.join("helper.sh"), "#!/bin/bash\necho hi").unwrap();
+
+        // Parse and load like load_all_skills does for user skills
+        let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+        let (manifest, body) = parse_skill_md(&content).unwrap();
+
+        // Load references (only .md files)
+        let mut references = Vec::new();
+        for entry in std::fs::read_dir(&refs_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "md") {
+                let ref_content = std::fs::read_to_string(&path).unwrap();
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                references.push((name, ref_content));
+            }
+        }
+
+        // Load scripts
+        let mut scripts = Vec::new();
+        for entry in std::fs::read_dir(&scripts_dir).unwrap().flatten() {
+            scripts.push(entry.path());
+        }
+
+        let skill = Skill {
+            manifest,
+            body,
+            source: SkillSource::User,
+            available: true,
+            disabled: false,
+            references,
+            scripts,
+        };
+
+        assert_eq!(skill.manifest.name, "my-skill");
+        assert_eq!(skill.references.len(), 1, "should only load .md references");
+        assert_eq!(skill.references[0].0, "guide.md");
+        assert!(skill.references[0].1.contains("# Guide"));
+        assert_eq!(skill.scripts.len(), 1);
+        assert!(skill.scripts[0].ends_with("helper.sh"));
+    }
+
+    #[test]
+    fn test_status_and_source_helpers() {
+        let make = |source, available, disabled| Skill {
+            manifest: SkillManifest {
+                name: "t".into(),
+                description: "t".into(),
+                requires: SkillRequires::default(),
+                os: vec![],
+                install: std::collections::HashMap::new(),
+            },
+            body: String::new(),
+            source,
+            available,
+            disabled,
+            references: vec![],
+            scripts: vec![],
+        };
+
+        let s = make(SkillSource::BuiltIn, true, false);
+        assert_eq!(s.source_label(), "built-in");
+        assert_eq!(s.status_label(), "available");
+        assert_eq!(s.status_icon(), "✓");
+
+        let s = make(SkillSource::User, false, false);
+        assert_eq!(s.source_label(), "user");
+        assert_eq!(s.status_label(), "unavailable (missing requirements)");
+        assert_eq!(s.status_icon(), "✗");
+
+        let s = make(SkillSource::BuiltIn, false, true);
+        assert_eq!(s.status_label(), "disabled");
+        assert_eq!(s.status_icon(), "—");
     }
 }
