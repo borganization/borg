@@ -34,6 +34,11 @@ pub enum AppState {
     AwaitingApproval {
         respond: Option<oneshot::Sender<bool>>,
     },
+    /// Agent has asked a question mid-turn via `request_user_input`; waiting for user to type.
+    AwaitingInput {
+        prompt: String,
+        respond: Option<oneshot::Sender<String>>,
+    },
     PlanReview,
 }
 
@@ -130,6 +135,12 @@ pub struct App<'a> {
     pub throbber_state: ThrobberState,
     transcript_area: Rect,
     scrollbar_dragging: bool,
+    /// Channel for sending steer messages to the agent mid-turn.
+    pub steer_tx: Option<mpsc::UnboundedSender<String>>,
+    /// Steers queued in UI, cleared when agent confirms receipt.
+    pub pending_steers: VecDeque<String>,
+    /// Current plan steps displayed inline (updated by PlanUpdated events).
+    pub plan_steps: Vec<borg_core::types::PlanStep>,
 }
 
 impl<'a> App<'a> {
@@ -166,6 +177,9 @@ impl<'a> App<'a> {
             throbber_state: ThrobberState::default(),
             transcript_area: Rect::default(),
             scrollbar_dragging: false,
+            steer_tx: None,
+            pending_steers: VecDeque::new(),
+            plan_steps: Vec::new(),
         }
     }
 
@@ -272,6 +286,50 @@ impl<'a> App<'a> {
                 }
                 _ => {}
             },
+            AppState::AwaitingInput { respond, .. } => match key.code {
+                KeyCode::Enter => {
+                    let text = self.composer.text().trim().to_string();
+                    if text.is_empty() {
+                        // Don't send empty responses — user must type something or press Esc
+                        return Ok(AppAction::Continue);
+                    }
+                    if let Some(tx) = respond.take() {
+                        let _ = tx.send(text);
+                    }
+                    self.composer.set_text("");
+                    self.state = AppState::Streaming {
+                        start: Instant::now(),
+                    };
+                }
+                KeyCode::Esc => {
+                    if let Some(tx) = respond.take() {
+                        let _ = tx.send("[user declined to answer]".to_string());
+                    }
+                    self.composer.set_text("");
+                    self.state = AppState::Streaming {
+                        start: Instant::now(),
+                    };
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+C: decline and cancel turn
+                    if let Some(tx) = respond.take() {
+                        let _ = tx.send("[user declined to answer]".to_string());
+                    }
+                    if let Some(token) = self.cancel_token.take() {
+                        token.cancel();
+                    }
+                    self.event_rx = None;
+                    self.steer_tx = None;
+                    self.composer.set_text("");
+                    self.cells.push(HistoryCell::System {
+                        text: "[interrupted]".to_string(),
+                    });
+                    self.state = AppState::Idle;
+                }
+                _ => {
+                    self.composer.handle_key(key);
+                }
+            },
             AppState::PlanReview => {
                 match key.code {
                     KeyCode::BackTab => {
@@ -323,6 +381,8 @@ impl<'a> App<'a> {
                         token.cancel();
                     }
                     self.event_rx = None;
+                    self.steer_tx = None;
+                    self.pending_steers.clear();
                     for cell in self.cells.iter_mut().rev() {
                         if let HistoryCell::Assistant { streaming, .. } = cell {
                             *streaming = false;
@@ -392,17 +452,30 @@ impl<'a> App<'a> {
                         }
                     }
                 } else if key.code == KeyCode::Enter {
-                    // Queue current composer text to auto-submit after turn completes
+                    // Send as a steer (mid-turn injection at tool boundary)
                     let text = self.composer.text().trim().to_string();
                     if !text.is_empty() {
-                        let images = self.composer.take_image_attachments();
-                        // Show the queued message in the transcript immediately
-                        self.cells.push(HistoryCell::User { text: text.clone() });
-                        self.cells.push(HistoryCell::System {
-                            text: format!("[queued — {} in queue]", self.queued_messages.len() + 1),
-                        });
-                        self.queued_messages
-                            .push_back(QueuedMessage { text, images });
+                        if let Some(ref steer_tx) = self.steer_tx {
+                            let _ = steer_tx.send(text.clone());
+                            self.cells.push(HistoryCell::User { text: text.clone() });
+                            self.cells.push(HistoryCell::System {
+                                text: "[steer queued — will be sent at next tool boundary]"
+                                    .to_string(),
+                            });
+                            self.pending_steers.push_back(text);
+                        } else {
+                            // Fallback: queue normally if no steer channel
+                            let images = self.composer.take_image_attachments();
+                            self.cells.push(HistoryCell::User { text: text.clone() });
+                            self.cells.push(HistoryCell::System {
+                                text: format!(
+                                    "[queued — {} in queue]",
+                                    self.queued_messages.len() + 1
+                                ),
+                            });
+                            self.queued_messages
+                                .push_back(QueuedMessage { text, images });
+                        }
                         self.composer.set_text("");
                         self.auto_scroll = true;
                     }
@@ -1301,6 +1374,9 @@ impl<'a> App<'a> {
                 self.session_completion_tokens += usage.completion_tokens;
             }
             AgentEvent::TurnComplete => {
+                // Clean up steer channel on turn completion
+                self.steer_tx = None;
+                self.pending_steers.clear();
                 // Clean up any leftover empty thinking placeholders
                 self.cells
                     .retain(|c| !matches!(c, HistoryCell::Thinking { text } if text.is_empty()));
@@ -1340,6 +1416,41 @@ impl<'a> App<'a> {
                 self.last_turn_errored = true;
                 self.plan_mode = false;
                 self.state = AppState::Idle;
+            }
+            AgentEvent::SteerReceived { text } => {
+                // Remove matching steer from pending
+                if let Some(pos) = self.pending_steers.iter().position(|s| *s == text) {
+                    self.pending_steers.remove(pos);
+                }
+            }
+            AgentEvent::PlanUpdated { steps } => {
+                self.plan_steps = steps.clone();
+                // Update existing Plan cell in-place, or insert a new one
+                let existing = self
+                    .cells
+                    .iter()
+                    .rposition(|c| matches!(c, HistoryCell::Plan { .. }));
+                if let Some(idx) = existing {
+                    self.cells[idx] = HistoryCell::Plan { steps };
+                } else {
+                    self.cells.push(HistoryCell::Plan { steps });
+                }
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
+            AgentEvent::UserInputRequest { prompt, respond } => {
+                // Show prompt and transition to awaiting input
+                self.cells.push(HistoryCell::System {
+                    text: format!("[agent asks: {prompt}]"),
+                });
+                self.state = AppState::AwaitingInput {
+                    prompt,
+                    respond: Some(respond),
+                };
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
             }
             AgentEvent::SubAgentUpdate { .. } => {
                 // Sub-agent updates are informational; no TUI action needed yet.
@@ -1520,6 +1631,13 @@ impl<'a> App<'a> {
                 format!(" {} Approval needed — press y or n", theme::BULLET),
                 theme::error_style(),
             )]),
+            AppState::AwaitingInput { .. } => Line::from(vec![Span::styled(
+                format!(
+                    " {} Agent needs your input — type and press enter",
+                    theme::BULLET
+                ),
+                theme::tool_style(),
+            )]),
             AppState::PlanReview => Line::from(vec![Span::styled(
                 format!(" {} Plan ready — choose an action", theme::BULLET),
                 theme::tool_style(),
@@ -1594,6 +1712,9 @@ impl<'a> App<'a> {
                 }
             }
             AppState::AwaitingApproval { .. } => "y to approve  •  n to deny".to_string(),
+            AppState::AwaitingInput { prompt, .. } => {
+                format!("type your answer  •  enter to send  •  esc to skip  [{prompt}]")
+            }
             AppState::PlanReview => {
                 "shift+tab: cycle  •  1-3: jump  •  enter: confirm  •  esc: dismiss".to_string()
             }

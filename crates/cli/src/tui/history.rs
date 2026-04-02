@@ -1,3 +1,4 @@
+use borg_core::types::{PlanStep, PlanStepStatus};
 use ratatui::text::{Line, Span};
 use throbber_widgets_tui::ThrobberState;
 
@@ -54,6 +55,10 @@ pub enum HistoryCell {
         #[allow(dead_code)]
         name: String,
         lines: Vec<(String, bool)>,
+    },
+    /// Structured plan with step tracking.
+    Plan {
+        steps: Vec<PlanStep>,
     },
     Separator,
 }
@@ -367,6 +372,30 @@ impl HistoryCell {
                 }
                 rendered
             }
+            HistoryCell::Plan { steps } => {
+                let mut lines = vec![Line::from(Span::styled(
+                    "Plan:".to_string(),
+                    theme::dim().add_modifier(ratatui::style::Modifier::BOLD),
+                ))];
+                for step in steps {
+                    let (icon, style) = match step.status {
+                        PlanStepStatus::Completed => {
+                            (theme::CHECK.to_string(), theme::check_style())
+                        }
+                        PlanStepStatus::InProgress => (
+                            "~".to_string(),
+                            ratatui::style::Style::default().fg(ratatui::style::Color::Yellow),
+                        ),
+                        PlanStepStatus::Pending => (" ".to_string(), theme::dim()),
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  [{icon}] "), style),
+                        Span::styled(step.title.clone(), style),
+                    ]));
+                }
+                lines.push(Line::default());
+                lines
+            }
             HistoryCell::Separator => {
                 let rule_width = ((width as usize) * 2 / 3).min(80);
                 vec![
@@ -626,6 +655,55 @@ mod tests {
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("[heartbeat]"));
         assert!(text.contains("check-in"));
+    }
+
+    #[test]
+    fn render_plan_cell_with_steps() {
+        let cell = HistoryCell::Plan {
+            steps: vec![
+                PlanStep {
+                    title: "Read files".into(),
+                    status: PlanStepStatus::Completed,
+                },
+                PlanStep {
+                    title: "Write code".into(),
+                    status: PlanStepStatus::InProgress,
+                },
+                PlanStep {
+                    title: "Run tests".into(),
+                    status: PlanStepStatus::Pending,
+                },
+            ],
+        };
+        let lines = cell.render(80, None);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("Plan:"));
+        assert!(all_text.contains("Read files"));
+        assert!(all_text.contains("Write code"));
+        assert!(all_text.contains("Run tests"));
+    }
+
+    #[test]
+    fn render_plan_cell_empty() {
+        let cell = HistoryCell::Plan { steps: vec![] };
+        let lines = cell.render(80, None);
+        // Should have the "Plan:" header + empty line
+        assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn plan_cell_variant_exists() {
+        let cell = HistoryCell::Plan {
+            steps: vec![PlanStep {
+                title: "A".into(),
+                status: PlanStepStatus::Completed,
+            }],
+        };
+        assert!(matches!(cell, HistoryCell::Plan { .. }));
     }
 
     #[test]

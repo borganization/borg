@@ -345,6 +345,22 @@ impl Message {
     }
 }
 
+/// A step in a structured plan tracked by the `update_plan` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlanStep {
+    pub title: String,
+    pub status: PlanStepStatus,
+}
+
+/// Status of a plan step.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
 /// Output from a tool execution: either plain text or multimodal (text + images).
 #[derive(Debug, Clone)]
 pub enum ToolOutput {
@@ -650,5 +666,49 @@ mod tests {
             Some(MessageContent::Parts(p)) => assert_eq!(p.len(), 2),
             _ => panic!("expected Parts"),
         }
+    }
+
+    // -- PlanStep / PlanStepStatus --
+
+    #[test]
+    fn plan_step_status_serializes_snake_case() {
+        let step = PlanStep {
+            title: "Do thing".into(),
+            status: PlanStepStatus::InProgress,
+        };
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(json.contains("\"in_progress\""));
+    }
+
+    #[test]
+    fn plan_step_deserializes_from_json() {
+        let json = r#"{"title":"Test","status":"pending"}"#;
+        let step: PlanStep = serde_json::from_str(json).unwrap();
+        assert_eq!(step.status, PlanStepStatus::Pending);
+        assert_eq!(step.title, "Test");
+    }
+
+    #[test]
+    fn plan_step_status_all_variants_roundtrip() {
+        for status in [
+            PlanStepStatus::Pending,
+            PlanStepStatus::InProgress,
+            PlanStepStatus::Completed,
+        ] {
+            let step = PlanStep {
+                title: "x".into(),
+                status: status.clone(),
+            };
+            let json = serde_json::to_string(&step).unwrap();
+            let back: PlanStep = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.status, step.status);
+        }
+    }
+
+    #[test]
+    fn plan_step_invalid_status_fails() {
+        let json = r#"{"title":"X","status":"unknown"}"#;
+        let result = serde_json::from_str::<PlanStep>(json);
+        assert!(result.is_err());
     }
 }
