@@ -362,7 +362,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 21;
+    const CURRENT_VERSION: u32 = 22;
 
     /// Check if a column exists on a table via `PRAGMA table_info`.
     /// Safer than catching ALTER TABLE errors by string matching.
@@ -424,6 +424,7 @@ impl Database {
             Database::migrate_v19,
             Database::migrate_v20,
             Database::migrate_v21,
+            Database::migrate_v22,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -1066,6 +1067,148 @@ impl Database {
             ",
         )?;
         Ok(())
+    }
+
+    /// V22: Vitals system — event-sourced agent health tracking.
+    /// State is derived by replaying verified events from baseline.
+    /// No mutable state table — the event ledger is the single source of truth.
+    fn migrate_v22(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS vitals_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                source TEXT NOT NULL,
+                stability_delta INTEGER NOT NULL DEFAULT 0,
+                focus_delta INTEGER NOT NULL DEFAULT 0,
+                sync_delta INTEGER NOT NULL DEFAULT 0,
+                growth_delta INTEGER NOT NULL DEFAULT 0,
+                charge_delta INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT,
+                created_at INTEGER NOT NULL,
+                hmac TEXT NOT NULL,
+                prev_hmac TEXT NOT NULL DEFAULT '0'
+            );
+            CREATE INDEX IF NOT EXISTS idx_vitals_events_created
+                ON vitals_events(created_at);
+            ",
+        )?;
+        Ok(())
+    }
+
+    // ── Vitals CRUD (event-sourced) ──
+
+    /// Compute vitals state by replaying all verified events from baseline.
+    /// Events with broken HMAC chains are skipped. Rate limiting caps impact
+    /// per category per hour to prevent gaming.
+    pub fn get_vitals_state(&self) -> Result<crate::vitals::VitalsState> {
+        let events = self.load_all_vitals_events()?;
+        Ok(crate::vitals::replay_events(&events))
+    }
+
+    /// Load all vitals events ordered chronologically (for replay).
+    fn load_all_vitals_events(&self) -> Result<Vec<crate::vitals::VitalsEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, category, source, stability_delta, focus_delta, sync_delta,
+                    growth_delta, charge_delta, metadata_json, created_at, hmac, prev_hmac
+             FROM vitals_events ORDER BY id ASC",
+        )?;
+
+        let events = stmt
+            .query_map([], |row| {
+                Ok(crate::vitals::VitalsEvent {
+                    id: row.get(0)?,
+                    category: row.get(1)?,
+                    source: row.get(2)?,
+                    stability_delta: row.get(3)?,
+                    focus_delta: row.get(4)?,
+                    sync_delta: row.get(5)?,
+                    growth_delta: row.get(6)?,
+                    charge_delta: row.get(7)?,
+                    metadata_json: row.get(8)?,
+                    created_at: row.get(9)?,
+                    hmac: row.get(10)?,
+                    prev_hmac: row.get(11)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(events)
+    }
+
+    /// Append a vitals event with HMAC chain integrity.
+    pub fn record_vitals_event(
+        &self,
+        category: &str,
+        source: &str,
+        deltas: &crate::vitals::StatDeltas,
+        metadata: Option<&str>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+
+        // Get the HMAC of the last event for chaining
+        let prev_hmac: String = self
+            .conn
+            .query_row(
+                "SELECT hmac FROM vitals_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "0".to_string());
+
+        let hmac = crate::vitals::compute_event_hmac(&prev_hmac, category, source, deltas, now);
+
+        self.conn.execute(
+            "INSERT INTO vitals_events (category, source, stability_delta, focus_delta,
+                sync_delta, growth_delta, charge_delta, metadata_json, created_at,
+                hmac, prev_hmac)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                category,
+                source,
+                deltas.stability as i32,
+                deltas.focus as i32,
+                deltas.sync as i32,
+                deltas.growth as i32,
+                deltas.charge as i32,
+                metadata,
+                now,
+                hmac,
+                prev_hmac,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get vitals events since a given timestamp (for display, not replay).
+    pub fn vitals_events_since(&self, since: i64) -> Result<Vec<crate::vitals::VitalsEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, category, source, stability_delta, focus_delta, sync_delta,
+                    growth_delta, charge_delta, metadata_json, created_at, hmac, prev_hmac
+             FROM vitals_events WHERE created_at >= ?1 ORDER BY created_at DESC",
+        )?;
+
+        let events = stmt
+            .query_map(params![since], |row| {
+                Ok(crate::vitals::VitalsEvent {
+                    id: row.get(0)?,
+                    category: row.get(1)?,
+                    source: row.get(2)?,
+                    stability_delta: row.get(3)?,
+                    focus_delta: row.get(4)?,
+                    sync_delta: row.get(5)?,
+                    growth_delta: row.get(6)?,
+                    charge_delta: row.get(7)?,
+                    metadata_json: row.get(8)?,
+                    created_at: row.get(9)?,
+                    hmac: row.get(10)?,
+                    prev_hmac: row.get(11)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(events)
     }
 
     // ── Embedding Cache CRUD ──
@@ -5506,5 +5649,79 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
             .expect("read busy_timeout pragma");
         assert_eq!(timeout, 5000);
+    }
+
+    // ── Vitals DB tests (event-sourced) ──
+
+    #[test]
+    fn vitals_state_baseline_no_events() {
+        let db = test_db();
+        let state = db.get_vitals_state().unwrap();
+        assert_eq!(state.stability, 80);
+        assert_eq!(state.focus, 60);
+        assert_eq!(state.sync, 55);
+        assert_eq!(state.growth, 70);
+        assert_eq!(state.charge, 65);
+    }
+
+    #[test]
+    fn record_and_replay_vitals_event() {
+        let db = test_db();
+        let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Creation);
+        db.record_vitals_event("creation", "create_tool", &deltas, None)
+            .unwrap();
+        let state = db.get_vitals_state().unwrap();
+        assert_eq!(state.stability, 82); // 80 + 2
+        assert_eq!(state.focus, 61); // 60 + 1
+        assert_eq!(state.sync, 56); // 55 + 1
+        assert_eq!(state.growth, 73); // 70 + 3
+        assert_eq!(state.charge, 68); // 65 + 3
+    }
+
+    #[test]
+    fn vitals_events_since_returns_events() {
+        let db = test_db();
+        let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Interaction);
+        db.record_vitals_event("interaction", "session_start", &deltas, None)
+            .unwrap();
+        db.record_vitals_event("interaction", "user_message", &deltas, None)
+            .unwrap();
+        let events = db.vitals_events_since(0).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].category, "interaction");
+        assert_eq!(events[0].source, "user_message"); // DESC order
+        assert_eq!(events[1].source, "session_start");
+    }
+
+    #[test]
+    fn vitals_event_ledger_appends() {
+        let db = test_db();
+        let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Success);
+        for _ in 0..5 {
+            db.record_vitals_event("success", "run_shell", &deltas, None)
+                .unwrap();
+        }
+        let events = db.vitals_events_since(0).unwrap();
+        assert_eq!(events.len(), 5);
+        // State replayed from events: stability 80 + 5*1 = 85
+        let state = db.get_vitals_state().unwrap();
+        assert_eq!(state.stability, 85);
+    }
+
+    #[test]
+    fn vitals_hmac_chain_integrity() {
+        let db = test_db();
+        let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Interaction);
+        db.record_vitals_event("interaction", "a", &deltas, None)
+            .unwrap();
+        db.record_vitals_event("interaction", "b", &deltas, None)
+            .unwrap();
+        // Events should have valid HMAC chain
+        let events = db.vitals_events_since(0).unwrap();
+        assert!(!events[0].hmac.is_empty());
+        assert!(!events[1].hmac.is_empty());
+        // State should be valid (both events applied)
+        let state = db.get_vitals_state().unwrap();
+        assert_eq!(state.focus, 62); // 60 + 1 + 1
     }
 }

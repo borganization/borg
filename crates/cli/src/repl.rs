@@ -23,6 +23,11 @@ pub async fn one_shot(
     let metrics = BorgMetrics::from_config(&config);
     let mut agent = Agent::new(config, metrics)?;
 
+    // Register vitals hook for passive health tracking
+    if let Ok(vitals_hook) = borg_core::vitals::VitalsHook::new() {
+        agent.hook_registry_mut().register(Box::new(vitals_hook));
+    }
+
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
 
     let send_future = agent.send_message(message, event_tx);
