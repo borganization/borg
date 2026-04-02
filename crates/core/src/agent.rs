@@ -235,6 +235,19 @@ pub enum AgentEvent {
         nickname: String,
         status: String,
     },
+    /// A user steer message was received and injected into history at a tool boundary.
+    SteerReceived {
+        text: String,
+    },
+    /// The agent's plan has been updated (structured step tracking).
+    PlanUpdated {
+        steps: Vec<crate::types::PlanStep>,
+    },
+    /// The agent is requesting user input mid-turn. Send the user's response via the channel.
+    UserInputRequest {
+        prompt: String,
+        respond: oneshot::Sender<String>,
+    },
     /// Emitted between tool result and next LLM stream to indicate preparation work.
     Preparing,
     TurnComplete,
@@ -268,6 +281,8 @@ pub struct Agent {
     git_repo_root: Option<std::path::PathBuf>,
     /// Cached project doc contents (AGENTS.md / CLAUDE.md), loaded once.
     cached_project_docs: Option<Option<String>>,
+    /// Channel for receiving user steer messages mid-turn (injected at tool boundaries).
+    steer_rx: Option<mpsc::UnboundedReceiver<String>>,
 }
 
 /// Common state produced by `build_common`, consumed by both `new()` and `new_sub_agent()`.
@@ -356,7 +371,13 @@ impl Agent {
             ghost_commit: None,
             git_repo_root,
             cached_project_docs: None,
+            steer_rx: None,
         })
+    }
+
+    /// Set a channel for receiving user steer messages mid-turn.
+    pub fn set_steer_channel(&mut self, rx: mpsc::UnboundedReceiver<String>) {
+        self.steer_rx = Some(rx);
     }
 
     /// Set a config watch receiver for hot reload.
@@ -418,6 +439,7 @@ impl Agent {
             ghost_commit: None,
             git_repo_root,
             cached_project_docs: None,
+            steer_rx: None,
         })
     }
 
@@ -1451,6 +1473,30 @@ impl Agent {
 
             self.run_tool_calls(&parallel, &event_tx, &cancel).await;
             self.run_tool_calls(&sequential, &event_tx, &cancel).await;
+
+            // Drain any steer messages from the user at the tool boundary
+            self.drain_steers(&event_tx).await;
+        }
+    }
+
+    /// Drain pending steer messages from the user and inject them into history.
+    async fn drain_steers(&mut self, event_tx: &mpsc::Sender<AgentEvent>) {
+        // Collect all steers first to avoid borrow conflict with self.persist_message
+        let steers: Vec<String> = if let Some(ref mut steer_rx) = self.steer_rx {
+            let mut collected = Vec::new();
+            while let Ok(text) = steer_rx.try_recv() {
+                collected.push(text);
+            }
+            collected
+        } else {
+            return;
+        };
+
+        for steer_text in steers {
+            self.persist_message(Message::user(&steer_text));
+            let _ = event_tx
+                .send(AgentEvent::SteerReceived { text: steer_text })
+                .await;
         }
     }
 
@@ -1758,6 +1804,12 @@ impl Agent {
             "manage_roles" => crate::multi_agent::tools::handle_manage_roles(&args),
             "manage_scripts" => tool_handlers::handle_manage_scripts(&args, &self.config),
             "run_script" => tool_handlers::handle_run_script(&args, &self.config).await,
+            "update_plan" => {
+                return tool_handlers::handle_update_plan(&args, event_tx).await;
+            }
+            "request_user_input" => {
+                return tool_handlers::handle_request_user_input(&args, event_tx).await;
+            }
             _ => {
                 // Try integration tools first
                 if let Some(result) =
@@ -2088,6 +2140,45 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         // If we get here, the panic was handled (not propagated)
     }
+
+    // -- New AgentEvent variants --
+
+    #[test]
+    fn steer_received_event_variant_exists() {
+        let event = AgentEvent::SteerReceived {
+            text: "adjust approach".into(),
+        };
+        assert!(matches!(event, AgentEvent::SteerReceived { .. }));
+    }
+
+    #[test]
+    fn plan_updated_event_variant_exists() {
+        let event = AgentEvent::PlanUpdated { steps: vec![] };
+        assert!(matches!(event, AgentEvent::PlanUpdated { .. }));
+    }
+
+    #[test]
+    fn user_input_request_event_variant_exists() {
+        let (tx, _rx) = tokio::sync::oneshot::channel::<String>();
+        let event = AgentEvent::UserInputRequest {
+            prompt: "Which DB?".into(),
+            respond: tx,
+        };
+        assert!(matches!(event, AgentEvent::UserInputRequest { .. }));
+    }
+
+    // -- update_plan tool in plan mode --
+
+    #[test]
+    fn update_plan_is_non_mutating() {
+        assert!(!is_mutating_tool("update_plan"));
+    }
+
+    #[test]
+    fn request_user_input_is_mutating() {
+        // request_user_input blocks execution, so it should be blocked in plan mode
+        assert!(is_mutating_tool("request_user_input"));
+    }
 }
 
 /// Check if a tool call requires user confirmation before execution.
@@ -2181,6 +2272,7 @@ fn is_mutating_tool(name: &str) -> bool {
             | "web_fetch"
             | "web_search"
             | "security_audit"
+            | "update_plan"
     )
 }
 

@@ -401,9 +401,15 @@ async fn run_event_loop(
                 event_tx,
                 cancel,
             } => {
+                // Set up steer channel for mid-turn user guidance
+                let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+                app.steer_tx = Some(steer_tx);
+                app.pending_steers.clear();
+
                 let agent_clone = Arc::clone(agent);
                 tokio::spawn(async move {
                     let mut agent = agent_clone.lock().await;
+                    agent.set_steer_channel(steer_rx);
                     if images.is_empty() {
                         if let Err(e) = agent
                             .send_message_with_cancel(&input, event_tx.clone(), cancel)

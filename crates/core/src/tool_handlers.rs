@@ -1479,6 +1479,44 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         ));
     }
 
+    // Structured plan tool — always available
+    defs.push(ToolDefinition::new(
+        "update_plan",
+        "Update the task plan with steps and their statuses. Call this to track progress through multi-step tasks. At most one step should be in_progress at a time.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string", "description": "Step description" },
+                            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Step status" }
+                        },
+                        "required": ["title", "status"]
+                    },
+                    "description": "List of plan steps with statuses"
+                },
+                "explanation": { "type": "string", "description": "Why the plan is being updated" }
+            },
+            "required": ["steps"]
+        }),
+    ));
+
+    // Request user input — always available (disabled at gateway level)
+    defs.push(ToolDefinition::new(
+        "request_user_input",
+        "Ask the user a question and wait for their response. Use when you need clarification or a decision before proceeding. Do not use for routine confirmations — only when genuinely blocked.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "prompt": { "type": "string", "description": "The question to ask the user" }
+            },
+            "required": ["prompt"]
+        }),
+    ));
+
     defs
 }
 
@@ -1703,6 +1741,62 @@ pub fn format_search_results(results: &[crate::embeddings::SearchResult]) -> Str
         ));
     }
     output.trim_end().to_string()
+}
+
+/// Handle the `update_plan` tool: parse structured plan steps and emit a PlanUpdated event.
+pub async fn handle_update_plan(
+    args: &serde_json::Value,
+    event_tx: &tokio::sync::mpsc::Sender<crate::agent::AgentEvent>,
+) -> anyhow::Result<crate::types::ToolOutput> {
+    let steps_val = args
+        .get("steps")
+        .ok_or_else(|| anyhow::anyhow!("Missing required parameter 'steps'"))?;
+    let steps: Vec<crate::types::PlanStep> = serde_json::from_value(steps_val.clone())
+        .map_err(|e| anyhow::anyhow!("Invalid steps format: {e}. Each step needs 'title' (string) and 'status' (pending|in_progress|completed)."))?;
+
+    // Validate: at most one step may be in_progress
+    let in_progress_count = steps
+        .iter()
+        .filter(|s| s.status == crate::types::PlanStepStatus::InProgress)
+        .count();
+    if in_progress_count > 1 {
+        return Ok(crate::types::ToolOutput::Text(
+            "Error: At most one step may be in_progress at a time.".to_string(),
+        ));
+    }
+
+    let _ = event_tx
+        .send(crate::agent::AgentEvent::PlanUpdated { steps })
+        .await;
+
+    Ok(crate::types::ToolOutput::Text("Plan updated.".to_string()))
+}
+
+/// Handle the `request_user_input` tool: prompt the user for input and block until they respond.
+pub async fn handle_request_user_input(
+    args: &serde_json::Value,
+    event_tx: &tokio::sync::mpsc::Sender<crate::agent::AgentEvent>,
+) -> anyhow::Result<crate::types::ToolOutput> {
+    let prompt = require_str_param(args, "prompt")?;
+
+    let (respond_tx, respond_rx) = tokio::sync::oneshot::channel::<String>();
+    let _ = event_tx
+        .send(crate::agent::AgentEvent::UserInputRequest {
+            prompt: prompt.to_string(),
+            respond: respond_tx,
+        })
+        .await;
+
+    // Wait for user response with a 5-minute timeout
+    match tokio::time::timeout(std::time::Duration::from_secs(300), respond_rx).await {
+        Ok(Ok(response)) => Ok(crate::types::ToolOutput::Text(response)),
+        Ok(Err(_)) => Ok(crate::types::ToolOutput::Text(
+            "[No response received — channel closed]".to_string(),
+        )),
+        Err(_) => Ok(crate::types::ToolOutput::Text(
+            "[No response received — timed out after 5 minutes]".to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -2086,17 +2180,17 @@ mod tests {
         // With all defaults enabled (web, browser, security_audit, scripts):
         // write_memory, read_memory, memory_search, list, apply_patch, run_shell, read_pdf,
         // read_file, list_dir, web_fetch, web_search, manage_tasks, browser, security_audit,
-        // manage_scripts, run_script = 16
+        // manage_scripts, run_script, update_plan, request_user_input = 18
         let config = Config::default();
         let defs = core_tool_definitions(&config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert_eq!(
             names.len(),
-            16,
-            "expected 16 core tools (all enabled), got: {names:?}"
+            18,
+            "expected 18 core tools (all enabled), got: {names:?}"
         );
 
-        // With everything disabled: 9 base tools + list_dir
+        // With everything disabled: 9 base tools + list_dir + update_plan + request_user_input
         let mut minimal_config = Config::default();
         minimal_config.web.enabled = false;
         minimal_config.browser.enabled = false;
@@ -2104,7 +2198,7 @@ mod tests {
         minimal_config.scripts.enabled = false;
         let defs = core_tool_definitions(&minimal_config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert_eq!(names.len(), 10, "expected 10 base tools, got: {names:?}");
+        assert_eq!(names.len(), 12, "expected 12 base tools, got: {names:?}");
     }
 
     #[test]
@@ -2553,5 +2647,117 @@ mod tests {
             result.contains("Minimal"),
             "should show Minimal profile name"
         );
+    }
+
+    // -- update_plan tool --
+
+    #[test]
+    fn core_tool_definitions_includes_update_plan() {
+        let config = Config::default();
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"update_plan"));
+    }
+
+    #[test]
+    fn core_tool_definitions_includes_request_user_input() {
+        let config = Config::default();
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"request_user_input"));
+    }
+
+    #[tokio::test]
+    async fn handle_update_plan_valid_steps() {
+        let args = json!({
+            "steps": [
+                {"title": "Read files", "status": "completed"},
+                {"title": "Write code", "status": "in_progress"},
+                {"title": "Run tests", "status": "pending"}
+            ]
+        });
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+        let result = handle_update_plan(&args, &event_tx).await.unwrap();
+        match result {
+            crate::types::ToolOutput::Text(t) => assert_eq!(t, "Plan updated."),
+            _ => panic!("expected Text output"),
+        }
+        // Check event was emitted
+        let event = event_rx.try_recv().unwrap();
+        assert!(matches!(
+            event,
+            crate::agent::AgentEvent::PlanUpdated { steps } if steps.len() == 3
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_update_plan_rejects_multiple_in_progress() {
+        let args = json!({
+            "steps": [
+                {"title": "Step A", "status": "in_progress"},
+                {"title": "Step B", "status": "in_progress"}
+            ]
+        });
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let result = handle_update_plan(&args, &event_tx).await.unwrap();
+        match result {
+            crate::types::ToolOutput::Text(t) => {
+                assert!(t.contains("At most one"), "got: {t}");
+            }
+            _ => panic!("expected Text output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_update_plan_empty_steps_ok() {
+        let args = json!({"steps": []});
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let result = handle_update_plan(&args, &event_tx).await.unwrap();
+        match result {
+            crate::types::ToolOutput::Text(t) => assert_eq!(t, "Plan updated."),
+            _ => panic!("expected Text output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_update_plan_missing_steps_errors() {
+        let args = json!({"explanation": "changed my mind"});
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let result = handle_update_plan(&args, &event_tx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_request_user_input_requires_prompt() {
+        let args = json!({});
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let result = handle_request_user_input(&args, &event_tx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_request_user_input_emits_event_and_returns_response() {
+        let args = json!({"prompt": "Which DB?"});
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+
+        // Spawn handler in background
+        let handle = tokio::spawn(async move { handle_request_user_input(&args, &event_tx).await });
+
+        // Receive the event and respond
+        let event = event_rx.recv().await.unwrap();
+        match event {
+            crate::agent::AgentEvent::UserInputRequest { prompt, respond } => {
+                assert_eq!(prompt, "Which DB?");
+                let _ = respond.send("PostgreSQL".to_string());
+            }
+            _ => panic!("expected UserInputRequest"),
+        }
+
+        // Handler should return the response
+        let result = handle.await.unwrap().unwrap();
+        match result {
+            crate::types::ToolOutput::Text(t) => assert_eq!(t, "PostgreSQL"),
+            _ => panic!("expected Text output"),
+        }
     }
 }
