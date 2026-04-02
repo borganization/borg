@@ -937,6 +937,24 @@ impl<'a> App<'a> {
                 });
                 return Ok(AppAction::Continue);
             }
+            "/status" => {
+                if let Ok(db) = borg_core::db::Database::open() {
+                    if let Ok(state) = db.get_vitals_state() {
+                        let now = chrono::Utc::now();
+                        let state = borg_core::vitals::apply_decay(&state, now);
+                        let mut drift = borg_core::vitals::detect_drift(&state, now);
+                        let since = (now - chrono::Duration::days(7)).timestamp();
+                        let events = db.vitals_events_since(since).unwrap_or_default();
+                        if borg_core::vitals::detect_failure_drift(&events) {
+                            drift.push(borg_core::vitals::DriftFlag::RepeatedFailures);
+                        }
+                        self.push_system_message(borg_core::vitals::format_status(
+                            &state, &events, &drift,
+                        ));
+                    }
+                }
+                return Ok(AppAction::Continue);
+            }
             "/doctor" => {
                 let report = borg_core::doctor::run_diagnostics(&self.config);
                 self.push_system_message(report.format());

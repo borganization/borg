@@ -199,6 +199,11 @@ pub async fn run() -> Result<()> {
             }
         };
 
+    // Register vitals hook for passive health tracking
+    if let Ok(vitals_hook) = borg_core::vitals::VitalsHook::new() {
+        agent.hook_registry_mut().register(Box::new(vitals_hook));
+    }
+
     // Try to resume the last session
     let mut resumed_info: Option<(String, usize)> = None;
     if let Ok(Some(session)) = borg_core::session::load_last_session() {
@@ -266,6 +271,18 @@ pub async fn run() -> Result<()> {
     let mut app = App::new(config, heartbeat_rx, heartbeat_event_tx);
     if let Some((title, count)) = resumed_info {
         app.push_system_message(format!("Resumed session: {title} ({count} messages)"));
+    }
+    // Show vitals header on session start
+    if let Ok(db) = borg_core::db::Database::open() {
+        if let Ok(state) = db.get_vitals_state() {
+            let now = chrono::Utc::now();
+            let state = borg_core::vitals::apply_decay(&state, now);
+            app.push_system_message(borg_core::vitals::format_compact(&state));
+            let drift = borg_core::vitals::detect_drift(&state, now);
+            if let Some(notice) = borg_core::vitals::format_drift_notice(&drift) {
+                app.push_system_message(notice);
+            }
+        }
     }
     let mut event_stream = EventStream::new();
     let tick_rate = Duration::from_millis(100);
