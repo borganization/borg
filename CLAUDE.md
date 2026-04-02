@@ -54,6 +54,7 @@ Release binaries are built via `.github/workflows/release.yml` on tag push (`v*`
 - `borg plugins` — list all integrations with configured/unconfigured status
 - `borg gateway` — start webhook gateway server for messaging channels
 - `borg wake` — trigger an immediate heartbeat check-in (sends wake signal to daemon)
+- `borg status` — show agent vitals (stability, focus, sync, growth, charge)
 - `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
 - `borg tasks list` — list all scheduled tasks
 - `borg tasks create` — create a scheduled task (supports `--max-retries`, `--timeout`, `--delivery-channel`, `--delivery-target`)
@@ -457,6 +458,20 @@ The `SettingsResolver` handles merging automatically — no additional wiring ne
 | `crates/core/src/db.rs` | SQLite `settings` table: `get_setting`, `set_setting`, `delete_setting`, `list_settings` |
 | `crates/cli/src/main.rs` | CLI `borg settings` subcommands |
 
+## Vitals System
+
+`crates/core/src/vitals.rs` — passive agent health tracking via lifecycle hooks.
+
+Five stats (stability, focus, sync, growth, charge) update automatically from usage events classified into broad categories (Interaction, Success, Failure, Correction, Creation). State is **event-sourced** — computed by replaying verified events from baseline, not stored mutably. HMAC-SHA256 chain prevents tampering; per-category-per-hour rate limiting prevents gaming.
+
+`VitalsHook` implements the `Hook` trait, listens on `SessionStart`, `BeforeAgentStart`, and `AfterToolCall`, and appends events to SQLite.
+
+**Commands:** `borg status` (CLI), `/status` (TUI). TUI shows compact vitals header on session start.
+
+**DB tables (V22):** `vitals_events` (append-only ledger with HMAC chain).
+
+See `docs/vitals.md` for full documentation.
+
 ## Doctor Command
 
 `crates/core/src/doctor.rs` — diagnostic checks for config, provider, sandbox, tools, skills, memory, data directory, budget, and host security.
@@ -472,6 +487,7 @@ SQLite at `~/.borg/borg.db` with versioned migrations:
 - **V14**: Add retry (max_retries, retry_count, retry_after, last_error), timeout (timeout_ms), and delivery (delivery_channel, delivery_target) columns to `scheduled_tasks`
 - **V16**: `embedding_cache` table for caching embedding API results
 - **V17**: `session_index_status` table for tracking indexed sessions
+- **V22**: `vitals_events` table (event-sourced agent health tracking with HMAC chain)
 - Schema version tracked in `meta` table; migrations run automatically on `Database::open()`
 
 ## Signal Handling & Graceful Shutdown
@@ -548,6 +564,7 @@ Six-layer defense against prompt injection attacks:
 | `crates/core/src/chunker.rs` | Markdown-aware content chunking with code fence preservation |
 | `crates/core/src/skills.rs` | Skills loading, parsing, progressive token budgeting |
 | `crates/core/src/hooks.rs` | Lifecycle hook system (trait, registry, dispatch) |
+| `crates/core/src/vitals.rs` | Vitals system: stats, events, decay, drift, VitalsHook |
 | `crates/core/src/doctor.rs` | Diagnostic checks and report formatting |
 | `crates/core/src/browser.rs` | Chrome detection, CDP session management, browser automation |
 | `crates/core/src/host_audit.rs` | Host security audit checks (firewall, ports, SSH, permissions, encryption, updates, services) |

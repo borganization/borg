@@ -60,6 +60,8 @@ enum Commands {
         #[arg(long, short)]
         mode: Option<String>,
     },
+    /// Show agent vitals and status
+    Status,
     /// Run diagnostics to check configuration, connectivity, and dependencies
     Doctor,
     /// Run as a background daemon (executes scheduled tasks and heartbeat)
@@ -371,6 +373,7 @@ async fn main() -> Result<()> {
             json,
             mode,
         }) => repl::one_shot(&message, yes, json, mode.as_deref()).await?,
+        Some(Commands::Status) => run_status()?,
         Some(Commands::Doctor) => run_doctor()?,
         Some(Commands::Daemon) => service::run_daemon(shutdown).await?,
         Some(Commands::Service { action }) => match action {
@@ -630,6 +633,24 @@ fn run_usage() -> Result<()> {
         println!("Budget: {total_tokens}/{budget_limit} tokens ({pct:.1}%) used");
     }
 
+    Ok(())
+}
+
+fn run_status() -> Result<()> {
+    let now = chrono::Utc::now();
+    let db = borg_core::db::Database::open()?;
+    let state = db.get_vitals_state()?;
+    let state = borg_core::vitals::apply_decay(&state, now);
+    let mut drift = borg_core::vitals::detect_drift(&state, now);
+    let since = (now - chrono::Duration::days(7)).timestamp();
+    let events = db.vitals_events_since(since)?;
+    if borg_core::vitals::detect_failure_drift(&events) {
+        drift.push(borg_core::vitals::DriftFlag::RepeatedFailures);
+    }
+    println!(
+        "{}",
+        borg_core::vitals::format_status(&state, &events, &drift)
+    );
     Ok(())
 }
 
