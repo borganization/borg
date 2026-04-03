@@ -91,7 +91,7 @@ Events are classified at the hook level:
 - **SessionStart** hook → `Interaction`
 - **BeforeAgentStart** hook → `Interaction` (or `Correction` if message matches heuristic)
 - **AfterToolCall** hook → classified by tool name and outcome:
-  - `write_memory`, `create_tool`, `apply_skill_patch`, `create_channel` → `Creation` (if successful)
+  - `write_memory`, `create_tool`, `apply_skill_patch`, `create_channel`, `apply_patch` → `Creation` (if successful)
   - Any tool with `is_error: false` → `Success`
   - Any tool with `is_error: true` → `Failure`
 
@@ -131,7 +131,7 @@ State is **never stored directly**. The `vitals_events` table is the single sour
 
 ### Anti-tamper: HMAC chain
 
-Each event carries an HMAC-SHA256 signature computed from `(prev_hmac + category + source + deltas + timestamp)` using a secret compiled into the binary. During replay, events with broken chains are skipped.
+Each event carries an HMAC-SHA256 signature using the shared `hmac_chain` module. Fields are concatenated directly: `prev_hmac || category || source || deltas || timestamp`. Key is derived per-installation via `db.derive_hmac_key()` with domain `borg-vitals-chain-v1`. During replay, events with broken chains are skipped.
 
 ### Anti-gaming: Rate limiting
 
@@ -197,8 +197,9 @@ Plus optional drift notice (max one per session).
 
 ## Architecture
 
-### Core module
+### Core modules
 - `crates/core/src/vitals.rs` — all types, scoring, decay, drift, formatting, VitalsHook
+- `crates/core/src/hmac_chain.rs` — shared HMAC builder, chain verification, rate limiting (used by vitals, bond, evolution)
 
 ### Hook integration
 Uses the existing `Hook` trait. `VitalsHook` opens its own DB connection (hooks are `Send + Sync`).

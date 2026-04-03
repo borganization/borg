@@ -417,9 +417,11 @@ impl Database {
     }
 
     /// Derive an HMAC key for a specific system using the per-installation salt.
+    /// Derive a domain-specific HMAC key from the per-installation salt.
+    /// Returns sensitive key material — callers should not log or persist the result.
     /// Uses HMAC-SHA256(key=salt, data=domain) as a simple KDF.
     #[allow(clippy::expect_used)]
-    pub(crate) fn derive_hmac_key(&self, domain: &[u8]) -> Vec<u8> {
+    pub fn derive_hmac_key(&self, domain: &[u8]) -> Vec<u8> {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
@@ -434,7 +436,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 25;
+    const CURRENT_VERSION: u32 = 26;
 
     /// Check if a column exists on a table via `PRAGMA table_info`.
     /// Safer than catching ALTER TABLE errors by string matching.
@@ -500,6 +502,7 @@ impl Database {
             Database::migrate_v23,
             Database::migrate_v24,
             Database::migrate_v25,
+            Database::migrate_v26,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -1244,6 +1247,68 @@ impl Database {
             ",
         )?;
         Ok(())
+    }
+
+    fn migrate_v26(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS hmac_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT NOT NULL,
+                event_id INTEGER NOT NULL,
+                prev_hmac TEXT NOT NULL,
+                state_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_hmac_checkpoints_domain
+                ON hmac_checkpoints(domain, event_id);
+            ",
+        )?;
+        Ok(())
+    }
+
+    /// Save an HMAC chain checkpoint for recovery.
+    pub fn save_hmac_checkpoint(
+        &self,
+        domain: &str,
+        event_id: i64,
+        prev_hmac: &str,
+        state_hash: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO hmac_checkpoints (domain, event_id, prev_hmac, state_hash, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![domain, event_id, prev_hmac, state_hash, now],
+        )?;
+        Ok(())
+    }
+
+    /// Load the most recent checkpoint for a domain.
+    pub fn load_latest_hmac_checkpoint(
+        &self,
+        domain: &str,
+    ) -> Result<Option<crate::hmac_chain::ChainCheckpoint>> {
+        let result = self.conn.query_row(
+            "SELECT id, domain, event_id, prev_hmac, state_hash, created_at
+             FROM hmac_checkpoints WHERE domain = ?1 ORDER BY event_id DESC LIMIT 1",
+            rusqlite::params![domain],
+            |row| {
+                Ok(crate::hmac_chain::ChainCheckpoint {
+                    id: row.get(0)?,
+                    domain: row.get(1)?,
+                    event_id: row.get(2)?,
+                    prev_hmac: row.get(3)?,
+                    state_hash: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        );
+        match result {
+            Ok(cp) => Ok(Some(cp)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     // ── Chain Integrity Verification ──
@@ -6878,5 +6943,58 @@ mod tests {
             state.chain_valid,
             "HMAC chain should be valid with transactional writes"
         );
+    }
+
+    #[test]
+    fn hmac_checkpoint_write_and_read() {
+        let db = test_db();
+        // No checkpoint initially
+        let cp = db.load_latest_hmac_checkpoint("vitals").unwrap();
+        assert!(cp.is_none());
+
+        // Save a checkpoint
+        db.save_hmac_checkpoint("vitals", 42, "prev_abc", "state_hash_123")
+            .unwrap();
+        let cp = db.load_latest_hmac_checkpoint("vitals").unwrap().unwrap();
+        assert_eq!(cp.domain, "vitals");
+        assert_eq!(cp.event_id, 42);
+        assert_eq!(cp.prev_hmac, "prev_abc");
+        assert_eq!(cp.state_hash, "state_hash_123");
+
+        // Save another checkpoint — latest should win
+        db.save_hmac_checkpoint("vitals", 100, "prev_xyz", "state_hash_456")
+            .unwrap();
+        let cp = db.load_latest_hmac_checkpoint("vitals").unwrap().unwrap();
+        assert_eq!(cp.event_id, 100);
+
+        // Different domain should have its own checkpoints
+        let cp_bond = db.load_latest_hmac_checkpoint("bond").unwrap();
+        assert!(cp_bond.is_none());
+    }
+
+    #[test]
+    fn bond_to_evolution_gate_integration() {
+        let db = test_db();
+        // Record bond events to build score
+        for _ in 0..20 {
+            db.record_bond_event_chained("tool_success", 1, "test")
+                .unwrap();
+        }
+        // Verify bond state replays correctly
+        let bond_events = db.get_all_bond_events().unwrap();
+        let bond_key = db.derive_hmac_key(crate::bond::BOND_HMAC_DOMAIN);
+        let bond_state = crate::bond::replay_events_with_key(&bond_key, &bond_events);
+        assert!(bond_state.chain_valid);
+        // Baseline 40 + 15 (capped per hour) = 55
+        assert!(
+            bond_state.score >= 30,
+            "bond score {} should be >= 30 for stage1 gate",
+            bond_state.score
+        );
+
+        // Verify evolution state can replay correctly after bond + evolution events
+        let evo_state = db.get_evolution_state().unwrap();
+        assert!(evo_state.chain_valid);
+        assert_eq!(evo_state.stage, crate::evolution::Stage::Base);
     }
 }

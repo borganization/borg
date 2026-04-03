@@ -105,11 +105,7 @@ Indexes on `created_at` and `event_type`.
 
 ### HMAC chain
 
-Reuses existing HMAC infrastructure from `crates/core/src/scripts.rs`:
-- `scripts::get_or_create_hmac_key()` — shared keychain/file key
-- `scripts::compute_hmac(key, content)` — HMAC-SHA256
-
-Event HMAC content = `"{event_type}|{score_delta}|{reason}|{created_at}|{prev_hmac}"`.
+Uses the shared `hmac_chain` module (`crates/core/src/hmac_chain.rs`). Fields are concatenated directly: `prev_hmac || event_type || score_delta || reason || created_at`. Key is derived per-installation via `db.derive_hmac_key()` with domain `borg-bond-chain-v1`.
 
 Each event links to the previous via `prev_hmac`. On replay, the entire chain is verified. Tampered events are detected and flagged in `chain_valid`.
 
@@ -121,7 +117,7 @@ Prevents gaming by capping bond events per time window:
 |-------|-------|
 | Total events per hour | 30 |
 | Positive-delta events per hour | 15 |
-| Same event_type per hour | 10 |
+| Per event_type per hour | 5-15 (type-specific) |
 
 Events exceeding limits are silently dropped.
 
@@ -148,10 +144,12 @@ Bond consumes vitals events and adds bond-specific signals:
 Heuristic-only (no explicit `/accept`/`/reject` commands):
 
 **Acceptance patterns** (regex, case-insensitive):
-`\b(yes|do it|go ahead|sounds good|perfect|great|approved|let's do)\b`
+`\b(do it|go ahead|sounds good|approved|let's do it|yes, do|yes please|absolutely)\b`
+
+Note: Bare "yes" is intentionally excluded to reduce false positives from conversational filler. Multi-word phrases are preferred.
 
 **Rejection patterns** (regex, case-insensitive):
-`\b(no don't|don't do|cancel|never mind|skip that|wrong suggestion)\b`
+`\b(no don't|don't do|cancel that|never mind|skip that|wrong suggestion|stop suggesting|not helpful)\b`
 
 Distinct from the vitals `looks_like_correction` regex. Corrections = "you did something wrong." Rejections = "I don't want your suggestion."
 
@@ -270,8 +268,9 @@ Show last N bond events in tabular format.
 
 ## Architecture
 
-### Core module
-- `crates/core/src/bond.rs` — all types, scoring, HMAC chain, rate limiting, replay, heuristics, formatting, BondHook
+### Core modules
+- `crates/core/src/bond.rs` — all types, scoring, replay, heuristics, formatting, BondHook
+- `crates/core/src/hmac_chain.rs` — shared HMAC builder, chain verification, rate limiting (used by vitals, bond, evolution)
 
 ### Hook integration
 Uses the existing `Hook` trait. `BondHook` wraps Database in `Mutex<Database>` (same pattern as `VitalsHook`).
@@ -319,7 +318,7 @@ Registered AFTER VitalsHook in:
 - Keep scoring deterministic.
 - Favor explainability over complexity.
 - Bond should be hard to game with shallow usage (rate limiting enforces this).
-- Reuse `scripts::get_or_create_hmac_key()` and `scripts::compute_hmac()` — don't duplicate HMAC code.
+- Use the shared `hmac_chain` module for HMAC computation and chain verification.
 - Reuse `vitals::classify_tool()` for tool event categorization.
 - Rolling metrics are live queries, not stored — prevents stale data.
 - Hook always returns `Continue` except at BeforeAgentStart/BeforeLlmCall where it returns `InjectContext`.
