@@ -54,6 +54,7 @@ Release binaries are built via `.github/workflows/release.yml` on tag push (`v*`
 - `borg plugins` — list all integrations with configured/unconfigured status
 - `borg gateway` — start webhook gateway server for messaging channels
 - `borg wake` — trigger an immediate heartbeat check-in (sends wake signal to daemon)
+- `borg update` — self-update to the latest GitHub release (checksum-verified)
 - `borg status` — show agent vitals (stability, focus, sync, growth, charge)
 - `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
 - `borg tasks list` — list all scheduled tasks

@@ -44,12 +44,17 @@ tempfile = { workspace = true }
 throbber-widgets-tui = { workspace = true }
 ignore = { workspace = true }
 libc = "0.2"
+semver = { workspace = true }
+sha2 = { workspace = true }
 arboard = { workspace = true }
 image = { workspace = true }
 base64 = "0.22"
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+
+[dev-dependencies]
+wiremock = "0.5"
 
 [lints]
 workspace = true

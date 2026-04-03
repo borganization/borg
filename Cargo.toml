@@ -53,6 +53,7 @@ rusqlite = { version = "0.32", features = ["bundled-full"] }
 scraper = "0.22"
 pdf-extract = "0.7"
 shellexpand = "3"
+semver = "1"
 sha2 = "0.10"
 hmac = "0.12"
 axum = "0.8"
