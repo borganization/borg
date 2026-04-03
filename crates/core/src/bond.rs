@@ -10,29 +10,25 @@
 //! does not bypass HITL safety checks.
 
 use chrono::Utc;
-use hmac::{Hmac, Mac};
 use regex::Regex;
-use sha2::Sha256;
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::LazyLock;
 
 use crate::db::Database;
+use crate::hmac_chain;
 use crate::hooks::{Hook, HookAction, HookContext, HookData, HookPoint};
 use crate::vitals;
 
 // ── HMAC ──
 
 /// Domain string for HMAC key derivation. Combined with per-installation salt.
-pub(crate) const BOND_HMAC_DOMAIN: &[u8] = b"borg-bond-chain-v1";
+pub const BOND_HMAC_DOMAIN: &[u8] = b"borg-bond-chain-v1";
 
 /// Legacy compiled-in secret for installations without per-install salt.
+#[cfg(test)]
 const BOND_HMAC_LEGACY: &[u8] = b"borg-bond-chain-v1";
 
-type HmacSha256 = Hmac<Sha256>;
-
-/// Compute HMAC for a bond event, chaining from the previous event's HMAC.
-#[allow(clippy::expect_used)]
+/// Compute HMAC for a bond event using the shared HMAC chain module.
 pub(crate) fn compute_event_hmac(
     key: &[u8],
     prev_hmac: &str,
@@ -41,28 +37,21 @@ pub(crate) fn compute_event_hmac(
     reason: &str,
     created_at: i64,
 ) -> String {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key size");
-    mac.update(prev_hmac.as_bytes());
-    mac.update(event_type.as_bytes());
-    mac.update(&score_delta.to_le_bytes());
-    mac.update(reason.as_bytes());
-    mac.update(&created_at.to_le_bytes());
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .fold(String::new(), |mut s, b| {
-            use std::fmt::Write;
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    hmac_chain::compute_hmac(
+        key,
+        &[
+            prev_hmac.as_bytes(),
+            event_type.as_bytes(),
+            &score_delta.to_le_bytes(),
+            reason.as_bytes(),
+            &created_at.to_le_bytes(),
+        ],
+    )
 }
 
 /// Verify a bond event's HMAC against the expected chain.
 fn verify_event_hmac(key: &[u8], event: &BondEvent, expected_prev_hmac: &str) -> bool {
-    if event.prev_hmac != expected_prev_hmac {
-        return false;
-    }
-    let expected = compute_event_hmac(
+    let recomputed = compute_event_hmac(
         key,
         &event.prev_hmac,
         &event.event_type,
@@ -70,7 +59,12 @@ fn verify_event_hmac(key: &[u8], event: &BondEvent, expected_prev_hmac: &str) ->
         &event.reason,
         event.created_at,
     );
-    event.hmac == expected
+    hmac_chain::verify_chain_link(
+        &event.hmac,
+        &event.prev_hmac,
+        expected_prev_hmac,
+        &recomputed,
+    )
 }
 
 // ── Rate Limiting ──
@@ -200,6 +194,7 @@ pub fn autonomy_from_level(level: BondLevel) -> AutonomyTier {
 /// A broken HMAC link invalidates the rest of the chain — all subsequent
 /// events are skipped. This is intentional: the chain is append-only and
 /// any tampering makes the tail untrustworthy.
+#[cfg(test)]
 pub fn replay_events(events: &[BondEvent]) -> BondState {
     replay_events_with_key(BOND_HMAC_LEGACY, events)
 }
@@ -217,10 +212,7 @@ pub fn replay_events_with_key(key: &[u8], events: &[BondEvent]) -> BondState {
 
     let mut score: i32 = BASELINE_SCORE;
     let mut expected_prev_hmac = "0".to_string();
-    // Rate limits: per-type, total per hour, positive-delta per hour
-    let mut hourly_counts: HashMap<(i64, &str), u32> = HashMap::new();
-    let mut hourly_total: HashMap<i64, u32> = HashMap::new();
-    let mut hourly_positive: HashMap<i64, u32> = HashMap::new();
+    let mut rate_limiter = hmac_chain::HourlyRateLimiter::new(Some(30), Some(15));
     let mut chain_valid = true;
 
     for event in events {
@@ -239,32 +231,12 @@ pub fn replay_events_with_key(key: &[u8], events: &[BondEvent]) -> BondState {
             continue;
         }
 
-        let hour_bucket = event.created_at / 3600;
-
-        // Total events per hour cap (30)
-        let total_count = hourly_total.entry(hour_bucket).or_insert(0);
-        if *total_count >= 30 {
-            continue;
-        }
-        *total_count += 1;
-
-        // Positive-delta events per hour cap (15)
-        if event.score_delta > 0 {
-            let pos_count = hourly_positive.entry(hour_bucket).or_insert(0);
-            if *pos_count >= 15 {
-                continue;
-            }
-            *pos_count += 1;
-        }
-
-        // Per-type per hour rate limit
-        let rate_key = (hour_bucket, event.event_type.as_str());
-        let count = hourly_counts.entry(rate_key).or_insert(0);
+        // Combined rate limiting: total/hour, positive/hour, per-type/hour
         let cap = rate_limit_for(&event.event_type);
-        if *count >= cap {
+        let is_positive = event.score_delta > 0;
+        if !rate_limiter.check_and_consume(event.created_at, &event.event_type, cap, is_positive) {
             continue;
         }
-        *count += 1;
 
         // Apply delta
         score = (score + event.score_delta).clamp(0, 100);
@@ -1298,5 +1270,72 @@ mod tests {
         let state = replay_events(&events);
         assert!(state.chain_valid);
         assert_eq!(state.score, 45); // 40 + 15 - 10
+    }
+
+    #[test]
+    fn test_inject_context_format() {
+        let state = BondState {
+            score: 68,
+            level: BondLevel::Trusted,
+            autonomy_tier: AutonomyTier::GuidedAction,
+            total_events: 100,
+            chain_valid: true,
+        };
+        let ctx = format_context(&state, 0.09, 0.83);
+        assert!(ctx.contains("<bond_context>"));
+        assert!(ctx.contains("</bond_context>"));
+        assert!(ctx.contains("Trusted"));
+        assert!(ctx.contains("68/100"));
+        assert!(ctx.contains("GuidedAction"));
+        assert!(ctx.contains("9%"));
+        assert!(ctx.contains("83%"));
+    }
+
+    #[test]
+    fn test_mid_chain_corruption_invalidates_tail() {
+        // Build 3 events: valid → corrupted → valid-but-orphaned
+        let hmac1 = compute_event_hmac(BOND_HMAC_LEGACY, "0", "tool_success", 1, "test", 1000);
+        let event1 = BondEvent {
+            id: 1,
+            event_type: "tool_success".to_string(),
+            score_delta: 1,
+            reason: "test".to_string(),
+            hmac: hmac1.clone(),
+            prev_hmac: "0".to_string(),
+            created_at: 1000,
+        };
+        // Event 2: corrupted
+        let event2 = BondEvent {
+            id: 2,
+            event_type: "creation".to_string(),
+            score_delta: 2,
+            reason: "test".to_string(),
+            hmac: "corrupted".to_string(),
+            prev_hmac: hmac1,
+            created_at: 2000,
+        };
+        // Event 3: chains from corrupted — should be skipped too
+        let hmac3 = compute_event_hmac(
+            BOND_HMAC_LEGACY,
+            "corrupted",
+            "tool_success",
+            1,
+            "test",
+            3000,
+        );
+        let event3 = BondEvent {
+            id: 3,
+            event_type: "tool_success".to_string(),
+            score_delta: 1,
+            reason: "test".to_string(),
+            hmac: hmac3,
+            prev_hmac: "corrupted".to_string(),
+            created_at: 3000,
+        };
+
+        let state = replay_events(&[event1, event2, event3]);
+        // Only event1 applies: baseline 40 + 1 = 41
+        assert_eq!(state.score, 41);
+        assert!(!state.chain_valid);
     }
 }
