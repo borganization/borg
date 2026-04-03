@@ -53,6 +53,19 @@ fn is_diff_prefix(line: &str) -> bool {
     matches!(line.as_bytes().first(), Some(b' ' | b'+' | b'-'))
 }
 
+/// Check if `text` is a DSL marker that should never appear as file content.
+/// Used to detect when an LLM erroneously prefixes a marker with `+` or `-`.
+fn is_dsl_marker(text: &str) -> bool {
+    let t = text.trim();
+    t == END_PATCH_MARKER
+        || t == BEGIN_PATCH_MARKER
+        || t.starts_with(ADD_FILE_MARKER)
+        || t.starts_with(UPDATE_FILE_MARKER)
+        || t.starts_with(DELETE_FILE_MARKER)
+        || t.starts_with(MOVE_TO_MARKER)
+        || t == EOF_MARKER
+}
+
 /// Collect diff lines starting at `lines[*i]`. Each line must start with
 /// ` ` (context), `+` (add), or `-` (remove). Empty lines are treated as
 /// empty context. Stops at a non-diff line or `*** End of File` marker.
@@ -72,8 +85,24 @@ fn collect_diff_lines<'a>(lines: &[&'a str], i: &mut usize) -> (Vec<&'a str>, Ve
         }
 
         if let Some(removed) = l.strip_prefix('-') {
+            // If the stripped content is a DSL marker and no more diff lines
+            // follow, this is an LLM error — don't include it as content.
+            if is_dsl_marker(removed) {
+                let next_is_diff = *i + 1 < lines.len() && is_diff_prefix(lines[*i + 1]);
+                if !next_is_diff {
+                    *i += 1;
+                    break;
+                }
+            }
             search_lines.push(removed);
         } else if let Some(added) = l.strip_prefix('+') {
+            if is_dsl_marker(added) {
+                let next_is_diff = *i + 1 < lines.len() && is_diff_prefix(lines[*i + 1]);
+                if !next_is_diff {
+                    *i += 1;
+                    break;
+                }
+            }
             replace_lines.push(added);
         } else if let Some(context) = l.strip_prefix(' ') {
             search_lines.push(context);
@@ -181,9 +210,18 @@ pub fn parse_patch(input: &str) -> Result<Patch, ParseError> {
             // Collect content: every line MUST start with '+'.
             // Lines without '+' terminate the block (they belong to the
             // next operation or are the *** End Patch marker).
+            // If a '+'-prefixed line is a DSL marker (e.g. +*** End Patch)
+            // and no more '+' lines follow, it's an LLM error — strip it.
             let mut content = String::new();
             while i < lines.len() {
                 if let Some(added) = lines[i].strip_prefix('+') {
+                    if is_dsl_marker(added) {
+                        let next_is_plus = i + 1 < lines.len() && lines[i + 1].starts_with('+');
+                        if !next_is_plus {
+                            i += 1;
+                            break;
+                        }
+                    }
                     if !content.is_empty() {
                         content.push('\n');
                     }
@@ -1034,6 +1072,166 @@ not_a_diff_line
                 assert!(hunks[0].replace.is_empty());
             }
             other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    // ── DSL marker stripping (LLM error recovery) ──
+
+    #[test]
+    fn parse_add_file_strips_plus_end_patch_marker() {
+        // LLM erroneously prefixes *** End Patch with +
+        let input = "\
+*** Begin Patch
+*** Add File: src/new.rs
++fn main() {}
++*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 1);
+        match &patch.operations[0] {
+            PatchOperation::AddFile { path, content } => {
+                assert_eq!(path, "src/new.rs");
+                assert_eq!(content, "fn main() {}");
+                assert!(
+                    !content.contains("End Patch"),
+                    "DSL marker should not leak into content, got: {content}"
+                );
+            }
+            other => panic!("Expected AddFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_add_file_plus_end_patch_followed_by_more_ops() {
+        // +*** End Patch is the last '+' line, so it's stripped.
+        // Subsequent operations are parsed normally.
+        let input = "\
+*** Begin Patch
+*** Add File: a.txt
++hello
++*** End Patch
+*** Delete File: b.txt
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 2);
+        match &patch.operations[0] {
+            PatchOperation::AddFile { content, .. } => {
+                assert_eq!(content, "hello");
+            }
+            other => panic!("Expected AddFile, got {:?}", other),
+        }
+        assert!(matches!(
+            &patch.operations[1],
+            PatchOperation::DeleteFile { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_update_file_strips_plus_end_patch_marker() {
+        let input = "\
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-old_line
++new_line
++*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert_eq!(hunks.len(), 1);
+                assert_eq!(hunks[0].search, "old_line");
+                assert_eq!(hunks[0].replace, "new_line");
+                assert!(
+                    !hunks[0].replace.contains("End Patch"),
+                    "DSL marker should not leak into replace text"
+                );
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_update_file_preserves_embedded_end_patch_mid_content() {
+        // +*** End Patch followed by more '+' lines is legitimate content
+        let input = "\
+*** Begin Patch
+*** Update File: doc.md
+@@
+-old
++*** End Patch
++more content after
+*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        match &patch.operations[0] {
+            PatchOperation::UpdateFile { hunks, .. } => {
+                assert_eq!(hunks.len(), 1);
+                assert!(
+                    hunks[0].replace.contains("*** End Patch"),
+                    "Embedded marker followed by more '+' lines should be preserved"
+                );
+                assert!(hunks[0].replace.contains("more content after"));
+            }
+            other => panic!("Expected UpdateFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_add_file_strips_plus_begin_patch_marker() {
+        // LLM wraps content with both +*** Begin Patch and +*** End Patch
+        let input = "\
+*** Begin Patch
+*** Add File: script.py
++*** Begin Patch
++print('hello')
++*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 1);
+        match &patch.operations[0] {
+            PatchOperation::AddFile { content, .. } => {
+                // +*** Begin Patch is followed by more + lines, so it's kept
+                assert!(content.contains("*** Begin Patch"));
+                assert!(content.contains("print('hello')"));
+                // +*** End Patch is the last + line, so it's stripped
+                assert!(
+                    !content.contains("*** End Patch"),
+                    "Trailing End Patch marker leaked: {content}"
+                );
+            }
+            other => panic!("Expected AddFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_add_file_strips_all_dsl_markers_at_end() {
+        // +*** Add File: as last line should be stripped too
+        let input = "\
+*** Begin Patch
+*** Add File: test.py
++code here
++*** Add File: bogus.py";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 1);
+        match &patch.operations[0] {
+            PatchOperation::AddFile { content, .. } => {
+                assert_eq!(content, "code here");
+            }
+            other => panic!("Expected AddFile, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_add_file_no_content_only_plus_end_patch() {
+        // Edge case: only line is +*** End Patch — should produce empty content
+        let input = "\
+*** Begin Patch
+*** Add File: empty.py
++*** End Patch";
+        let patch = parse_patch(input).unwrap();
+        assert_eq!(patch.operations.len(), 1);
+        match &patch.operations[0] {
+            PatchOperation::AddFile { content, .. } => {
+                assert_eq!(content, "");
+            }
+            other => panic!("Expected AddFile, got {:?}", other),
         }
     }
 }
