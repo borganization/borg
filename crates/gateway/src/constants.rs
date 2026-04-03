@@ -11,3 +11,31 @@ pub const PEER_KIND_DIRECT: &str = "direct";
 
 /// Peer kind for group/channel messages.
 pub const PEER_KIND_GROUP: &str = "group";
+
+// ── Telegram ──────────────────────────────────────────────────────
+
+/// Telegram API base URL.
+pub const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
+
+/// Telegram HTTP connect timeout.
+pub const TELEGRAM_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Max retries for Telegram send operations.
+pub const TELEGRAM_MAX_SEND_RETRIES: u32 = 5;
+
+/// Max retry_after seconds we'll honor from Telegram before giving up.
+pub const TELEGRAM_MAX_RETRY_AFTER_SECS: u64 = 300;
+
+// ── Slack ─────────────────────────────────────────────────────────
+
+/// Slack API base URL.
+pub const SLACK_API_BASE: &str = "https://slack.com/api";
+
+/// Slack signature replay window in seconds.
+pub const SLACK_REPLAY_WINDOW_SECS: u64 = 300;
+
+/// Slack typing indicator circuit breaker: trips after N consecutive failures.
+pub const SLACK_TYPING_CB_FAILURE_THRESHOLD: u32 = 2;
+
+/// Slack typing indicator circuit breaker: suspension duration in seconds.
+pub const SLACK_TYPING_CB_SUSPENSION_SECS: u64 = 60;

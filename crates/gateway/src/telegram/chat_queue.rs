@@ -5,9 +5,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
-const QUEUE_CAPACITY: usize = 64;
-const MAX_ACTIVE_CHATS: usize = 10_000;
+const IDLE_TIMEOUT: Duration = Duration::from_secs(borg_core::constants::SESSION_IDLE_TIMEOUT_SECS);
+const QUEUE_CAPACITY: usize = borg_core::constants::SESSION_QUEUE_CAPACITY;
+const MAX_ACTIVE_CHATS: usize = borg_core::constants::MAX_ACTIVE_SESSIONS;
 
 /// A message queued for sequential processing within a chat.
 pub struct QueuedMessage {

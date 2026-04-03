@@ -83,7 +83,10 @@ fn build_transcript(messages: &[crate::db::MessageRow]) -> String {
                 "assistant" => "Assistant",
                 _ => &msg.role,
             };
-            let truncated: String = content.chars().take(2000).collect();
+            let truncated: String = content
+                .chars()
+                .take(crate::constants::MAX_SESSION_MESSAGE_CHARS)
+                .collect();
             transcript.push_str(&format!("{role_label}: {truncated}\n\n"));
 
             if transcript.len() >= MAX_TRANSCRIPT_CHARS {

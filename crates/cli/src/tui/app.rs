@@ -770,12 +770,16 @@ impl<'a> App<'a> {
                 // for transcript scrolling instead.
                 match key.code {
                     KeyCode::PageUp => {
-                        self.scroll_offset = self.scroll_offset.saturating_add(20);
+                        self.scroll_offset = self
+                            .scroll_offset
+                            .saturating_add(borg_core::constants::PAGE_SCROLL_LINES);
                         self.auto_scroll = false;
                         return Ok(AppAction::Continue);
                     }
                     KeyCode::PageDown => {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(20);
+                        self.scroll_offset = self
+                            .scroll_offset
+                            .saturating_sub(borg_core::constants::PAGE_SCROLL_LINES);
                         if self.scroll_offset == 0 {
                             self.auto_scroll = true;
                         }

@@ -3,15 +3,12 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tracing::warn;
 
 use super::api::DiscordClient;
+use crate::typing_keepalive::{self, TypingKeepaliveConfig};
 
 /// Keepalive interval for re-sending typing indicator (Discord typing lasts ~10s).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(8);
-
-/// Maximum duration before auto-stopping typing indicator.
-const MAX_TTL: Duration = Duration::from_secs(60);
 
 /// Discord API endpoint path for triggering typing indicator.
 #[cfg(test)]
@@ -30,12 +27,21 @@ impl TypingIndicator {
     ///
     /// Spawns a background task that posts to Discord's typing endpoint
     /// every 8 seconds to keep the indicator visible (it expires after ~10s).
-    /// Auto-stops after 60 seconds TTL.
+    /// Auto-stops after TTL.
     pub fn start(client: Arc<DiscordClient>, channel_id: String) -> Self {
         let (stop_tx, stop_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
-            typing_keepalive(client, channel_id, stop_rx).await;
+            let config = TypingKeepaliveConfig {
+                keepalive_interval: KEEPALIVE_INTERVAL,
+                label: "discord",
+            };
+            typing_keepalive::run_keepalive(config, stop_rx, || {
+                let client = client.clone();
+                let channel_id = channel_id.clone();
+                async move { client.trigger_typing_indicator(&channel_id).await }
+            })
+            .await;
         });
 
         Self {
@@ -67,48 +73,6 @@ impl Drop for TypingIndicator {
     }
 }
 
-async fn typing_keepalive(
-    client: Arc<DiscordClient>,
-    channel_id: String,
-    mut stop_rx: oneshot::Receiver<()>,
-) {
-    // Initial typing trigger
-    if let Err(e) = client.trigger_typing_indicator(&channel_id).await {
-        warn!("[discord typing] Initial trigger failed: {e}");
-    }
-
-    let mut keepalive_interval = tokio::time::interval(KEEPALIVE_INTERVAL);
-    keepalive_interval.tick().await; // consume first immediate tick
-    let ttl_deadline = tokio::time::sleep(MAX_TTL);
-    tokio::pin!(ttl_deadline);
-
-    let mut consecutive_failures: u32 = 0;
-
-    loop {
-        tokio::select! {
-            _ = &mut stop_rx => {
-                break;
-            }
-            _ = keepalive_interval.tick() => {
-                let result = client.trigger_typing_indicator(&channel_id).await;
-                if result.is_err() {
-                    consecutive_failures += 1;
-                    if consecutive_failures >= 2 {
-                        warn!("[discord typing] 2 consecutive failures, stopping keepalive");
-                        break;
-                    }
-                } else {
-                    consecutive_failures = 0;
-                }
-            }
-            _ = &mut ttl_deadline => {
-                warn!("[discord typing] TTL exceeded (60s), auto-stopping");
-                break;
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,7 +80,6 @@ mod tests {
     #[test]
     fn constants_match_expected() {
         assert_eq!(KEEPALIVE_INTERVAL, Duration::from_secs(8));
-        assert_eq!(MAX_TTL, Duration::from_secs(60));
     }
 
     #[test]

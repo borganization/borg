@@ -27,6 +27,7 @@ pub mod slack;
 pub mod teams;
 pub mod telegram;
 pub mod twilio;
+pub(crate) mod typing_keepalive;
 
 pub use registry::ChannelRegistry;
 pub use server::GatewayServer;
