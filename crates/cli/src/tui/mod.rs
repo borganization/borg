@@ -210,8 +210,10 @@ pub async fn run() -> Result<()> {
     }
 
     // Register evolution hook for XP tracking and specialization
-    if let Ok(evolution_hook) = borg_core::evolution::EvolutionHook::new() {
-        agent.hook_registry_mut().register(Box::new(evolution_hook));
+    if config.evolution.enabled {
+        if let Ok(evolution_hook) = borg_core::evolution::EvolutionHook::new() {
+            agent.hook_registry_mut().register(Box::new(evolution_hook));
+        }
     }
 
     // Try to resume the last session
@@ -284,8 +286,10 @@ pub async fn run() -> Result<()> {
     }
     // Show vitals + evolution header on session start
     if let Ok(db) = borg_core::db::Database::open() {
-        if let Ok(evo_state) = db.get_evolution_state() {
-            app.push_system_message(borg_core::evolution::format_compact(&evo_state));
+        if app.config.evolution.enabled {
+            if let Ok(evo_state) = db.get_evolution_state() {
+                app.push_system_message(borg_core::evolution::format_compact(&evo_state));
+            }
         }
         if let Ok(state) = db.get_vitals_state() {
             let now = chrono::Utc::now();

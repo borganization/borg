@@ -676,18 +676,21 @@ fn run_usage() -> Result<()> {
 
 fn run_status() -> Result<()> {
     let now = chrono::Utc::now();
+    let config = borg_core::config::Config::load()?;
     let db = borg_core::db::Database::open()?;
 
     // Evolution header
-    if let Ok(evo_state) = db.get_evolution_state() {
-        println!("Borg Status");
-        println!("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
-        println!();
-        print!(
-            "{}",
-            borg_core::evolution::format_status_section(&evo_state)
-        );
-        println!();
+    if config.evolution.enabled {
+        if let Ok(evo_state) = db.get_evolution_state() {
+            println!("Borg Status");
+            println!("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
+            println!();
+            print!(
+                "{}",
+                borg_core::evolution::format_status_section(&evo_state)
+            );
+            println!();
+        }
     }
 
     // Vitals
@@ -730,6 +733,13 @@ fn format_bar(value: usize, width: usize) -> String {
 }
 
 fn run_status_history() -> Result<()> {
+    let config = borg_core::config::Config::load()?;
+    if !config.evolution.enabled {
+        println!(
+            "Evolution system is disabled. Enable with: borg settings set evolution.enabled true"
+        );
+        return Ok(());
+    }
     let db = borg_core::db::Database::open()?;
     let events = db.evolution_events_since(0)?;
     // Reverse to chronological for display
@@ -740,6 +750,13 @@ fn run_status_history() -> Result<()> {
 }
 
 fn run_status_archetypes() -> Result<()> {
+    let config = borg_core::config::Config::load()?;
+    if !config.evolution.enabled {
+        println!(
+            "Evolution system is disabled. Enable with: borg settings set evolution.enabled true"
+        );
+        return Ok(());
+    }
     let db = borg_core::db::Database::open()?;
     let state = db.get_evolution_state()?;
     println!("{}", borg_core::evolution::format_archetype_scores(&state));
