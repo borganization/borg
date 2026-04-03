@@ -621,15 +621,15 @@ pub fn format_compact(state: &EvolutionState) -> String {
         (Some(name), Some(arch)) => {
             let arch_display = format!("{arch}");
             let capitalized = capitalize_first(&arch_display);
-            format!("[{name} Lvl.{} | {capitalized}]", state.level)
+            format!("{name} Lvl.{} | {capitalized}", state.level)
         }
-        (Some(name), None) => format!("[{name} Lvl.{}]", state.level),
+        (Some(name), None) => format!("{name} Lvl.{}", state.level),
         (None, Some(arch)) => {
             let arch_display = format!("{arch}");
             let capitalized = capitalize_first(&arch_display);
-            format!("[Base Borg Lvl.{} | {capitalized}]", state.level)
+            format!("Base Borg Lvl.{} | {capitalized}", state.level)
         }
-        (None, None) => format!("[Base Borg Lvl.{}]", state.level),
+        (None, None) => format!("Base Borg Lvl.{}", state.level),
     }
 }
 
