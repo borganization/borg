@@ -44,10 +44,6 @@ fn session_path(id: &str) -> Result<PathBuf> {
     Ok(sessions_dir()?.join(format!("{id}.json")))
 }
 
-fn last_session_path() -> Result<PathBuf> {
-    Ok(Config::data_dir()?.join("last_session"))
-}
-
 impl Default for Session {
     fn default() -> Self {
         Self::new()
@@ -78,9 +74,6 @@ impl Session {
         fs::write(&tmp_path, &json)?;
         fs::rename(&tmp_path, &path)?;
 
-        // Track as last session
-        let last = last_session_path()?;
-        fs::write(&last, &self.meta.id)?;
         Ok(())
     }
 
@@ -114,17 +107,13 @@ impl Session {
 }
 
 pub fn load_last_session() -> Result<Option<Session>> {
-    let last_path = last_session_path()?;
-    if !last_path.exists() {
-        return Ok(None);
-    }
-    let id = fs::read_to_string(&last_path)?.trim().to_string();
-    if id.is_empty() {
-        return Ok(None);
-    }
-    match Session::load(&id) {
-        Ok(session) => Ok(Some(session)),
-        Err(_) => Ok(None),
+    let sessions = list_sessions()?;
+    match sessions.first() {
+        Some(meta) => match Session::load(&meta.id) {
+            Ok(session) => Ok(Some(session)),
+            Err(_) => Ok(None),
+        },
+        None => Ok(None),
     }
 }
 
@@ -298,6 +287,104 @@ mod tests {
         let deserialized: SessionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.id, session.meta.id);
         assert_eq!(deserialized.title, session.meta.title);
+    }
+
+    static SESSION_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn write_test_session(sessions_dir: &std::path::Path, id: &str, updated_at: &str) {
+        let session = Session {
+            meta: SessionMeta {
+                id: id.to_string(),
+                title: format!("Test {id}"),
+                created_at: "2025-01-01T00:00:00+00:00".to_string(),
+                updated_at: updated_at.to_string(),
+                message_count: 1,
+            },
+            messages: vec![Message {
+                role: Role::User,
+                content: Some(MessageContent::Text("hello".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                timestamp: None,
+            }],
+        };
+        let path = sessions_dir.join(format!("{id}.json"));
+        fs::write(&path, serde_json::to_string(&session).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn load_last_session_returns_most_recently_updated() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+        let sdir = tmp.path().join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+
+        write_test_session(&sdir, "old-session", "2025-01-01T00:00:00+00:00");
+        write_test_session(&sdir, "new-session", "2025-06-01T00:00:00+00:00");
+
+        let result = load_last_session().unwrap().unwrap();
+        assert_eq!(result.meta.id, "new-session");
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
+    fn load_last_session_returns_none_when_no_sessions() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+        let sdir = tmp.path().join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+
+        let result = load_last_session().unwrap();
+        assert!(result.is_none());
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
+    fn load_last_session_skips_corrupt_files() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+        let sdir = tmp.path().join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+
+        fs::write(sdir.join("corrupt.json"), "not valid json{{{").unwrap();
+        write_test_session(&sdir, "valid-session", "2025-03-01T00:00:00+00:00");
+
+        let result = load_last_session().unwrap().unwrap();
+        assert_eq!(result.meta.id, "valid-session");
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
+    fn save_then_load_last_session_roundtrip() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+
+        let mut session = Session::new();
+        session.meta.title = "Roundtrip test".to_string();
+        session.save().unwrap();
+
+        let loaded = load_last_session().unwrap().unwrap();
+        assert_eq!(loaded.meta.id, session.meta.id);
+        assert_eq!(loaded.meta.title, "Roundtrip test");
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
+    fn save_does_not_create_last_session_file() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+
+        let session = Session::new();
+        session.save().unwrap();
+
+        let last_file = tmp.path().join("last_session");
+        assert!(!last_file.exists());
+        std::env::remove_var("BORG_DATA_DIR");
     }
 }
 
