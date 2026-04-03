@@ -72,8 +72,10 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 
 /// Style a system message line with visual hierarchy:
 /// - Icons (✓, ●) → cyan, (⚠) → amber, (✗) → red
-/// - Headers (non-indented, non-separator) → bold white
+/// - Explicit headers/titles → bold white
+/// - Lines with `Label:` prefix → label bold white, rest dim
 /// - History lines `[HH:MM] Role: ...` → styled role labels
+/// - Log lines → timestamp+level bold white, message dim
 /// - Help lines with `/command` → command bold white
 /// - Everything else → dim
 fn style_system_line(line: &str) -> Line<'static> {
@@ -156,13 +158,58 @@ fn style_system_line(line: &str) -> Line<'static> {
         }
     }
 
+    // Log lines: "2026-04-03T17:05:25...Z  WARN ..." or "2026-04-03T17:05:25...Z ERROR ..."
+    if trimmed.len() > 20 && trimmed.as_bytes()[0].is_ascii_digit() && trimmed[..20].contains('T') {
+        for level in &[" ERROR ", " WARN ", " INFO ", " DEBUG ", " TRACE "] {
+            if let Some(pos) = trimmed.find(level) {
+                let prefix_end = pos + level.len();
+                return Line::from(vec![
+                    Span::styled(trimmed[..prefix_end].to_string(), theme::header_style()),
+                    Span::styled(trimmed[prefix_end..].to_string(), theme::dim()),
+                ]);
+            }
+        }
+        return Line::from(Span::styled(line.to_string(), theme::dim()));
+    }
+
     // Indented lines — check for /command patterns (for /help)
     if line.starts_with("  ") {
         return style_help_commands(line);
     }
 
-    // Non-indented, non-empty → header (bold white)
-    Line::from(Span::styled(line.to_string(), theme::header_style()))
+    // XML tags → bold white
+    if trimmed.starts_with('<') {
+        return Line::from(Span::styled(line.to_string(), theme::header_style()));
+    }
+
+    // Markdown headers → bold white
+    if trimmed.starts_with('#') {
+        return Line::from(Span::styled(line.to_string(), theme::header_style()));
+    }
+
+    // Short title-like lines (no spaces, or very short) → bold white
+    // Matches: "Browser", "Security", "Host Security", "Borg Doctor", "Borg Vitals",
+    //          "Commands:", "Built-in tools:", "Pending Requests", "Approved Senders"
+    if !trimmed.contains(':') && trimmed.len() <= 40 && !trimmed.starts_with('(') {
+        return Line::from(Span::styled(line.to_string(), theme::header_style()));
+    }
+
+    // "Label: content" pattern — bold the label, dim the content
+    // Matches: "Session: 58 messages", "LLM usage: 0 prompt...", "24h: 1 user...",
+    //          "Budget: 0/1000000", "Summary: 36 passed...", "Tip: ..."
+    if let Some(colon_pos) = trimmed.find(':') {
+        let label = &trimmed[..colon_pos];
+        // Only treat as label if it's short and looks like a title (no long prose before colon)
+        if label.len() <= 30 && !label.contains("  ") {
+            return Line::from(vec![
+                Span::styled(trimmed[..colon_pos + 1].to_string(), theme::header_style()),
+                Span::styled(trimmed[colon_pos + 1..].to_string(), theme::dim()),
+            ]);
+        }
+    }
+
+    // Default: dim
+    Line::from(Span::styled(line.to_string(), theme::dim()))
 }
 
 /// Highlight `/command` patterns in indented lines (for /help output).
@@ -905,8 +952,59 @@ mod tests {
     }
 
     #[test]
+    fn style_system_line_log_warn() {
+        let line =
+            style_system_line("2026-04-03T17:05:25.065853Z  WARN Failed to resolve credential");
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].style, theme::header_style());
+        assert!(line.spans[0].content.contains("WARN "));
+        assert_eq!(line.spans[1].style, theme::dim());
+    }
+
+    #[test]
+    fn style_system_line_log_error() {
+        let line = style_system_line("2026-04-03T17:05:25.096265Z ERROR Gateway exited with error");
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].style, theme::header_style());
+        assert!(line.spans[0].content.contains("ERROR "));
+        assert_eq!(line.spans[1].style, theme::dim());
+    }
+
+    #[test]
     fn style_system_line_plain_indented() {
         let line = style_system_line("  some body text");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style, theme::dim());
+    }
+
+    #[test]
+    fn style_system_line_label_content() {
+        let line = style_system_line("Session: 58 messages, ~11399 estimated tokens");
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content.as_ref(), "Session:");
+        assert_eq!(line.spans[0].style, theme::header_style());
+        assert_eq!(line.spans[1].style, theme::dim());
+    }
+
+    #[test]
+    fn style_system_line_xml_tag() {
+        let line = style_system_line("<memory_file name=\"notes.md\">");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style, theme::header_style());
+    }
+
+    #[test]
+    fn style_system_line_markdown_header() {
+        let line = style_system_line("# My Memory Topic");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style, theme::header_style());
+    }
+
+    #[test]
+    fn style_system_line_prose_is_dim() {
+        let line = style_system_line(
+            "This is a longer line of regular prose text that should remain dim styled",
+        );
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].style, theme::dim());
     }
