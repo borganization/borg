@@ -248,6 +248,16 @@ pub enum AgentEvent {
     Error(String),
 }
 
+/// Returns true if the agent should retry the LLM call because it returned
+/// empty text after tool execution (safety net for silent completions).
+fn should_nudge_for_response(
+    text_content: &str,
+    needs_response: bool,
+    already_nudged: bool,
+) -> bool {
+    text_content.trim().is_empty() && needs_response && !already_nudged
+}
+
 pub struct Agent {
     config: Config,
     history: Vec<Message>,
@@ -1067,6 +1077,8 @@ impl Agent {
     ) -> Result<()> {
         let max_iterations = self.config.conversation.max_iterations as usize;
         let mut iteration: usize = 0;
+        let mut needs_response = false;
+        let mut nudged_for_response = false;
 
         self.prepare_loop().await;
 
@@ -1379,6 +1391,16 @@ impl Agent {
             self.hook_registry.dispatch(&hook_ctx);
 
             if tool_calls.is_empty() {
+                // Safety net: if LLM returned empty text after tool execution,
+                // nudge once for a confirmation response before terminating.
+                if should_nudge_for_response(&text_content, needs_response, nudged_for_response) {
+                    nudged_for_response = true;
+                    self.log_and_persist(Message::system(
+                        "Respond to the user with a brief confirmation of what you just did.",
+                    ));
+                    continue;
+                }
+
                 // Fire TurnComplete hook
                 let hook_ctx = self.hook_ctx(
                     HookPoint::TurnComplete,
@@ -1473,6 +1495,7 @@ impl Agent {
 
             self.run_tool_calls(&parallel, &event_tx, &cancel).await;
             self.run_tool_calls(&sequential, &event_tx, &cancel).await;
+            needs_response = true;
 
             // Drain any steer messages from the user at the tool boundary
             self.drain_steers(&event_tx).await;
@@ -2158,6 +2181,49 @@ mod tests {
 
         // Second attempt — file is gone
         assert!(std::fs::rename(&setup_path, &consumed_path).is_err());
+    }
+
+    // -- should_nudge_for_response tests --
+
+    #[test]
+    fn nudge_when_empty_after_tools() {
+        assert!(should_nudge_for_response("", true, false));
+        assert!(should_nudge_for_response("  \n  ", true, false));
+    }
+
+    #[test]
+    fn no_nudge_when_text_present() {
+        assert!(!should_nudge_for_response("Done!", true, false));
+    }
+
+    #[test]
+    fn no_nudge_when_no_tools_executed() {
+        assert!(!should_nudge_for_response("", false, false));
+    }
+
+    #[test]
+    fn no_nudge_when_already_retried() {
+        assert!(!should_nudge_for_response("", true, true));
+    }
+
+    // -- collaboration mode template tests --
+
+    #[test]
+    fn default_mode_requires_task_confirmation() {
+        let template = include_str!("../templates/collaboration_mode/default.md");
+        assert!(
+            template.contains("always provide a brief text response"),
+            "Default collaboration mode must instruct agent to confirm task completion"
+        );
+    }
+
+    #[test]
+    fn execute_mode_requires_task_confirmation() {
+        let template = include_str!("../templates/collaboration_mode/execute.md");
+        assert!(
+            template.contains("Never end a turn silently"),
+            "Execute collaboration mode must instruct agent to never end silently"
+        );
     }
 }
 
