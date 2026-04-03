@@ -86,25 +86,6 @@ pub async fn one_shot(
                         }
                     }
                 }
-                AgentEvent::ToolConfirmation {
-                    respond,
-                    tool_name,
-                    reason,
-                } => {
-                    if auto_approve {
-                        let _ = respond.send(true);
-                        if !json_output {
-                            eprintln!("[auto-approved] {tool_name}: {reason}");
-                        }
-                    } else {
-                        let _ = respond.send(false);
-                        if !json_output {
-                            eprintln!(
-                                "Dangerous operation denied in one-shot mode ({tool_name}: {reason}). Use --yes to allow."
-                            );
-                        }
-                    }
-                }
                 AgentEvent::Error(e) => {
                     eprintln!("Error: {e}");
                     exit_code = 1;

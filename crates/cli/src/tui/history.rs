@@ -37,11 +37,6 @@ pub enum HistoryCell {
         command: String,
         status: ApprovalStatus,
     },
-    ToolApproval {
-        tool_name: String,
-        reason: String,
-        status: ApprovalStatus,
-    },
     Heartbeat {
         text: String,
     },
@@ -108,7 +103,6 @@ impl HistoryCell {
                     }
                     lines.push(Line::from(all_spans).style(bg));
                 }
-                lines.push(Line::from(Span::styled(" ".repeat(w), bg)).style(bg));
                 lines
             }
             HistoryCell::Assistant { text, streaming } => {
@@ -247,32 +241,6 @@ impl HistoryCell {
                     Line::from(vec![
                         Span::styled("  [run_shell] ", theme::error_style()),
                         Span::styled(command.clone(), theme::error_style()),
-                    ]),
-                    Line::from(vec![
-                        Span::raw("  Allow? "),
-                        Span::styled(status_text.to_string(), status_style),
-                    ]),
-                ]
-            }
-            HistoryCell::ToolApproval {
-                tool_name,
-                reason,
-                status,
-            } => {
-                let status_text = match status {
-                    ApprovalStatus::Pending => "[y/N]",
-                    ApprovalStatus::Approved => "[approved]",
-                    ApprovalStatus::Denied => "[denied]",
-                };
-                let status_style = match status {
-                    ApprovalStatus::Pending => theme::error_style(),
-                    ApprovalStatus::Approved => theme::success_style(),
-                    ApprovalStatus::Denied => theme::dim(),
-                };
-                vec![
-                    Line::from(vec![
-                        Span::styled(format!("  [{tool_name}] "), theme::error_style()),
-                        Span::styled(reason.clone(), theme::error_style()),
                     ]),
                     Line::from(vec![
                         Span::raw("  Allow? "),
@@ -538,8 +506,23 @@ mod tests {
             text: "hello".to_string(),
         };
         let lines = cell.render(40, None);
-        // Should have top padding, content, bottom padding
-        assert!(lines.len() >= 3);
+        // Should have top padding + content line(s), no bottom padding
+        assert_eq!(lines.len(), 2); // 1 top padding + 1 content line
+    }
+
+    #[test]
+    fn render_user_cell_no_double_background() {
+        let cell = HistoryCell::User {
+            text: "hello world".to_string(),
+        };
+        let lines = cell.render(80, None);
+        // Last line should be a content line (contains the chevron), not empty padding
+        let last = lines.last().unwrap();
+        let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains(super::theme::CHEVRON),
+            "last line should contain the chevron prefix, not be empty padding"
+        );
     }
 
     #[test]

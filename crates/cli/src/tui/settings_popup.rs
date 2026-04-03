@@ -111,12 +111,6 @@ const SETTINGS: &[SettingEntry] = &[
         kind: SettingKind::Bool,
         category: "Security",
     },
-    SettingEntry {
-        key: "security.hitl_dangerous_ops",
-        label: "Confirm risky actions",
-        kind: SettingKind::Bool,
-        category: "Security",
-    },
     // — Budget —
     SettingEntry {
         key: "budget.monthly_token_limit",
@@ -236,7 +230,6 @@ impl SettingsPopup {
                 format!("{}", config.conversation.max_transcript_chars)
             }
             "security.secret_detection" => format!("{}", config.security.secret_detection),
-            "security.hitl_dangerous_ops" => format!("{}", config.security.hitl_dangerous_ops),
             "budget.monthly_token_limit" => format!("{}", config.budget.monthly_token_limit),
             "budget.warning_threshold" => format!("{}", config.budget.warning_threshold),
             "gateway.max_body_size" => format!("{}", config.gateway.max_body_size),

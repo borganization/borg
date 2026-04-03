@@ -547,17 +547,6 @@ pub async fn invoke_agent_with_auto_reply(
                         response_text = borg_core::error_format::format_friendly_error(&e);
                     }
                 }
-                AgentEvent::ToolConfirmation {
-                    respond,
-                    tool_name,
-                    reason,
-                } => {
-                    warn!("Auto-denying tool confirmation in gateway mode: {tool_name} ({reason})");
-                    response_text.push_str(&format!(
-                        "\n[Operation denied: {tool_name} requires confirmation — {reason}]"
-                    ));
-                    let _ = respond.send(false);
-                }
                 AgentEvent::ShellConfirmation { respond, command } => {
                     warn!("Auto-denying shell confirmation in gateway mode: {command}");
                     response_text
