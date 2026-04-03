@@ -433,4 +433,84 @@ mod tests {
         let result = popup.handle_key(enter);
         assert!(result.is_none());
     }
+
+    fn make_popup_with_task(status: &str) -> SchedulePopup {
+        let mut popup = SchedulePopup::new();
+        popup.visible = true;
+        popup.tasks.push(TaskItem {
+            task: ScheduledTaskRow {
+                id: "test-1".into(),
+                name: "test task".into(),
+                prompt: "do something".into(),
+                schedule_type: "cron".into(),
+                schedule_expr: "0 9 * * *".into(),
+                timezone: "UTC".into(),
+                status: status.into(),
+                next_run: None,
+                created_at: 0,
+                max_retries: 0,
+                retry_count: 0,
+                retry_after: None,
+                last_error: None,
+                timeout_ms: 60000,
+                delivery_channel: None,
+                delivery_target: None,
+                allowed_tools: None,
+            },
+            original_status: status.into(),
+            original_schedule_expr: "0 9 * * *".into(),
+            pending_delete: false,
+        });
+        popup
+    }
+
+    #[test]
+    fn space_toggles_task_status() {
+        let mut popup = make_popup_with_task("active");
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+
+        let result = popup.handle_key(space);
+        assert_eq!(popup.tasks[0].task.status, "paused");
+        assert!(result.is_none());
+
+        let result = popup.handle_key(space);
+        assert_eq!(popup.tasks[0].task.status, "active");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn enter_does_not_toggle_triggers_apply() {
+        let mut popup = make_popup_with_task("active");
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+
+        // Enter with no changes should not toggle
+        let result = popup.handle_key(enter);
+        assert_eq!(popup.tasks[0].task.status, "active");
+        assert!(result.is_none());
+
+        // Toggle with Space, then Enter should apply
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        popup.handle_key(space);
+        assert_eq!(popup.tasks[0].task.status, "paused");
+
+        let result = popup.handle_key(enter);
+        assert!(result.is_some());
+        let actions = result.unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], ScheduleAction::ToggleStatus { .. }));
+    }
+
+    #[test]
+    fn tab_does_nothing() {
+        let mut popup = make_popup_with_task("active");
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+
+        let result = popup.handle_key(tab);
+        assert_eq!(popup.tasks[0].task.status, "active");
+        assert!(result.is_none());
+        assert!(popup.status_message.is_none());
+    }
 }

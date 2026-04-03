@@ -560,6 +560,27 @@ mod tests {
     }
 
     #[test]
+    fn tab_does_nothing() {
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-tab");
+        popup.show(&tmp);
+
+        popup.items[0].is_installed = false;
+        popup.items[0].is_selected = false;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let result = popup.handle_key(tab);
+
+        // Tab should not toggle selection
+        assert!(!popup.items[0].is_selected);
+        // Tab should not trigger apply
+        assert!(result.is_none());
+        // Tab should not set a status message
+        assert!(popup.status_message.is_none());
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     fn no_credential_input_for_zero_cred_defs() {
         let mut popup = PluginsPopup::new();
