@@ -799,7 +799,8 @@ impl<'a> App<'a> {
                      /help      - Show this help\n  \
                      /settings  - Configure settings\n  \
                      /usage     - Show usage stats\n  \
-                     /plan      - Toggle plan mode\n\
+                     /plan      - Toggle plan mode\n  \
+                     /mode      - Switch mode (default/execute/plan)\n\
                      \n  \
                      /compact   - Compact conversation history\n  \
                      /clear     - Clear conversation\n  \
@@ -808,14 +809,20 @@ impl<'a> App<'a> {
                      /tools     - List tools\n  \
                      /memory    - Show memory\n  \
                      /skills    - List skills\n  \
-                     /doctor    - Run diagnostics\n\
+                     /history   - Show conversation history\n  \
+                     /logs      - Show TUI log file\n  \
+                     /doctor    - Run diagnostics\n  \
+                     /status    - Show agent vitals\n  \
+                     /pairing   - Show channel pairing info\n\
                      \n  \
                      /sessions  - Browse saved sessions\n  \
                      /save      - Save current session\n  \
-                     /new       - Start new session\n\
+                     /new       - Start new session\n  \
+                     /load      - Load a saved session by ID\n\
                      \n  \
                      /plugins   - Browse integrations\n  \
                      /schedule  - Manage scheduled tasks\n  \
+                     /restart   - Restart gateway server\n  \
                      quit/exit  - Exit"
                         .to_string(),
                 );
@@ -1166,6 +1173,14 @@ impl<'a> App<'a> {
                 );
                 return Ok(AppAction::Continue);
             }
+        }
+
+        // Reject unknown slash commands
+        if trimmed.starts_with('/') {
+            self.push_system_message(format!(
+                "Unknown command: {trimmed}\nType /help for available commands."
+            ));
+            return Ok(AppAction::Continue);
         }
 
         // Separator between turns
@@ -2679,5 +2694,101 @@ mod tests {
             app.cells.last(),
             Some(HistoryCell::Thinking { text }) if text == "reasoning..."
         ));
+    }
+
+    // --- Slash command handling ---
+
+    #[test]
+    fn unknown_slash_command_rejected() {
+        let mut app = make_app();
+        let result = app.handle_submit("/foobar").unwrap();
+        assert!(matches!(result, AppAction::Continue));
+        let has_unknown_msg = app.cells.iter().any(|c| {
+            matches!(
+                c, HistoryCell::System { text } if text.contains("Unknown command")
+            )
+        });
+        assert!(has_unknown_msg, "should show unknown command message");
+    }
+
+    #[test]
+    fn unknown_slash_command_not_sent_to_agent() {
+        let mut app = make_app();
+        app.handle_submit("/notacommand").unwrap();
+        // Should NOT create a User cell (which would mean it was sent to the agent)
+        let has_user_cell = app
+            .cells
+            .iter()
+            .any(|c| matches!(c, HistoryCell::User { .. }));
+        assert!(
+            !has_user_cell,
+            "unknown slash command should not be sent to agent"
+        );
+    }
+
+    #[test]
+    fn help_command_works() {
+        let mut app = make_app();
+        let result = app.handle_submit("/help").unwrap();
+        assert!(matches!(result, AppAction::Continue));
+        let has_help = app.cells.iter().any(|c| {
+            matches!(
+                c, HistoryCell::System { text } if text.contains("/help")
+            )
+        });
+        assert!(has_help, "should show help text");
+    }
+
+    #[test]
+    fn mode_prefix_command_not_rejected() {
+        let mut app = make_app();
+        let result = app.handle_submit("/mode execute").unwrap();
+        assert!(matches!(result, AppAction::Continue));
+        // Should show mode change message, not "Unknown command"
+        let has_unknown = app.cells.iter().any(|c| {
+            matches!(
+                c, HistoryCell::System { text } if text.contains("Unknown command")
+            )
+        });
+        assert!(
+            !has_unknown,
+            "/mode execute should not be treated as unknown"
+        );
+    }
+
+    #[test]
+    fn load_prefix_command_not_rejected() {
+        let mut app = make_app();
+        let result = app.handle_submit("/load abc123").unwrap();
+        // /load returns LoadSession action, not Continue
+        assert!(matches!(result, AppAction::LoadSession { .. }));
+    }
+
+    #[test]
+    fn settings_prefix_not_rejected() {
+        let mut app = make_app();
+        let result = app.handle_submit("/settings temperature 0.5").unwrap();
+        // Should either update or error, not "Unknown command"
+        let has_unknown = app.cells.iter().any(|c| {
+            matches!(
+                c, HistoryCell::System { text } if text.contains("Unknown command")
+            )
+        });
+        assert!(
+            !has_unknown,
+            "/settings key value should not be treated as unknown"
+        );
+    }
+
+    #[test]
+    fn plan_prefix_not_rejected() {
+        let mut app = make_app();
+        let _result = app.handle_submit("/plan hello").unwrap();
+        let has_unknown = app.cells.iter().any(|c| {
+            matches!(
+                c, HistoryCell::System { text } if text.contains("Unknown command")
+            )
+        });
+        assert!(!has_unknown, "/plan <msg> should not be treated as unknown");
     }
 }

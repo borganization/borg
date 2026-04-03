@@ -29,6 +29,10 @@ const COMMANDS: &[SlashCommandDef] = &[
         name: "/plan",
         description: "Toggle plan mode (review before proceeding)",
     },
+    SlashCommandDef {
+        name: "/mode",
+        description: "Switch mode (default/execute/plan)",
+    },
     // Conversation
     SlashCommandDef {
         name: "/compact",
@@ -56,8 +60,25 @@ const COMMANDS: &[SlashCommandDef] = &[
         description: "List skills",
     },
     SlashCommandDef {
+        name: "/history",
+        description: "Show conversation history",
+    },
+    SlashCommandDef {
+        name: "/logs",
+        description: "Show TUI log file",
+    },
+    // Diagnostics
+    SlashCommandDef {
         name: "/doctor",
         description: "Run diagnostics",
+    },
+    SlashCommandDef {
+        name: "/status",
+        description: "Show agent vitals",
+    },
+    SlashCommandDef {
+        name: "/pairing",
+        description: "Show channel pairing info",
     },
     // Sessions
     SlashCommandDef {
@@ -72,6 +93,10 @@ const COMMANDS: &[SlashCommandDef] = &[
         name: "/new",
         description: "Start new session",
     },
+    SlashCommandDef {
+        name: "/load",
+        description: "Load a saved session by ID",
+    },
     // Integrations
     SlashCommandDef {
         name: "/plugins",
@@ -80,6 +105,10 @@ const COMMANDS: &[SlashCommandDef] = &[
     SlashCommandDef {
         name: "/schedule",
         description: "Manage scheduled tasks",
+    },
+    SlashCommandDef {
+        name: "/restart",
+        description: "Restart gateway server",
     },
 ];
 
@@ -306,5 +335,63 @@ mod tests {
             items.iter().any(|c| c.name == "/schedule"),
             "/schedule should appear in filtered commands"
         );
+    }
+
+    #[test]
+    fn all_known_commands_present() {
+        let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        let expected = [
+            "/help",
+            "/settings",
+            "/usage",
+            "/plan",
+            "/mode",
+            "/compact",
+            "/clear",
+            "/undo",
+            "/tools",
+            "/memory",
+            "/skills",
+            "/history",
+            "/logs",
+            "/doctor",
+            "/status",
+            "/pairing",
+            "/sessions",
+            "/save",
+            "/new",
+            "/load",
+            "/plugins",
+            "/schedule",
+            "/restart",
+        ];
+        assert_eq!(COMMANDS.len(), expected.len(), "COMMANDS count mismatch");
+        for cmd in &expected {
+            assert!(names.contains(cmd), "missing command: {cmd}");
+        }
+    }
+
+    #[test]
+    fn filter_st_matches_status_and_schedule() {
+        let mut popup = CommandPopup::new();
+        popup.update_filter("/st");
+        let items = popup.filtered();
+        let names: Vec<&str> = items.iter().map(|c| c.name).collect();
+        assert!(names.contains(&"/status"), "should match /status");
+        // /settings starts with /se, not /st — so it should NOT match
+        assert!(
+            !names.contains(&"/settings"),
+            "/settings should not match /st"
+        );
+    }
+
+    #[test]
+    fn filter_lo_matches_load_and_logs() {
+        let mut popup = CommandPopup::new();
+        popup.update_filter("/lo");
+        let items = popup.filtered();
+        let names: Vec<&str> = items.iter().map(|c| c.name).collect();
+        assert!(names.contains(&"/load"), "should match /load");
+        assert!(names.contains(&"/logs"), "should match /logs");
     }
 }
