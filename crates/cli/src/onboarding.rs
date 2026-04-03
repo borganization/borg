@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn generate_setup_mentions_archetypes() {
         let setup = generate_setup("Nova", "Alice");
-        assert!(setup.contains("archetypes"));
+        assert!(setup.contains("specialize"));
     }
 
     #[test]
