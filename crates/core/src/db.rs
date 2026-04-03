@@ -1166,7 +1166,7 @@ impl Database {
                 focus_delta INTEGER NOT NULL DEFAULT 0,
                 sync_delta INTEGER NOT NULL DEFAULT 0,
                 growth_delta INTEGER NOT NULL DEFAULT 0,
-                charge_delta INTEGER NOT NULL DEFAULT 0,
+                happiness_delta INTEGER NOT NULL DEFAULT 0,
                 metadata_json TEXT,
                 created_at INTEGER NOT NULL,
                 hmac TEXT NOT NULL,
@@ -1374,7 +1374,7 @@ impl Database {
     fn load_all_vitals_events(&self) -> Result<Vec<crate::vitals::VitalsEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, category, source, stability_delta, focus_delta, sync_delta,
-                    growth_delta, charge_delta, metadata_json, created_at, hmac, prev_hmac
+                    growth_delta, happiness_delta, metadata_json, created_at, hmac, prev_hmac
              FROM vitals_events ORDER BY id ASC",
         )?;
 
@@ -1388,7 +1388,7 @@ impl Database {
                     focus_delta: row.get(4)?,
                     sync_delta: row.get(5)?,
                     growth_delta: row.get(6)?,
-                    charge_delta: row.get(7)?,
+                    happiness_delta: row.get(7)?,
                     metadata_json: row.get(8)?,
                     created_at: row.get(9)?,
                     hmac: row.get(10)?,
@@ -1446,7 +1446,7 @@ impl Database {
 
             self.conn.execute(
                 "INSERT INTO vitals_events (category, source, stability_delta, focus_delta,
-                    sync_delta, growth_delta, charge_delta, metadata_json, created_at,
+                    sync_delta, growth_delta, happiness_delta, metadata_json, created_at,
                     hmac, prev_hmac)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
@@ -1456,7 +1456,7 @@ impl Database {
                     deltas.focus as i32,
                     deltas.sync as i32,
                     deltas.growth as i32,
-                    deltas.charge as i32,
+                    deltas.happiness as i32,
                     metadata,
                     now,
                     hmac,
@@ -1482,7 +1482,7 @@ impl Database {
     pub fn vitals_events_since(&self, since: i64) -> Result<Vec<crate::vitals::VitalsEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, category, source, stability_delta, focus_delta, sync_delta,
-                    growth_delta, charge_delta, metadata_json, created_at, hmac, prev_hmac
+                    growth_delta, happiness_delta, metadata_json, created_at, hmac, prev_hmac
              FROM vitals_events WHERE created_at >= ?1 ORDER BY created_at DESC",
         )?;
 
@@ -1496,7 +1496,7 @@ impl Database {
                     focus_delta: row.get(4)?,
                     sync_delta: row.get(5)?,
                     growth_delta: row.get(6)?,
-                    charge_delta: row.get(7)?,
+                    happiness_delta: row.get(7)?,
                     metadata_json: row.get(8)?,
                     created_at: row.get(9)?,
                     hmac: row.get(10)?,
@@ -6363,11 +6363,11 @@ mod tests {
     fn vitals_state_baseline_no_events() {
         let db = test_db();
         let state = db.get_vitals_state().unwrap();
-        assert_eq!(state.stability, 80);
-        assert_eq!(state.focus, 60);
-        assert_eq!(state.sync, 55);
-        assert_eq!(state.growth, 70);
-        assert_eq!(state.charge, 65);
+        assert_eq!(state.stability, 50);
+        assert_eq!(state.focus, 50);
+        assert_eq!(state.sync, 50);
+        assert_eq!(state.growth, 50);
+        assert_eq!(state.happiness, 50);
     }
 
     #[test]
@@ -6377,11 +6377,11 @@ mod tests {
         db.record_vitals_event("creation", "create_tool", &deltas, None)
             .unwrap();
         let state = db.get_vitals_state().unwrap();
-        assert_eq!(state.stability, 82); // 80 + 2
-        assert_eq!(state.focus, 61); // 60 + 1
-        assert_eq!(state.sync, 56); // 55 + 1
-        assert_eq!(state.growth, 73); // 70 + 3
-        assert_eq!(state.charge, 68); // 65 + 3
+        assert_eq!(state.stability, 52); // 50 + 2
+        assert_eq!(state.focus, 51); // 50 + 1
+        assert_eq!(state.sync, 51); // 50 + 1
+        assert_eq!(state.growth, 53); // 50 + 3
+        assert_eq!(state.happiness, 53); // 50 + 3
     }
 
     #[test]
@@ -6409,9 +6409,9 @@ mod tests {
         }
         let events = db.vitals_events_since(0).unwrap();
         assert_eq!(events.len(), 5);
-        // State replayed from events: stability 80 + 5*1 = 85
+        // State replayed from events: stability 50 + 5*1 = 55
         let state = db.get_vitals_state().unwrap();
-        assert_eq!(state.stability, 85);
+        assert_eq!(state.stability, 55);
     }
 
     #[test]
@@ -6428,7 +6428,7 @@ mod tests {
         assert!(!events[1].hmac.is_empty());
         // State should be valid (both events applied)
         let state = db.get_vitals_state().unwrap();
-        assert_eq!(state.focus, 62); // 60 + 1 + 1
+        assert_eq!(state.focus, 52); // 50 + 1 + 1
     }
 
     // ── Bond DB Tests ──

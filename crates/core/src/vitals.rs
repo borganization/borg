@@ -1,6 +1,6 @@
 //! Vitals system — passive agent health tracking via lifecycle hooks.
 //!
-//! Five stats (stability, focus, sync, growth, charge) update automatically
+//! Five stats (stability, focus, sync, growth, happiness) update automatically
 //! from usage events. State is event-sourced: derived by replaying verified
 //! events from baseline. HMAC chain prevents tampering; rate limiting caps
 //! impact per category per hour to prevent gaming.
@@ -42,7 +42,7 @@ pub(crate) fn compute_event_hmac(
             &deltas.focus.to_le_bytes(),
             &deltas.sync.to_le_bytes(),
             &deltas.growth.to_le_bytes(),
-            &deltas.charge.to_le_bytes(),
+            &deltas.happiness.to_le_bytes(),
             &created_at.to_le_bytes(),
         ],
     )
@@ -55,7 +55,7 @@ fn verify_event_hmac(key: &[u8], event: &VitalsEvent, expected_prev_hmac: &str) 
         focus: event.focus_delta as i8,
         sync: event.sync_delta as i8,
         growth: event.growth_delta as i8,
-        charge: event.charge_delta as i8,
+        happiness: event.happiness_delta as i8,
     };
     let recomputed = compute_event_hmac(
         key,
@@ -101,7 +101,7 @@ pub struct VitalsState {
     pub focus: u8,
     pub sync: u8,
     pub growth: u8,
-    pub charge: u8,
+    pub happiness: u8,
     pub last_interaction_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub chain_valid: bool,
@@ -150,7 +150,7 @@ pub struct StatDeltas {
     pub focus: i8,
     pub sync: i8,
     pub growth: i8,
-    pub charge: i8,
+    pub happiness: i8,
 }
 
 /// A recorded event from the ledger.
@@ -163,7 +163,7 @@ pub struct VitalsEvent {
     pub focus_delta: i32,
     pub sync_delta: i32,
     pub growth_delta: i32,
-    pub charge_delta: i32,
+    pub happiness_delta: i32,
     pub metadata_json: Option<String>,
     pub created_at: i64,
     pub hmac: String,
@@ -176,7 +176,7 @@ pub enum DriftFlag {
     InactiveTooLong,
     LowStability,
     LowSync,
-    LowCharge,
+    LowHappiness,
     RepeatedFailures,
 }
 
@@ -186,7 +186,7 @@ impl DriftFlag {
             Self::InactiveTooLong => "Agent inactive for over 48 hours",
             Self::LowStability => "Stability is critically low",
             Self::LowSync => "Sync is low — regular interaction helps",
-            Self::LowCharge => "Charge is critically low",
+            Self::LowHappiness => "Happiness is critically low",
             Self::RepeatedFailures => "Multiple recent tool failures detected",
         }
     }
@@ -204,11 +204,11 @@ pub struct Recommendation {
 /// Baseline vitals for a fresh agent.
 pub fn baseline() -> VitalsState {
     VitalsState {
-        stability: 80,
-        focus: 60,
-        sync: 55,
-        growth: 70,
-        charge: 65,
+        stability: 50,
+        focus: 50,
+        sync: 50,
+        growth: 50,
+        happiness: 50,
         last_interaction_at: Utc::now(),
         updated_at: Utc::now(),
         chain_valid: true,
@@ -223,35 +223,35 @@ pub fn deltas_for(category: EventCategory) -> StatDeltas {
             focus: 1,
             sync: 2,
             growth: 0,
-            charge: 1,
+            happiness: 1,
         },
         EventCategory::Success => StatDeltas {
             stability: 1,
             focus: 1,
             sync: 0,
             growth: 0,
-            charge: 1,
+            happiness: 1,
         },
         EventCategory::Failure => StatDeltas {
             stability: -2,
             focus: -1,
             sync: 0,
             growth: -1,
-            charge: 0,
+            happiness: 0,
         },
         EventCategory::Correction => StatDeltas {
             stability: -3,
             focus: -2,
             sync: -1,
             growth: 0,
-            charge: -1,
+            happiness: -1,
         },
         EventCategory::Creation => StatDeltas {
             stability: 2,
             focus: 1,
             sync: 1,
             growth: 3,
-            charge: 3,
+            happiness: 3,
         },
     }
 }
@@ -262,7 +262,7 @@ pub fn apply_deltas(state: &mut VitalsState, deltas: &StatDeltas) {
     state.focus = clamp_add(state.focus, deltas.focus);
     state.sync = clamp_add(state.sync, deltas.sync);
     state.growth = clamp_add(state.growth, deltas.growth);
-    state.charge = clamp_add(state.charge, deltas.charge);
+    state.happiness = clamp_add(state.happiness, deltas.happiness);
 }
 
 fn clamp_add(val: u8, delta: i8) -> u8 {
@@ -308,7 +308,7 @@ pub fn replay_events_with_key(key: &[u8], events: &[VitalsEvent]) -> VitalsState
             focus: event.focus_delta as i8,
             sync: event.sync_delta as i8,
             growth: event.growth_delta as i8,
-            charge: event.charge_delta as i8,
+            happiness: event.happiness_delta as i8,
         };
         apply_deltas(&mut state, &deltas);
 
@@ -341,7 +341,7 @@ pub fn apply_decay(state: &VitalsState, now: DateTime<Utc>) -> VitalsState {
 
     if hours >= 24 {
         result.sync = clamp_add(result.sync, -6);
-        result.charge = clamp_add(result.charge, -4);
+        result.happiness = clamp_add(result.happiness, -4);
     }
     if hours >= 72 {
         result.stability = clamp_add(result.stability, -8);
@@ -371,8 +371,8 @@ pub fn detect_drift(state: &VitalsState, now: DateTime<Utc>) -> Vec<DriftFlag> {
     if state.sync < 40 {
         flags.push(DriftFlag::LowSync);
     }
-    if state.charge < 30 {
-        flags.push(DriftFlag::LowCharge);
+    if state.happiness < 30 {
+        flags.push(DriftFlag::LowHappiness);
     }
 
     flags
@@ -394,10 +394,10 @@ pub fn recommend(state: &VitalsState) -> Recommendation {
             tip: "Have a conversation or start a task to restore sync",
         };
     }
-    if state.charge < 30 {
+    if state.happiness < 30 {
         return Recommendation {
-            reason: "Charge is low",
-            tip: "Use borg for a meaningful task to restore charge",
+            reason: "Happiness is low",
+            tip: "Use borg for a meaningful task to restore happiness",
         };
     }
     if state.stability < 30 {
@@ -463,8 +463,8 @@ fn bar(val: u8, width: usize) -> String {
 /// Compact one-liner for TUI session header.
 pub fn format_compact(state: &VitalsState) -> String {
     format!(
-        "[stability:{} focus:{} sync:{} growth:{} charge:{}]",
-        state.stability, state.focus, state.sync, state.growth, state.charge
+        "[stability:{} focus:{} sync:{} growth:{} happiness:{}]",
+        state.stability, state.focus, state.sync, state.growth, state.happiness
     )
 }
 
@@ -494,9 +494,9 @@ pub fn format_status(state: &VitalsState, events: &[VitalsEvent], drift: &[Drift
         state.growth
     ));
     out.push_str(&format!(
-        "  charge       {}  {}\n",
-        bar(state.charge, 10),
-        state.charge
+        "  happiness    {}  {}\n",
+        bar(state.happiness, 10),
+        state.happiness
     ));
 
     if !events.is_empty() {
@@ -637,42 +637,42 @@ mod tests {
     #[test]
     fn test_baseline_values() {
         let state = baseline();
-        assert_eq!(state.stability, 80);
-        assert_eq!(state.focus, 60);
-        assert_eq!(state.sync, 55);
-        assert_eq!(state.growth, 70);
-        assert_eq!(state.charge, 65);
+        assert_eq!(state.stability, 50);
+        assert_eq!(state.focus, 50);
+        assert_eq!(state.sync, 50);
+        assert_eq!(state.growth, 50);
+        assert_eq!(state.happiness, 50);
     }
 
     #[test]
     fn test_deltas_for_all_categories() {
         let d = deltas_for(EventCategory::Interaction);
         assert_eq!(
-            (d.stability, d.focus, d.sync, d.growth, d.charge),
+            (d.stability, d.focus, d.sync, d.growth, d.happiness),
             (0, 1, 2, 0, 1)
         );
 
         let d = deltas_for(EventCategory::Success);
         assert_eq!(
-            (d.stability, d.focus, d.sync, d.growth, d.charge),
+            (d.stability, d.focus, d.sync, d.growth, d.happiness),
             (1, 1, 0, 0, 1)
         );
 
         let d = deltas_for(EventCategory::Failure);
         assert_eq!(
-            (d.stability, d.focus, d.sync, d.growth, d.charge),
+            (d.stability, d.focus, d.sync, d.growth, d.happiness),
             (-2, -1, 0, -1, 0)
         );
 
         let d = deltas_for(EventCategory::Correction);
         assert_eq!(
-            (d.stability, d.focus, d.sync, d.growth, d.charge),
+            (d.stability, d.focus, d.sync, d.growth, d.happiness),
             (-3, -2, -1, 0, -1)
         );
 
         let d = deltas_for(EventCategory::Creation);
         assert_eq!(
-            (d.stability, d.focus, d.sync, d.growth, d.charge),
+            (d.stability, d.focus, d.sync, d.growth, d.happiness),
             (2, 1, 1, 3, 3)
         );
     }
@@ -682,11 +682,11 @@ mod tests {
         let mut state = baseline();
         let deltas = deltas_for(EventCategory::Interaction);
         apply_deltas(&mut state, &deltas);
-        assert_eq!(state.stability, 80);
-        assert_eq!(state.focus, 61);
-        assert_eq!(state.sync, 57);
-        assert_eq!(state.growth, 70);
-        assert_eq!(state.charge, 66);
+        assert_eq!(state.stability, 50);
+        assert_eq!(state.focus, 51);
+        assert_eq!(state.sync, 52);
+        assert_eq!(state.growth, 50);
+        assert_eq!(state.happiness, 51);
     }
 
     #[test]
@@ -741,7 +741,7 @@ mod tests {
         let now = state.last_interaction_at + Duration::hours(23);
         let decayed = apply_decay(&state, now);
         assert_eq!(decayed.sync, state.sync);
-        assert_eq!(decayed.charge, state.charge);
+        assert_eq!(decayed.happiness, state.happiness);
         assert_eq!(decayed.stability, state.stability);
         assert_eq!(decayed.focus, state.focus);
         assert_eq!(decayed.growth, state.growth);
@@ -752,10 +752,10 @@ mod tests {
         let state = baseline();
         let now = state.last_interaction_at + Duration::hours(25);
         let decayed = apply_decay(&state, now);
-        assert_eq!(decayed.sync, 55 - 6);
-        assert_eq!(decayed.charge, 65 - 4);
-        assert_eq!(decayed.stability, 80);
-        assert_eq!(decayed.focus, 60);
+        assert_eq!(decayed.sync, 50 - 6);
+        assert_eq!(decayed.happiness, 50 - 4);
+        assert_eq!(decayed.stability, 50);
+        assert_eq!(decayed.focus, 50);
     }
 
     #[test]
@@ -763,10 +763,10 @@ mod tests {
         let state = baseline();
         let now = state.last_interaction_at + Duration::hours(73);
         let decayed = apply_decay(&state, now);
-        assert_eq!(decayed.sync, 55 - 6);
-        assert_eq!(decayed.charge, 65 - 4);
-        assert_eq!(decayed.stability, 80 - 8);
-        assert_eq!(decayed.focus, 60 - 8);
+        assert_eq!(decayed.sync, 50 - 6);
+        assert_eq!(decayed.happiness, 50 - 4);
+        assert_eq!(decayed.stability, 50 - 8);
+        assert_eq!(decayed.focus, 50 - 8);
     }
 
     #[test]
@@ -774,11 +774,11 @@ mod tests {
         let state = baseline();
         let now = state.last_interaction_at + Duration::hours(169);
         let decayed = apply_decay(&state, now);
-        assert_eq!(decayed.sync, 55 - 6);
-        assert_eq!(decayed.charge, 65 - 4);
-        assert_eq!(decayed.stability, 80 - 8 - 5);
-        assert_eq!(decayed.focus, 60 - 8);
-        assert_eq!(decayed.growth, 70 - 5);
+        assert_eq!(decayed.sync, 50 - 6);
+        assert_eq!(decayed.happiness, 50 - 4);
+        assert_eq!(decayed.stability, 50 - 8 - 5);
+        assert_eq!(decayed.focus, 50 - 8);
+        assert_eq!(decayed.growth, 50 - 5);
     }
 
     // ── Drift Detection ──
@@ -796,11 +796,11 @@ mod tests {
         let mut state = baseline();
         state.stability = 25;
         state.sync = 35;
-        state.charge = 20;
+        state.happiness = 20;
         let drift = detect_drift(&state, Utc::now());
         assert!(drift.contains(&DriftFlag::LowStability));
         assert!(drift.contains(&DriftFlag::LowSync));
-        assert!(drift.contains(&DriftFlag::LowCharge));
+        assert!(drift.contains(&DriftFlag::LowHappiness));
     }
 
     #[test]
@@ -821,11 +821,11 @@ mod tests {
     }
 
     #[test]
-    fn test_recommend_low_charge() {
+    fn test_recommend_low_happiness() {
         let mut state = baseline();
-        state.charge = 25;
+        state.happiness = 25;
         let rec = recommend(&state);
-        assert!(rec.reason.contains("Charge"));
+        assert!(rec.reason.contains("Happiness"));
     }
 
     #[test]
@@ -865,11 +865,11 @@ mod tests {
     fn test_format_compact() {
         let state = baseline();
         let compact = format_compact(&state);
-        assert!(compact.contains("stability:80"));
-        assert!(compact.contains("focus:60"));
-        assert!(compact.contains("sync:55"));
-        assert!(compact.contains("growth:70"));
-        assert!(compact.contains("charge:65"));
+        assert!(compact.contains("stability:50"));
+        assert!(compact.contains("focus:50"));
+        assert!(compact.contains("sync:50"));
+        assert!(compact.contains("growth:50"));
+        assert!(compact.contains("happiness:50"));
     }
 
     #[test]
@@ -882,7 +882,7 @@ mod tests {
         assert!(output.contains("focus"));
         assert!(output.contains("sync"));
         assert!(output.contains("growth"));
-        assert!(output.contains("charge"));
+        assert!(output.contains("happiness"));
         assert!(output.contains("Drift:"));
         assert!(output.contains("Tip:"));
     }
@@ -918,7 +918,7 @@ mod tests {
             focus_delta: 0,
             sync_delta: 0,
             growth_delta: 0,
-            charge_delta: 0,
+            happiness_delta: 0,
             metadata_json: None,
             created_at: Utc::now().timestamp(),
             hmac: String::new(),
@@ -981,7 +981,7 @@ mod tests {
             focus_delta: deltas.focus as i32,
             sync_delta: deltas.sync as i32,
             growth_delta: deltas.growth as i32,
-            charge_delta: deltas.charge as i32,
+            happiness_delta: deltas.happiness as i32,
             metadata_json: None,
             created_at: 100,
             hmac: hmac1.clone(),
@@ -1012,7 +1012,7 @@ mod tests {
             focus_delta: deltas.focus as i32,
             sync_delta: deltas.sync as i32,
             growth_delta: deltas.growth as i32,
-            charge_delta: deltas.charge as i32,
+            happiness_delta: deltas.happiness as i32,
             metadata_json: None,
             created_at: ts,
             hmac: hmac.clone(),
@@ -1028,7 +1028,7 @@ mod tests {
             focus_delta: 100,
             sync_delta: 100,
             growth_delta: 100,
-            charge_delta: 100,
+            happiness_delta: 100,
             metadata_json: None,
             created_at: ts + 1,
             hmac: "fake_hmac".to_string(),
@@ -1037,8 +1037,8 @@ mod tests {
 
         let state = replay_events(&[legit, tampered]);
         // Only the legit event should be applied (creation: +2 stab)
-        assert_eq!(state.stability, 82); // 80 + 2
-        assert_eq!(state.growth, 73); // 70 + 3
+        assert_eq!(state.stability, 52); // 50 + 2
+        assert_eq!(state.growth, 53); // 50 + 3
     }
 
     // ── Rate Limiting ──
@@ -1063,7 +1063,7 @@ mod tests {
                 focus_delta: deltas.focus as i32,
                 sync_delta: deltas.sync as i32,
                 growth_delta: deltas.growth as i32,
-                charge_delta: deltas.charge as i32,
+                happiness_delta: deltas.happiness as i32,
                 metadata_json: None,
                 created_at: ts,
                 hmac: hmac.clone(),
@@ -1074,8 +1074,8 @@ mod tests {
 
         let state = replay_events(&events);
         // Only 5 creation events should apply (cap), each +2 stability
-        assert_eq!(state.stability, 80 + 5 * 2); // 90, not 80 + 20*2
-        assert_eq!(state.growth, 70 + 5 * 3); // 85, not 70 + 20*3
+        assert_eq!(state.stability, 50 + 5 * 2); // 60, not 50 + 20*2
+        assert_eq!(state.growth, 50 + 5 * 3); // 65, not 50 + 20*3
     }
 
     #[test]
@@ -1101,7 +1101,7 @@ mod tests {
             focus_delta: deltas.focus as i32,
             sync_delta: deltas.sync as i32,
             growth_delta: deltas.growth as i32,
-            charge_delta: deltas.charge as i32,
+            happiness_delta: deltas.happiness as i32,
             metadata_json: None,
             created_at: 1000,
             hmac: hmac1.clone(),
@@ -1117,7 +1117,7 @@ mod tests {
             focus_delta: deltas.focus as i32,
             sync_delta: deltas.sync as i32,
             growth_delta: deltas.growth as i32,
-            charge_delta: deltas.charge as i32,
+            happiness_delta: deltas.happiness as i32,
             metadata_json: None,
             created_at: 2000,
             hmac: "corrupted".to_string(),
@@ -1141,7 +1141,7 @@ mod tests {
             focus_delta: deltas.focus as i32,
             sync_delta: deltas.sync as i32,
             growth_delta: deltas.growth as i32,
-            charge_delta: deltas.charge as i32,
+            happiness_delta: deltas.happiness as i32,
             metadata_json: None,
             created_at: 3000,
             hmac: hmac3,
@@ -1150,8 +1150,76 @@ mod tests {
 
         let state = replay_events(&[event1, event2, event3]);
         // Only event1 should be applied (stability +1)
-        assert_eq!(state.stability, 81); // 80 + 1
+        assert_eq!(state.stability, 51); // 50 + 1
         assert!(!state.chain_valid);
+    }
+
+    // ── Baseline Invariants ──
+
+    #[test]
+    fn test_baseline_all_equal() {
+        let state = baseline();
+        assert_eq!(state.stability, state.focus);
+        assert_eq!(state.focus, state.sync);
+        assert_eq!(state.sync, state.growth);
+        assert_eq!(state.growth, state.happiness);
+    }
+
+    #[test]
+    fn test_baseline_is_midpoint() {
+        let state = baseline();
+        for val in [
+            state.stability,
+            state.focus,
+            state.sync,
+            state.growth,
+            state.happiness,
+        ] {
+            assert_eq!(val, 50);
+            assert_eq!(100 - val, val); // symmetric headroom
+        }
+    }
+
+    #[test]
+    fn test_decay_never_triggers_drift_from_baseline() {
+        let mut state = baseline();
+        // Simulate 8 days of inactivity (max decay)
+        state.last_interaction_at = Utc::now() - Duration::hours(200);
+        let decayed = apply_decay(&state, Utc::now());
+        // InactiveTooLong will fire (>48h), but no stat-based drift flags
+        let drift = detect_drift(&decayed, Utc::now());
+        assert!(!drift.contains(&DriftFlag::LowStability));
+        assert!(!drift.contains(&DriftFlag::LowSync));
+        assert!(!drift.contains(&DriftFlag::LowHappiness));
+    }
+
+    #[test]
+    fn test_all_negative_events_from_baseline() {
+        let mut state = baseline();
+        let deltas = deltas_for(EventCategory::Correction); // -3,-2,-1,0,-1
+                                                            // Apply 50 corrections — should drive all affected stats to 0 without underflow
+        for _ in 0..50 {
+            apply_deltas(&mut state, &deltas);
+        }
+        assert_eq!(state.stability, 0);
+        assert_eq!(state.focus, 0);
+        assert_eq!(state.sync, 0);
+        assert_eq!(state.growth, 50); // corrections don't affect growth
+        assert_eq!(state.happiness, 0);
+    }
+
+    #[test]
+    fn test_growth_from_baseline() {
+        let mut state = baseline();
+        let deltas = deltas_for(EventCategory::Creation); // +2,+1,+1,+3,+3
+                                                          // Apply 17 creations — growth should hit 100 (50 + 17*3 = 101 → clamped to 100)
+        for _ in 0..17 {
+            apply_deltas(&mut state, &deltas);
+        }
+        assert_eq!(state.growth, 100);
+        assert_eq!(state.happiness, 100); // 50 + 17*3 = 101 → 100
+        assert!(state.stability <= 100);
+        assert!(state.focus <= 100);
     }
 
     #[test]
@@ -1161,7 +1229,7 @@ mod tests {
             focus: -2,
             sync: -1,
             growth: 0,
-            charge: -1,
+            happiness: -1,
         };
         let hmac1 = compute_event_hmac(VITALS_HMAC_LEGACY, "0", "correction", "test", deltas, 1000);
         let hmac2 = compute_event_hmac(VITALS_HMAC_LEGACY, "0", "correction", "test", deltas, 1000);
