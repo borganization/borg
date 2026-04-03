@@ -23,22 +23,25 @@ use crate::vitals;
 
 // ── HMAC ──
 
-/// Compiled-in secret for HMAC chain. Prevents casual SQL tampering.
-/// See module-level docs for security limitations.
-const BOND_HMAC_SECRET: &[u8] = b"borg-bond-chain-v1";
+/// Domain string for HMAC key derivation. Combined with per-installation salt.
+pub(crate) const BOND_HMAC_DOMAIN: &[u8] = b"borg-bond-chain-v1";
+
+/// Legacy compiled-in secret for installations without per-install salt.
+const BOND_HMAC_LEGACY: &[u8] = b"borg-bond-chain-v1";
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Compute HMAC for a bond event, chaining from the previous event's HMAC.
 #[allow(clippy::expect_used)]
-pub fn compute_event_hmac(
+pub(crate) fn compute_event_hmac(
+    key: &[u8],
     prev_hmac: &str,
     event_type: &str,
     score_delta: i32,
     reason: &str,
     created_at: i64,
 ) -> String {
-    let mut mac = HmacSha256::new_from_slice(BOND_HMAC_SECRET).expect("HMAC accepts any key size");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key size");
     mac.update(prev_hmac.as_bytes());
     mac.update(event_type.as_bytes());
     mac.update(&score_delta.to_le_bytes());
@@ -55,11 +58,12 @@ pub fn compute_event_hmac(
 }
 
 /// Verify a bond event's HMAC against the expected chain.
-fn verify_event_hmac(event: &BondEvent, expected_prev_hmac: &str) -> bool {
+fn verify_event_hmac(key: &[u8], event: &BondEvent, expected_prev_hmac: &str) -> bool {
     if event.prev_hmac != expected_prev_hmac {
         return false;
     }
     let expected = compute_event_hmac(
+        key,
         &event.prev_hmac,
         &event.event_type,
         event.score_delta,
@@ -72,7 +76,7 @@ fn verify_event_hmac(event: &BondEvent, expected_prev_hmac: &str) -> bool {
 // ── Rate Limiting ──
 
 /// Maximum events per type per hour during replay.
-fn rate_limit_for(event_type: &str) -> u32 {
+pub(crate) fn rate_limit_for(event_type: &str) -> u32 {
     match event_type {
         "tool_success" => 15,
         "tool_failure" => 10,
@@ -197,6 +201,11 @@ pub fn autonomy_from_level(level: BondLevel) -> AutonomyTier {
 /// events are skipped. This is intentional: the chain is append-only and
 /// any tampering makes the tail untrustworthy.
 pub fn replay_events(events: &[BondEvent]) -> BondState {
+    replay_events_with_key(BOND_HMAC_LEGACY, events)
+}
+
+/// Replay events with a specific HMAC key (for per-installation derived keys).
+pub fn replay_events_with_key(key: &[u8], events: &[BondEvent]) -> BondState {
     let mut score: i32 = BASELINE_SCORE;
     let mut expected_prev_hmac = "0".to_string();
     // Rate limit: (hour_bucket, event_type) -> count
@@ -205,7 +214,7 @@ pub fn replay_events(events: &[BondEvent]) -> BondState {
 
     for event in events {
         // Verify HMAC chain — skip tampered/injected events
-        if !verify_event_hmac(event, &expected_prev_hmac) {
+        if !verify_event_hmac(key, event, &expected_prev_hmac) {
             tracing::warn!("bond: skipping event {} with broken HMAC chain", event.id);
             chain_valid = false;
             continue;
@@ -620,31 +629,45 @@ mod tests {
 
     #[test]
     fn test_compute_event_hmac_deterministic() {
-        let h1 = compute_event_hmac("0", "tool_success", 1, "run_shell", 1000);
-        let h2 = compute_event_hmac("0", "tool_success", 1, "run_shell", 1000);
+        let h1 = compute_event_hmac(BOND_HMAC_LEGACY, "0", "tool_success", 1, "run_shell", 1000);
+        let h2 = compute_event_hmac(BOND_HMAC_LEGACY, "0", "tool_success", 1, "run_shell", 1000);
         assert_eq!(h1, h2);
         assert!(!h1.is_empty());
     }
 
     #[test]
     fn test_compute_event_hmac_different_inputs() {
-        let h1 = compute_event_hmac("0", "tool_success", 1, "run_shell", 1000);
-        let h2 = compute_event_hmac("0", "tool_failure", -1, "run_shell", 1000);
+        let h1 = compute_event_hmac(BOND_HMAC_LEGACY, "0", "tool_success", 1, "run_shell", 1000);
+        let h2 = compute_event_hmac(BOND_HMAC_LEGACY, "0", "tool_failure", -1, "run_shell", 1000);
         assert_ne!(h1, h2);
     }
 
     #[test]
     fn test_compute_event_hmac_different_prev() {
-        let h1 = compute_event_hmac("0", "tool_success", 1, "test", 1000);
-        let h2 = compute_event_hmac("abc", "tool_success", 1, "test", 1000);
+        let h1 = compute_event_hmac(BOND_HMAC_LEGACY, "0", "tool_success", 1, "test", 1000);
+        let h2 = compute_event_hmac(BOND_HMAC_LEGACY, "abc", "tool_success", 1, "test", 1000);
         assert_ne!(h1, h2);
     }
 
     #[test]
     fn test_verify_chain_valid() {
-        let hmac1 = compute_event_hmac("0", "tool_success", 1, "test", 1000);
-        let hmac2 = compute_event_hmac(&hmac1, "creation", 2, "write_memory", 2000);
-        let hmac3 = compute_event_hmac(&hmac2, "tool_failure", -1, "run_shell", 3000);
+        let hmac1 = compute_event_hmac(BOND_HMAC_LEGACY, "0", "tool_success", 1, "test", 1000);
+        let hmac2 = compute_event_hmac(
+            BOND_HMAC_LEGACY,
+            &hmac1,
+            "creation",
+            2,
+            "write_memory",
+            2000,
+        );
+        let hmac3 = compute_event_hmac(
+            BOND_HMAC_LEGACY,
+            &hmac2,
+            "tool_failure",
+            -1,
+            "run_shell",
+            3000,
+        );
 
         let events = vec![
             BondEvent {
@@ -685,7 +708,7 @@ mod tests {
 
     #[test]
     fn test_verify_chain_tampered_delta() {
-        let hmac1 = compute_event_hmac("0", "tool_success", 1, "test", 1000);
+        let hmac1 = compute_event_hmac(BOND_HMAC_LEGACY, "0", "tool_success", 1, "test", 1000);
 
         let events = vec![BondEvent {
             id: 1,
@@ -706,9 +729,23 @@ mod tests {
     #[test]
     fn test_verify_chain_mid_corruption_invalidates_tail() {
         // Event 1: valid, event 2: tampered, event 3: valid but after broken chain
-        let hmac1 = compute_event_hmac("0", "tool_success", 1, "test", 1000);
-        let hmac2_real = compute_event_hmac(&hmac1, "creation", 2, "write_memory", 2000);
-        let hmac3 = compute_event_hmac(&hmac2_real, "tool_success", 1, "read_file", 3000);
+        let hmac1 = compute_event_hmac(BOND_HMAC_LEGACY, "0", "tool_success", 1, "test", 1000);
+        let hmac2_real = compute_event_hmac(
+            BOND_HMAC_LEGACY,
+            &hmac1,
+            "creation",
+            2,
+            "write_memory",
+            2000,
+        );
+        let hmac3 = compute_event_hmac(
+            BOND_HMAC_LEGACY,
+            &hmac2_real,
+            "tool_success",
+            1,
+            "read_file",
+            3000,
+        );
 
         let events = vec![
             BondEvent {
@@ -765,7 +802,14 @@ mod tests {
 
         for i in 0..20 {
             let created_at = base_time + i;
-            let hmac = compute_event_hmac(&prev_hmac, "tool_success", 1, "test", created_at);
+            let hmac = compute_event_hmac(
+                BOND_HMAC_LEGACY,
+                &prev_hmac,
+                "tool_success",
+                1,
+                "test",
+                created_at,
+            );
             events.push(BondEvent {
                 id: i as i64 + 1,
                 event_type: "tool_success".to_string(),
@@ -793,7 +837,14 @@ mod tests {
 
         for i in 0..20 {
             let created_at = 3600 * (i as i64 + 1); // each in a different hour
-            let hmac = compute_event_hmac(&prev_hmac, "tool_success", 1, "test", created_at);
+            let hmac = compute_event_hmac(
+                BOND_HMAC_LEGACY,
+                &prev_hmac,
+                "tool_success",
+                1,
+                "test",
+                created_at,
+            );
             events.push(BondEvent {
                 id: i as i64 + 1,
                 event_type: "tool_success".to_string(),
@@ -821,7 +872,14 @@ mod tests {
 
         for i in 0..70 {
             let created_at = 3600 * (i as i64 + 1);
-            let hmac = compute_event_hmac(&prev_hmac, "creation", 2, "test", created_at);
+            let hmac = compute_event_hmac(
+                BOND_HMAC_LEGACY,
+                &prev_hmac,
+                "creation",
+                2,
+                "test",
+                created_at,
+            );
             events.push(BondEvent {
                 id: i as i64 + 1,
                 event_type: "creation".to_string(),
@@ -845,7 +903,14 @@ mod tests {
 
         for i in 0..50 {
             let created_at = 3600 * (i as i64 + 1);
-            let hmac = compute_event_hmac(&prev_hmac, "correction", -2, "test", created_at);
+            let hmac = compute_event_hmac(
+                BOND_HMAC_LEGACY,
+                &prev_hmac,
+                "correction",
+                -2,
+                "test",
+                created_at,
+            );
             events.push(BondEvent {
                 id: i as i64 + 1,
                 event_type: "correction".to_string(),
