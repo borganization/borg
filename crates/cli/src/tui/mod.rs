@@ -998,24 +998,37 @@ async fn run_event_loop(
                 }
             }
             AppAction::Uninstall => {
-                // Uninstall daemon service (best-effort)
+                // Step 1: Daemon service
+                app.push_system_message("Removing daemon service...".to_string());
+                terminal.draw(|f| app.render(f))?;
                 if let Err(e) = crate::service::uninstall_service() {
                     tracing::debug!("Service uninstall skipped: {e}");
                 }
-                // Remove data directory (~/.borg/)
+
+                // Step 2: Data directory
+                app.push_system_message("Removing data directory (~/.borg/)...".to_string());
+                terminal.draw(|f| app.render(f))?;
                 if let Ok(data_dir) = borg_core::config::Config::data_dir() {
                     if let Err(e) = std::fs::remove_dir_all(&data_dir) {
-                        tracing::warn!("Failed to remove data dir: {e}");
+                        app.push_system_message(format!("Warning: failed to remove data dir: {e}"));
+                        terminal.draw(|f| app.render(f))?;
                     }
                 }
-                // Remove binary (best-effort — works on Unix even while running)
+
+                // Step 3: Binary
+                app.push_system_message("Removing binary...".to_string());
+                terminal.draw(|f| app.render(f))?;
                 if let Ok(exe) = std::env::current_exe() {
                     let exe = exe.canonicalize().unwrap_or(exe);
                     if let Err(e) = std::fs::remove_file(&exe) {
                         tracing::debug!("Could not remove binary: {e}");
                     }
                 }
+
+                // Close browser and exit
                 agent.lock().await.close_browser().await;
+                app.push_system_message("Goodbye!".to_string());
+                terminal.draw(|f| app.render(f))?;
                 return Ok(());
             }
             AppAction::Continue => {}
