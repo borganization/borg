@@ -295,11 +295,6 @@ pub async fn run() -> Result<()> {
     }
     // Show vitals + evolution header on session start
     if let Ok(db) = borg_core::db::Database::open() {
-        if app.config.evolution.enabled {
-            if let Ok(evo_state) = db.get_evolution_state() {
-                app.push_system_message(borg_core::evolution::format_compact(&evo_state));
-            }
-        }
         if let Ok(state) = db.get_vitals_state() {
             let now = chrono::Utc::now();
             let state = borg_core::vitals::apply_decay(&state, now);
