@@ -123,7 +123,7 @@ impl PluginsPopup {
                     self.status_message = None;
                     None
                 }
-                KeyCode::Char(' ') | KeyCode::Enter => {
+                KeyCode::Char(' ') => {
                     if let Some(item) = self.items.get_mut(self.cursor) {
                         if !item.def.platform.is_available() {
                             self.status_message = Some((
@@ -141,7 +141,7 @@ impl PluginsPopup {
                     }
                     None
                 }
-                KeyCode::Tab => {
+                KeyCode::Enter => {
                     let actions = self.compute_pending_actions();
                     if actions.is_empty() {
                         self.status_message = Some(("No changes to apply.".to_string(), false));
@@ -447,7 +447,7 @@ impl PluginsPopup {
         let hint = if matches!(self.phase, PluginPhase::CredentialInput { .. }) {
             " Enter: submit  Esc: cancel"
         } else {
-            " Enter: toggle  Tab: apply  Esc: close"
+            " Space: toggle  Enter: apply  Esc: close"
         };
         let footer_y = inner.y + inner.height - 1;
         let footer_area = Rect::new(inner.x, footer_y, inner.width, 1);
@@ -510,23 +510,53 @@ mod tests {
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        // Enter toggles selection
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        popup.handle_key(enter);
+        // Space toggles selection
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        popup.handle_key(space);
         assert!(popup.items[0].is_selected);
 
-        // Space also toggles selection
-        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        // Space toggles back off
         popup.handle_key(space);
         assert!(!popup.items[0].is_selected);
 
         // Toggle back on for action check
-        popup.handle_key(enter);
+        popup.handle_key(space);
         assert!(popup.items[0].is_selected);
 
         let actions = popup.compute_pending_actions();
         assert_eq!(actions.len(), 1);
         assert!(actions[0].1); // is_install = true
+    }
+
+    #[test]
+    fn enter_does_not_toggle_triggers_apply() {
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-enter-apply");
+        popup.show(&tmp);
+
+        popup.items[0].is_installed = false;
+        popup.items[0].is_selected = false;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // Enter should NOT toggle — it triggers apply (no changes = status message)
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        popup.handle_key(enter);
+        assert!(!popup.items[0].is_selected);
+        assert!(popup.status_message.is_some());
+    }
+
+    #[test]
+    fn esc_closes_popup() {
+        let mut popup = PluginsPopup::new();
+        let tmp = std::env::temp_dir().join("borg-plugins-test-esc-close");
+        popup.show(&tmp);
+        assert!(popup.is_visible());
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        popup.handle_key(esc);
+        assert!(!popup.is_visible());
     }
 
     #[test]
@@ -545,13 +575,13 @@ mod tests {
         popup.cursor = imessage_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        popup.handle_key(enter);
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        popup.handle_key(space);
         assert!(popup.items[imessage_idx].is_selected);
 
-        // Tab should produce actions immediately (no credential input phase)
-        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-        let result = popup.handle_key(tab);
+        // Enter should produce actions immediately (no credential input phase)
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let result = popup.handle_key(enter);
         assert!(result.is_some());
         let actions = result.expect("should have actions");
         assert!(!actions.is_empty());
@@ -579,12 +609,12 @@ mod tests {
         popup.cursor = gmail_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        popup.handle_key(enter);
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        popup.handle_key(space);
 
-        // Tab should transition to CredentialInput
-        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-        let result = popup.handle_key(tab);
+        // Enter should transition to CredentialInput
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let result = popup.handle_key(enter);
         assert!(result.is_none()); // No actions yet
         assert!(matches!(popup.phase, PluginPhase::CredentialInput { .. }));
     }
@@ -603,8 +633,8 @@ mod tests {
         popup.cursor = gmail_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        popup.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(matches!(popup.phase, PluginPhase::CredentialInput { .. }));
 
         popup.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -625,8 +655,8 @@ mod tests {
         popup.cursor = gmail_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        popup.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
         // Type some characters
         popup.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
@@ -663,8 +693,8 @@ mod tests {
         popup.cursor = gmail_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        popup.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
         // Type credential value
         for c in "my-bot-token".chars() {
@@ -740,10 +770,10 @@ mod tests {
         popup.cursor = telegram_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        popup.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert!(popup.items[telegram_idx].is_selected);
 
-        popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(popup.phase, PluginPhase::CredentialInput { .. }));
 
         for c in "test-token".chars() {
@@ -782,8 +812,8 @@ mod tests {
         popup.cursor = slack_idx;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        popup.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         popup.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        popup.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(matches!(popup.phase, PluginPhase::CredentialInput { .. }));
 
         for c in "xoxb-token".chars() {

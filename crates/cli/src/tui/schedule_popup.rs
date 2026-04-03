@@ -122,19 +122,19 @@ impl SchedulePopup {
                     self.status_message = None;
                     None
                 }
-                KeyCode::Char(' ') | KeyCode::Enter => {
+                KeyCode::Char(' ') => {
                     if let Some(item) = self.tasks.get_mut(self.cursor) {
                         let status = item.task.status.as_str();
                         match status {
                             "active" => {
                                 item.task.status = "paused".to_string();
                                 self.status_message =
-                                    Some(("Paused (Tab to apply)".to_string(), true));
+                                    Some(("Paused (Enter to apply)".to_string(), true));
                             }
                             "paused" => {
                                 item.task.status = "active".to_string();
                                 self.status_message =
-                                    Some(("Resumed (Tab to apply)".to_string(), true));
+                                    Some(("Resumed (Enter to apply)".to_string(), true));
                             }
                             _ => {
                                 self.status_message =
@@ -162,7 +162,7 @@ impl SchedulePopup {
                     }
                     None
                 }
-                KeyCode::Tab => {
+                KeyCode::Enter => {
                     let actions = self.collect_actions();
                     if actions.is_empty() {
                         self.status_message = Some(("No changes to apply.".to_string(), false));
@@ -206,7 +206,7 @@ impl SchedulePopup {
                     }
                     self.phase = SchedulePhase::Browsing;
                     self.status_message =
-                        Some(("Schedule updated (Tab to apply)".to_string(), true));
+                        Some(("Schedule updated (Enter to apply)".to_string(), true));
                     None
                 }
                 _ => None,
@@ -384,7 +384,7 @@ impl SchedulePopup {
         let hint = if matches!(self.phase, SchedulePhase::EditingSchedule { .. }) {
             " Enter: save  Esc: cancel"
         } else {
-            " Space: toggle  e: edit  d: delete  Tab: apply  Esc: close"
+            " Space: toggle  e: edit  d: delete  Enter: apply  Esc: close"
         };
         let footer_y = inner.y + inner.height - 1;
         let footer_area = Rect::new(inner.x, footer_y, inner.width, 1);
@@ -425,12 +425,12 @@ mod tests {
     }
 
     #[test]
-    fn no_changes_returns_none() {
+    fn no_changes_enter_returns_none() {
         let mut popup = SchedulePopup::new();
         popup.show();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-        let result = popup.handle_key(tab);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let result = popup.handle_key(enter);
         assert!(result.is_none());
     }
 }
