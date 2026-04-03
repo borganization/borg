@@ -62,7 +62,10 @@ enum Commands {
         mode: Option<String>,
     },
     /// Show agent vitals and status
-    Status,
+    Status {
+        #[command(subcommand)]
+        action: Option<StatusAction>,
+    },
     /// Show bond status and trust metrics
     Bond {
         #[command(subcommand)]
@@ -138,6 +141,14 @@ enum BondAction {
         #[arg(long, short, default_value_t = 20)]
         count: usize,
     },
+}
+
+#[derive(Subcommand)]
+enum StatusAction {
+    /// Show evolution history timeline
+    History,
+    /// Show archetype score breakdown
+    Archetypes,
 }
 
 #[derive(Subcommand)]
@@ -391,7 +402,11 @@ async fn main() -> Result<()> {
             json,
             mode,
         }) => repl::one_shot(&message, yes, json, mode.as_deref()).await?,
-        Some(Commands::Status) => run_status()?,
+        Some(Commands::Status { action }) => match action {
+            None => run_status()?,
+            Some(StatusAction::History) => run_status_history()?,
+            Some(StatusAction::Archetypes) => run_status_archetypes()?,
+        },
         Some(Commands::Bond { action }) => match action {
             Some(BondAction::History { count }) => run_bond_history(count)?,
             None => run_bond_status()?,
@@ -662,6 +677,20 @@ fn run_usage() -> Result<()> {
 fn run_status() -> Result<()> {
     let now = chrono::Utc::now();
     let db = borg_core::db::Database::open()?;
+
+    // Evolution header
+    if let Ok(evo_state) = db.get_evolution_state() {
+        println!("Borg Status");
+        println!("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
+        println!();
+        print!(
+            "{}",
+            borg_core::evolution::format_status_section(&evo_state)
+        );
+        println!();
+    }
+
+    // Vitals
     let state = db.get_vitals_state()?;
     let state = borg_core::vitals::apply_decay(&state, now);
     let mut drift = borg_core::vitals::detect_drift(&state, now);
@@ -674,6 +703,46 @@ fn run_status() -> Result<()> {
         "{}",
         borg_core::vitals::format_status(&state, &events, &drift)
     );
+
+    // Bond
+    if let Ok(bond_events) = db.get_all_bond_events() {
+        let bond_state = borg_core::bond::replay_events(&bond_events);
+        println!("Bond");
+        println!(
+            "  score        {}  {} ({})",
+            format_bar(bond_state.score as usize, 10),
+            bond_state.score,
+            bond_state.level
+        );
+        println!();
+    }
+
+    Ok(())
+}
+
+fn format_bar(value: usize, width: usize) -> String {
+    let filled = (value * width) / 100;
+    format!(
+        "{}{}",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn run_status_history() -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    let events = db.evolution_events_since(0)?;
+    // Reverse to chronological for display
+    let mut events = events;
+    events.reverse();
+    println!("{}", borg_core::evolution::format_history(&events));
+    Ok(())
+}
+
+fn run_status_archetypes() -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    let state = db.get_evolution_state()?;
+    println!("{}", borg_core::evolution::format_archetype_scores(&state));
     Ok(())
 }
 

@@ -362,7 +362,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 23;
+    const CURRENT_VERSION: u32 = 24;
 
     /// Check if a column exists on a table via `PRAGMA table_info`.
     /// Safer than catching ALTER TABLE errors by string matching.
@@ -426,6 +426,7 @@ impl Database {
             Database::migrate_v21,
             Database::migrate_v22,
             Database::migrate_v23,
+            Database::migrate_v24,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -1119,6 +1120,30 @@ impl Database {
         Ok(())
     }
 
+    /// V24: Evolution system — event-sourced specialization tracking with HMAC chain.
+    fn migrate_v24(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS evolution_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                xp_delta INTEGER NOT NULL DEFAULT 0,
+                archetype TEXT,
+                source TEXT NOT NULL,
+                metadata_json TEXT,
+                created_at INTEGER NOT NULL,
+                hmac TEXT NOT NULL,
+                prev_hmac TEXT NOT NULL DEFAULT '0'
+            );
+            CREATE INDEX IF NOT EXISTS idx_evolution_events_created
+                ON evolution_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_evolution_events_archetype
+                ON evolution_events(archetype);
+            ",
+        )?;
+        Ok(())
+    }
+
     // ── Vitals CRUD (event-sourced) ──
 
     /// Compute vitals state by replaying all verified events from baseline.
@@ -1443,6 +1468,132 @@ impl Database {
         )?;
 
         Ok((matching, total))
+    }
+
+    // ── Evolution CRUD (event-sourced) ──
+
+    /// Compute evolution state by replaying all verified events from baseline.
+    pub fn get_evolution_state(&self) -> Result<crate::evolution::EvolutionState> {
+        let events = self.load_all_evolution_events()?;
+        Ok(crate::evolution::replay_events(&events))
+    }
+
+    /// Load all evolution events ordered chronologically for replay.
+    fn load_all_evolution_events(&self) -> Result<Vec<crate::evolution::EvolutionEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_type, xp_delta, archetype, source, metadata_json,
+                    created_at, hmac, prev_hmac
+             FROM evolution_events ORDER BY id ASC",
+        )?;
+        let events = stmt
+            .query_map([], |row| {
+                Ok(crate::evolution::EvolutionEvent {
+                    id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    xp_delta: row.get(2)?,
+                    archetype: row.get(3)?,
+                    source: row.get(4)?,
+                    metadata_json: row.get(5)?,
+                    created_at: row.get(6)?,
+                    hmac: row.get(7)?,
+                    prev_hmac: row.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(events)
+    }
+
+    /// Atomically read prev_hmac, compute HMAC, and insert an evolution event.
+    /// Uses BEGIN IMMEDIATE to prevent concurrent writers from reading the same prev_hmac.
+    pub fn record_evolution_event(
+        &self,
+        event_type: &str,
+        xp_delta: i32,
+        archetype: Option<&str>,
+        source: &str,
+        metadata: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> Result<()> {
+            let now = chrono::Utc::now().timestamp();
+
+            let prev_hmac: String = self
+                .conn
+                .query_row(
+                    "SELECT hmac FROM evolution_events ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| "0".to_string());
+
+            let hmac = crate::evolution::compute_event_hmac(
+                &prev_hmac,
+                event_type,
+                xp_delta,
+                archetype.unwrap_or(""),
+                source,
+                now,
+            );
+
+            self.conn.execute(
+                "INSERT INTO evolution_events (event_type, xp_delta, archetype, source,
+                    metadata_json, created_at, hmac, prev_hmac)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![event_type, xp_delta, archetype, source, metadata, now, hmac, prev_hmac],
+            )?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Get evolution events since a given timestamp (for display).
+    pub fn evolution_events_since(
+        &self,
+        since: i64,
+    ) -> Result<Vec<crate::evolution::EvolutionEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_type, xp_delta, archetype, source, metadata_json,
+                    created_at, hmac, prev_hmac
+             FROM evolution_events WHERE created_at >= ?1 ORDER BY created_at DESC",
+        )?;
+        let events = stmt
+            .query_map(params![since], |row| {
+                Ok(crate::evolution::EvolutionEvent {
+                    id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    xp_delta: row.get(2)?,
+                    archetype: row.get(3)?,
+                    source: row.get(4)?,
+                    metadata_json: row.get(5)?,
+                    created_at: row.get(6)?,
+                    hmac: row.get(7)?,
+                    prev_hmac: row.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(events)
+    }
+
+    /// Get the timestamp of the first evolution event (for usage duration).
+    pub fn first_evolution_event_timestamp(&self) -> Result<Option<i64>> {
+        let result: Option<i64> = self
+            .conn
+            .query_row("SELECT MIN(created_at) FROM evolution_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(None);
+        Ok(result)
     }
 
     // ── Embedding Cache CRUD ──

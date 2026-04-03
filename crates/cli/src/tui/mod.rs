@@ -209,6 +209,11 @@ pub async fn run() -> Result<()> {
         agent.hook_registry_mut().register(Box::new(bond_hook));
     }
 
+    // Register evolution hook for XP tracking and specialization
+    if let Ok(evolution_hook) = borg_core::evolution::EvolutionHook::new() {
+        agent.hook_registry_mut().register(Box::new(evolution_hook));
+    }
+
     // Try to resume the last session
     let mut resumed_info: Option<(String, usize)> = None;
     if let Ok(Some(session)) = borg_core::session::load_last_session() {
@@ -277,8 +282,11 @@ pub async fn run() -> Result<()> {
     if let Some((title, count)) = resumed_info {
         app.push_system_message(format!("Resumed session: {title} ({count} messages)"));
     }
-    // Show vitals header on session start
+    // Show vitals + evolution header on session start
     if let Ok(db) = borg_core::db::Database::open() {
+        if let Ok(evo_state) = db.get_evolution_state() {
+            app.push_system_message(borg_core::evolution::format_compact(&evo_state));
+        }
         if let Ok(state) = db.get_vitals_state() {
             let now = chrono::Utc::now();
             let state = borg_core::vitals::apply_decay(&state, now);
