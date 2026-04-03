@@ -1,4 +1,6 @@
-use tracing::debug;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::time::Instant;
+use tracing::{debug, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookPoint {
@@ -100,8 +102,34 @@ impl HookRegistry {
                 continue;
             }
 
-            debug!("Dispatching {:?} to hook '{}'", ctx.point, hook.name());
-            match hook.execute(ctx) {
+            let hook_name = hook.name().to_string();
+            debug!("Dispatching {:?} to hook '{}'", ctx.point, hook_name);
+
+            let start = Instant::now();
+            let outcome = catch_unwind(AssertUnwindSafe(|| hook.execute(ctx)));
+            let elapsed = start.elapsed();
+
+            if elapsed.as_secs() >= 5 {
+                warn!(
+                    "Hook '{}' took {:.1}s for {:?} — consider optimizing",
+                    hook_name,
+                    elapsed.as_secs_f64(),
+                    ctx.point,
+                );
+            }
+
+            let action = match outcome {
+                Ok(action) => action,
+                Err(_) => {
+                    warn!(
+                        "Hook '{}' panicked during {:?}, skipping",
+                        hook_name, ctx.point,
+                    );
+                    continue;
+                }
+            };
+
+            match action {
                 HookAction::Continue => {}
                 HookAction::InjectContext(text) => {
                     result = match result {
@@ -112,7 +140,7 @@ impl HookRegistry {
                     };
                 }
                 HookAction::Skip => {
-                    debug!("Hook '{}' returned Skip for {:?}", hook.name(), ctx.point);
+                    debug!("Hook '{}' returned Skip for {:?}", hook_name, ctx.point);
                     return HookAction::Skip;
                 }
             }
@@ -454,5 +482,49 @@ mod tests {
             session_id: "s1".to_string(),
             total_turns: 10,
         };
+    }
+
+    /// A hook that panics on execute — used to verify dispatch resilience.
+    struct PanicHook;
+
+    impl Hook for PanicHook {
+        fn name(&self) -> &str {
+            "panicker"
+        }
+        fn points(&self) -> &[HookPoint] {
+            &[HookPoint::BeforeAgentStart]
+        }
+        fn execute(&self, _ctx: &HookContext) -> HookAction {
+            panic!("intentional panic in hook");
+        }
+    }
+
+    #[test]
+    fn panicking_hook_does_not_crash_dispatch() {
+        let mut registry = HookRegistry::new();
+        registry.register(Box::new(PanicHook));
+
+        let ctx = make_ctx(HookPoint::BeforeAgentStart);
+        // Should return Continue, not propagate panic
+        assert!(matches!(registry.dispatch(&ctx), HookAction::Continue));
+    }
+
+    #[test]
+    fn panicking_hook_does_not_block_subsequent_hooks() {
+        let mut registry = HookRegistry::new();
+        // Panicking hook registered first
+        registry.register(Box::new(PanicHook));
+        // Normal hook registered second — should still execute
+        registry.register(Box::new(TestHook {
+            name: "survivor".to_string(),
+            points: vec![HookPoint::BeforeAgentStart],
+            action: HookAction::InjectContext("survived".to_string()),
+        }));
+
+        let ctx = make_ctx(HookPoint::BeforeAgentStart);
+        match registry.dispatch(&ctx) {
+            HookAction::InjectContext(text) => assert_eq!(text, "survived"),
+            other => panic!("Expected InjectContext, got {other:?}"),
+        }
     }
 }

@@ -27,7 +27,6 @@ const VITALS_HMAC_LEGACY: &[u8] = b"borg-vitals-chain-v1";
 type HmacSha256 = Hmac<Sha256>;
 
 /// Compute HMAC for an event, chaining from the previous event's HMAC.
-#[allow(clippy::expect_used)]
 pub(crate) fn compute_event_hmac(
     key: &[u8],
     prev_hmac: &str,
@@ -36,7 +35,10 @@ pub(crate) fn compute_event_hmac(
     deltas: StatDeltas,
     created_at: i64,
 ) -> String {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key size");
+    let mut mac = match HmacSha256::new_from_slice(key) {
+        Ok(m) => m,
+        Err(_) => return String::from("0"),
+    };
     mac.update(prev_hmac.as_bytes());
     mac.update(category.as_bytes());
     mac.update(source.as_bytes());
