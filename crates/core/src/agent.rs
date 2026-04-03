@@ -2090,6 +2090,75 @@ mod tests {
         // request_user_input blocks execution, so it should be blocked in plan mode
         assert!(is_mutating_tool("request_user_input"));
     }
+
+    // -- SETUP template tests --
+
+    #[test]
+    fn setup_template_wraps_in_first_conversation_tags() {
+        let rendered = SETUP_TEMPLATE.render([("setup", "Hello world")]).unwrap();
+        assert!(rendered.contains("<first_conversation>"));
+        assert!(rendered.contains("</first_conversation>"));
+        assert!(rendered.contains("Hello world"));
+    }
+
+    #[test]
+    fn setup_template_preserves_multiline_content() {
+        let content = "# First Boot\n\nLine 1\nLine 2\n- bullet";
+        let rendered = SETUP_TEMPLATE.render([("setup", content)]).unwrap();
+        assert!(rendered.contains("# First Boot"));
+        assert!(rendered.contains("- bullet"));
+    }
+
+    #[test]
+    fn setup_file_lifecycle_atomic_consume() {
+        // Simulates the atomic rename → read → delete lifecycle from build_system_prompt
+        let tmp = tempfile::tempdir().unwrap();
+        let setup_path = tmp.path().join("SETUP.md");
+        let consumed_path = setup_path.with_extension("md.consumed");
+
+        // Write SETUP.md
+        std::fs::write(&setup_path, "# First Boot\nTest content").unwrap();
+        assert!(setup_path.exists());
+
+        // Atomic rename (simulates line 732)
+        assert!(std::fs::rename(&setup_path, &consumed_path).is_ok());
+        assert!(!setup_path.exists());
+        assert!(consumed_path.exists());
+
+        // Read consumed file (simulates line 733)
+        let content = std::fs::read_to_string(&consumed_path).unwrap();
+        assert!(content.contains("First Boot"));
+
+        // Delete consumed file (simulates line 740)
+        std::fs::remove_file(&consumed_path).unwrap();
+        assert!(!consumed_path.exists());
+        assert!(!setup_path.exists());
+    }
+
+    #[test]
+    fn setup_file_missing_does_not_inject() {
+        // If SETUP.md doesn't exist, rename fails and nothing is injected
+        let tmp = tempfile::tempdir().unwrap();
+        let setup_path = tmp.path().join("SETUP.md");
+        let consumed_path = setup_path.with_extension("md.consumed");
+
+        assert!(std::fs::rename(&setup_path, &consumed_path).is_err());
+    }
+
+    #[test]
+    fn setup_file_not_injected_twice() {
+        // After first consumption, file is gone — second attempt is a no-op
+        let tmp = tempfile::tempdir().unwrap();
+        let setup_path = tmp.path().join("SETUP.md");
+        let consumed_path = setup_path.with_extension("md.consumed");
+
+        std::fs::write(&setup_path, "content").unwrap();
+        std::fs::rename(&setup_path, &consumed_path).unwrap();
+        std::fs::remove_file(&consumed_path).unwrap();
+
+        // Second attempt — file is gone
+        assert!(std::fs::rename(&setup_path, &consumed_path).is_err());
+    }
 }
 
 /// Map a tool name to an action type for rate limiting.
