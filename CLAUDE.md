@@ -264,7 +264,6 @@ max_context_tokens = 4000
 secret_detection = true
 blocked_paths = [".ssh", ".aws", ".gnupg", ".config/gh", ".env", "credentials", "private_key"]
 host_audit = true                # enable host security checks in doctor + security_audit tool
-hitl_dangerous_ops = false          # confirm before file deletion, IDENTITY.md changes
 action_limits.tool_calls_warn = 50
 action_limits.tool_calls_block = 100
 action_limits.shell_commands_warn = 20
@@ -538,7 +537,7 @@ Policy derived from each tool's `[sandbox]` section in `tool.toml`.
 
 ## Prompt Injection Defense
 
-Six-layer defense against prompt injection attacks:
+Five-layer defense against prompt injection attacks:
 
 1. **Input Sanitization** (`crates/core/src/sanitize.rs`): Scoring-based injection detection with regex patterns. Flags suspicious content with explicit untrusted markers instead of stripping (preserves legitimate messages). Applied at gateway inbound and tool results.
 
@@ -546,11 +545,9 @@ Six-layer defense against prompt injection attacks:
 
 3. **Prompt Hardening**: Security policy injected into system prompt instructing the model to treat external data as data, not instructions. Role boundary enforcement.
 
-4. **HITL for Dangerous Ops**: `ToolConfirmation` event for file deletion (apply_patch) and identity modification (IDENTITY.md). Auto-denied in gateway mode. Configurable via `security.hitl_dangerous_ops`.
+4. **Rate Limiting** (`crates/core/src/rate_guard.rs`): Per-session action caps (tool calls, shell commands, file/memory writes, web requests) with warn and block thresholds. Configurable via `[security]` config.
 
-5. **Rate Limiting** (`crates/core/src/rate_guard.rs`): Per-session action caps (tool calls, shell commands, file/memory writes, web requests) with warn and block thresholds. Configurable via `[security]` config.
-
-6. **Secret Redaction** (existing): Regex-based redaction of API keys, tokens, and credentials in tool outputs.
+5. **Secret Redaction** (existing): Regex-based redaction of API keys, tokens, and credentials in tool outputs.
 
 ## Key Source Files
 

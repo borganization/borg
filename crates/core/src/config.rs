@@ -863,16 +863,10 @@ pub struct SecurityConfig {
     pub secret_detection: bool,
     pub blocked_paths: Vec<String>,
     pub host_audit: bool,
-    #[serde(default = "default_hitl_dangerous_ops")]
-    pub hitl_dangerous_ops: bool,
     #[serde(default)]
     pub action_limits: crate::rate_guard::ActionLimits,
     #[serde(default = "default_gateway_action_limits")]
     pub gateway_action_limits: crate::rate_guard::ActionLimits,
-}
-
-fn default_hitl_dangerous_ops() -> bool {
-    false
 }
 
 fn default_gateway_action_limits() -> crate::rate_guard::ActionLimits {
@@ -1171,7 +1165,6 @@ impl Default for SecurityConfig {
                 "private_key".into(),
             ],
             host_audit: true,
-            hitl_dangerous_ops: false,
             action_limits: crate::rate_guard::ActionLimits::default(),
             gateway_action_limits: crate::rate_guard::ActionLimits::gateway_defaults(),
         }
@@ -1515,10 +1508,6 @@ impl Config {
             "security.secret_detection" => {
                 self.security.secret_detection = parse_bool(value, key)?;
                 Ok(format!("{key} = {}", self.security.secret_detection))
-            }
-            "security.hitl_dangerous_ops" => {
-                self.security.hitl_dangerous_ops = parse_bool(value, key)?;
-                Ok(format!("{key} = {}", self.security.hitl_dangerous_ops))
             }
             "security.host_audit" => {
                 self.security.host_audit = parse_bool(value, key)?;
@@ -1964,20 +1953,6 @@ agent_name = "Buddy"
         cfg.apply_setting("security.secret_detection", "false")
             .unwrap();
         assert!(!cfg.security.secret_detection);
-    }
-
-    #[test]
-    fn default_hitl_dangerous_ops_is_false() {
-        let cfg = Config::default();
-        assert!(!cfg.security.hitl_dangerous_ops);
-    }
-
-    #[test]
-    fn apply_setting_hitl_dangerous_ops() {
-        let mut cfg = Config::default();
-        cfg.apply_setting("security.hitl_dangerous_ops", "true")
-            .unwrap();
-        assert!(cfg.security.hitl_dangerous_ops);
     }
 
     #[test]

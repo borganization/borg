@@ -105,7 +105,6 @@ llm_logging = false                    # log all LLM requests/responses to daily
 secret_detection = true                # auto-redact secrets in tool output
 blocked_paths = [".ssh", ".aws", ".gnupg", ".config/gh", ".env", "credentials", "private_key"]
 host_audit = true                      # enable host security checks in doctor + security_audit tool
-hitl_dangerous_ops = false             # confirm before file deletion, IDENTITY.md changes
 
 [security.action_limits]
 tool_calls_warn = 50
@@ -400,7 +399,6 @@ Commands matching `deny` are rejected. Commands matching `auto_approve` run with
 | `secret_detection` | `true` | Auto-redact detected secrets in tool output |
 | `blocked_paths` | `[".ssh", ".aws", ...]` | Paths blocked from tool sandbox access |
 | `host_audit` | `true` | Enable host security checks in doctor + security_audit tool |
-| `hitl_dangerous_ops` | `false` | Require confirmation for file deletion and IDENTITY.md changes |
 
 Rate limits are configured per action type with warn and block thresholds. See `[security.action_limits]` in the full reference above.
 

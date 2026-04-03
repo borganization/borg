@@ -621,10 +621,6 @@ fn run_sub_agent(
                         Some(AgentEvent::ShellConfirmation { respond, .. }) => {
                             let _ = respond.send(true);
                         }
-                        Some(AgentEvent::ToolConfirmation { respond, .. }) => {
-                            // Deny dangerous ops in sub-agents (like gateway mode)
-                            let _ = respond.send(false);
-                        }
                         _ => {}
                     }
                 }
