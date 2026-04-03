@@ -409,6 +409,22 @@ async fn run_event_loop(
                 AppAction::Continue
             }
 
+            // Doctor diagnostic events
+            event = async {
+                if let Some(rx) = &mut app.doctor_rx {
+                    rx.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                if let Some(ev) = event {
+                    app.process_doctor_event(ev);
+                } else {
+                    app.doctor_rx = None;
+                }
+                AppAction::Continue
+            }
+
             // Terminal events
             maybe_event = event_stream.next() => {
                 match maybe_event {
@@ -1030,6 +1046,32 @@ async fn run_event_loop(
                 app.push_system_message("Goodbye!".to_string());
                 terminal.draw(|f| app.render(f))?;
                 return Ok(());
+            }
+            AppAction::RunDoctor => {
+                app.push_system_message("Borg Doctor\n───────────".to_string());
+                let (tx, rx) = tokio::sync::mpsc::channel(32);
+                app.doctor_rx = Some(rx);
+                let config = app.config.clone();
+                tokio::task::spawn_blocking(move || {
+                    use borg_core::doctor::DiagnosticRunner;
+                    let mut runner = DiagnosticRunner::new();
+                    let mut all_checks: Vec<borg_core::doctor::DiagnosticCheck> = Vec::new();
+                    while let Some(label) = runner.peek_label(&config) {
+                        let _ = tx.blocking_send(app::DoctorEvent::Analyzing {
+                            label: label.to_string(),
+                        });
+                        if let Some((_label, checks)) = runner.next_step(&config) {
+                            all_checks.extend(checks.clone());
+                            let _ = tx.blocking_send(app::DoctorEvent::Result {
+                                label: label.to_string(),
+                                checks,
+                            });
+                        }
+                    }
+                    let report = borg_core::doctor::DiagnosticReport { checks: all_checks };
+                    let (pass, warn, fail) = report.counts();
+                    let _ = tx.blocking_send(app::DoctorEvent::Done { pass, warn, fail });
+                });
             }
             AppAction::Continue => {}
         }
