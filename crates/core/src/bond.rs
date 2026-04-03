@@ -194,9 +194,8 @@ pub fn autonomy_from_level(level: BondLevel) -> AutonomyTier {
 /// A broken HMAC link invalidates the rest of the chain — all subsequent
 /// events are skipped. This is intentional: the chain is append-only and
 /// any tampering makes the tail untrustworthy.
-#[cfg(test)]
 pub fn replay_events(events: &[BondEvent]) -> BondState {
-    replay_events_with_key(BOND_HMAC_LEGACY, events)
+    replay_events_with_key(BOND_HMAC_DOMAIN, events)
 }
 
 /// Replay events with a specific HMAC key (for per-installation derived keys).

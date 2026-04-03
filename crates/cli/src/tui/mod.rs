@@ -978,6 +978,31 @@ async fn run_event_loop(
                 let msg = restart_gateway(gateway_shutdown);
                 app.push_system_message(msg);
             }
+            AppAction::SelfUpdate { dev } => {
+                app.push_system_message(format!(
+                    "Checking for updates{}...",
+                    if dev { " (including pre-releases)" } else { "" }
+                ));
+                terminal.draw(|f| app.render(f))?;
+                match borg_core::update::perform_update(dev).await {
+                    Ok(result) => match result.status {
+                        borg_core::update::UpdateStatus::AlreadyUpToDate => {
+                            app.push_system_message(format!(
+                                "Already up to date ({})",
+                                result.current_version
+                            ));
+                        }
+                        borg_core::update::UpdateStatus::Updated { from, to } => {
+                            app.push_system_message(format!(
+                                "Updated borg: {from} → {to}\nPlease restart borg to use the new version."
+                            ));
+                        }
+                    },
+                    Err(e) => {
+                        app.push_system_message(format!("Update failed: {e}"));
+                    }
+                }
+            }
             AppAction::Continue => {}
         }
     }

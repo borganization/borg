@@ -107,6 +107,9 @@ pub enum AppAction {
     RunSkillActions {
         actions: Vec<SkillAction>,
     },
+    SelfUpdate {
+        dev: bool,
+    },
 }
 
 pub struct App<'a> {
@@ -830,7 +833,8 @@ impl<'a> App<'a> {
                      /logs      - Show TUI log file\n  \
                      /doctor    - Run diagnostics\n  \
                      /status    - Show agent vitals\n  \
-                     /pairing   - Show channel pairing info\n\
+                     /pairing   - Show channel pairing info\n  \
+                     /update    - Update borg to latest version\n\
                      \n  \
                      /sessions  - Browse saved sessions\n  \
                      /save      - Save current session\n  \
@@ -969,6 +973,9 @@ impl<'a> App<'a> {
                 let report = borg_core::doctor::run_diagnostics(&self.config);
                 self.push_system_message(report.format());
                 return Ok(AppAction::Continue);
+            }
+            "/update" => {
+                return Ok(AppAction::SelfUpdate { dev: false });
             }
             "/pairing" => {
                 let mut output = String::from("Sender Pairing\n");
@@ -1183,6 +1190,11 @@ impl<'a> App<'a> {
                 );
                 return Ok(AppAction::Continue);
             }
+        }
+
+        // /update --dev or /update dev
+        if trimmed == "/update --dev" || trimmed == "/update dev" {
+            return Ok(AppAction::SelfUpdate { dev: true });
         }
 
         // Reject unknown slash commands
@@ -2761,6 +2773,35 @@ mod tests {
             )
         });
         assert!(!has_unknown, "/plan <msg> should not be treated as unknown");
+    }
+
+    // --- Update command ---
+
+    #[test]
+    fn update_command_returns_self_update() {
+        let mut app = make_app();
+        let result = app.handle_submit("/update").unwrap();
+        assert!(
+            matches!(result, AppAction::SelfUpdate { dev: false }),
+            "/update should return SelfUpdate {{ dev: false }}"
+        );
+    }
+
+    #[test]
+    fn update_dev_command_returns_self_update_dev() {
+        let mut app = make_app();
+        let result = app.handle_submit("/update --dev").unwrap();
+        assert!(
+            matches!(result, AppAction::SelfUpdate { dev: true }),
+            "/update --dev should return SelfUpdate {{ dev: true }}"
+        );
+
+        let mut app2 = make_app();
+        let result2 = app2.handle_submit("/update dev").unwrap();
+        assert!(
+            matches!(result2, AppAction::SelfUpdate { dev: true }),
+            "/update dev should return SelfUpdate {{ dev: true }}"
+        );
     }
 
     // --- Status popup integration ---

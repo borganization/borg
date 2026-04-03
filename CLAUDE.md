@@ -71,6 +71,8 @@ Release binaries are built via `.github/workflows/release.yml` on tag push (`v*`
 - `borg tasks runs <id>` — show execution history for a task
 - `borg tasks status <id>` — show detailed task status including retry state and delivery config
 - `borg tasks pause/resume/delete <id>` — manage task lifecycle
+- `borg update` — update borg to latest stable release (supports `--dev` for pre-release, `--check` for check-only)
+- `/update` (TUI command) — update borg to latest version (`/update --dev` for pre-release)
 - `/plugins` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
 
 ## Onboarding
