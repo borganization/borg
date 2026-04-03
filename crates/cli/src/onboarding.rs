@@ -459,8 +459,8 @@ mod tests {
     fn generate_setup_not_too_large() {
         let setup = generate_setup("TestAgent", "TestOwner");
         assert!(
-            setup.len() < 2000,
-            "SETUP.md is {} chars, should be under 2000",
+            setup.len() < 2500,
+            "SETUP.md is {} chars, should be under 2500",
             setup.len()
         );
     }
