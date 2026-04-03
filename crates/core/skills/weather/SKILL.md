@@ -1,6 +1,6 @@
 ---
 name: weather
-description: "Get current weather and forecasts via wttr.in. Use when: user asks about weather, temperature, or forecasts for any location. No API key needed, just curl."
+description: "Weather forecasts via wttr.in"
 requires:
   bins: ["curl"]
 ---

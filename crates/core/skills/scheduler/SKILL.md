@@ -1,6 +1,6 @@
 ---
 name: scheduler
-description: "Create and manage scheduled tasks using the manage_tasks tool. Covers cron, interval, and one-shot schedules."
+description: "Create and manage scheduled and recurring tasks"
 requires:
   bins: []
   env: []

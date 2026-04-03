@@ -1,6 +1,6 @@
 ---
 name: browser
-description: "Browse the web for any task — research topics, read articles, interact with web apps, fill forms, take screenshots, extract data, and test web pages. Use whenever a browser would be useful, not just when the user explicitly asks. Requires agent-browser CLI (npm i -g agent-browser)."
+description: "Browse the web, interact with pages, take screenshots"
 requires:
   bins: ["agent-browser"]
 ---

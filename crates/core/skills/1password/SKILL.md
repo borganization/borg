@@ -1,6 +1,6 @@
 ---
 name: 1password
-description: "1Password CLI integration for retrieving secrets, passwords, and secure notes. Use when: user needs to look up credentials, inject secrets into commands, or manage vault items. Requires op CLI installed and authenticated."
+description: "Retrieve secrets and credentials via op CLI"
 requires:
   bins: ["op"]
 ---

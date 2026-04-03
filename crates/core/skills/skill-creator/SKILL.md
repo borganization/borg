@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: "Create, edit, or improve Borg skills. Use when: creating a new skill from scratch, improving an existing skill, or reviewing/auditing a SKILL.md file. Triggers on phrases like 'create a skill', 'make a skill', 'new skill'."
+description: "Create, edit, and improve Borg skills"
 requires: {}
 ---
 

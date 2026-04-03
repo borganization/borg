@@ -1,6 +1,6 @@
 ---
 name: discord
-description: "Interact with Discord via run_shell + curl and the Discord REST API. Use when: sending messages, reacting, managing pins, or reading channels in Discord. Requires DISCORD_BOT_TOKEN env var and curl."
+description: "Send messages and manage Discord channels"
 requires:
   bins: ["curl"]
   env: ["DISCORD_BOT_TOKEN"]
