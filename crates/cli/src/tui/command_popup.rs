@@ -80,6 +80,10 @@ const COMMANDS: &[SlashCommandDef] = &[
         name: "/pairing",
         description: "Show channel pairing info",
     },
+    SlashCommandDef {
+        name: "/update",
+        description: "Update borg to latest version",
+    },
     // Sessions
     SlashCommandDef {
         name: "/sessions",
@@ -357,6 +361,7 @@ mod tests {
             "/doctor",
             "/status",
             "/pairing",
+            "/update",
             "/sessions",
             "/save",
             "/new",
