@@ -28,7 +28,6 @@ fn title_case_name(name: &str) -> String {
 struct SkillItem {
     name: String,
     description: String,
-    source: String,
     available: bool,
     original_enabled: bool,
     is_enabled: bool,
@@ -72,7 +71,6 @@ impl SkillsPopup {
                     .map(|s| SkillItem {
                         name: s.manifest.name.clone(),
                         description: s.manifest.description.clone(),
-                        source: s.source_label().to_string(),
                         available: s.available,
                         original_enabled: !s.disabled,
                         is_enabled: !s.disabled,
@@ -198,7 +196,7 @@ impl SkillsPopup {
             let check = if item.is_enabled { "x" } else { " " };
 
             // Truncate description to fit within popup width (char-safe)
-            let max_desc_len = (inner.width as usize).saturating_sub(item.name.len() + 18);
+            let max_desc_len = (inner.width as usize).saturating_sub(item.name.len() + 10);
             let desc = if item.description.chars().count() > max_desc_len {
                 let truncated: String = item
                     .description
@@ -212,10 +210,7 @@ impl SkillsPopup {
             };
 
             let display_name = title_case_name(&item.name);
-            let label = format!(
-                "  [{check}] {display_name} ({}) \u{2014} {desc}",
-                item.source,
-            );
+            let label = format!("  [{check}] {display_name} \u{2014} {desc}");
 
             let is_cursor = i == self.cursor;
             let style = if is_cursor {
