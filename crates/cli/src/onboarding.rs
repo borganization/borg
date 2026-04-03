@@ -327,12 +327,16 @@ pub fn apply_onboarding(result: &OnboardingResult) -> Result<()> {
         println!("  Created {}", identity_path.display());
     }
 
-    // Write MEMORY.md (skip if already exists)
+    // Write MEMORY.md with owner name seeded (skip if already exists)
     let memory_path = data_dir.join("MEMORY.md");
     if memory_path.exists() {
         println!("  Skipped {} (already exists)", memory_path.display());
     } else {
-        if let Err(e) = atomic_write(&memory_path, "# Memory Index\n\nNo memories yet.\n") {
+        let memory_content = format!(
+            "# Memory Index\n\n## Owner\n- Name: {}\n- Agent: {}\n",
+            result.user_name, result.agent_name
+        );
+        if let Err(e) = atomic_write(&memory_path, &memory_content) {
             cleanup_tmp_files(&data_dir);
             return Err(e.context("Failed to write MEMORY.md during onboarding"));
         }
