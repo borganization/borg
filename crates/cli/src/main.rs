@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 mod credentials;
 mod logo;
+mod migrate_tui;
 mod onboarding;
 mod onboarding_tui;
 mod plugins;
@@ -123,6 +124,8 @@ enum Commands {
     },
     /// Set the agent back to available mode (stops auto-replying)
     Available,
+    /// Migrate settings from Hermes Agent or OpenClaw
+    Migrate,
     /// Permanently delete all Borg data and uninstall the service
     Uninstall,
 }
@@ -450,6 +453,7 @@ async fn main() -> Result<()> {
         Some(Commands::Wake) => run_wake().await?,
         Some(Commands::Away { message }) => run_away(message).await?,
         Some(Commands::Available) => run_available().await?,
+        Some(Commands::Migrate) => migrate_tui::run()?,
         Some(Commands::Uninstall) => run_uninstall()?,
     }
 

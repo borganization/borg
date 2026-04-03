@@ -23,6 +23,7 @@ pub mod media;
 pub mod media_understanding;
 pub mod memory;
 pub mod memory_watcher;
+pub mod migrate;
 pub mod mmr;
 pub mod multi_agent;
 pub mod pairing;
