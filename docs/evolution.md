@@ -318,7 +318,7 @@ Vitals
   focus        ██████░░░░  60
   sync         █████░░░░░  55
   growth       ███████░░░  70
-  charge       ██████░░░░  65
+  happiness    █████░░░░░  50
 
 Bond
   score        ██████░░░░  68  (Trusted)

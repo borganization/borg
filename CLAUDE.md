@@ -63,7 +63,7 @@ Release binaries are built via `.github/workflows/release.yml` on tag push (`v*`
 - `borg plugins` — list all integrations with configured/unconfigured status
 - `borg gateway` — start webhook gateway server for messaging channels
 - `borg wake` — trigger an immediate heartbeat check-in (sends wake signal to daemon)
-- `borg status` — show agent vitals (stability, focus, sync, growth, charge)
+- `borg status` — show agent vitals (stability, focus, sync, growth, happiness)
 - `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
 - `borg tasks list` — list all scheduled tasks
 - `borg tasks create` — create a scheduled task (supports `--max-retries`, `--timeout`, `--delivery-channel`, `--delivery-target`)
@@ -472,7 +472,7 @@ The `SettingsResolver` handles merging automatically — no additional wiring ne
 
 `crates/core/src/vitals.rs` — passive agent health tracking via lifecycle hooks.
 
-Five stats (stability, focus, sync, growth, charge) update automatically from usage events classified into broad categories (Interaction, Success, Failure, Correction, Creation). State is **event-sourced** — computed by replaying verified events from baseline, not stored mutably. HMAC-SHA256 chain prevents tampering; per-category-per-hour rate limiting prevents gaming.
+Five stats (stability, focus, sync, growth, happiness) update automatically from usage events classified into broad categories (Interaction, Success, Failure, Correction, Creation). State is **event-sourced** — computed by replaying verified events from baseline, not stored mutably. HMAC-SHA256 chain prevents tampering; per-category-per-hour rate limiting prevents gaming.
 
 `VitalsHook` implements the `Hook` trait, listens on `SessionStart`, `BeforeAgentStart`, and `AfterToolCall`, and appends events to SQLite.
 

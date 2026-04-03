@@ -36,7 +36,7 @@ All stats are integers from `0..=100`.
 | **focus** | Alignment with user intent | Successful interactions, creation events | Corrections, repeated failures |
 | **sync** | How in-touch agent and user are | Regular interaction, sessions | Inactivity (strongest time decay) |
 | **growth** | Capability expansion and learning | Memory writes, tool/skill creation, new integrations | Inactivity, stagnation |
-| **charge** | Momentum and energy | Any meaningful usage, creation events | Inactivity |
+| **happiness** | Momentum and energy | Any meaningful usage, creation events | Inactivity |
 
 ```rust
 pub struct VitalsState {
@@ -44,7 +44,7 @@ pub struct VitalsState {
     pub focus: u8,
     pub sync: u8,
     pub growth: u8,
-    pub charge: u8,
+    pub happiness: u8,
     pub last_interaction_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -52,11 +52,11 @@ pub struct VitalsState {
 
 ### Baseline initialization
 On first run:
-- stability = 80
-- focus = 60
-- sync = 55
-- growth = 70
-- charge = 65
+- stability = 50
+- focus = 50
+- sync = 50
+- growth = 50
+- happiness = 50
 
 ## Event System
 
@@ -76,7 +76,7 @@ pub enum EventCategory {
 
 ### Stat deltas per category
 
-| Category | stability | focus | sync | growth | charge |
+| Category | stability | focus | sync | growth | happiness |
 |----------|-----------|-------|------|--------|--------|
 | Interaction | 0 | +1 | +2 | 0 | +1 |
 | Success | +1 | +1 | 0 | 0 | +1 |
@@ -105,7 +105,7 @@ Time-based decay applied when vitals are read (lazy evaluation):
 
 | Inactivity threshold | Stats affected |
 |---------------------|---------------|
-| 24h+ | sync -6, charge -4 |
+| 24h+ | sync -6, happiness -4 |
 | 72h+ | additionally stability -8, focus -8 |
 | 168h+ (7 days) | additionally growth -5, stability -5 |
 
@@ -120,7 +120,7 @@ pub enum DriftFlag {
     InactiveTooLong,       // >48h no interaction
     LowStability,          // stability < 30
     LowSync,               // sync < 40
-    LowCharge,             // charge < 30
+    LowHappiness,             // happiness < 30
     RepeatedFailures,      // 3+ failures in recent events
 }
 ```
@@ -154,7 +154,7 @@ Append-only ledger — the single source of truth.
 | focus_delta | INTEGER NOT NULL DEFAULT 0 | |
 | sync_delta | INTEGER NOT NULL DEFAULT 0 | |
 | growth_delta | INTEGER NOT NULL DEFAULT 0 | |
-| charge_delta | INTEGER NOT NULL DEFAULT 0 | |
+| happiness_delta | INTEGER NOT NULL DEFAULT 0 | |
 | metadata_json | TEXT | Optional context |
 | created_at | INTEGER NOT NULL | Unix timestamp |
 | hmac | TEXT NOT NULL | HMAC-SHA256 of event data chained from previous |
@@ -171,11 +171,11 @@ Single command surface. Output:
 ```text
 Borg Vitals
 ───────────
-  stability    ████████░░  80
-  focus        ██████░░░░  60
-  sync         █████░░░░░  55
-  growth       ███████░░░  70
-  charge       ██████░░░░  65
+  stability    █████░░░░░  50
+  focus        █████░░░░░  50
+  sync         █████░░░░░  50
+  growth       █████░░░░░  50
+  happiness    █████░░░░░  50
 
 Recent Activity (7d):
   12 interactions, 8 successes, 1 failure, 2 creations
@@ -190,7 +190,7 @@ Tip: Use borg regularly to keep vitals healthy
 
 On session start, show compact one-liner:
 ```text
-[stability:80 focus:60 sync:55 growth:70 charge:65]
+[stability:50 focus:50 sync:50 growth:50 happiness:50]
 ```
 
 Plus optional drift notice (max one per session).
