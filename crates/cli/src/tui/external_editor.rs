@@ -7,7 +7,13 @@ use anyhow::{bail, Result};
 fn resolve_editor() -> String {
     std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_string())
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "notepad".to_string()
+            } else {
+                "vi".to_string()
+            }
+        })
 }
 
 /// Open the user's external editor with `initial_text` pre-filled.
@@ -26,7 +32,8 @@ pub fn open_external_editor(initial_text: &str) -> Result<String> {
 
     // Split editor command in case it contains args (e.g. "code --wait")
     let parts: Vec<&str> = editor.split_whitespace().collect();
-    let (cmd, args) = parts.split_first().unwrap_or((&"vi", &[]));
+    let default_editor = if cfg!(windows) { "notepad" } else { "vi" };
+    let (cmd, args) = parts.split_first().unwrap_or((&default_editor, &[]));
 
     let status = Command::new(cmd).args(args).arg(&path).status()?;
 
@@ -43,7 +50,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_editor_defaults_to_vi() {
+    fn resolve_editor_defaults_to_platform_editor() {
         // Temporarily unset VISUAL and EDITOR to test fallback
         let old_visual = std::env::var("VISUAL").ok();
         let old_editor = std::env::var("EDITOR").ok();
@@ -51,7 +58,11 @@ mod tests {
         std::env::remove_var("EDITOR");
 
         let editor = resolve_editor();
-        assert_eq!(editor, "vi");
+        if cfg!(windows) {
+            assert_eq!(editor, "notepad");
+        } else {
+            assert_eq!(editor, "vi");
+        }
 
         // Restore
         if let Some(v) = old_visual {

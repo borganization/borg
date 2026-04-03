@@ -561,8 +561,12 @@ pub fn install_skill_deps(skill: &Skill) -> Result<Vec<String>> {
         match cmd {
             Some(c) => {
                 println!("  Installing {dep_name}: {c}");
-                let status = std::process::Command::new("sh")
-                    .arg("-c")
+                #[cfg(unix)]
+                let (shell, shell_flag) = ("sh", "-c");
+                #[cfg(windows)]
+                let (shell, shell_flag) = ("cmd.exe", "/C");
+                let status = std::process::Command::new(shell)
+                    .arg(shell_flag)
                     .arg(&c)
                     .status()?;
                 if status.success() {

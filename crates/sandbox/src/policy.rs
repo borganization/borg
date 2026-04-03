@@ -146,7 +146,7 @@ impl SandboxPolicy {
         } else if cfg!(target_os = "linux") {
             self.wrap_bubblewrap(program, args, tool_dir)
         } else {
-            // No sandboxing on other platforms
+            tracing::warn!("Sandboxing not available on this platform; running unsandboxed");
             SandboxCommand {
                 program: program.to_string(),
                 args: args.to_vec(),
@@ -535,5 +535,31 @@ mod tests {
             vec![format!("{home_str}/.borg/channels/imessage"),]
         );
         assert!(!expanded.network);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_falls_through_to_unsandboxed() {
+        let policy = SandboxPolicy::default();
+        let args = vec!["script.py".to_string()];
+        let cmd = policy.wrap_command("python3", &args, Path::new(r"C:\tools\test"));
+        // On Windows, should pass through without sandboxing
+        assert_eq!(cmd.program, "python3");
+        assert_eq!(cmd.args, vec!["script.py"]);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn unsupported_platform_passes_through() {
+        let policy = SandboxPolicy {
+            network: true,
+            fs_read: vec!["/data".into()],
+            ..Default::default()
+        };
+        let args = vec!["arg1".to_string()];
+        let cmd = policy.wrap_command("node", &args, Path::new("/tmp/tool"));
+        // Should pass through without modification
+        assert_eq!(cmd.program, "node");
+        assert_eq!(cmd.args, vec!["arg1"]);
     }
 }
