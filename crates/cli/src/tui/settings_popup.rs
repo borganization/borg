@@ -861,6 +861,27 @@ mod tests {
     }
 
     #[test]
+    fn tab_does_nothing() {
+        let mut popup = SettingsPopup::new();
+        let cfg = Config::default();
+        popup.show(&cfg);
+
+        // Select sandbox.enabled (Bool at index 7)
+        popup.selected = 7;
+        assert_eq!(popup.entries[7].key, "sandbox.enabled");
+        let mut cfg = Config::default();
+        let original = cfg.sandbox.enabled;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let result = popup.handle_key(tab, &mut cfg).unwrap();
+
+        assert_eq!(cfg.sandbox.enabled, original);
+        assert!(result.is_none());
+        assert!(matches!(popup.mode, EditMode::Browsing));
+    }
+
+    #[test]
     fn provider_cycle_forward() {
         let mut popup = SettingsPopup::new();
         let mut cfg = Config::default();
