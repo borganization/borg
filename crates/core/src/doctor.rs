@@ -65,6 +65,15 @@ impl DiagnosticCheck {
             Err(e) => Self::fail(category, name, format!("{e}")),
         }
     }
+
+    /// Format a single check result line with status icon.
+    pub fn format_line(&self) -> String {
+        match &self.status {
+            CheckStatus::Pass => format!("  ✓ {}", self.name),
+            CheckStatus::Warn(msg) => format!("  ⚠ {} — {msg}", self.name),
+            CheckStatus::Fail(msg) => format!("  ✗ {} — {msg}", self.name),
+        }
+    }
 }
 
 pub struct DiagnosticReport {
@@ -75,31 +84,17 @@ impl DiagnosticReport {
     pub fn format(&self) -> String {
         let mut output = String::from("Borg Doctor\n───────────\n");
         let mut current_category = "";
-        let mut pass_count = 0;
-        let mut warn_count = 0;
-        let mut fail_count = 0;
 
         for check in &self.checks {
             if check.category != current_category {
                 current_category = check.category;
                 output.push_str(&format!("\n{current_category}\n"));
             }
-            match &check.status {
-                CheckStatus::Pass => {
-                    output.push_str(&format!("  ✓ {}\n", check.name));
-                    pass_count += 1;
-                }
-                CheckStatus::Warn(msg) => {
-                    output.push_str(&format!("  ⚠ {} — {msg}\n", check.name));
-                    warn_count += 1;
-                }
-                CheckStatus::Fail(msg) => {
-                    output.push_str(&format!("  ✗ {} — {msg}\n", check.name));
-                    fail_count += 1;
-                }
-            }
+            output.push_str(&check.format_line());
+            output.push('\n');
         }
 
+        let (pass_count, warn_count, fail_count) = self.counts();
         output.push_str(&format!(
             "\nSummary: {pass_count} passed, {warn_count} warning(s), {fail_count} failed"
         ));
@@ -121,56 +116,135 @@ impl DiagnosticReport {
     }
 }
 
-pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
-    let mut checks = Vec::new();
+/// Stepped diagnostic runner that yields one check category at a time.
+/// Used by the TUI to show progressive output.
+#[derive(Default)]
+pub struct DiagnosticRunner {
+    step: usize,
+}
 
-    // Config checks
-    check_config(&mut checks);
+const STEP_COUNT: usize = 15;
 
-    // Provider checks
-    check_provider(config, &mut checks);
-
-    // Secrets audit
-    check_secrets(config, &mut checks);
-
-    // Sandbox checks
-    check_sandbox(&mut checks);
-
-    // Skills checks
-    check_skills(config, &mut checks);
-
-    // Memory checks
-    check_memory(&mut checks);
-
-    // Embeddings checks
-    check_embeddings(config, &mut checks);
-
-    // Data directory checks
-    check_data_dir(&mut checks);
-
-    // Gateway checks
-    check_gateway(config, &mut checks);
-
-    // Budget checks
-    check_budget(config, &mut checks);
-
-    // Plugins checks
-    check_plugins(&mut checks);
-
-    // Browser checks
-    check_browser(config, &mut checks);
-
-    // Agent config checks
-    check_agents(config, &mut checks);
-
-    // Config security posture checks
-    check_config_security(config, &mut checks);
-
-    // Host security checks
-    if config.security.host_audit {
-        crate::host_audit::run_host_security_checks(&mut checks);
+impl DiagnosticRunner {
+    pub fn new() -> Self {
+        Self::default()
     }
 
+    /// Returns the label of the next step without running it, or `None` if done.
+    pub fn peek_label(&self, config: &Config) -> Option<&'static str> {
+        match self.step {
+            0 => Some("Config"),
+            1 => Some("Provider"),
+            2 => Some("Secrets"),
+            3 => Some("Sandbox"),
+            4 => Some("Skills"),
+            5 => Some("Memory"),
+            6 => Some("Embeddings"),
+            7 => Some("Data"),
+            8 => Some("Gateway"),
+            9 => Some("Budget"),
+            10 => Some("Plugins"),
+            11 => Some("Browser"),
+            12 => Some("Agents"),
+            13 => Some("Security"),
+            14 if config.security.host_audit => Some("Host Audit"),
+            14 => None,
+            _ => None,
+        }
+    }
+
+    /// Run the next check group. Returns `None` when all groups are done.
+    pub fn next_step(&mut self, config: &Config) -> Option<(&'static str, Vec<DiagnosticCheck>)> {
+        if self.step >= STEP_COUNT {
+            return None;
+        }
+        let mut checks = Vec::new();
+        let label = match self.step {
+            0 => {
+                check_config(&mut checks);
+                "Config"
+            }
+            1 => {
+                check_provider(config, &mut checks);
+                "Provider"
+            }
+            2 => {
+                check_secrets(config, &mut checks);
+                "Secrets"
+            }
+            3 => {
+                check_sandbox(&mut checks);
+                "Sandbox"
+            }
+            4 => {
+                check_skills(config, &mut checks);
+                "Skills"
+            }
+            5 => {
+                check_memory(&mut checks);
+                "Memory"
+            }
+            6 => {
+                check_embeddings(config, &mut checks);
+                "Embeddings"
+            }
+            7 => {
+                check_data_dir(&mut checks);
+                "Data"
+            }
+            8 => {
+                check_gateway(config, &mut checks);
+                "Gateway"
+            }
+            9 => {
+                check_budget(config, &mut checks);
+                "Budget"
+            }
+            10 => {
+                check_plugins(&mut checks);
+                "Plugins"
+            }
+            11 => {
+                check_browser(config, &mut checks);
+                "Browser"
+            }
+            12 => {
+                check_agents(config, &mut checks);
+                "Agents"
+            }
+            13 => {
+                check_config_security(config, &mut checks);
+                "Security"
+            }
+            14 => {
+                if config.security.host_audit {
+                    crate::host_audit::run_host_security_checks(&mut checks);
+                    self.step += 1;
+                    return if checks.is_empty() {
+                        None
+                    } else {
+                        Some(("Host Audit", checks))
+                    };
+                } else {
+                    self.step += 1;
+                    return None;
+                }
+            }
+            _ => {
+                return None;
+            }
+        };
+        self.step += 1;
+        Some((label, checks))
+    }
+}
+
+pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
+    let mut runner = DiagnosticRunner::new();
+    let mut checks = Vec::new();
+    while let Some((_label, step_checks)) = runner.next_step(config) {
+        checks.extend(step_checks);
+    }
     DiagnosticReport { checks }
 }
 
