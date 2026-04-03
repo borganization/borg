@@ -851,12 +851,21 @@ impl<'a> App<'a> {
                 self.push_system_message(format!("⏳ Analyzing {label}..."));
             }
             DoctorEvent::Result { label, checks } => {
+                // Replace the "Analyzing..." cell with actual results
                 let mut text = format!("{label}\n");
                 for check in &checks {
                     text.push_str(&check.format_line());
                     text.push('\n');
                 }
-                self.push_system_message(text.trim_end().to_string());
+                let result_text = text.trim_end().to_string();
+                // Find and replace the last Analyzing cell for this label
+                if let Some(pos) = self.cells.iter().rposition(|cell| {
+                    matches!(cell, HistoryCell::System { text } if text.contains(&format!("Analyzing {label}...")))
+                }) {
+                    self.cells[pos] = HistoryCell::System { text: result_text };
+                } else {
+                    self.push_system_message(result_text);
+                }
             }
             DoctorEvent::Done { pass, warn, fail } => {
                 self.push_system_message(format!(
