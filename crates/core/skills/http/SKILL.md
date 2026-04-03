@@ -1,6 +1,6 @@
 ---
 name: http
-description: "HTTP requests via curl with JSON parsing using jq. Use when: calling REST APIs, downloading data, testing endpoints, or inspecting HTTP responses. Requires curl installed; jq recommended for JSON parsing."
+description: "HTTP requests and REST API calls via curl and jq"
 requires:
   bins: ["curl"]
 ---

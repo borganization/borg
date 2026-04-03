@@ -1,6 +1,6 @@
 ---
 name: slack
-description: "Interact with Slack via run_shell + curl and the Slack Web API. Use when: sending messages, reacting, pinning, reading channels, or managing Slack workflows. Requires SLACK_BOT_TOKEN env var and curl."
+description: "Send messages and manage Slack channels"
 requires:
   bins: ["curl"]
   env: ["SLACK_BOT_TOKEN"]

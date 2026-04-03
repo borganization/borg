@@ -1,6 +1,6 @@
 ---
 name: search
-description: "File and content search using ripgrep (rg) and fd. Use when: finding files by name or pattern, searching file contents, exploring codebases, or locating configuration files. Requires rg installed; fd recommended for file name search."
+description: "Find files and search content via ripgrep and fd"
 requires:
   bins: ["rg"]
 ---

@@ -1,6 +1,6 @@
 ---
 name: database
-description: "Database queries via sqlite3 and psql CLIs. Use when: querying local SQLite databases, connecting to PostgreSQL, inspecting schemas, running SQL, or exporting data. Requires sqlite3 installed; psql for PostgreSQL."
+description: "Query SQLite and PostgreSQL databases via CLI"
 requires:
   bins: ["sqlite3"]
 ---

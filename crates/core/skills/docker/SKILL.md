@@ -1,6 +1,6 @@
 ---
 name: docker
-description: "Container management with Docker: build images, run containers, manage compose stacks, inspect logs. Use when: starting/stopping containers, building images, debugging services, or managing multi-container apps. Requires docker installed."
+description: "Build images, run and manage containers"
 requires:
   bins: ["docker"]
 ---

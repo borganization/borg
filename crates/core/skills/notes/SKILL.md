@@ -1,6 +1,6 @@
 ---
 name: notes
-description: "Markdown and Obsidian note management: create, search, link, and organize notes. Use when: user asks to take notes, search their vault, create linked references, or manage knowledge base files. No external tools required."
+description: "Create, search, and organize Markdown notes"
 requires:
   bins: []
 ---

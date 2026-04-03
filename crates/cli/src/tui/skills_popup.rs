@@ -8,6 +8,23 @@ use borg_core::skills::load_all_skills;
 
 use super::theme;
 
+fn title_case_name(name: &str) -> String {
+    name.split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => {
+                    let mut s = c.to_uppercase().to_string();
+                    s.extend(chars);
+                    s
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 struct SkillItem {
     name: String,
     description: String,
@@ -194,9 +211,10 @@ impl SkillsPopup {
                 item.description.clone()
             };
 
+            let display_name = title_case_name(&item.name);
             let label = format!(
-                "  [{check}] {} ({}) \u{2014} {desc}",
-                item.name, item.source,
+                "  [{check}] {display_name} ({}) \u{2014} {desc}",
+                item.source,
             );
 
             let is_cursor = i == self.cursor;
