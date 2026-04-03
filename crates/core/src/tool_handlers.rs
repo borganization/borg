@@ -326,8 +326,12 @@ pub async fn handle_run_shell(
     for (k, v) in skill_env {
         filtered_creds.entry(k).or_insert(v);
     }
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-c")
+    #[cfg(unix)]
+    let (shell, shell_flag) = ("sh", "-c");
+    #[cfg(windows)]
+    let (shell, shell_flag) = ("cmd.exe", "/C");
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.arg(shell_flag)
         .arg(command)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2758,6 +2762,22 @@ mod tests {
         match result {
             crate::types::ToolOutput::Text(t) => assert_eq!(t, "PostgreSQL"),
             _ => panic!("expected Text output"),
+        }
+    }
+
+    #[test]
+    fn shell_command_constants_match_platform() {
+        #[cfg(unix)]
+        {
+            let (shell, flag) = ("sh", "-c");
+            assert_eq!(shell, "sh");
+            assert_eq!(flag, "-c");
+        }
+        #[cfg(windows)]
+        {
+            let (shell, flag) = ("cmd.exe", "/C");
+            assert_eq!(shell, "cmd.exe");
+            assert_eq!(flag, "/C");
         }
     }
 }

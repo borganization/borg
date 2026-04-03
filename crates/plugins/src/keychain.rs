@@ -6,6 +6,8 @@ pub fn available() -> bool {
         which::which("security").is_ok()
     } else if cfg!(target_os = "linux") {
         which::which("secret-tool").is_ok()
+    } else if cfg!(target_os = "windows") {
+        which::which("cmdkey").is_ok()
     } else {
         false
     }
@@ -53,6 +55,16 @@ pub fn store(service: &str, account: &str, value: &str) -> Result<()> {
         if !status.success() {
             anyhow::bail!("Failed to store via secret-tool (service={service}, account={account})");
         }
+    } else if cfg!(target_os = "windows") {
+        let target = format!("{service}/{account}");
+        let status = std::process::Command::new("cmdkey")
+            .arg(format!("/generic:{target}"))
+            .arg(format!("/user:{account}"))
+            .arg(format!("/pass:{value}"))
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("Failed to store in Windows Credential Manager (target={target})");
+        }
     } else {
         anyhow::bail!("No keychain available on this platform");
     }
@@ -69,6 +81,11 @@ pub fn remove(service: &str, account: &str) {
         let _ = std::process::Command::new("secret-tool")
             .args(["clear", "service", service, "account", account])
             .status();
+    } else if cfg!(target_os = "windows") {
+        let target = format!("{service}/{account}");
+        let _ = std::process::Command::new("cmdkey")
+            .arg(format!("/delete:{target}"))
+            .status();
     }
 }
 
@@ -84,6 +101,14 @@ pub fn check(service: &str, account: &str) -> bool {
             .args(["lookup", "service", service, "account", account])
             .output()
             .is_ok_and(|o| o.status.success())
+    } else if cfg!(target_os = "windows") {
+        let target = format!("{service}/{account}");
+        std::process::Command::new("cmdkey")
+            .arg(format!("/list:{target}"))
+            .output()
+            .is_ok_and(|o| {
+                o.status.success() && !String::from_utf8_lossy(&o.stdout).contains("not found")
+            })
     } else {
         false
     }
@@ -147,7 +172,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     #[test]
     fn store_fails_on_unsupported_platform() {
         let result = store("svc", "acct", "val");
@@ -156,5 +181,58 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("No keychain available"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn available_true_on_windows() {
+        // cmdkey.exe is always present on Windows
+        assert!(available());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_store_and_check_round_trip() {
+        let service = "borg-keychain-test";
+        let account = "test-round-trip-win";
+        let value = "test-secret-value";
+
+        // Clean up first in case of prior failed run
+        remove(service, account);
+
+        // Store
+        store(service, account, value).expect("store should succeed on Windows");
+
+        // Check exists
+        assert!(
+            check(service, account),
+            "credential should exist after store"
+        );
+
+        // Clean up
+        remove(service, account);
+        assert!(
+            !check(service, account),
+            "credential should not exist after remove"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_check_nonexistent_returns_false() {
+        let result = check(
+            "borg-test-nonexistent-svc-win-12345",
+            "nonexistent-account-xyz",
+        );
+        assert!(!result);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_remove_nonexistent_does_not_panic() {
+        remove(
+            "borg-test-nonexistent-svc-win-12345",
+            "nonexistent-account-xyz",
+        );
     }
 }

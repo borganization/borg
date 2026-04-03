@@ -5,6 +5,14 @@ use std::time::Duration;
 
 /// Run all host security checks.
 pub fn run_host_security_checks(checks: &mut Vec<DiagnosticCheck>) {
+    if cfg!(target_os = "windows") {
+        checks.push(DiagnosticCheck::warn(
+            CATEGORY,
+            "Platform",
+            "Host security audit not yet available on Windows",
+        ));
+        return;
+    }
     check_firewall(checks);
     check_listening_ports(checks);
     check_ssh_config(checks);
@@ -830,5 +838,25 @@ mod tests {
     fn parse_macos_firewall_unexpected_output() {
         let status = parse_macos_firewall("something completely unexpected");
         assert!(matches!(status, CheckStatus::Warn(_)));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_returns_single_warn_check() {
+        let mut checks = Vec::new();
+        run_host_security_checks(&mut checks);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].category, CATEGORY);
+        assert!(matches!(checks[0].status, CheckStatus::Warn(_)));
+    }
+
+    #[test]
+    fn host_security_checks_does_not_panic() {
+        let mut checks = Vec::new();
+        run_host_security_checks(&mut checks);
+        // On all platforms, this should complete without panic
+        // On Windows: 1 check (platform warning)
+        // On macOS/Linux: multiple checks
+        assert!(!checks.is_empty());
     }
 }
