@@ -483,6 +483,28 @@ impl<'a> App<'a> {
                     return Ok(AppAction::Quit);
                 }
 
+                // Popups get first priority for all key events (including Esc)
+                if self.settings_popup.is_visible() {
+                    if let Some(action) = self.settings_popup.handle_key(key, &mut self.config)? {
+                        return Ok(action);
+                    }
+                    return Ok(AppAction::Continue);
+                }
+
+                if self.plugins_popup.is_visible() {
+                    if let Some(actions) = self.plugins_popup.handle_key(key) {
+                        return Ok(AppAction::RunPlugins { actions });
+                    }
+                    return Ok(AppAction::Continue);
+                }
+
+                if self.schedule_popup.is_visible() {
+                    if let Some(actions) = self.schedule_popup.handle_key(key) {
+                        return Ok(AppAction::RunScheduleActions { actions });
+                    }
+                    return Ok(AppAction::Continue);
+                }
+
                 // Handle backtrack mode (selecting a past user message to rewind to)
                 if let BacktrackPhase::Selecting {
                     ref user_message_indices,
@@ -611,27 +633,6 @@ impl<'a> App<'a> {
                     };
                     self.config.conversation.collaboration_mode = next;
                     self.push_system_message(format!("[mode: {next}]"));
-                    return Ok(AppAction::Continue);
-                }
-
-                if self.settings_popup.is_visible() {
-                    if let Some(action) = self.settings_popup.handle_key(key, &mut self.config)? {
-                        return Ok(action);
-                    }
-                    return Ok(AppAction::Continue);
-                }
-
-                if self.plugins_popup.is_visible() {
-                    if let Some(actions) = self.plugins_popup.handle_key(key) {
-                        return Ok(AppAction::RunPlugins { actions });
-                    }
-                    return Ok(AppAction::Continue);
-                }
-
-                if self.schedule_popup.is_visible() {
-                    if let Some(actions) = self.schedule_popup.handle_key(key) {
-                        return Ok(AppAction::RunScheduleActions { actions });
-                    }
                     return Ok(AppAction::Continue);
                 }
 
