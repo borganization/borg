@@ -143,6 +143,13 @@ const SETTINGS: &[SettingEntry] = &[
         kind: SettingKind::Bool,
         category: "Voice",
     },
+    // — Evolution —
+    SettingEntry {
+        key: "evolution.enabled",
+        label: "Evolution system",
+        kind: SettingKind::Bool,
+        category: "Evolution",
+    },
 ];
 
 impl SettingsPopup {
@@ -252,6 +259,7 @@ impl SettingsPopup {
             "conversation.collaboration_mode" => {
                 format!("{}", config.conversation.collaboration_mode)
             }
+            "evolution.enabled" => format!("{}", config.evolution.enabled),
             _ => "?".to_string(),
         }
     }
