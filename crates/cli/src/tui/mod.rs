@@ -204,6 +204,11 @@ pub async fn run() -> Result<()> {
         agent.hook_registry_mut().register(Box::new(vitals_hook));
     }
 
+    // Register bond hook for trust tracking (after vitals so events are available)
+    if let Ok(bond_hook) = borg_core::bond::BondHook::new() {
+        agent.hook_registry_mut().register(Box::new(bond_hook));
+    }
+
     // Try to resume the last session
     let mut resumed_info: Option<(String, usize)> = None;
     if let Ok(Some(session)) = borg_core::session::load_last_session() {

@@ -28,6 +28,11 @@ pub async fn one_shot(
         agent.hook_registry_mut().register(Box::new(vitals_hook));
     }
 
+    // Register bond hook for trust tracking (after vitals so events are available)
+    if let Ok(bond_hook) = borg_core::bond::BondHook::new() {
+        agent.hook_registry_mut().register(Box::new(bond_hook));
+    }
+
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
 
     let send_future = agent.send_message(message, event_tx);
