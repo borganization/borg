@@ -980,6 +980,55 @@ mod tests {
         assert!(content.contains("fn new()"));
     }
 
+    /// End-to-end: LLM erroneously prefixes *** End Patch with +.
+    /// The marker must NOT leak into the created file.
+    #[test]
+    fn end_to_end_add_file_plus_end_patch_stripped() {
+        let dir = TempDir::new().unwrap();
+        let patch_text = "\
+*** Begin Patch
+*** Add File: snake.py
++import sys
++print('hello')
++*** End Patch";
+
+        let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        assert_eq!(affected.added, vec!["snake.py"]);
+
+        let content = std::fs::read_to_string(dir.path().join("snake.py")).unwrap();
+        assert!(content.contains("import sys"));
+        assert!(content.contains("print('hello')"));
+        assert!(
+            !content.contains("End Patch"),
+            "DSL marker leaked into file: {content}"
+        );
+    }
+
+    /// End-to-end: +*** End Patch in Update File hunk must not leak to disk.
+    #[test]
+    fn end_to_end_update_file_plus_end_patch_stripped() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("app.py"), "old_line\n").unwrap();
+
+        let patch_text = "\
+*** Begin Patch
+*** Update File: app.py
+@@
+-old_line
++new_line
++*** End Patch";
+
+        let affected = crate::apply_patch_to_dir(patch_text, dir.path()).unwrap();
+        assert_eq!(affected.modified, vec!["app.py"]);
+
+        let content = std::fs::read_to_string(dir.path().join("app.py")).unwrap();
+        assert!(content.contains("new_line"));
+        assert!(
+            !content.contains("End Patch"),
+            "DSL marker leaked into file: {content}"
+        );
+    }
+
     #[test]
     fn affected_paths_empty_default() {
         let paths = AffectedPaths::default();

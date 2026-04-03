@@ -23,9 +23,9 @@ use std::str::FromStr;
 
 const LOGO_HEIGHT: u16 = 8; // includes leading blank line
 
-const SECURITY_WARNING: &str = "\
-Security warning — please read.
+const SECURITY_TITLE: &str = "SECURITY WARNING - PLEASE READ";
 
+const SECURITY_BODY: &str = "\
 Borg is a personal AI agent that can execute tools and shell commands.
 By default, it operates as a single trusted-operator system.
 
@@ -36,9 +36,7 @@ Recommended baseline:
   • Sandbox mode enabled (strict by default)
   • Least-privilege tools — don't grant unnecessary fs/network access
   • Keep secrets out of the agent's reachable filesystem
-  • Shared use: isolate sessions per user/channel
-
-Run diagnostics anytime: borg doctor";
+  • Shared use: isolate sessions per user/channel";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -57,7 +55,7 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Tab::Welcome => "Welcome",
-            Tab::Security => "Security",
+            Tab::Security => "Disclaimer",
             Tab::ApiKey => "API Key",
         }
     }
@@ -563,13 +561,38 @@ fn render_welcome(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingStat
 fn render_security(frame: &mut ratatui::Frame, area: Rect, _state: &OnboardingState) {
     let mut lines: Vec<Line> = Vec::new();
 
-    // Security warning box
-    for line in SECURITY_WARNING.lines() {
+    // Title in bold white
+    lines.push(Line::from(Span::styled(
+        format!("  {SECURITY_TITLE}"),
+        Style::default()
+            .fg(ratatui::style::Color::White)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::default());
+
+    // Body in yellow
+    for line in SECURITY_BODY.lines() {
         lines.push(Line::from(Span::styled(
             format!("  {line}"),
             Style::default().fg(theme::YELLOW),
         )));
     }
+
+    lines.push(Line::default());
+
+    // "Run diagnostics anytime: borg doctor" with bold white on "borg doctor"
+    lines.push(Line::from(vec![
+        Span::styled(
+            "  Run diagnostics anytime: ",
+            Style::default().fg(theme::YELLOW),
+        ),
+        Span::styled(
+            "borg doctor",
+            Style::default()
+                .fg(ratatui::style::Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
 
     lines.push(Line::default());
     lines.push(Line::default());
