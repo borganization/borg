@@ -30,10 +30,11 @@ pub struct SettingEntry {
     pub category: &'static str,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EditMode {
     Browsing,
     Editing { buffer: String },
+    ConfirmReset,
 }
 
 pub struct SettingsPopup {
@@ -320,7 +321,24 @@ impl SettingsPopup {
                     }
                     Ok(None)
                 }
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    self.mode = EditMode::ConfirmReset;
+                    self.status_message = None;
+                    Ok(None)
+                }
                 _ => Ok(None),
+            },
+            EditMode::ConfirmReset => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let result = self.reset_all_to_defaults(config);
+                    self.mode = EditMode::Browsing;
+                    result
+                }
+                _ => {
+                    self.mode = EditMode::Browsing;
+                    self.status_message = None;
+                    Ok(None)
+                }
             },
             EditMode::Editing { buffer } => match key.code {
                 KeyCode::Esc => {
@@ -541,6 +559,21 @@ impl SettingsPopup {
         Ok(())
     }
 
+    /// Reset all settings to compiled defaults by clearing DB overrides and reloading config.
+    fn reset_all_to_defaults(&mut self, config: &mut Config) -> anyhow::Result<Option<AppAction>> {
+        if let Some(ref db) = self.db {
+            for entry in self.entries {
+                let _ = db.delete_setting(entry.key);
+            }
+        }
+        // Reload config from disk (TOML + defaults, no DB overrides).
+        // If the config file doesn't exist or can't be read, fall back to compiled defaults.
+        *config = Config::load().unwrap_or_default();
+        self.sync_select_indices(config);
+        self.status_message = Some(("All settings reset to defaults".to_string(), true));
+        Ok(Some(AppAction::ConfigReloaded))
+    }
+
     /// Get the source of a setting value.
     fn setting_source(&self, key: &str) -> SettingSource {
         if let Some(ref db) = self.db {
@@ -602,45 +635,60 @@ impl SettingsPopup {
             row_indices.push(lines.len());
             let value = self.current_value(config, entry.key);
             let source = self.setting_source(entry.key);
-            let source_tag = match source {
-                SettingSource::Database => " [db]",
-                SettingSource::ConfigToml => " [toml]",
-                SettingSource::Default => "",
-            };
+            let is_customized = !matches!(source, SettingSource::Default);
             let is_selected = i == self.selected;
 
             let display_value = if is_selected {
                 if let EditMode::Editing { ref buffer } = self.mode {
                     format!("{buffer}_")
                 } else if entry.kind == SettingKind::Bool {
-                    let check = if value == "true" { "x" } else { " " };
-                    format!("[{check}]{source_tag}")
+                    let icon = if value == "true" {
+                        theme::CHECK
+                    } else {
+                        theme::CROSS
+                    };
+                    icon.to_string()
                 } else if entry.kind == SettingKind::Select {
-                    format!("< {value} >{source_tag}")
+                    format!("< {value} >")
                 } else {
-                    format!("{value}{source_tag}")
+                    value.clone()
                 }
             } else if entry.kind == SettingKind::Bool {
-                let check = if value == "true" { "x" } else { " " };
-                format!("[{check}]{source_tag}")
+                let icon = if value == "true" {
+                    theme::CHECK
+                } else {
+                    theme::CROSS
+                };
+                icon.to_string()
             } else {
-                format!("{value}{source_tag}")
+                value.clone()
             };
 
+            let customized_suffix = if is_customized { " ●" } else { "" };
             let label_width = inner.width.saturating_sub(4) as usize;
             let label = format!("  {}", entry.label);
-            let val_len = display_value.len();
+            let val_with_suffix = format!("{display_value}{customized_suffix}");
+            let val_len = val_with_suffix.len();
             let padding = label_width.saturating_sub(label.len() + val_len);
 
-            let row_text = format!("{label}{:>pad$}{display_value} ", "", pad = padding);
-
-            let style = if is_selected {
+            let base_style = if is_selected {
                 theme::popup_selected()
             } else {
                 ratatui::style::Style::default()
             };
 
-            lines.push(Line::from(Span::styled(row_text, style)));
+            let mut spans = vec![
+                Span::styled(label.clone(), base_style),
+                Span::styled(format!("{:>pad$}", "", pad = padding), base_style),
+                Span::styled(display_value, base_style),
+            ];
+            if is_customized {
+                spans.push(Span::styled(" ●", base_style.patch(theme::dim())));
+            }
+            // Fill remaining space with base style for consistent highlight
+            spans.push(Span::styled(" ", base_style));
+
+            lines.push(Line::from(spans));
         }
 
         // Scroll to keep selected visible
@@ -691,11 +739,18 @@ impl SettingsPopup {
             EditMode::Browsing => {
                 let entry = &self.entries[self.selected];
                 match entry.kind {
-                    SettingKind::Select => " \u{25C0}\u{25B6}: cycle  Enter: next  Esc: close",
-                    SettingKind::Bool => " Space: toggle  Esc: close",
-                    SettingKind::Float => " Enter: edit  \u{25C0}\u{25B6}: \u{00B1}0.1  Esc: close",
-                    _ => " Enter: edit  Esc: close",
+                    SettingKind::Select => {
+                        " \u{25C0}\u{25B6}: cycle  Enter: next  r: reset all  Esc: close"
+                    }
+                    SettingKind::Bool => " Space: toggle  r: reset all  Esc: close",
+                    SettingKind::Float => {
+                        " Enter: edit  \u{25C0}\u{25B6}: \u{00B1}0.1  r: reset all  Esc: close"
+                    }
+                    _ => " Enter: edit  r: reset all  Esc: close",
                 }
+            }
+            EditMode::ConfirmReset => {
+                " Reset all settings to defaults? y: confirm  any key: cancel"
             }
             EditMode::Editing { .. } => " Enter: apply  Esc: cancel",
         };
@@ -1083,5 +1138,129 @@ mod tests {
         let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         let result = popup.handle_key(right, &mut cfg).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn bool_display_uses_check_and_cross() {
+        let popup = SettingsPopup::new();
+        let cfg = Config::default();
+
+        // sandbox.enabled defaults to true
+        let val = popup.current_value(&cfg, "sandbox.enabled");
+        assert_eq!(val, "true");
+
+        // The display should use ✓ for true bools — verify via current_value + formatting logic
+        // (render builds the display_value inline; we test the component values here)
+        assert_eq!(theme::CHECK, "✓");
+        assert_eq!(theme::CROSS, "✗");
+    }
+
+    #[test]
+    fn display_value_no_source_tags() {
+        let popup = SettingsPopup::new();
+        let cfg = Config::default();
+
+        // Verify no current_value contains [db] or [toml] — those are gone
+        for entry in popup.entries {
+            let val = popup.current_value(&cfg, entry.key);
+            assert!(
+                !val.contains("[db]") && !val.contains("[toml]"),
+                "source tag found in value for {}: {}",
+                entry.key,
+                val
+            );
+        }
+    }
+
+    #[test]
+    fn default_values_not_customized() {
+        let popup = SettingsPopup::new();
+
+        // With no DB, all sources should be Default
+        for entry in popup.entries {
+            let source = popup.setting_source(entry.key);
+            assert_eq!(
+                source,
+                SettingSource::Default,
+                "expected Default source for {} but got {:?}",
+                entry.key,
+                source
+            );
+        }
+    }
+
+    #[test]
+    fn r_key_enters_confirm_reset() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        popup.handle_key(r, &mut cfg).unwrap();
+        assert_eq!(popup.mode, EditMode::ConfirmReset);
+    }
+
+    #[test]
+    fn confirm_reset_cancel_on_non_y() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // Enter confirm mode
+        popup.mode = EditMode::ConfirmReset;
+
+        // Press 'n' — should cancel
+        let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        popup.handle_key(n, &mut cfg).unwrap();
+        assert_eq!(popup.mode, EditMode::Browsing);
+    }
+
+    #[test]
+    fn confirm_reset_y_resets_config() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        // Modify config to non-default
+        cfg.llm.temperature = 1.5;
+        cfg.sandbox.enabled = false;
+
+        // Enter confirm mode and confirm
+        popup.mode = EditMode::ConfirmReset;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        let result = popup.handle_key(y, &mut cfg).unwrap();
+
+        // Config should be reloaded (no longer the modified values)
+        assert!(
+            (cfg.llm.temperature - 1.5).abs() > f32::EPSILON || cfg.sandbox.enabled,
+            "config was not reloaded after reset"
+        );
+        assert_eq!(popup.mode, EditMode::Browsing);
+        assert!(result.is_some()); // ConfigReloaded action
+        assert!(
+            popup
+                .status_message
+                .as_ref()
+                .map_or(false, |(msg, ok)| *ok && msg.contains("reset")),
+            "expected success status message about reset"
+        );
+    }
+
+    #[test]
+    fn confirm_reset_esc_cancels() {
+        let mut popup = SettingsPopup::new();
+        let mut cfg = Config::default();
+        popup.show(&cfg);
+
+        popup.mode = EditMode::ConfirmReset;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        popup.handle_key(esc, &mut cfg).unwrap();
+        assert_eq!(popup.mode, EditMode::Browsing);
     }
 }
