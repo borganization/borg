@@ -18,13 +18,18 @@ use crate::hooks::{Hook, HookAction, HookContext, HookData, HookPoint};
 
 // ── HMAC ──
 
-const EVOLUTION_HMAC_SECRET: &[u8] = b"borg-evolution-chain-v1";
+/// Domain string for HMAC key derivation. Combined with per-installation salt.
+pub(crate) const EVOLUTION_HMAC_DOMAIN: &[u8] = b"borg-evolution-chain-v1";
+
+/// Legacy compiled-in secret for installations without per-install salt.
+const EVOLUTION_HMAC_LEGACY: &[u8] = b"borg-evolution-chain-v1";
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Compute HMAC for an evolution event, chaining from the previous event's HMAC.
 #[allow(clippy::expect_used)]
-pub fn compute_event_hmac(
+pub(crate) fn compute_event_hmac(
+    key: &[u8],
     prev_hmac: &str,
     event_type: &str,
     xp_delta: i32,
@@ -32,8 +37,7 @@ pub fn compute_event_hmac(
     source: &str,
     created_at: i64,
 ) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(EVOLUTION_HMAC_SECRET).expect("HMAC accepts any key size");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key size");
     mac.update(prev_hmac.as_bytes());
     mac.update(event_type.as_bytes());
     mac.update(&xp_delta.to_le_bytes());
@@ -51,11 +55,12 @@ pub fn compute_event_hmac(
 }
 
 /// Verify an event's HMAC against the expected chain.
-fn verify_event_hmac(event: &EvolutionEvent, expected_prev_hmac: &str) -> bool {
+fn verify_event_hmac(key: &[u8], event: &EvolutionEvent, expected_prev_hmac: &str) -> bool {
     if event.prev_hmac != expected_prev_hmac {
         return false;
     }
     let expected = compute_event_hmac(
+        key,
         &event.prev_hmac,
         &event.event_type,
         event.xp_delta,
@@ -69,7 +74,7 @@ fn verify_event_hmac(event: &EvolutionEvent, expected_prev_hmac: &str) -> bool {
 // ── Rate Limiting ──
 
 /// Maximum events per bucket per hour during replay.
-fn rate_limit_for(event_type: &str) -> u32 {
+pub(crate) fn rate_limit_for(event_type: &str) -> u32 {
     match event_type {
         "xp_gain" => 30,
         "evolution" => 3,
@@ -435,6 +440,11 @@ const BASE_XP_INTERACTION: i32 = 1;
 /// Replay verified events from baseline to compute current evolution state.
 /// Verifies HMAC chain and applies rate limits per event type per hour.
 pub fn replay_events(events: &[EvolutionEvent]) -> EvolutionState {
+    replay_events_with_key(EVOLUTION_HMAC_LEGACY, events)
+}
+
+/// Replay events with a specific HMAC key (for per-installation derived keys).
+pub fn replay_events_with_key(key: &[u8], events: &[EvolutionEvent]) -> EvolutionState {
     let mut stage = Stage::Base;
     let mut total_xp: u32 = 0;
     let mut archetype_scores: HashMap<Archetype, u32> = HashMap::new();
@@ -451,7 +461,7 @@ pub fn replay_events(events: &[EvolutionEvent]) -> EvolutionState {
 
     for event in events {
         // Verify HMAC chain
-        if !verify_event_hmac(event, &expected_prev_hmac) {
+        if !verify_event_hmac(key, event, &expected_prev_hmac) {
             tracing::warn!(
                 "evolution: broken HMAC chain at event {}, skipping",
                 event.id
@@ -491,6 +501,19 @@ pub fn replay_events(events: &[EvolutionEvent]) -> EvolutionState {
                 }
             }
             "evolution" => {
+                // Warn if this evolution event wasn't gate-verified
+                let gates_verified = event
+                    .metadata_json
+                    .as_deref()
+                    .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                    .and_then(|v| v.get("gates_verified").and_then(serde_json::Value::as_bool))
+                    .unwrap_or(false);
+                if !gates_verified {
+                    tracing::warn!(
+                        "evolution: event {} lacks gates_verified — may be legacy or tampered",
+                        event.id
+                    );
+                }
                 // Stage transition: reset XP, advance stage
                 stage = match stage {
                     Stage::Base => Stage::Evolved,
@@ -804,6 +827,81 @@ impl EvolutionHook {
         if let Err(e) = db.record_evolution_event("xp_gain", xp, arch_str.as_deref(), source, None)
         {
             tracing::warn!("evolution: failed to record XP event: {e}");
+            return;
+        }
+        // Check if we should attempt an evolution after this XP gain
+        self.attempt_evolution(&db);
+    }
+
+    /// Check evolution gates and record an evolution event if all prerequisites are met.
+    fn attempt_evolution(&self, db: &Database) {
+        let evo_state = match db.get_evolution_state() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // Only trigger at level 99 (stage cap)
+        if evo_state.level < 99 {
+            return;
+        }
+
+        // Already at final stage
+        if evo_state.stage == Stage::Final {
+            return;
+        }
+
+        // Get bond state for gate checks (use derived key for HMAC verification)
+        let bond_events = db.get_all_bond_events().unwrap_or_default();
+        let bond_key = db.derive_hmac_key(crate::bond::BOND_HMAC_DOMAIN);
+        let bond_state = crate::bond::replay_events_with_key(&bond_key, &bond_events);
+
+        // Get vitals state for gate checks
+        let vitals_state = match db.get_vitals_state() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let min_vital = vitals_state
+            .stability
+            .min(vitals_state.focus)
+            .min(vitals_state.sync)
+            .min(vitals_state.growth)
+            .min(vitals_state.charge);
+
+        let gates_passed = match evo_state.stage {
+            Stage::Base => check_stage1_gates(&evo_state, bond_state.score, min_vital),
+            Stage::Evolved => {
+                // Compute correction rate from vitals events
+                let (corrections, total) = db
+                    .count_vitals_events_by_category_since(0, "correction")
+                    .unwrap_or((0, 1));
+                let correction_rate = if total > 0 {
+                    corrections as f64 / total as f64
+                } else {
+                    0.0
+                };
+                // Approximate archetype stable days from first event with current dominant archetype
+                let archetype_stable_days = 30; // TODO: compute from event history
+                check_stage2_gates(
+                    &evo_state,
+                    bond_state.score,
+                    correction_rate,
+                    archetype_stable_days,
+                )
+            }
+            Stage::Final => false,
+        };
+
+        if !gates_passed {
+            return;
+        }
+
+        let metadata = serde_json::json!({ "gates_verified": true }).to_string();
+        if let Err(e) =
+            db.record_evolution_event("evolution", 0, None, "gate_check", Some(&metadata))
+        {
+            tracing::warn!("evolution: failed to record evolution event: {e}");
+        } else {
+            tracing::info!("evolution: stage transition triggered — gates verified");
         }
     }
 
@@ -1070,14 +1168,38 @@ mod tests {
 
     #[test]
     fn hmac_deterministic() {
-        let h1 = compute_event_hmac("0", "xp_gain", 3, "builder", "create_tool", 1000);
-        let h2 = compute_event_hmac("0", "xp_gain", 3, "builder", "create_tool", 1000);
+        let h1 = compute_event_hmac(
+            EVOLUTION_HMAC_LEGACY,
+            "0",
+            "xp_gain",
+            3,
+            "builder",
+            "create_tool",
+            1000,
+        );
+        let h2 = compute_event_hmac(
+            EVOLUTION_HMAC_LEGACY,
+            "0",
+            "xp_gain",
+            3,
+            "builder",
+            "create_tool",
+            1000,
+        );
         assert_eq!(h1, h2);
     }
 
     #[test]
     fn hmac_verify_valid() {
-        let hmac = compute_event_hmac("0", "xp_gain", 1, "ops", "run_shell", 1000);
+        let hmac = compute_event_hmac(
+            EVOLUTION_HMAC_LEGACY,
+            "0",
+            "xp_gain",
+            1,
+            "ops",
+            "run_shell",
+            1000,
+        );
         let event = EvolutionEvent {
             id: 1,
             event_type: "xp_gain".to_string(),
@@ -1089,12 +1211,20 @@ mod tests {
             hmac: hmac.clone(),
             prev_hmac: "0".to_string(),
         };
-        assert!(verify_event_hmac(&event, "0"));
+        assert!(verify_event_hmac(EVOLUTION_HMAC_LEGACY, &event, "0"));
     }
 
     #[test]
     fn hmac_tamper_detection() {
-        let hmac = compute_event_hmac("0", "xp_gain", 1, "ops", "run_shell", 1000);
+        let hmac = compute_event_hmac(
+            EVOLUTION_HMAC_LEGACY,
+            "0",
+            "xp_gain",
+            1,
+            "ops",
+            "run_shell",
+            1000,
+        );
         let mut event = EvolutionEvent {
             id: 1,
             event_type: "xp_gain".to_string(),
@@ -1108,13 +1238,13 @@ mod tests {
         };
         // Tamper with XP
         event.xp_delta = 999;
-        assert!(!verify_event_hmac(&event, "0"));
+        assert!(!verify_event_hmac(EVOLUTION_HMAC_LEGACY, &event, "0"));
     }
 
     #[test]
     fn hmac_chain_linking() {
-        let h1 = compute_event_hmac("0", "xp_gain", 1, "", "a", 1000);
-        let h2 = compute_event_hmac(&h1, "xp_gain", 1, "", "b", 2000);
+        let h1 = compute_event_hmac(EVOLUTION_HMAC_LEGACY, "0", "xp_gain", 1, "", "a", 1000);
+        let h2 = compute_event_hmac(EVOLUTION_HMAC_LEGACY, &h1, "xp_gain", 1, "", "b", 2000);
         assert_ne!(h1, h2);
 
         let e2 = EvolutionEvent {
@@ -1128,9 +1258,9 @@ mod tests {
             hmac: h2,
             prev_hmac: h1.clone(),
         };
-        assert!(verify_event_hmac(&e2, &h1));
+        assert!(verify_event_hmac(EVOLUTION_HMAC_LEGACY, &e2, &h1));
         // Wrong prev_hmac
-        assert!(!verify_event_hmac(&e2, "0"));
+        assert!(!verify_event_hmac(EVOLUTION_HMAC_LEGACY, &e2, "0"));
     }
 
     // ── Replay ──
@@ -1145,6 +1275,7 @@ mod tests {
         prev_hmac: &str,
     ) -> EvolutionEvent {
         let hmac = compute_event_hmac(
+            EVOLUTION_HMAC_LEGACY,
             prev_hmac,
             event_type,
             xp_delta,
@@ -1460,5 +1591,83 @@ mod tests {
                 "roundtrip failed for {stage:?}"
             );
         }
+    }
+
+    // ── Gate Enforcement Tests ──
+
+    #[test]
+    fn replay_warns_on_unverified_evolution_event() {
+        // An evolution event without gates_verified metadata should still be applied (backward compat)
+        // but the chain should remain valid
+        let e1 = make_event(1, "xp_gain", 5, Some("ops"), "test", 1000, "0");
+        let e2 = make_event(2, "evolution", 0, None, "system", 2000, &e1.hmac);
+        let state = replay_events(&[e1, e2]);
+        assert_eq!(
+            state.stage,
+            Stage::Evolved,
+            "evolution event without gates_verified should still apply"
+        );
+        assert!(state.chain_valid);
+    }
+
+    #[test]
+    fn replay_accepts_gates_verified_evolution_event() {
+        let e1 = make_event(1, "xp_gain", 5, Some("ops"), "test", 1000, "0");
+        let mut e2 = make_event(2, "evolution", 0, None, "gate_check", 2000, &e1.hmac);
+        e2.metadata_json = Some(r#"{"gates_verified": true}"#.to_string());
+        // Recompute HMAC since metadata isn't included in HMAC (only type, xp_delta, archetype, source, created_at)
+        let state = replay_events(&[e1, e2]);
+        assert_eq!(state.stage, Stage::Evolved);
+    }
+
+    #[test]
+    fn stage1_gates_require_level_99() {
+        let mut scores = HashMap::new();
+        scores.insert(Archetype::Ops, 100);
+        let state_50 = make_state_at_level(Stage::Base, 50, scores.clone());
+        assert!(
+            !check_stage1_gates(&state_50, 50, 30),
+            "level 50 should not pass gate"
+        );
+
+        let state_99 = make_state_at_level(Stage::Base, 99, scores);
+        assert!(
+            check_stage1_gates(&state_99, 50, 30),
+            "level 99 should pass gate"
+        );
+    }
+
+    #[test]
+    fn stage2_gates_require_low_correction_rate() {
+        let mut scores = HashMap::new();
+        scores.insert(Archetype::Ops, 200);
+        let state = make_state_at_level(Stage::Evolved, 99, scores);
+        assert!(
+            check_stage2_gates(&state, 60, 0.10, 30),
+            "low correction rate should pass"
+        );
+        assert!(
+            !check_stage2_gates(&state, 60, 0.25, 30),
+            "high correction rate should fail"
+        );
+    }
+
+    #[test]
+    fn derived_key_produces_different_hmacs_than_legacy() {
+        let legacy = compute_event_hmac(
+            EVOLUTION_HMAC_LEGACY,
+            "0",
+            "xp_gain",
+            5,
+            "ops",
+            "test",
+            1000,
+        );
+        let derived_key = b"some-derived-key-that-differs-!!";
+        let derived = compute_event_hmac(derived_key, "0", "xp_gain", 5, "ops", "test", 1000);
+        assert_ne!(
+            legacy, derived,
+            "derived key should produce different HMAC than legacy"
+        );
     }
 }

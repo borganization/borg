@@ -18,23 +18,25 @@ use crate::hooks::{Hook, HookAction, HookContext, HookData, HookPoint};
 
 // ── HMAC ──
 
-/// Compiled-in secret for HMAC chain. Not meant to be cryptographically
-/// unbreakable — just enough to prevent casual SQL tampering.
-const VITALS_HMAC_SECRET: &[u8] = b"borg-vitals-chain-v1";
+/// Domain string for HMAC key derivation. Combined with per-installation salt.
+pub(crate) const VITALS_HMAC_DOMAIN: &[u8] = b"borg-vitals-chain-v1";
+
+/// Legacy compiled-in secret for installations without per-install salt.
+const VITALS_HMAC_LEGACY: &[u8] = b"borg-vitals-chain-v1";
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Compute HMAC for an event, chaining from the previous event's HMAC.
 #[allow(clippy::expect_used)]
-pub fn compute_event_hmac(
+pub(crate) fn compute_event_hmac(
+    key: &[u8],
     prev_hmac: &str,
     category: &str,
     source: &str,
-    deltas: &StatDeltas,
+    deltas: StatDeltas,
     created_at: i64,
 ) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(VITALS_HMAC_SECRET).expect("HMAC accepts any key size");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key size");
     mac.update(prev_hmac.as_bytes());
     mac.update(category.as_bytes());
     mac.update(source.as_bytes());
@@ -57,7 +59,7 @@ pub fn compute_event_hmac(
 }
 
 /// Verify an event's HMAC against the expected chain.
-fn verify_event_hmac(event: &VitalsEvent, expected_prev_hmac: &str) -> bool {
+fn verify_event_hmac(key: &[u8], event: &VitalsEvent, expected_prev_hmac: &str) -> bool {
     if event.prev_hmac != expected_prev_hmac {
         return false;
     }
@@ -69,10 +71,11 @@ fn verify_event_hmac(event: &VitalsEvent, expected_prev_hmac: &str) -> bool {
         charge: event.charge_delta as i8,
     };
     let expected = compute_event_hmac(
+        key,
         &event.prev_hmac,
         &event.category,
         &event.source,
-        &deltas,
+        deltas,
         event.created_at,
     );
     event.hmac == expected
@@ -81,7 +84,7 @@ fn verify_event_hmac(event: &VitalsEvent, expected_prev_hmac: &str) -> bool {
 // ── Rate Limiting ──
 
 /// Maximum events per category per hour during replay.
-fn rate_limit_for(category: &str) -> u32 {
+pub(crate) fn rate_limit_for(category: &str) -> u32 {
     match category {
         "interaction" => 10,
         "success" => 15,
@@ -104,6 +107,7 @@ pub struct VitalsState {
     pub charge: u8,
     pub last_interaction_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub chain_valid: bool,
 }
 
 /// Broad impact categories for events.
@@ -210,6 +214,7 @@ pub fn baseline() -> VitalsState {
         charge: 65,
         last_interaction_at: Utc::now(),
         updated_at: Utc::now(),
+        chain_valid: true,
     }
 }
 
@@ -273,16 +278,23 @@ fn clamp_add(val: u8, delta: i8) -> u8 {
 /// Replay verified events from baseline to compute current state.
 /// Verifies HMAC chain and applies per-category-per-hour rate limits.
 pub fn replay_events(events: &[VitalsEvent]) -> VitalsState {
+    replay_events_with_key(VITALS_HMAC_LEGACY, events)
+}
+
+/// Replay events with a specific HMAC key (for per-installation derived keys).
+pub fn replay_events_with_key(key: &[u8], events: &[VitalsEvent]) -> VitalsState {
     let mut state = baseline();
     let mut expected_prev_hmac = "0".to_string();
+    let mut chain_valid = true;
     // Rate limit: (hour_bucket, category) -> count
     let mut hourly_counts: HashMap<(i64, &str), u32> = HashMap::new();
     let mut last_interaction_at: Option<i64> = None;
 
     for event in events {
         // Verify HMAC chain — skip tampered/injected events
-        if !verify_event_hmac(event, &expected_prev_hmac) {
+        if !verify_event_hmac(key, event, &expected_prev_hmac) {
             tracing::warn!("vitals: skipping event {} with broken HMAC chain", event.id);
+            chain_valid = false;
             continue;
         }
         expected_prev_hmac = event.hmac.clone();
@@ -325,6 +337,7 @@ pub fn replay_events(events: &[VitalsEvent]) -> VitalsState {
         }
     }
 
+    state.chain_valid = chain_valid;
     state
 }
 
@@ -949,23 +962,24 @@ mod tests {
     #[test]
     fn test_hmac_deterministic() {
         let deltas = deltas_for(EventCategory::Interaction);
-        let h1 = compute_event_hmac("0", "interaction", "test", &deltas, 1000);
-        let h2 = compute_event_hmac("0", "interaction", "test", &deltas, 1000);
+        let h1 = compute_event_hmac(VITALS_HMAC_LEGACY, "0", "interaction", "test", deltas, 1000);
+        let h2 = compute_event_hmac(VITALS_HMAC_LEGACY, "0", "interaction", "test", deltas, 1000);
         assert_eq!(h1, h2);
     }
 
     #[test]
     fn test_hmac_changes_with_input() {
         let deltas = deltas_for(EventCategory::Interaction);
-        let h1 = compute_event_hmac("0", "interaction", "test", &deltas, 1000);
-        let h2 = compute_event_hmac("0", "interaction", "test", &deltas, 1001);
+        let h1 = compute_event_hmac(VITALS_HMAC_LEGACY, "0", "interaction", "test", deltas, 1000);
+        let h2 = compute_event_hmac(VITALS_HMAC_LEGACY, "0", "interaction", "test", deltas, 1001);
         assert_ne!(h1, h2);
     }
 
     #[test]
     fn test_hmac_chain_verification() {
         let deltas = deltas_for(EventCategory::Success);
-        let hmac1 = compute_event_hmac("0", "success", "run_shell", &deltas, 100);
+        let hmac1 =
+            compute_event_hmac(VITALS_HMAC_LEGACY, "0", "success", "run_shell", deltas, 100);
         let event = VitalsEvent {
             id: 1,
             category: "success".to_string(),
@@ -980,15 +994,22 @@ mod tests {
             hmac: hmac1.clone(),
             prev_hmac: "0".to_string(),
         };
-        assert!(verify_event_hmac(&event, "0"));
-        assert!(!verify_event_hmac(&event, "wrong_prev"));
+        assert!(verify_event_hmac(VITALS_HMAC_LEGACY, &event, "0"));
+        assert!(!verify_event_hmac(VITALS_HMAC_LEGACY, &event, "wrong_prev"));
     }
 
     #[test]
     fn test_tampered_event_skipped_in_replay() {
         let deltas = deltas_for(EventCategory::Creation);
         let ts = 1000;
-        let hmac = compute_event_hmac("0", "creation", "create_tool", &deltas, ts);
+        let hmac = compute_event_hmac(
+            VITALS_HMAC_LEGACY,
+            "0",
+            "creation",
+            "create_tool",
+            deltas,
+            ts,
+        );
 
         let legit = VitalsEvent {
             id: 1,
@@ -1039,7 +1060,8 @@ mod tests {
         // Create 20 events in the same hour (cap is 5 for creation)
         for i in 0..20 {
             let ts = hour_base + i;
-            let hmac = compute_event_hmac(&prev, "creation", "test", &deltas, ts);
+            let hmac =
+                compute_event_hmac(VITALS_HMAC_LEGACY, &prev, "creation", "test", deltas, ts);
             events.push(VitalsEvent {
                 id: i + 1,
                 category: "creation".to_string(),

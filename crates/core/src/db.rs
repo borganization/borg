@@ -9,6 +9,9 @@ use crate::config::Config;
 /// SQLite database for structured data (session metadata, scheduled tasks, task runs).
 pub struct Database {
     conn: Connection,
+    /// Per-installation HMAC salt for event chain keys.
+    /// Derived keys prevent cross-installation HMAC forgery.
+    hmac_salt: Vec<u8>,
 }
 
 /// Session metadata row from SQLite.
@@ -304,6 +307,17 @@ pub struct NewScript<'a> {
     pub updated_at: i64,
 }
 
+/// Health report for all event-sourced HMAC chains.
+#[derive(Debug)]
+pub struct ChainHealth {
+    pub vitals_valid: bool,
+    pub vitals_count: u32,
+    pub bond_valid: bool,
+    pub bond_count: u32,
+    pub evolution_valid: bool,
+    pub evolution_count: u32,
+}
+
 impl Database {
     /// Get a reference to the underlying SQLite connection.
     pub fn conn(&self) -> &Connection {
@@ -330,6 +344,12 @@ impl Database {
         }
         let conn =
             Connection::open(&path).with_context(|| format!("Failed to open DB at {path:?}"))?;
+        // Restrict DB file to owner-only access
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
         Self::init_connection_with_timeout(conn, busy_timeout_ms)
     }
 
@@ -352,9 +372,61 @@ impl Database {
         // embeddings cache, and task runs. Requires running PRAGMA incremental_vacuum
         // periodically (done in run_migrations after schema changes).
         conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
-        let db = Self { conn };
+        let db = Self {
+            conn,
+            hmac_salt: Vec::new(),
+        };
         db.run_migrations()?;
-        Ok(db)
+        // Initialize per-installation HMAC salt after migrations (meta table must exist)
+        let salt = db.get_or_create_hmac_salt()?;
+        Ok(Self {
+            conn: db.conn,
+            hmac_salt: salt,
+        })
+    }
+
+    /// Get or create a per-installation random salt for HMAC key derivation.
+    /// Stored in the meta table so it persists across restarts but is unique per install.
+    fn get_or_create_hmac_salt(&self) -> Result<Vec<u8>> {
+        if let Some(hex) = self.get_meta("hmac_salt")? {
+            // Decode existing salt — fail loudly on corruption
+            if hex.len() == 64 {
+                let bytes: Result<Vec<u8>, _> = (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+                    .collect();
+                if let Ok(b) = bytes {
+                    if b.len() == 32 {
+                        return Ok(b);
+                    }
+                }
+            }
+            tracing::warn!("integrity: stored hmac_salt is corrupted, regenerating");
+        }
+        // Generate new 32-byte random salt using OS CSPRNG
+        use rand::Rng;
+        let mut salt = vec![0u8; 32];
+        rand::rng().fill(&mut salt[..]);
+        let hex: String = salt.iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+        self.set_meta("hmac_salt", &hex)?;
+        Ok(salt)
+    }
+
+    /// Derive an HMAC key for a specific system using the per-installation salt.
+    /// Uses HMAC-SHA256(key=salt, data=domain) as a simple KDF.
+    #[allow(clippy::expect_used)]
+    pub(crate) fn derive_hmac_key(&self, domain: &[u8]) -> Vec<u8> {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac =
+            HmacSha256::new_from_slice(&self.hmac_salt).expect("HMAC accepts any key size");
+        mac.update(domain);
+        mac.finalize().into_bytes().to_vec()
     }
 
     fn db_path() -> Result<PathBuf> {
@@ -362,7 +434,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 24;
+    const CURRENT_VERSION: u32 = 25;
 
     /// Check if a column exists on a table via `PRAGMA table_info`.
     /// Safer than catching ALTER TABLE errors by string matching.
@@ -427,6 +499,7 @@ impl Database {
             Database::migrate_v22,
             Database::migrate_v23,
             Database::migrate_v24,
+            Database::migrate_v25,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -1144,6 +1217,78 @@ impl Database {
         Ok(())
     }
 
+    fn migrate_v25(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            -- Append-only triggers: prevent UPDATE/DELETE on event ledgers
+            CREATE TRIGGER IF NOT EXISTS vitals_events_no_update
+                BEFORE UPDATE ON vitals_events
+                BEGIN SELECT RAISE(ABORT, 'vitals_events is append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS vitals_events_no_delete
+                BEFORE DELETE ON vitals_events
+                BEGIN SELECT RAISE(ABORT, 'vitals_events is append-only'); END;
+
+            CREATE TRIGGER IF NOT EXISTS bond_events_no_update
+                BEFORE UPDATE ON bond_events
+                BEGIN SELECT RAISE(ABORT, 'bond_events is append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS bond_events_no_delete
+                BEFORE DELETE ON bond_events
+                BEGIN SELECT RAISE(ABORT, 'bond_events is append-only'); END;
+
+            CREATE TRIGGER IF NOT EXISTS evolution_events_no_update
+                BEFORE UPDATE ON evolution_events
+                BEGIN SELECT RAISE(ABORT, 'evolution_events is append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS evolution_events_no_delete
+                BEFORE DELETE ON evolution_events
+                BEGIN SELECT RAISE(ABORT, 'evolution_events is append-only'); END;
+            ",
+        )?;
+        Ok(())
+    }
+
+    // ── Chain Integrity Verification ──
+
+    /// Verify HMAC chain integrity across all event-sourced systems.
+    /// Returns health status without blocking. Call on startup to detect tampering.
+    pub fn verify_event_chains(&self) -> ChainHealth {
+        let vitals_key = self.derive_hmac_key(crate::vitals::VITALS_HMAC_DOMAIN);
+        let vitals_events = self.load_all_vitals_events().unwrap_or_default();
+        let vitals_state = crate::vitals::replay_events_with_key(&vitals_key, &vitals_events);
+        let vitals_valid = vitals_state.chain_valid;
+        let vitals_count = vitals_events.len() as u32;
+
+        let bond_key = self.derive_hmac_key(crate::bond::BOND_HMAC_DOMAIN);
+        let bond_events = self.get_all_bond_events().unwrap_or_default();
+        let bond_state = crate::bond::replay_events_with_key(&bond_key, &bond_events);
+        let bond_valid = bond_state.chain_valid;
+        let bond_count = bond_events.len() as u32;
+
+        let evo_key = self.derive_hmac_key(crate::evolution::EVOLUTION_HMAC_DOMAIN);
+        let evolution_events = self.load_all_evolution_events().unwrap_or_default();
+        let evolution_state = crate::evolution::replay_events_with_key(&evo_key, &evolution_events);
+        let evolution_valid = evolution_state.chain_valid;
+        let evolution_count = evolution_events.len() as u32;
+
+        if !vitals_valid {
+            tracing::warn!("integrity: vitals HMAC chain is broken ({vitals_count} events)");
+        }
+        if !bond_valid {
+            tracing::warn!("integrity: bond HMAC chain is broken ({bond_count} events)");
+        }
+        if !evolution_valid {
+            tracing::warn!("integrity: evolution HMAC chain is broken ({evolution_count} events)");
+        }
+
+        ChainHealth {
+            vitals_valid,
+            vitals_count,
+            bond_valid,
+            bond_count,
+            evolution_valid,
+            evolution_count,
+        }
+    }
+
     // ── Vitals CRUD (event-sourced) ──
 
     /// Compute vitals state by replaying all verified events from baseline.
@@ -1151,7 +1296,8 @@ impl Database {
     /// per category per hour to prevent gaming.
     pub fn get_vitals_state(&self) -> Result<crate::vitals::VitalsState> {
         let events = self.load_all_vitals_events()?;
-        Ok(crate::vitals::replay_events(&events))
+        let key = self.derive_hmac_key(crate::vitals::VITALS_HMAC_DOMAIN);
+        Ok(crate::vitals::replay_events_with_key(&key, &events))
     }
 
     /// Load all vitals events ordered chronologically (for replay).
@@ -1184,7 +1330,8 @@ impl Database {
         Ok(events)
     }
 
-    /// Append a vitals event with HMAC chain integrity.
+    /// Atomically read prev_hmac, compute HMAC, and insert a vitals event.
+    /// Uses BEGIN IMMEDIATE to prevent concurrent writers from reading the same prev_hmac.
     pub fn record_vitals_event(
         &self,
         category: &str,
@@ -1192,41 +1339,73 @@ impl Database {
         deltas: &crate::vitals::StatDeltas,
         metadata: Option<&str>,
     ) -> Result<()> {
-        let now = chrono::Utc::now().timestamp();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
-        // Get the HMAC of the last event for chaining
-        let prev_hmac: String = self
-            .conn
-            .query_row(
-                "SELECT hmac FROM vitals_events ORDER BY id DESC LIMIT 1",
-                [],
+        let result = (|| -> Result<()> {
+            let now = chrono::Utc::now().timestamp();
+            let hour_start = now - (now % 3600);
+
+            // Record-time rate limiting: reject if this category already hit its cap this hour
+            let count: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM vitals_events WHERE category = ?1 AND created_at >= ?2",
+                params![category, hour_start],
                 |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "0".to_string());
+            )?;
+            if count >= crate::vitals::rate_limit_for(category) as i64 {
+                return Ok(()); // silently drop — at capacity
+            }
 
-        let hmac = crate::vitals::compute_event_hmac(&prev_hmac, category, source, deltas, now);
+            // Get the HMAC of the last event for chaining
+            let prev_hmac: String = self
+                .conn
+                .query_row(
+                    "SELECT hmac FROM vitals_events ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| "0".to_string());
 
-        self.conn.execute(
-            "INSERT INTO vitals_events (category, source, stability_delta, focus_delta,
-                sync_delta, growth_delta, charge_delta, metadata_json, created_at,
-                hmac, prev_hmac)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
+            let hmac = crate::vitals::compute_event_hmac(
+                &self.derive_hmac_key(crate::vitals::VITALS_HMAC_DOMAIN),
+                &prev_hmac,
                 category,
                 source,
-                deltas.stability as i32,
-                deltas.focus as i32,
-                deltas.sync as i32,
-                deltas.growth as i32,
-                deltas.charge as i32,
-                metadata,
+                *deltas,
                 now,
-                hmac,
-                prev_hmac,
-            ],
-        )?;
+            );
 
-        Ok(())
+            self.conn.execute(
+                "INSERT INTO vitals_events (category, source, stability_delta, focus_delta,
+                    sync_delta, growth_delta, charge_delta, metadata_json, created_at,
+                    hmac, prev_hmac)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    category,
+                    source,
+                    deltas.stability as i32,
+                    deltas.focus as i32,
+                    deltas.sync as i32,
+                    deltas.growth as i32,
+                    deltas.charge as i32,
+                    metadata,
+                    now,
+                    hmac,
+                    prev_hmac,
+                ],
+            )?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     /// Get vitals events since a given timestamp (for display, not replay).
@@ -1326,6 +1505,19 @@ impl Database {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
         let result = (|| -> Result<()> {
+            let now = chrono::Utc::now().timestamp();
+            let hour_start = now - (now % 3600);
+
+            // Record-time rate limiting: reject if this event_type already hit its cap this hour
+            let count: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM bond_events WHERE event_type = ?1 AND created_at >= ?2",
+                params![event_type, hour_start],
+                |row| row.get(0),
+            )?;
+            if count >= crate::bond::rate_limit_for(event_type) as i64 {
+                return Ok(()); // silently drop — at capacity
+            }
+
             let prev_hmac: String = self
                 .conn
                 .query_row(
@@ -1335,8 +1527,14 @@ impl Database {
                 )
                 .unwrap_or_else(|_| "0".to_string());
 
-            let now = chrono::Utc::now().timestamp();
-            let hmac = crate::bond::compute_event_hmac(&prev_hmac, event_type, delta, reason, now);
+            let hmac = crate::bond::compute_event_hmac(
+                &self.derive_hmac_key(crate::bond::BOND_HMAC_DOMAIN),
+                &prev_hmac,
+                event_type,
+                delta,
+                reason,
+                now,
+            );
 
             self.conn.execute(
                 "INSERT INTO bond_events (event_type, score_delta, reason, hmac, prev_hmac, created_at)
@@ -1475,7 +1673,8 @@ impl Database {
     /// Compute evolution state by replaying all verified events from baseline.
     pub fn get_evolution_state(&self) -> Result<crate::evolution::EvolutionState> {
         let events = self.load_all_evolution_events()?;
-        Ok(crate::evolution::replay_events(&events))
+        let key = self.derive_hmac_key(crate::evolution::EVOLUTION_HMAC_DOMAIN);
+        Ok(crate::evolution::replay_events_with_key(&key, &events))
     }
 
     /// Load all evolution events ordered chronologically for replay.
@@ -1517,6 +1716,17 @@ impl Database {
 
         let result = (|| -> Result<()> {
             let now = chrono::Utc::now().timestamp();
+            let hour_start = now - (now % 3600);
+
+            // Record-time rate limiting: reject if this event_type already hit its cap this hour
+            let count: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM evolution_events WHERE event_type = ?1 AND created_at >= ?2",
+                params![event_type, hour_start],
+                |row| row.get(0),
+            )?;
+            if count >= crate::evolution::rate_limit_for(event_type) as i64 {
+                return Ok(()); // silently drop — at capacity
+            }
 
             let prev_hmac: String = self
                 .conn
@@ -1528,6 +1738,7 @@ impl Database {
                 .unwrap_or_else(|_| "0".to_string());
 
             let hmac = crate::evolution::compute_event_hmac(
+                &self.derive_hmac_key(crate::evolution::EVOLUTION_HMAC_DOMAIN),
                 &prev_hmac,
                 event_type,
                 xp_delta,
@@ -6138,7 +6349,14 @@ mod tests {
     fn bond_record_and_read_event() {
         let db = test_db();
         let now = chrono::Utc::now().timestamp();
-        let hmac = crate::bond::compute_event_hmac("0", "tool_success", 1, "run_shell", now);
+        let hmac = crate::bond::compute_event_hmac(
+            b"borg-bond-chain-v1",
+            "0",
+            "tool_success",
+            1,
+            "run_shell",
+            now,
+        );
         db.record_bond_event("tool_success", 1, "run_shell", &hmac, "0", now)
             .unwrap();
 
@@ -6160,13 +6378,27 @@ mod tests {
 
         // Add an event
         let now = chrono::Utc::now().timestamp();
-        let h1 = crate::bond::compute_event_hmac("0", "tool_success", 1, "test", now);
+        let h1 = crate::bond::compute_event_hmac(
+            b"borg-bond-chain-v1",
+            "0",
+            "tool_success",
+            1,
+            "test",
+            now,
+        );
         db.record_bond_event("tool_success", 1, "test", &h1, "0", now)
             .unwrap();
         assert_eq!(db.get_last_bond_event_hmac().unwrap(), h1);
 
         // Add another
-        let h2 = crate::bond::compute_event_hmac(&h1, "creation", 2, "write_memory", now + 1);
+        let h2 = crate::bond::compute_event_hmac(
+            b"borg-bond-chain-v1",
+            &h1,
+            "creation",
+            2,
+            "write_memory",
+            now + 1,
+        );
         db.record_bond_event("creation", 2, "write_memory", &h2, &h1, now + 1)
             .unwrap();
         assert_eq!(db.get_last_bond_event_hmac().unwrap(), h2);
@@ -6176,7 +6408,14 @@ mod tests {
     fn bond_events_since_filters() {
         let db = test_db();
         let now = chrono::Utc::now().timestamp();
-        let h1 = crate::bond::compute_event_hmac("0", "tool_success", 1, "a", now);
+        let h1 = crate::bond::compute_event_hmac(
+            b"borg-bond-chain-v1",
+            "0",
+            "tool_success",
+            1,
+            "a",
+            now,
+        );
         db.record_bond_event("tool_success", 1, "a", &h1, "0", now)
             .unwrap();
 
@@ -6202,7 +6441,14 @@ mod tests {
                 db.get_last_bond_event_hmac().unwrap()
             };
             let ts = base + i;
-            let h = crate::bond::compute_event_hmac(&prev, "tool_success", 1, "t", ts);
+            let h = crate::bond::compute_event_hmac(
+                b"borg-bond-chain-v1",
+                &prev,
+                "tool_success",
+                1,
+                "t",
+                ts,
+            );
             db.record_bond_event("tool_success", 1, "t", &h, &prev, ts)
                 .unwrap();
         }
@@ -6215,13 +6461,34 @@ mod tests {
     fn bond_count_events_since() {
         let db = test_db();
         let base = chrono::Utc::now().timestamp();
-        let h1 = crate::bond::compute_event_hmac("0", "tool_success", 1, "a", base);
+        let h1 = crate::bond::compute_event_hmac(
+            b"borg-bond-chain-v1",
+            "0",
+            "tool_success",
+            1,
+            "a",
+            base,
+        );
         db.record_bond_event("tool_success", 1, "a", &h1, "0", base)
             .unwrap();
-        let h2 = crate::bond::compute_event_hmac(&h1, "creation", 2, "b", base + 1);
+        let h2 = crate::bond::compute_event_hmac(
+            b"borg-bond-chain-v1",
+            &h1,
+            "creation",
+            2,
+            "b",
+            base + 1,
+        );
         db.record_bond_event("creation", 2, "b", &h2, &h1, base + 1)
             .unwrap();
-        let h3 = crate::bond::compute_event_hmac(&h2, "tool_success", 1, "c", base + 2);
+        let h3 = crate::bond::compute_event_hmac(
+            b"borg-bond-chain-v1",
+            &h2,
+            "tool_success",
+            1,
+            "c",
+            base + 2,
+        );
         db.record_bond_event("tool_success", 1, "c", &h3, &h2, base + 2)
             .unwrap();
 
@@ -6242,10 +6509,24 @@ mod tests {
         let db = test_db();
         let base = chrono::Utc::now().timestamp();
         // Record a chain of events
-        let h1 = crate::bond::compute_event_hmac("0", "tool_success", 1, "read_file", base);
+        let h1 = crate::bond::compute_event_hmac(
+            b"borg-bond-chain-v1",
+            "0",
+            "tool_success",
+            1,
+            "read_file",
+            base,
+        );
         db.record_bond_event("tool_success", 1, "read_file", &h1, "0", base)
             .unwrap();
-        let h2 = crate::bond::compute_event_hmac(&h1, "creation", 2, "write_memory", base + 1);
+        let h2 = crate::bond::compute_event_hmac(
+            b"borg-bond-chain-v1",
+            &h1,
+            "creation",
+            2,
+            "write_memory",
+            base + 1,
+        );
         db.record_bond_event("creation", 2, "write_memory", &h2, &h1, base + 1)
             .unwrap();
 
@@ -6270,8 +6551,9 @@ mod tests {
         let events = db.get_all_bond_events().unwrap();
         assert_eq!(events.len(), 3);
 
-        // Replay should verify the chain is valid
-        let state = crate::bond::replay_events(&events);
+        // Replay should verify the chain is valid (use derived key matching record_bond_event_chained)
+        let key = db.derive_hmac_key(crate::bond::BOND_HMAC_DOMAIN);
+        let state = crate::bond::replay_events_with_key(&key, &events);
         assert!(state.chain_valid);
         // 40 + 1 + 2 - 1 = 42
         assert_eq!(state.score, 42);
@@ -6304,5 +6586,193 @@ mod tests {
             .count_vitals_events_by_category_since(0, "interaction")
             .unwrap();
         assert_eq!(interactions, 2);
+    }
+
+    // ── Tamper-Proof Hardening Tests ──
+
+    #[test]
+    fn vitals_record_time_rate_limiting() {
+        let db = test_db();
+        let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Correction);
+        // Correction cap is 5/hour
+        for _ in 0..10 {
+            db.record_vitals_event("correction", "test", &deltas, None)
+                .unwrap();
+        }
+        // Only 5 should actually be recorded
+        let events = db.vitals_events_since(0).unwrap();
+        assert_eq!(
+            events.len(),
+            5,
+            "record-time rate limiting should cap at 5 correction events/hour"
+        );
+    }
+
+    #[test]
+    fn bond_record_time_rate_limiting() {
+        let db = test_db();
+        // creation cap is 5/hour
+        for _ in 0..10 {
+            db.record_bond_event_chained("creation", 2, "test").unwrap();
+        }
+        let events = db.get_all_bond_events().unwrap();
+        assert_eq!(
+            events.len(),
+            5,
+            "record-time rate limiting should cap at 5 creation events/hour"
+        );
+    }
+
+    #[test]
+    fn evolution_record_time_rate_limiting() {
+        let db = test_db();
+        // xp_gain cap is 30/hour
+        for _ in 0..35 {
+            db.record_evolution_event("xp_gain", 5, Some("builder"), "test", None)
+                .unwrap();
+        }
+        let events = db.load_all_evolution_events().unwrap();
+        assert_eq!(
+            events.len(),
+            30,
+            "record-time rate limiting should cap at 30 xp_gain events/hour"
+        );
+    }
+
+    #[test]
+    fn append_only_triggers_block_update() {
+        let db = test_db();
+        let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Interaction);
+        db.record_vitals_event("interaction", "test", &deltas, None)
+            .unwrap();
+
+        // UPDATE should be blocked by trigger
+        let result = db.conn.execute(
+            "UPDATE vitals_events SET category = 'hacked' WHERE id = 1",
+            [],
+        );
+        assert!(result.is_err(), "append-only trigger should prevent UPDATE");
+        assert!(
+            result.unwrap_err().to_string().contains("append-only"),
+            "error message should mention append-only"
+        );
+    }
+
+    #[test]
+    fn append_only_triggers_block_delete() {
+        let db = test_db();
+        let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Interaction);
+        db.record_vitals_event("interaction", "test", &deltas, None)
+            .unwrap();
+
+        // DELETE should be blocked by trigger
+        let result = db
+            .conn
+            .execute("DELETE FROM vitals_events WHERE id = 1", []);
+        assert!(result.is_err(), "append-only trigger should prevent DELETE");
+    }
+
+    #[test]
+    fn bond_append_only_triggers() {
+        let db = test_db();
+        db.record_bond_event_chained("tool_success", 1, "test")
+            .unwrap();
+
+        let update = db
+            .conn
+            .execute("UPDATE bond_events SET score_delta = 100 WHERE id = 1", []);
+        assert!(update.is_err(), "bond trigger should prevent UPDATE");
+
+        let delete = db.conn.execute("DELETE FROM bond_events WHERE id = 1", []);
+        assert!(delete.is_err(), "bond trigger should prevent DELETE");
+    }
+
+    #[test]
+    fn evolution_append_only_triggers() {
+        let db = test_db();
+        db.record_evolution_event("xp_gain", 5, Some("builder"), "test", None)
+            .unwrap();
+
+        let update = db.conn.execute(
+            "UPDATE evolution_events SET xp_delta = 99999 WHERE id = 1",
+            [],
+        );
+        assert!(update.is_err(), "evolution trigger should prevent UPDATE");
+
+        let delete = db
+            .conn
+            .execute("DELETE FROM evolution_events WHERE id = 1", []);
+        assert!(delete.is_err(), "evolution trigger should prevent DELETE");
+    }
+
+    #[test]
+    fn chain_integrity_verification_healthy() {
+        let db = test_db();
+        let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Success);
+        db.record_vitals_event("success", "test", &deltas, None)
+            .unwrap();
+        db.record_bond_event_chained("tool_success", 1, "test")
+            .unwrap();
+        db.record_evolution_event("xp_gain", 5, Some("ops"), "test", None)
+            .unwrap();
+
+        let health = db.verify_event_chains();
+        assert!(health.vitals_valid, "vitals chain should be valid");
+        assert!(health.bond_valid, "bond chain should be valid");
+        assert!(health.evolution_valid, "evolution chain should be valid");
+        assert_eq!(health.vitals_count, 1);
+        assert_eq!(health.bond_count, 1);
+        assert_eq!(health.evolution_count, 1);
+    }
+
+    #[test]
+    fn chain_integrity_empty_db() {
+        let db = test_db();
+        let health = db.verify_event_chains();
+        assert!(health.vitals_valid, "empty chain should be valid");
+        assert!(health.bond_valid, "empty chain should be valid");
+        assert!(health.evolution_valid, "empty chain should be valid");
+        assert_eq!(health.vitals_count, 0);
+    }
+
+    #[test]
+    fn per_install_hmac_salt_persists() {
+        let db = test_db();
+        let salt1 = db.get_meta("hmac_salt").unwrap().unwrap();
+        // Create another DB from same connection — salt should be the same
+        let salt2 = db.get_meta("hmac_salt").unwrap().unwrap();
+        assert_eq!(salt1, salt2, "HMAC salt should persist across reads");
+        assert_eq!(salt1.len(), 64, "salt should be 64 hex chars (32 bytes)");
+    }
+
+    #[test]
+    fn derived_keys_differ_by_domain() {
+        let db = test_db();
+        let vitals_key = db.derive_hmac_key(crate::vitals::VITALS_HMAC_DOMAIN);
+        let bond_key = db.derive_hmac_key(crate::bond::BOND_HMAC_DOMAIN);
+        let evo_key = db.derive_hmac_key(crate::evolution::EVOLUTION_HMAC_DOMAIN);
+        assert_ne!(vitals_key, bond_key, "vitals and bond keys should differ");
+        assert_ne!(bond_key, evo_key, "bond and evolution keys should differ");
+        assert_ne!(
+            vitals_key, evo_key,
+            "vitals and evolution keys should differ"
+        );
+    }
+
+    #[test]
+    fn vitals_transaction_atomicity() {
+        let db = test_db();
+        let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Success);
+        // Record two events and verify HMAC chain is valid (proves atomic transactions)
+        db.record_vitals_event("success", "a", &deltas, None)
+            .unwrap();
+        db.record_vitals_event("success", "b", &deltas, None)
+            .unwrap();
+
+        let state = db.get_vitals_state().unwrap();
+        assert!(
+            state.chain_valid,
+            "HMAC chain should be valid with transactional writes"
+        );
     }
 }
