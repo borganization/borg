@@ -379,6 +379,28 @@ impl GatewayServer {
             .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
             .with_state(state.clone());
 
+        // Check if a gateway is already running on this port before attempting to bind
+        let probe_ok = async {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .ok()?;
+            let resp = client
+                .get(format!("http://{addr}/healthz"))
+                .send()
+                .await
+                .ok()?;
+            resp.status().is_success().then_some(())
+        }
+        .await
+        .is_some();
+
+        if probe_ok {
+            info!("Gateway already running on {addr}, skipping bind");
+            self.shutdown.cancelled().await;
+            return Ok(());
+        }
+
         let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse {
                 anyhow::anyhow!(

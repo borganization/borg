@@ -1151,6 +1151,11 @@ impl Database {
     /// State is derived by replaying verified events from baseline.
     /// No mutable state table — the event ledger is the single source of truth.
     fn migrate_v22(&self) -> Result<()> {
+        // Repair: if table exists from a prior dev build without hmac column, drop it
+        if !Self::has_column(&self.conn, "vitals_events", "hmac") {
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS vitals_events;")?;
+        }
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS vitals_events (

@@ -137,7 +137,6 @@ pub struct App<'a> {
     pub file_popup: FileSearchPopup,
     pub throbber_state: ThrobberState,
     transcript_area: Rect,
-    scrollbar_dragging: bool,
     /// Channel for sending steer messages to the agent mid-turn.
     pub steer_tx: Option<mpsc::UnboundedSender<String>>,
     /// Steers queued in UI, cleared when agent confirms receipt.
@@ -182,7 +181,6 @@ impl<'a> App<'a> {
             file_popup: FileSearchPopup::new(),
             throbber_state: ThrobberState::default(),
             transcript_area: Rect::default(),
-            scrollbar_dragging: false,
             steer_tx: None,
             pending_steers: VecDeque::new(),
             plan_steps: Vec::new(),
@@ -230,29 +228,19 @@ impl<'a> App<'a> {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // Scrollbar click-to-jump: clicking on the scrollbar column
+                // jumps the scroll position. Drag is NOT handled (?1002h is
+                // disabled to preserve native text selection).
                 let scrollbar_col = area.x + area.width - 1;
                 if event.column == scrollbar_col
                     && event.row >= area.y
                     && event.row < area.y + area.height
                 {
-                    self.scrollbar_dragging = true;
                     let local_y = (event.row - area.y) as usize;
                     self.scroll_offset =
                         mouse_y_to_scroll_offset(local_y, visible_height, max_scroll);
                     self.auto_scroll = self.scroll_offset == 0;
                 }
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if self.scrollbar_dragging {
-                    let local_y = event.row.saturating_sub(area.y) as usize;
-                    let clamped = local_y.min(visible_height.saturating_sub(1));
-                    self.scroll_offset =
-                        mouse_y_to_scroll_offset(clamped, visible_height, max_scroll);
-                    self.auto_scroll = self.scroll_offset == 0;
-                }
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                self.scrollbar_dragging = false;
             }
             _ => {}
         }
@@ -946,10 +934,18 @@ impl<'a> App<'a> {
                 } else {
                     "No log file found.".to_string()
                 };
+                let clipboard_note = if !text.is_empty() {
+                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone())) {
+                        Ok(_) => "\n\n(copied to clipboard)",
+                        Err(_) => "",
+                    }
+                } else {
+                    ""
+                };
                 self.push_system_message(if text.is_empty() {
                     "Log file is empty.".to_string()
                 } else {
-                    text
+                    format!("{text}{clipboard_note}")
                 });
                 return Ok(AppAction::Continue);
             }
@@ -2144,55 +2140,11 @@ mod tests {
 
         app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 10));
         assert_eq!(app.scroll_offset, 10);
-        assert!(!app.scrollbar_dragging);
     }
 
-    #[test]
-    fn drag_scrollbar_updates_offset() {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        let mut app = setup_app_with_transcript();
-        let scrollbar_col = app.transcript_area.x + app.transcript_area.width - 1;
-
-        // Start drag on scrollbar
-        app.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Left),
-            scrollbar_col,
-            0,
-        ));
-        assert!(app.scrollbar_dragging);
-
-        // Drag to middle
-        app.handle_mouse(mouse_event(
-            MouseEventKind::Drag(MouseButton::Left),
-            scrollbar_col,
-            20,
-        ));
-        let max_scroll = app
-            .total_lines
-            .saturating_sub(app.transcript_area.height as usize);
-        let expected = mouse_y_to_scroll_offset(20, 40, max_scroll);
-        assert_eq!(app.scroll_offset, expected);
-    }
-
-    #[test]
-    fn drag_without_scrollbar_flag_does_nothing() {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        let mut app = setup_app_with_transcript();
-        app.scroll_offset = 10;
-
-        app.handle_mouse(mouse_event(MouseEventKind::Drag(MouseButton::Left), 79, 20));
-        assert_eq!(app.scroll_offset, 10);
-    }
-
-    #[test]
-    fn mouse_up_clears_dragging() {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        let mut app = setup_app_with_transcript();
-        app.scrollbar_dragging = true;
-
-        app.handle_mouse(mouse_event(MouseEventKind::Up(MouseButton::Left), 0, 0));
-        assert!(!app.scrollbar_dragging);
-    }
+    // NOTE: Scrollbar drag tests removed — ?1002h (button-event tracking) is
+    // disabled to preserve native text selection. Scrollbar click-to-jump
+    // still works via ?1000h. See mod.rs EnableScrollMouseCapture.
 
     #[test]
     fn mouse_ignored_before_first_render() {
@@ -2227,10 +2179,6 @@ mod tests {
         assert_eq!(
             app.scroll_offset, 5,
             "click in transcript must not change scroll"
-        );
-        assert!(
-            !app.scrollbar_dragging,
-            "click in transcript must not start drag"
         );
     }
 

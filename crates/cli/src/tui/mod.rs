@@ -31,29 +31,35 @@ use crossterm::ExecutableCommand;
 // ============================================================================
 // crossterm's EnableMouseCapture enables ?1003h (any-event tracking) which
 // captures ALL mouse events (including movement), breaking native text
-// selection in terminals. We only enable the modes we actually need:
+// selection in terminals. We ONLY enable scroll-wheel tracking:
 //   - ?1000h: Normal tracking (button press/release) — for scroll wheel
-//   - ?1002h: Button-event tracking (dragging) — for scrollbar drag
 //   - ?1006h: SGR mouse mode — for coordinates >223
-// This preserves native text selection (click+drag) while still supporting
-// scroll wheel and scrollbar interaction. Shift+click also works as fallback.
 //
-// DO NOT add ?1003h — it will break text selection. This is a recurring
-// regression. See CLAUDE.md "Mouse Interaction" section.
+// EXCLUDED modes (DO NOT ADD):
+//   - ?1002h: Button-event tracking (drag) — breaks native text selection
+//             because click+drag events go to the app instead of the terminal.
+//             Scrollbar drag is sacrificed to preserve text selection.
+//   - ?1003h: Any-event tracking — captures ALL mouse events including bare
+//             movement, completely breaks text selection.
+//
+// Native text selection (click+drag) MUST work in the transcript area.
+// This has regressed multiple times. See CLAUDE.md "Mouse Interaction".
 // ============================================================================
 
-/// Enable mouse capture for scroll wheel and scrollbar only.
-/// Does NOT enable any-event tracking (?1003h) to preserve text selection.
+/// Enable mouse capture for scroll wheel only.
+/// Does NOT enable drag (?1002h) or any-event (?1003h) tracking — both break
+/// native text selection. Scrollbar click-to-jump still works via ?1000h.
 struct EnableScrollMouseCapture;
 
 impl crossterm::Command for EnableScrollMouseCapture {
     fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
-        // ?1000h: Normal tracking — button press/release (includes scroll wheel)
-        // ?1002h: Button-event tracking — drag events (for scrollbar)
+        // ?1000h: Normal tracking — button press/release (includes scroll wheel
+        //         and single clicks, e.g. scrollbar click-to-jump)
         // ?1006h: SGR extended mode — coordinates >223
-        // NOTE: ?1003h (any-event tracking) is intentionally EXCLUDED.
-        // Adding it breaks native text selection. See comment block above.
-        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+        //
+        // DO NOT add ?1002h — it captures drag events, breaking text selection.
+        // DO NOT add ?1003h — it captures all mouse events, breaking text selection.
+        f.write_str("\x1b[?1000h\x1b[?1006h")
     }
 
     #[cfg(windows)]
@@ -68,7 +74,8 @@ struct DisableScrollMouseCapture;
 
 impl crossterm::Command for DisableScrollMouseCapture {
     fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
-        f.write_str("\x1b[?1006l\x1b[?1002l\x1b[?1000l")
+        // Only disable the modes we enabled: ?1000h and ?1006h
+        f.write_str("\x1b[?1006l\x1b[?1000l")
     }
 
     #[cfg(windows)]
@@ -952,26 +959,29 @@ mod tests {
     use super::*;
     use crossterm::Command;
 
-    /// Verify that our custom mouse capture does NOT include ?1003h (any-event
-    /// tracking). ?1003h captures all mouse motion and breaks native text
-    /// selection. This test exists to prevent a recurring regression.
+    /// Verify that our custom mouse capture preserves native text selection.
+    /// Only ?1000h (scroll wheel / single click) and ?1006h (SGR coords) are
+    /// enabled. ?1002h (drag) and ?1003h (any-event) MUST be excluded — both
+    /// break native text selection. This test prevents a recurring regression.
     #[test]
-    fn enable_scroll_mouse_capture_excludes_any_event_tracking() {
+    fn enable_scroll_mouse_capture_preserves_text_selection() {
         let mut buf = String::new();
         EnableScrollMouseCapture.write_ansi(&mut buf).unwrap();
 
         // Must include the modes we need
         assert!(buf.contains("?1000h"), "must enable normal button tracking");
         assert!(
-            buf.contains("?1002h"),
-            "must enable button-event (drag) tracking"
-        );
-        assert!(
             buf.contains("?1006h"),
             "must enable SGR extended coordinates"
         );
 
-        // Must NOT include any-event tracking — this breaks text selection
+        // Must NOT include drag tracking — breaks native text selection
+        assert!(
+            !buf.contains("?1002h"),
+            "MUST NOT enable ?1002h (drag tracking) — it breaks native text selection"
+        );
+
+        // Must NOT include any-event tracking — breaks native text selection
         assert!(
             !buf.contains("?1003h"),
             "MUST NOT enable ?1003h (any-event tracking) — it breaks native text selection"
@@ -984,8 +994,9 @@ mod tests {
         DisableScrollMouseCapture.write_ansi(&mut buf).unwrap();
 
         assert!(buf.contains("?1000l"), "must disable normal tracking");
-        assert!(buf.contains("?1002l"), "must disable drag tracking");
         assert!(buf.contains("?1006l"), "must disable SGR mode");
+        // Must not reference modes we don't enable
+        assert!(!buf.contains("?1002l"), "must not reference ?1002 at all");
         assert!(!buf.contains("?1003l"), "must not reference ?1003 at all");
     }
 }
