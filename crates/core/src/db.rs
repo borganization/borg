@@ -1502,13 +1502,51 @@ impl Database {
         delta: i32,
         reason: &str,
     ) -> Result<()> {
+        // Validate event_type and delta to prevent gaming via custom types or inflated deltas
+        let expected_delta = match event_type {
+            "tool_success" => 1,
+            "tool_failure" => -1,
+            "creation" => 2,
+            "correction" => -2,
+            "suggestion_accepted" => 1,
+            "suggestion_rejected" => -1,
+            _ => return Err(anyhow::anyhow!("invalid bond event_type: {event_type}")),
+        };
+        if delta != expected_delta {
+            return Err(anyhow::anyhow!(
+                "invalid delta {delta} for bond event_type {event_type}, expected {expected_delta}"
+            ));
+        }
+
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
         let result = (|| -> Result<()> {
             let now = chrono::Utc::now().timestamp();
             let hour_start = now - (now % 3600);
 
-            // Record-time rate limiting: reject if this event_type already hit its cap this hour
+            // Total events per hour cap (30)
+            let total_this_hour: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM bond_events WHERE created_at >= ?1",
+                params![hour_start],
+                |row| row.get(0),
+            )?;
+            if total_this_hour >= 30 {
+                return Ok(()); // silently drop — at capacity
+            }
+
+            // Positive-delta events per hour cap (15)
+            if delta > 0 {
+                let pos_this_hour: i64 = self.conn.query_row(
+                    "SELECT COUNT(*) FROM bond_events WHERE score_delta > 0 AND created_at >= ?1",
+                    params![hour_start],
+                    |row| row.get(0),
+                )?;
+                if pos_this_hour >= 15 {
+                    return Ok(()); // silently drop — at capacity
+                }
+            }
+
+            // Per-type rate limiting
             let count: i64 = self.conn.query_row(
                 "SELECT COUNT(*) FROM bond_events WHERE event_type = ?1 AND created_at >= ?2",
                 params![event_type, hour_start],
@@ -1678,7 +1716,9 @@ impl Database {
     }
 
     /// Load all evolution events ordered chronologically for replay.
-    fn load_all_evolution_events(&self) -> Result<Vec<crate::evolution::EvolutionEvent>> {
+    pub(crate) fn load_all_evolution_events(
+        &self,
+    ) -> Result<Vec<crate::evolution::EvolutionEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, event_type, xp_delta, archetype, source, metadata_json,
                     created_at, hmac, prev_hmac
@@ -6562,6 +6602,70 @@ mod tests {
         assert_eq!(events[0].prev_hmac, "0");
         assert_eq!(events[1].prev_hmac, events[0].hmac);
         assert_eq!(events[2].prev_hmac, events[1].hmac);
+    }
+
+    #[test]
+    fn bond_record_rejects_invalid_event_type() {
+        let db = test_db();
+        let result = db.record_bond_event_chained("custom_exploit", 1, "test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn bond_record_rejects_wrong_delta() {
+        let db = test_db();
+        let result = db.record_bond_event_chained("tool_success", 99, "test");
+        assert!(result.is_err());
+        let result = db.record_bond_event_chained("tool_success", 1, "test");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn bond_record_total_hourly_cap() {
+        let db = test_db();
+        for i in 0..30 {
+            let event_type = match i % 6 {
+                0 => "tool_success",
+                1 => "tool_failure",
+                2 => "creation",
+                3 => "correction",
+                4 => "suggestion_accepted",
+                _ => "suggestion_rejected",
+            };
+            let delta = match event_type {
+                "tool_success" | "suggestion_accepted" => 1,
+                "tool_failure" | "suggestion_rejected" => -1,
+                "creation" => 2,
+                "correction" => -2,
+                _ => unreachable!(),
+            };
+            db.record_bond_event_chained(event_type, delta, "test")
+                .unwrap();
+        }
+        // 31st event should be silently dropped
+        db.record_bond_event_chained("tool_success", 1, "test")
+            .unwrap();
+        let events = db.get_all_bond_events().unwrap();
+        assert_eq!(events.len(), 30);
+    }
+
+    #[test]
+    fn bond_record_positive_delta_hourly_cap() {
+        let db = test_db();
+        for _ in 0..15 {
+            db.record_bond_event_chained("tool_success", 1, "test")
+                .unwrap();
+        }
+        // 16th positive event should be dropped
+        db.record_bond_event_chained("suggestion_accepted", 1, "test")
+            .unwrap();
+        let events = db.get_all_bond_events().unwrap();
+        assert_eq!(events.len(), 15);
+        // Negative event should still work
+        db.record_bond_event_chained("tool_failure", -1, "test")
+            .unwrap();
+        let events = db.get_all_bond_events().unwrap();
+        assert_eq!(events.len(), 16);
     }
 
     #[test]
