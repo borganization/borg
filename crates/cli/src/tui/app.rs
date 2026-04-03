@@ -230,6 +230,30 @@ impl<'a> App<'a> {
         }
     }
 
+    pub fn tick_paste_burst(&mut self) {
+        self.composer.tick();
+    }
+
+    /// Handle a bracketed paste event (entire pasted text as a single string).
+    pub fn handle_paste(&mut self, text: String) -> AppAction {
+        match self.state {
+            AppState::Idle | AppState::AwaitingInput { .. } => {
+                self.composer.handle_paste(&text);
+                // Update popup filters (same as after handle_key)
+                let composer_text = self.composer.text();
+                if composer_text.starts_with('/') {
+                    self.command_popup.update_filter(&composer_text);
+                }
+                AppAction::Continue
+            }
+            _ => {
+                // While streaming, queue the pasted text
+                self.pending_steers.push_back(text);
+                AppAction::Continue
+            }
+        }
+    }
+
     // =========================================================================
     // IMPORTANT: Mouse handling must NOT break native text selection.
     // Only scroll wheel and scrollbar interactions are handled here.

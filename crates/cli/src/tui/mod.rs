@@ -8,6 +8,7 @@ mod goodbye;
 mod history;
 mod layout;
 mod markdown;
+mod paste_burst;
 mod plan_overlay;
 mod plugins_popup;
 mod schedule_popup;
@@ -22,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -184,6 +185,7 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = stdout().execute(DisableBracketedPaste);
         let _ = stdout().execute(DisableScrollMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
@@ -274,6 +276,7 @@ pub async fn run() -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     stdout().execute(EnableScrollMouseCapture)?;
+    stdout().execute(EnableBracketedPaste)?;
 
     // Guard ensures terminal is restored on any exit path (error or normal)
     let _guard = TerminalGuard;
@@ -281,6 +284,7 @@ pub async fn run() -> Result<()> {
     // Install panic hook that restores terminal before printing panic
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
+        let _ = stdout().execute(DisableBracketedPaste);
         let _ = stdout().execute(DisableScrollMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
@@ -441,6 +445,7 @@ async fn run_event_loop(
             maybe_event = event_stream.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => app.handle_key(key)?,
+                    Some(Ok(Event::Paste(text))) => app.handle_paste(text),
                     Some(Ok(Event::Mouse(mouse))) => app.handle_mouse(mouse),
                     Some(Ok(Event::Resize(_, _))) => AppAction::Continue,
                     Some(Err(_)) | None => AppAction::Quit,
@@ -448,9 +453,10 @@ async fn run_event_loop(
                 }
             }
 
-            // Tick for status bar elapsed time + throbber animation
+            // Tick for status bar elapsed time + throbber animation + paste burst flush
             _ = tick_interval.tick() => {
                 app.tick_throbber();
+                app.tick_paste_burst();
                 drain_queued_if_idle(app)?
             }
         };

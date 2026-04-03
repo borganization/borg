@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
@@ -7,6 +8,7 @@ use ratatui::widgets::Block;
 use ratatui::Frame;
 use tui_textarea::TextArea;
 
+use super::paste_burst::PasteBurst;
 use super::theme;
 
 pub struct FileRef {
@@ -100,6 +102,7 @@ pub struct Composer<'a> {
     history: InputHistory,
     file_refs: Vec<FileRef>,
     image_attachments: Vec<ImageAttachment>,
+    paste_burst: PasteBurst,
 }
 
 impl<'a> Composer<'a> {
@@ -117,6 +120,20 @@ impl<'a> Composer<'a> {
             history: InputHistory::new(),
             file_refs: Vec::new(),
             image_attachments: Vec::new(),
+            paste_burst: PasteBurst::new(),
+        }
+    }
+
+    pub fn handle_paste(&mut self, text: &str) {
+        self.history.reset();
+        self.paste_burst.flush_immediate();
+        self.textarea.insert_str(text);
+    }
+
+    /// Called on each tick to flush any paste-burst buffer.
+    pub fn tick(&mut self) {
+        if let Some(text) = self.paste_burst.flush_if_due(Instant::now()) {
+            self.textarea.insert_str(&text);
         }
     }
 
@@ -125,6 +142,12 @@ impl<'a> Composer<'a> {
 
         match (key.code, key.modifiers) {
             (KeyCode::Enter, KeyModifiers::NONE) => {
+                // During a paste burst, treat Enter as newline instead of submit
+                let now = Instant::now();
+                if self.paste_burst.append_newline_if_active(now) {
+                    return None;
+                }
+
                 let text: String = self.textarea.lines().join("\n");
                 let trimmed = text.trim().to_string();
                 if trimmed.is_empty() {
@@ -193,7 +216,19 @@ impl<'a> Composer<'a> {
                 }
                 None
             }
+            // Ctrl+Backspace — delete backward word
+            (KeyCode::Backspace, m) if m.contains(KeyModifiers::CONTROL) => {
+                self.history.reset();
+                // Flush any paste burst before editing
+                if let Some(text) = self.paste_burst.flush_immediate() {
+                    self.textarea.insert_str(&text);
+                }
+                self.textarea
+                    .input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+                None
+            }
             (KeyCode::Esc, _) => {
+                self.paste_burst.flush_immediate();
                 self.textarea.select_all();
                 self.textarea.cut();
                 self.history.reset();
@@ -201,8 +236,24 @@ impl<'a> Composer<'a> {
                 self.image_attachments.clear();
                 None
             }
+            // Plain character — feed to paste burst detector
+            (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                use super::paste_burst::CharAction;
+                self.history.reset();
+                match self.paste_burst.on_char(ch, Instant::now()) {
+                    CharAction::Buffer => None,
+                    CharAction::Insert => {
+                        self.textarea.input(key);
+                        None
+                    }
+                }
+            }
             _ => {
                 self.history.reset();
+                // Flush any paste burst before handling other keys
+                if let Some(text) = self.paste_burst.flush_immediate() {
+                    self.textarea.insert_str(&text);
+                }
                 self.textarea.input(key);
                 None
             }
@@ -270,6 +321,21 @@ impl<'a> Composer<'a> {
     #[cfg(test)]
     pub fn is_browsing_history(&self) -> bool {
         self.history.is_browsing()
+    }
+
+    /// Type text and submit it (for tests). Uses set_text to avoid paste burst detection.
+    #[cfg(test)]
+    fn type_and_submit(&mut self, text: &str) {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        self.set_text(text);
+        self.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    /// Type text into the composer (for tests). Uses set_text to avoid paste burst detection.
+    #[cfg(test)]
+    fn type_text(&mut self, text: &str) {
+        self.set_text(text);
+        self.history.reset();
     }
 
     fn is_single_line(&self) -> bool {
@@ -347,9 +413,7 @@ mod tests {
     fn test_down_past_newest_clears_input() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut c = Composer::new();
-        c.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-        c.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
-        c.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        c.type_and_submit("hi");
 
         // Up loads "hi"
         c.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
@@ -365,15 +429,10 @@ mod tests {
     fn test_down_past_newest_clears_even_with_draft() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut c = Composer::new();
-        c.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        c.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        c.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-        c.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        c.type_and_submit("old");
 
         // Type draft text
-        c.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
-        c.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
-        c.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        c.type_text("wip");
 
         // Up saves draft and loads "old"
         c.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
@@ -388,8 +447,7 @@ mod tests {
     fn test_ctrl_n_past_newest_clears_input() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut c = Composer::new();
-        c.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        c.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        c.type_and_submit("x");
 
         // Ctrl+P to go back
         c.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
@@ -413,5 +471,61 @@ mod tests {
         let result = h.down();
         assert_eq!(result, Some(None));
         assert_eq!(h.draft(), "work in progress");
+    }
+
+    #[test]
+    fn test_handle_paste_inserts_text() {
+        let mut c = Composer::new();
+        c.handle_paste("hello world");
+        assert_eq!(c.text(), "hello world");
+    }
+
+    #[test]
+    fn test_handle_paste_multiline() {
+        let mut c = Composer::new();
+        c.handle_paste("line 1\nline 2\nline 3");
+        assert_eq!(c.text(), "line 1\nline 2\nline 3");
+    }
+
+    #[test]
+    fn test_handle_paste_appends_at_cursor() {
+        let mut c = Composer::new();
+        c.type_text("prefix ");
+        c.handle_paste("pasted");
+        assert_eq!(c.text(), "prefix pasted");
+    }
+
+    #[test]
+    fn test_handle_paste_resets_history() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut c = Composer::new();
+        c.type_and_submit("old");
+
+        // Browse history
+        c.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(c.is_browsing_history());
+
+        // Paste should reset history browsing
+        c.handle_paste("new text");
+        assert!(!c.is_browsing_history());
+    }
+
+    #[test]
+    fn test_ctrl_backspace_deletes_word() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut c = Composer::new();
+        c.type_text("hello world");
+        // Ctrl+Backspace should delete "world"
+        c.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        let text = c.text();
+        assert_eq!(text, "hello ");
+    }
+
+    #[test]
+    fn test_handle_paste_large_block() {
+        let mut c = Composer::new();
+        let large_text = "fn main() {\n    println!(\"Hello, world!\");\n    let x = 42;\n    let y = x * 2;\n}\n";
+        c.handle_paste(large_text);
+        assert_eq!(c.text(), large_text);
     }
 }
