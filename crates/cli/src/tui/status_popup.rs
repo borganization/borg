@@ -96,7 +96,8 @@ impl StatusPopup {
 
         // Bond
         if let Ok(bond_events) = db.get_all_bond_events() {
-            let bond_state = borg_core::bond::replay_events(&bond_events);
+            let bond_key = db.derive_hmac_key(borg_core::bond::BOND_HMAC_DOMAIN);
+            let bond_state = borg_core::bond::replay_events_with_key(&bond_key, &bond_events);
             let correction_rate = borg_core::bond::compute_correction_rate(&db);
             let routine_rate = borg_core::bond::compute_routine_success_rate(&db);
             let pref_count = borg_core::bond::compute_preference_learning_count(&db);
