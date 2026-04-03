@@ -54,6 +54,7 @@ pub mod tool_policy;
 pub mod truncate;
 pub mod tts;
 pub mod types;
+pub mod update;
 pub mod vitals;
 pub mod web;
 pub mod xml_util;

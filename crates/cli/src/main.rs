@@ -129,6 +129,15 @@ enum Commands {
     Available,
     /// Migrate settings from Hermes Agent or OpenClaw
     Migrate,
+    /// Update borg to the latest release
+    Update {
+        /// Install latest pre-release/dev build instead of stable
+        #[arg(long)]
+        dev: bool,
+        /// Only check for updates, don't install
+        #[arg(long)]
+        check: bool,
+    },
     /// Permanently delete all Borg data and uninstall the service
     Uninstall,
 }
@@ -469,6 +478,7 @@ async fn main() -> Result<()> {
         Some(Commands::Away { message }) => run_away(message).await?,
         Some(Commands::Available) => run_available().await?,
         Some(Commands::Migrate) => migrate_tui::run()?,
+        Some(Commands::Update { dev, check }) => run_update(dev, check).await?,
         Some(Commands::Uninstall) => run_uninstall()?,
     }
 
@@ -795,6 +805,47 @@ fn run_doctor() -> Result<()> {
     let (_pass, _warn, fail) = report.counts();
     if fail > 0 {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn run_update(dev: bool, check: bool) -> Result<()> {
+    let current = borg_core::update::current_version();
+    println!("Current version: {current}");
+    println!(
+        "Checking for updates{}...",
+        if dev { " (including pre-releases)" } else { "" }
+    );
+
+    if check {
+        let release = borg_core::update::fetch_latest_release(dev).await?;
+        let latest = release
+            .tag_name
+            .strip_prefix('v')
+            .unwrap_or(&release.tag_name);
+        if !borg_core::update::is_newer(current, latest) {
+            println!("Already up to date ({current})");
+        } else {
+            println!("Update available: {current} → {latest}");
+        }
+        return Ok(());
+    }
+
+    match borg_core::update::perform_update(dev).await? {
+        borg_core::update::UpdateResult {
+            status: borg_core::update::UpdateStatus::AlreadyUpToDate,
+            current_version,
+            ..
+        } => {
+            println!("Already up to date ({current_version})");
+        }
+        borg_core::update::UpdateResult {
+            status: borg_core::update::UpdateStatus::Updated { from, to },
+            ..
+        } => {
+            println!("Updated borg: {from} → {to}");
+            println!("Restart borg to use the new version.");
+        }
     }
     Ok(())
 }
