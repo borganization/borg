@@ -1,6 +1,6 @@
 ---
 name: calendar
-description: "Calendar integration via icalBuddy on macOS. Use when: checking today's schedule, listing upcoming events, finding free time, or querying specific calendars. Requires icalBuddy installed (brew install ical-buddy)."
+description: "Check schedule and events via icalBuddy (macOS)"
 requires:
   bins: ["icalBuddy"]
 ---

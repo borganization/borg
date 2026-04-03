@@ -1,6 +1,6 @@
 ---
 name: github
-description: "GitHub operations via gh CLI: issues, PRs, CI runs, code review, API queries. Use when: checking PR status or CI, creating/commenting on issues, listing/filtering PRs, viewing run logs. Requires gh CLI installed and authenticated."
+description: "GitHub issues, PRs, CI, and code review via gh CLI"
 requires:
   bins: ["gh"]
 ---

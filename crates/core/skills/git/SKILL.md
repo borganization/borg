@@ -1,6 +1,6 @@
 ---
 name: git
-description: "Local git operations: status, diff, log, commit, branch, stash, rebase. Use when: checking repo state, making commits, managing branches, reviewing history, or resolving conflicts. Requires git installed."
+description: "Git operations: commit, branch, diff, log, rebase"
 requires:
   bins: ["git"]
 ---
