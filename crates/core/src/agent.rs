@@ -841,10 +841,37 @@ impl Agent {
             .take(constants::FLUSH_TRANSCRIPT_CAP_CHARS)
             .collect();
 
-        let flush_prompt =
-            "Extract durable information from this conversation that should be remembered. \
-            Include: decisions made, facts learned, user preferences, action items, identifiers \
-            (preserve exactly). Format as markdown bullet points. Be concise.";
+        let flush_prompt = "\
+You are a Memory Writing Agent. Your job: extract durable information from conversation \
+messages that are about to be dropped from context.
+
+MINIMUM SIGNAL GATE: Before writing anything, ask: 'Will a future agent plausibly act \
+better because of what I write here?' If NO — return ONLY the word 'SKIP'. \
+Skip when the content is: one-off queries with no reusable insight, generic status updates \
+without takeaways, temporary facts that should be re-queried, or obvious/common knowledge.
+
+When there IS signal worth saving, extract structured information:
+
+## User Preferences
+- Corrections, repeated requests, or explicit preferences that should become defaults
+- Evidence > implication format: 'user said/did X -> suggests they want Y by default'
+
+## Decisions & Facts
+- Decisions made, identifiers (preserve exactly), facts learned about the codebase or environment
+
+## Reusable Knowledge
+- Commands that worked, failure modes and their fixes, high-leverage shortcuts
+- Symptom -> cause -> fix format for failures
+
+## Task Outcomes
+- What was attempted, what succeeded/failed, what the user confirmed or rejected
+
+Rules:
+- Be concise. Bullet points only. No filler.
+- Preserve exact identifiers, paths, commands, and error messages verbatim.
+- Never store tokens, keys, passwords, or secrets.
+- Overindex on user messages (requests, corrections, interruptions) over assistant messages.
+- Omit any section that has no entries.";
 
         let flush_messages = vec![
             crate::types::Message::system(flush_prompt),
@@ -863,6 +890,11 @@ impl Agent {
         match llm.chat(&flush_messages, None).await {
             Ok(response) => {
                 if let Some(text) = response.text_content() {
+                    // Respect the minimum-signal gate: if the LLM says SKIP, don't write
+                    if text.trim().eq_ignore_ascii_case("SKIP") {
+                        tracing::debug!("Pre-compaction flush: no signal worth saving (SKIP)");
+                        return;
+                    }
                     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
                     let filename = format!("daily/{today}.md");
                     let header = format!(

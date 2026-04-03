@@ -25,3 +25,6 @@ Thumbs.db
 
 # Reference implementations (local only)
 /reference
+
+# Internal specs (local only)
+/docs/specs/
