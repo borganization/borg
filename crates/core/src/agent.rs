@@ -72,7 +72,7 @@ const COLLAB_MODE_PLAN: &str = include_str!("../templates/collaboration_mode/pla
 
 /// Maximum number of parallel tool calls allowed in a single LLM response.
 /// Prevents OOM from malformed stream events with huge indices.
-const MAX_TOOL_CALLS: usize = 128;
+const MAX_TOOL_CALLS: usize = constants::MAX_AGENT_TOOL_CALLS;
 
 const SECURITY_POLICY: &str = "\
 # Security Policy
@@ -813,7 +813,10 @@ impl Agent {
                 crate::types::Role::System => "System",
             };
             if let Some(content) = msg.text_content() {
-                let truncated: String = content.chars().take(500).collect();
+                let truncated: String = content
+                    .chars()
+                    .take(constants::FLUSH_MESSAGE_TRUNCATE_CHARS)
+                    .collect();
                 transcript.push_str(&format!("{role}: {truncated}\n"));
             }
         }
@@ -823,7 +826,10 @@ impl Agent {
         }
 
         // Cap transcript
-        let transcript: String = transcript.chars().take(20000).collect();
+        let transcript: String = transcript
+            .chars()
+            .take(constants::FLUSH_TRANSCRIPT_CAP_CHARS)
+            .collect();
 
         let flush_prompt =
             "Extract durable information from this conversation that should be remembered. \

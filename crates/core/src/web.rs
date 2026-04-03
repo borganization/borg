@@ -3,9 +3,10 @@ use scraper::{Html, Selector};
 use std::sync::LazyLock;
 
 use crate::config::WebConfig;
+use crate::constants;
 
-const MAX_FETCH_CHARS: usize = 50000;
-const MAX_SEARCH_RESULTS: usize = 8;
+const MAX_FETCH_CHARS: usize = constants::WEB_FETCH_MAX_CHARS;
+const MAX_SEARCH_RESULTS: usize = constants::WEB_MAX_SEARCH_RESULTS;
 const USER_AGENT: &str = "Mozilla/5.0 (compatible; Borg/0.1)";
 
 fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client> {
@@ -87,8 +88,12 @@ pub async fn web_fetch(url: &str, max_chars: Option<usize>) -> Result<String> {
 
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .timeout(std::time::Duration::from_secs(
+            constants::WEB_FETCH_TIMEOUT_SECS,
+        ))
+        .redirect(reqwest::redirect::Policy::limited(
+            constants::WEB_REDIRECT_LIMIT,
+        ))
         .build()?;
 
     let resp = client
@@ -113,7 +118,7 @@ pub async fn web_fetch(url: &str, max_chars: Option<usize>) -> Result<String> {
         .bytes()
         .await
         .with_context(|| format!("Failed to read body from {url}"))?;
-    const MAX_BODY_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+    const MAX_BODY_BYTES: usize = constants::WEB_MAX_BODY_BYTES;
     if bytes.len() > MAX_BODY_BYTES {
         anyhow::bail!(
             "Response body too large ({} bytes, max {MAX_BODY_BYTES})",

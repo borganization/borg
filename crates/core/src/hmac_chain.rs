@@ -10,6 +10,8 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
 
+use crate::constants;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Compute an HMAC-SHA256 over a sequence of fields.
@@ -78,7 +80,7 @@ impl HourlyRateLimiter {
         type_cap: u32,
         is_positive: bool,
     ) -> bool {
-        let hour_bucket = timestamp / 3600;
+        let hour_bucket = timestamp / constants::SECS_PER_HOUR;
 
         // Total events per hour cap
         if let Some(cap) = self.total_cap {
@@ -120,7 +122,7 @@ impl HourlyRateLimiter {
     /// Source-specific rate limiting (separate from type-based).
     /// Returns `true` if allowed.
     pub fn check_source(&mut self, timestamp: i64, source: &str, cap: u32) -> bool {
-        let hour_bucket = timestamp / 3600;
+        let hour_bucket = timestamp / constants::SECS_PER_HOUR;
         let key = (hour_bucket, format!("__src__{source}"));
         let count = self.type_counts.entry(key).or_insert(0);
         if *count >= cap {
@@ -143,7 +145,7 @@ pub struct ChainCheckpoint {
 }
 
 /// How often to write checkpoints (every N verified events).
-pub const CHECKPOINT_INTERVAL: u32 = 100;
+pub const CHECKPOINT_INTERVAL: u32 = constants::HMAC_CHECKPOINT_INTERVAL;
 
 #[cfg(test)]
 mod tests {
