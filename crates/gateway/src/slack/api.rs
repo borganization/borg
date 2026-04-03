@@ -12,12 +12,12 @@ use crate::circuit_breaker::CircuitBreaker;
 use crate::constants::{DEFAULT_MESSAGE_CHUNK_SIZE, GATEWAY_HTTP_TIMEOUT};
 use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
 
-const SLACK_API_BASE: &str = "https://slack.com/api";
+const SLACK_API_BASE: &str = crate::constants::SLACK_API_BASE;
 
 /// Circuit breaker thresholds for Slack typing indicators.
-/// Trips after 2 consecutive failures (matching OpenClaw's maxConsecutiveFailures).
-const TYPING_CB_FAILURE_THRESHOLD: u32 = 2;
-const TYPING_CB_SUSPENSION_SECS: u64 = 60;
+/// Trips after N consecutive failures (matching OpenClaw's maxConsecutiveFailures).
+const TYPING_CB_FAILURE_THRESHOLD: u32 = crate::constants::SLACK_TYPING_CB_FAILURE_THRESHOLD;
+const TYPING_CB_SUSPENSION_SECS: u64 = crate::constants::SLACK_TYPING_CB_SUSPENSION_SECS;
 
 /// Max file download size for Slack attachments.
 const MAX_FILE_DOWNLOAD: usize = borg_core::constants::SLACK_MAX_FILE_SIZE;

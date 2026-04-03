@@ -135,6 +135,50 @@ pub const MAX_RESPONSE_SIZE: usize = 256 * 1024;
 /// Max inbound text payload from webhook (32 KB).
 pub const MAX_INBOUND_TEXT_BYTES: usize = 32 * 1024;
 
+// ── Embedding provider defaults ───────────────────────────────────
+
+/// Default embedding dimension for OpenAI models (text-embedding-3-small).
+pub const OPENAI_EMBEDDING_DIM: usize = 1536;
+
+/// Default embedding dimension for Gemini models (text-embedding-004).
+pub const GEMINI_EMBEDDING_DIM: usize = 768;
+
+/// Max characters sent to embedding API (~8000 tokens).
+pub const MAX_EMBEDDING_INPUT_CHARS: usize = 32_000;
+
+/// Max characters per message when building session transcripts.
+pub const MAX_SESSION_MESSAGE_CHARS: usize = 2000;
+
+// ── TUI ───────────────────────────────────────────────────────────
+
+/// Lines scrolled per PageUp/PageDown press.
+pub const PAGE_SCROLL_LINES: usize = 20;
+
+// ── Typing indicator ──────────────────────────────────────────────
+
+/// Maximum duration (seconds) before auto-stopping a typing indicator.
+pub const TYPING_MAX_TTL_SECS: u64 = 60;
+
+/// Consecutive send failures before stopping the typing keepalive.
+pub const TYPING_MAX_CONSECUTIVE_FAILURES: u32 = 2;
+
+// ── Gateway session queues ─────────────────────────────────────────
+
+/// Per-session idle timeout before the session consumer exits (seconds).
+pub const SESSION_IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// Per-session message queue capacity before backpressure.
+pub const SESSION_QUEUE_CAPACITY: usize = 64;
+
+/// Max concurrent active sessions across all channels.
+pub const MAX_ACTIVE_SESSIONS: usize = 10_000;
+
+/// Brief window (ms) to coalesce rapid-fire messages from the same session.
+pub const SESSION_COALESCE_WINDOW_MS: u64 = 200;
+
+/// Max sessions a single sender can create across all channels/threads.
+pub const MAX_SESSIONS_PER_SENDER: usize = 10;
+
 // ── Session indexing ───────────────────────────────────────────────
 
 /// Max transcript characters to index per session.

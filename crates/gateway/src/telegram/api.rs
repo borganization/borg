@@ -16,12 +16,12 @@ use crate::chunker;
 use crate::commands::{CommandDef, NativeCommandRegistration};
 use crate::constants::{DEFAULT_MESSAGE_CHUNK_SIZE, GATEWAY_HTTP_TIMEOUT};
 
-const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
-const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const TELEGRAM_API_BASE: &str = crate::constants::TELEGRAM_API_BASE;
+const HTTP_CONNECT_TIMEOUT: Duration = crate::constants::TELEGRAM_HTTP_CONNECT_TIMEOUT;
 
 // Telegram returns retry_after in JSON body, not Retry-After header, so we use custom retry logic instead of http_retry.
-const MAX_SEND_RETRIES: u32 = 5;
-const MAX_RETRY_AFTER_SECS: u64 = 300;
+const MAX_SEND_RETRIES: u32 = crate::constants::TELEGRAM_MAX_SEND_RETRIES;
+const MAX_RETRY_AFTER_SECS: u64 = crate::constants::TELEGRAM_MAX_RETRY_AFTER_SECS;
 
 /// A client for the Telegram Bot API.
 #[derive(Clone)]

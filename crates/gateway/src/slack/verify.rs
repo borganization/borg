@@ -5,7 +5,7 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const TIMESTAMP_REPLAY_WINDOW_SECS: u64 = 300;
+const TIMESTAMP_REPLAY_WINDOW_SECS: u64 = crate::constants::SLACK_REPLAY_WINDOW_SECS;
 
 /// Verify a Slack request signature using HMAC-SHA256.
 ///
