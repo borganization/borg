@@ -288,7 +288,7 @@ impl<'a> App<'a> {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     return Ok(AppAction::Uninstall);
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
                     self.push_system_message("Uninstall cancelled.".to_string());
                     self.state = AppState::Idle;
                 }
@@ -1279,7 +1279,7 @@ impl<'a> App<'a> {
                 "⚠ WARNING: This will permanently delete all Borg data (~/.borg/)\n\
                  including config, memory, tools, skills, channels, database,\n\
                  and remove the binary.\n\n\
-                 Proceed with uninstall? (Y/n)"
+                 Proceed with uninstall? (y/N)"
                     .to_string(),
             );
             self.state = AppState::ConfirmingUninstall;
@@ -1772,7 +1772,7 @@ impl<'a> App<'a> {
                 theme::tool_style(),
             )]),
             AppState::ConfirmingUninstall => Line::from(vec![Span::styled(
-                format!(" {} Confirm uninstall — press Y or N", theme::BULLET),
+                format!(" {} Confirm uninstall — press y or N", theme::BULLET),
                 theme::error_style(),
             )]),
             AppState::Idle => Line::default(),
@@ -1851,7 +1851,7 @@ impl<'a> App<'a> {
             AppState::PlanReview => {
                 "shift+tab: cycle  •  1-3: jump  •  enter: confirm  •  esc: dismiss".to_string()
             }
-            AppState::ConfirmingUninstall => "Y to uninstall  •  n to cancel".to_string(),
+            AppState::ConfirmingUninstall => "y to uninstall  •  N / enter to cancel".to_string(),
         };
         let line = Line::from(Span::styled(format!(" {left}"), theme::dim()));
         frame.render_widget(Paragraph::new(line), area);
@@ -2970,6 +2970,19 @@ mod tests {
             .cells
             .iter()
             .any(|c| matches!(c, HistoryCell::System { text } if text.contains("cancelled"))));
+    }
+
+    #[test]
+    fn uninstall_enter_defaults_to_cancel() {
+        let mut app = make_app();
+        app.state = AppState::ConfirmingUninstall;
+        let action = app
+            .handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Enter,
+            ))
+            .unwrap();
+        assert!(matches!(action, AppAction::Continue));
+        assert!(matches!(app.state, AppState::Idle));
     }
 
     #[test]
