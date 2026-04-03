@@ -17,7 +17,6 @@ mod plugins;
 mod repl;
 mod service;
 mod tui;
-mod update;
 
 /// Format a Unix timestamp for display. Returns "?" if invalid.
 fn format_ts(ts: i64, fmt: &str) -> String {
@@ -130,8 +129,6 @@ enum Commands {
     Available,
     /// Migrate settings from Hermes Agent or OpenClaw
     Migrate,
-    /// Update borg to the latest release
-    Update,
     /// Permanently delete all Borg data and uninstall the service
     Uninstall,
 }
@@ -383,7 +380,6 @@ async fn main() -> Result<()> {
         cli.command,
         Some(Commands::Daemon)
             | Some(Commands::Init)
-            | Some(Commands::Update)
             | Some(Commands::Uninstall)
             | Some(Commands::Service { .. })
     ) {
@@ -473,7 +469,6 @@ async fn main() -> Result<()> {
         Some(Commands::Away { message }) => run_away(message).await?,
         Some(Commands::Available) => run_available().await?,
         Some(Commands::Migrate) => migrate_tui::run()?,
-        Some(Commands::Update) => update::run_update().await?,
         Some(Commands::Uninstall) => run_uninstall()?,
     }
 
@@ -681,18 +676,21 @@ fn run_usage() -> Result<()> {
 
 fn run_status() -> Result<()> {
     let now = chrono::Utc::now();
+    let config = borg_core::config::Config::load()?;
     let db = borg_core::db::Database::open()?;
 
     // Evolution header
-    if let Ok(evo_state) = db.get_evolution_state() {
-        println!("Borg Status");
-        println!("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
-        println!();
-        print!(
-            "{}",
-            borg_core::evolution::format_status_section(&evo_state)
-        );
-        println!();
+    if config.evolution.enabled {
+        if let Ok(evo_state) = db.get_evolution_state() {
+            println!("Borg Status");
+            println!("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
+            println!();
+            print!(
+                "{}",
+                borg_core::evolution::format_status_section(&evo_state)
+            );
+            println!();
+        }
     }
 
     // Vitals
@@ -734,7 +732,21 @@ fn format_bar(value: usize, width: usize) -> String {
     )
 }
 
+fn require_evolution_enabled() -> Result<bool> {
+    let config = borg_core::config::Config::load()?;
+    if !config.evolution.enabled {
+        println!(
+            "Evolution system is disabled. Enable with: borg settings set evolution.enabled true"
+        );
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 fn run_status_history() -> Result<()> {
+    if !require_evolution_enabled()? {
+        return Ok(());
+    }
     let db = borg_core::db::Database::open()?;
     let events = db.evolution_events_since(0)?;
     // Reverse to chronological for display
@@ -745,6 +757,9 @@ fn run_status_history() -> Result<()> {
 }
 
 fn run_status_archetypes() -> Result<()> {
+    if !require_evolution_enabled()? {
+        return Ok(());
+    }
     let db = borg_core::db::Database::open()?;
     let state = db.get_evolution_state()?;
     println!("{}", borg_core::evolution::format_archetype_scores(&state));

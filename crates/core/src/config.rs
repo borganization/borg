@@ -132,6 +132,8 @@ pub struct Config {
     #[serde(default)]
     pub compaction: CompactionConfig,
     #[serde(default)]
+    pub evolution: EvolutionConfig,
+    #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
     /// Transient identity override (not serialized). Set by gateway routing.
     #[serde(skip)]
@@ -950,6 +952,18 @@ pub struct TtsModelConfig {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvolutionConfig {
+    pub enabled: bool,
+}
+
+impl Default for EvolutionConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// Text-to-speech configuration with multi-provider fallback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1550,6 +1564,10 @@ impl Config {
                 let mode: CollaborationMode = value.parse()?;
                 self.conversation.collaboration_mode = mode;
                 Ok(format!("{key} = {mode}"))
+            }
+            "evolution.enabled" => {
+                self.evolution.enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.evolution.enabled))
             }
             _ => anyhow::bail!(
                 "Unknown setting: {key}\nAvailable: {}",
@@ -2801,6 +2819,27 @@ api_key_env = "ELEVENLABS_API_KEY"
             config.tts.models[1].voice.as_deref(),
             Some("21m00Tcm4TlvDq8ikWAM")
         );
+    }
+
+    #[test]
+    fn evolution_enabled_default_true() {
+        let cfg = Config::default();
+        assert!(cfg.evolution.enabled);
+    }
+
+    #[test]
+    fn apply_setting_evolution_enabled() {
+        let mut cfg = Config::default();
+        cfg.apply_setting("evolution.enabled", "false").unwrap();
+        assert!(!cfg.evolution.enabled);
+        cfg.apply_setting("evolution.enabled", "true").unwrap();
+        assert!(cfg.evolution.enabled);
+    }
+
+    #[test]
+    fn apply_setting_evolution_enabled_invalid() {
+        let mut cfg = Config::default();
+        assert!(cfg.apply_setting("evolution.enabled", "nope").is_err());
     }
 
     #[test]

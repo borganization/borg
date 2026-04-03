@@ -34,8 +34,10 @@ pub async fn one_shot(
     }
 
     // Register evolution hook for XP tracking and specialization
-    if let Ok(evolution_hook) = borg_core::evolution::EvolutionHook::new() {
-        agent.hook_registry_mut().register(Box::new(evolution_hook));
+    if agent.config().evolution.enabled {
+        if let Ok(evolution_hook) = borg_core::evolution::EvolutionHook::new() {
+            agent.hook_registry_mut().register(Box::new(evolution_hook));
+        }
     }
 
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);

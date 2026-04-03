@@ -66,6 +66,7 @@ pub const ALL_SETTING_KEYS: &[&str] = &[
     "tts.default_voice",
     "tts.default_format",
     "conversation.collaboration_mode",
+    "evolution.enabled",
 ];
 
 /// Merges settings from three layers: DB overrides → config.toml → compiled defaults.
@@ -229,6 +230,7 @@ fn config_value_for_key(config: &Config, key: &str) -> Option<String> {
         "conversation.collaboration_mode" => {
             format!("{}", config.conversation.collaboration_mode)
         }
+        "evolution.enabled" => format!("{}", config.evolution.enabled),
         _ => return None,
     })
 }
@@ -284,6 +286,26 @@ mod tests {
         let (val, source) = resolver.get_with_source("temperature").unwrap();
         assert_eq!(val, "0.9");
         assert_eq!(source, SettingSource::Database);
+    }
+
+    #[test]
+    fn evolution_enabled_round_trip() {
+        let resolver = test_resolver();
+        let (val, source) = resolver.get_with_source("evolution.enabled").unwrap();
+        assert_eq!(val, "true");
+        assert_eq!(source, SettingSource::Default);
+
+        resolver.set("evolution.enabled", "false").unwrap();
+        let (val, source) = resolver.get_with_source("evolution.enabled").unwrap();
+        assert_eq!(val, "false");
+        assert_eq!(source, SettingSource::Database);
+    }
+
+    #[test]
+    fn evolution_enabled_in_list_all() {
+        let resolver = test_resolver();
+        let all = resolver.list_all().unwrap();
+        assert!(all.iter().any(|s| s.key == "evolution.enabled"));
     }
 
     #[test]
