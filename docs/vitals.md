@@ -10,7 +10,7 @@ Borg tracks five health stats that update passively as you use the agent. No mai
 | **focus** | Alignment with your intent — rises with clear, successful interactions | 0–100 |
 | **sync** | How in-touch you and the agent are — rises with regular use, decays fastest with inactivity | 0–100 |
 | **growth** | Capability expansion — rises when you create tools, write memories, or install skills | 0–100 |
-| **charge** | Momentum and energy — rises with any meaningful usage, decays with inactivity | 0–100 |
+| **happiness** | Momentum and energy — rises with any meaningful usage, decays with inactivity | 0–100 |
 
 ## Checking Vitals
 
@@ -34,11 +34,11 @@ Events are classified into broad categories. New tools and integrations automati
 
 | Category | What triggers it | Effect |
 |----------|-----------------|--------|
-| **Interaction** | Session start, any user message | sync +2, focus +1, charge +1 |
-| **Success** | Any tool completes without error | stability +1, focus +1, charge +1 |
+| **Interaction** | Session start, any user message | sync +2, focus +1, happiness +1 |
+| **Success** | Any tool completes without error | stability +1, focus +1, happiness +1 |
 | **Failure** | Any tool errors | stability -2, focus -1, growth -1 |
-| **Correction** | User corrects the agent ("that's wrong", "try again", etc.) | stability -3, focus -2, sync -1, charge -1 |
-| **Creation** | write_memory, create_tool, apply_patch, apply_skill_patch, create_channel | stability +2, focus +1, sync +1, growth +3, charge +3 |
+| **Correction** | User corrects the agent ("that's wrong", "try again", etc.) | stability -3, focus -2, sync -1, happiness -1 |
+| **Creation** | write_memory, create_tool, apply_patch, apply_skill_patch, create_channel | stability +2, focus +1, sync +1, growth +3, happiness +3 |
 
 ## Inactivity Decay
 
@@ -46,7 +46,7 @@ When you don't use borg, stats decay over time:
 
 | After | Stats affected |
 |-------|---------------|
-| 24 hours | sync -6, charge -4 |
+| 24 hours | sync -6, happiness -4 |
 | 72 hours | additionally stability -8, focus -8 |
 | 7 days | additionally growth -5, stability -5 |
 
@@ -57,7 +57,7 @@ When stats drop below thresholds, drift warnings appear:
 - **InactiveTooLong** — no interaction for 48+ hours
 - **LowStability** — stability below 30
 - **LowSync** — sync below 40
-- **LowCharge** — charge below 30
+- **LowHappiness** — happiness below 30
 - **RepeatedFailures** — 3+ recent tool failures
 
 ## Technical Details

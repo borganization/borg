@@ -854,7 +854,7 @@ impl EvolutionHook {
             .min(vitals_state.focus)
             .min(vitals_state.sync)
             .min(vitals_state.growth)
-            .min(vitals_state.charge);
+            .min(vitals_state.happiness);
 
         let gates_passed = match evo_state.stage {
             Stage::Base => check_stage1_gates(&evo_state, bond_state.score, min_vital),
