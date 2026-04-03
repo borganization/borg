@@ -997,6 +997,27 @@ async fn run_event_loop(
                     }
                 }
             }
+            AppAction::Uninstall => {
+                // Uninstall daemon service (best-effort)
+                if let Err(e) = crate::service::uninstall_service() {
+                    tracing::debug!("Service uninstall skipped: {e}");
+                }
+                // Remove data directory (~/.borg/)
+                if let Ok(data_dir) = borg_core::config::Config::data_dir() {
+                    if let Err(e) = std::fs::remove_dir_all(&data_dir) {
+                        tracing::warn!("Failed to remove data dir: {e}");
+                    }
+                }
+                // Remove binary (best-effort — works on Unix even while running)
+                if let Ok(exe) = std::env::current_exe() {
+                    let exe = exe.canonicalize().unwrap_or(exe);
+                    if let Err(e) = std::fs::remove_file(&exe) {
+                        tracing::debug!("Could not remove binary: {e}");
+                    }
+                }
+                agent.lock().await.close_browser().await;
+                return Ok(());
+            }
             AppAction::Continue => {}
         }
     }
