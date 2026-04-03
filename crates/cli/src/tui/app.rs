@@ -24,6 +24,7 @@ use super::plan_overlay::{PlanOption, PlanOverlay};
 use super::plugins_popup::{PluginAction, PluginsPopup};
 use super::schedule_popup::{ScheduleAction, SchedulePopup};
 use super::settings_popup::SettingsPopup;
+use super::status_popup::StatusPopup;
 use super::theme;
 
 pub enum AppState {
@@ -143,6 +144,9 @@ pub struct App<'a> {
     pub pending_steers: VecDeque<String>,
     /// Current plan steps displayed inline (updated by PlanUpdated events).
     pub plan_steps: Vec<borg_core::types::PlanStep>,
+    /// Cached evolution title for banner display.
+    pub evolution_title: Option<String>,
+    pub status_popup: StatusPopup,
 }
 
 impl<'a> App<'a> {
@@ -182,6 +186,11 @@ impl<'a> App<'a> {
             steer_tx: None,
             pending_steers: VecDeque::new(),
             plan_steps: Vec::new(),
+            evolution_title: borg_core::db::Database::open()
+                .ok()
+                .and_then(|db| db.get_evolution_state().ok())
+                .map(|state| borg_core::evolution::format_compact(&state)),
+            status_popup: StatusPopup::new(),
         }
     }
 
@@ -504,6 +513,11 @@ impl<'a> App<'a> {
                     if let Some(actions) = self.schedule_popup.handle_key(key) {
                         return Ok(AppAction::RunScheduleActions { actions });
                     }
+                    return Ok(AppAction::Continue);
+                }
+
+                if self.status_popup.is_visible() {
+                    self.status_popup.handle_key(key);
                     return Ok(AppAction::Continue);
                 }
 
@@ -940,21 +954,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/status" => {
-                if let Ok(db) = borg_core::db::Database::open() {
-                    if let Ok(state) = db.get_vitals_state() {
-                        let now = chrono::Utc::now();
-                        let state = borg_core::vitals::apply_decay(&state, now);
-                        let mut drift = borg_core::vitals::detect_drift(&state, now);
-                        let since = (now - chrono::Duration::days(7)).timestamp();
-                        let events = db.vitals_events_since(since).unwrap_or_default();
-                        if borg_core::vitals::detect_failure_drift(&events) {
-                            drift.push(borg_core::vitals::DriftFlag::RepeatedFailures);
-                        }
-                        self.push_system_message(borg_core::vitals::format_status(
-                            &state, &events, &drift,
-                        ));
-                    }
-                }
+                self.status_popup.show(&self.config);
                 return Ok(AppAction::Continue);
             }
             "/doctor" => {
@@ -1545,6 +1545,7 @@ impl<'a> App<'a> {
         self.settings_popup.render(frame, &self.config);
         self.plugins_popup.render(frame);
         self.schedule_popup.render(frame);
+        self.status_popup.render(frame);
     }
 
     fn compute_context_pct(&self) -> u8 {
@@ -1590,6 +1591,13 @@ impl<'a> App<'a> {
             Span::styled("model: ", theme::dim()),
             Span::from(self.config.llm.model.clone()),
         ]));
+
+        if let Some(ref evo_title) = self.evolution_title {
+            all_lines.push(Line::from(vec![
+                Span::styled("class: ", theme::dim()),
+                Span::styled(evo_title.clone(), Style::default().fg(theme::CYAN)),
+            ]));
+        }
 
         all_lines.push(Line::default());
 
@@ -2792,5 +2800,36 @@ mod tests {
             )
         });
         assert!(!has_unknown, "/plan <msg> should not be treated as unknown");
+    }
+
+    // --- Status popup integration ---
+
+    #[test]
+    fn status_popup_opens_on_slash_status() {
+        let mut app = make_app();
+        assert!(!app.status_popup.is_visible());
+        let _result = app.handle_submit("/status").unwrap();
+        assert!(app.status_popup.is_visible());
+    }
+
+    #[test]
+    fn status_popup_esc_closes() {
+        let mut app = make_app();
+        let _ = app.handle_submit("/status").unwrap();
+        assert!(app.status_popup.is_visible());
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+        assert!(!app.status_popup.is_visible());
+    }
+
+    #[test]
+    fn status_popup_consumes_keys() {
+        let mut app = make_app();
+        let _ = app.handle_submit("/status").unwrap();
+        assert!(app.status_popup.is_visible());
+        // A random key should be consumed (not affect scroll_offset on app)
+        let initial_scroll = app.scroll_offset;
+        app.handle_key(key(KeyCode::Char('a'))).unwrap();
+        assert_eq!(app.scroll_offset, initial_scroll);
+        assert!(app.status_popup.is_visible());
     }
 }
