@@ -249,7 +249,7 @@ impl MigrateState {
                 }
             }
             KeyCode::Down => {
-                if self.category_focus < 4 {
+                if self.category_focus < MigrationCategories::LABELS.len() - 1 {
                     self.category_focus += 1;
                 }
             }

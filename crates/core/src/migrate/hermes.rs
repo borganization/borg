@@ -183,17 +183,7 @@ fn get_tts_voice(yaml: &serde_yaml::Value, provider: &str) -> String {
 }
 
 fn map_hermes_provider(provider: &str) -> String {
-    match provider.to_lowercase().as_str() {
-        "openrouter" => "openrouter",
-        "anthropic" => "anthropic",
-        "openai" => "openai",
-        "google" | "gemini" => "gemini",
-        "deepseek" => "deepseek",
-        "groq" => "groq",
-        "ollama" => "ollama",
-        _ => provider,
-    }
-    .to_string()
+    super::map_provider_name(provider).to_string()
 }
 
 fn parse_credentials(root: &Path, data: &mut SourceData) -> Result<()> {
