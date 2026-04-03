@@ -1087,36 +1087,41 @@ fn render_goodbye_screen(terminal: &mut Terminal<CrosstermBackend<std::io::Stdou
     use ratatui::widgets::Paragraph;
 
     const GOODBYE_ART: &[&str] = &[
-        r"  .oooooo.                        .o8  .o8                              ",
-        r" d8P'  `Y8b                      '888 '888                              ",
-        r"888            .ooooo.   .ooooo.   888  888  .oooo.o  .ooooo.   .ooooo. ",
-        r"888           d88' `88b d88' `88b  888  888 d88(  '8 d88' `88b d88' `88b",
-        r"888     ooooo 888   888 888   888  888  888 `'Y88b.  888ooo888 888ooo888",
-        r"`88.    .88'  888   888 888   888  888  888 o.  )88b 888    .o 888    .o",
-        r" `Y8bood8P'   `Y8bod8P' `Y8bod8P' o888oo888o8''888P' `Y8bod8P' `Y8bod8P'",
+        r"  .oooooo.                       .o8  .o8                         .o.",
+        r" d8P'  `Y8b                     '888 '888                         888",
+        r"888            .ooooo.   .ooooo.  888  888 .oooo.o  .oooo.o  .o888888",
+        r"888   .ooooo  d88' `88b d88' `88b 888  888 d88' `8  d88' `8 d88' `888",
+        r"888   888888  888   888 888   888  888  888 `'Y88b.  `'Y88b. 888   888",
+        r"`88.    .888  888   888 888   888  888  888 o.  )88b o.  )88b`88.  888",
+        r" `Y8bood8P'  `Y8bod8P' `Y8bod8P' o888oo888o8''888P' 8''888P' `Y8od88P",
     ];
 
-    let color = theme::CYAN;
-    let style = Style::default().fg(color);
+    const SUBTITLE: &str = "Borg Decommissioned";
+
+    let style = Style::default().fg(theme::CYAN);
+    let dim = Style::default().fg(theme::DIM_WHITE);
 
     terminal.draw(|f| {
         let area = f.area();
-        // Clear the entire screen
         f.render_widget(ratatui::widgets::Clear, area);
 
         let art_height = GOODBYE_ART.len() as u16;
         let art_width = GOODBYE_ART.iter().map(|l| l.len()).max().unwrap_or(0) as u16;
+        // Art + blank line + subtitle
+        let total_height = art_height + 2;
 
         // Center vertically
-        let v_pad = area.height.saturating_sub(art_height) / 2;
+        let v_pad = area.height.saturating_sub(total_height) / 2;
         let chunks = Layout::vertical([
             Constraint::Length(v_pad),
             Constraint::Length(art_height),
+            Constraint::Length(1), // blank line
+            Constraint::Length(1), // subtitle
             Constraint::Min(0),
         ])
         .split(area);
 
-        // Center horizontally
+        // Center art horizontally
         let h_pad = area.width.saturating_sub(art_width) / 2;
         let h_chunks = Layout::horizontal([
             Constraint::Length(h_pad),
@@ -1129,8 +1134,22 @@ fn render_goodbye_screen(terminal: &mut Terminal<CrosstermBackend<std::io::Stdou
             .iter()
             .map(|l| Line::from(Span::styled(*l, style)))
             .collect();
-
         f.render_widget(Paragraph::new(lines), h_chunks[1]);
+
+        // Center subtitle horizontally
+        let sub_len = SUBTITLE.len() as u16;
+        let sub_pad = area.width.saturating_sub(sub_len) / 2;
+        let sub_chunks = Layout::horizontal([
+            Constraint::Length(sub_pad),
+            Constraint::Length(sub_len),
+            Constraint::Min(0),
+        ])
+        .split(chunks[3]);
+
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(SUBTITLE, dim))),
+            sub_chunks[1],
+        );
     })?;
 
     Ok(())

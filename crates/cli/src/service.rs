@@ -752,9 +752,9 @@ fn uninstall_launchd() -> Result<()> {
             .args(["unload", &plist_path.to_string_lossy()])
             .status();
         std::fs::remove_file(&plist_path)?;
-        println!("Service uninstalled: {}", plist_path.display());
+        println!("Borg decommissioned.");
     } else {
-        println!("Service not installed (no plist found).");
+        println!("Borg not installed.");
     }
     Ok(())
 }
@@ -857,9 +857,9 @@ fn uninstall_systemd() -> Result<()> {
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
-        println!("Service uninstalled: {}", unit_path.display());
+        println!("Borg decommissioned.");
     } else {
-        println!("Service not installed.");
+        println!("Borg not installed.");
     }
     Ok(())
 }
