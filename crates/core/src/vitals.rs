@@ -40,13 +40,11 @@ pub(crate) fn compute_event_hmac(
     mac.update(prev_hmac.as_bytes());
     mac.update(category.as_bytes());
     mac.update(source.as_bytes());
-    mac.update(&[
-        deltas.stability as u8,
-        deltas.focus as u8,
-        deltas.sync as u8,
-        deltas.growth as u8,
-        deltas.charge as u8,
-    ]);
+    mac.update(&deltas.stability.to_le_bytes());
+    mac.update(&deltas.focus.to_le_bytes());
+    mac.update(&deltas.sync.to_le_bytes());
+    mac.update(&deltas.growth.to_le_bytes());
+    mac.update(&deltas.charge.to_le_bytes());
     mac.update(&created_at.to_le_bytes());
     mac.finalize()
         .into_bytes()
@@ -1083,5 +1081,29 @@ mod tests {
         // Only 5 creation events should apply (cap), each +2 stability
         assert_eq!(state.stability, 80 + 5 * 2); // 90, not 80 + 20*2
         assert_eq!(state.growth, 70 + 5 * 3); // 85, not 70 + 20*3
+    }
+
+    #[test]
+    fn test_i8_to_le_bytes_matches_as_u8_cast() {
+        for val in [-3i8, -2, -1, 0, 1, 2, 3] {
+            let as_u8 = val as u8;
+            let le_bytes = val.to_le_bytes();
+            assert_eq!(as_u8, le_bytes[0], "mismatch for {val}");
+        }
+    }
+
+    #[test]
+    fn test_hmac_with_negative_deltas() {
+        let deltas = StatDeltas {
+            stability: -3,
+            focus: -2,
+            sync: -1,
+            growth: 0,
+            charge: -1,
+        };
+        let hmac1 = compute_event_hmac(VITALS_HMAC_LEGACY, "0", "correction", "test", deltas, 1000);
+        let hmac2 = compute_event_hmac(VITALS_HMAC_LEGACY, "0", "correction", "test", deltas, 1000);
+        assert_eq!(hmac1, hmac2);
+        assert!(!hmac1.is_empty());
     }
 }
