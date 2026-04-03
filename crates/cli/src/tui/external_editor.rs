@@ -41,87 +41,77 @@ pub fn open_external_editor(initial_text: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Env var mutations are process-global; serialize tests that touch VISUAL/EDITOR.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that saves and restores VISUAL/EDITOR env vars.
+    struct EditorEnvGuard {
+        old_visual: Option<String>,
+        old_editor: Option<String>,
+    }
+
+    impl EditorEnvGuard {
+        fn new() -> Self {
+            Self {
+                old_visual: std::env::var("VISUAL").ok(),
+                old_editor: std::env::var("EDITOR").ok(),
+            }
+        }
+    }
+
+    impl Drop for EditorEnvGuard {
+        fn drop(&mut self) {
+            match &self.old_visual {
+                Some(v) => std::env::set_var("VISUAL", v),
+                None => std::env::remove_var("VISUAL"),
+            }
+            match &self.old_editor {
+                Some(v) => std::env::set_var("EDITOR", v),
+                None => std::env::remove_var("EDITOR"),
+            }
+        }
+    }
 
     #[test]
     fn resolve_editor_defaults_to_vi() {
-        // Temporarily unset VISUAL and EDITOR to test fallback
-        let old_visual = std::env::var("VISUAL").ok();
-        let old_editor = std::env::var("EDITOR").ok();
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EditorEnvGuard::new();
         std::env::remove_var("VISUAL");
         std::env::remove_var("EDITOR");
 
-        let editor = resolve_editor();
-        assert_eq!(editor, "vi");
-
-        // Restore
-        if let Some(v) = old_visual {
-            std::env::set_var("VISUAL", v);
-        }
-        if let Some(e) = old_editor {
-            std::env::set_var("EDITOR", e);
-        }
+        assert_eq!(resolve_editor(), "vi");
     }
 
     #[test]
     fn resolve_editor_uses_visual_first() {
-        let old_visual = std::env::var("VISUAL").ok();
-        let old_editor = std::env::var("EDITOR").ok();
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EditorEnvGuard::new();
         std::env::set_var("VISUAL", "nvim");
         std::env::set_var("EDITOR", "nano");
 
-        let editor = resolve_editor();
-        assert_eq!(editor, "nvim");
-
-        // Restore
-        match old_visual {
-            Some(v) => std::env::set_var("VISUAL", v),
-            None => std::env::remove_var("VISUAL"),
-        }
-        match old_editor {
-            Some(v) => std::env::set_var("EDITOR", v),
-            None => std::env::remove_var("EDITOR"),
-        }
+        assert_eq!(resolve_editor(), "nvim");
     }
 
     #[test]
     fn resolve_editor_falls_back_to_editor() {
-        let old_visual = std::env::var("VISUAL").ok();
-        let old_editor = std::env::var("EDITOR").ok();
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EditorEnvGuard::new();
         std::env::remove_var("VISUAL");
         std::env::set_var("EDITOR", "emacs");
 
-        let editor = resolve_editor();
-        assert_eq!(editor, "emacs");
-
-        // Restore
-        match old_visual {
-            Some(v) => std::env::set_var("VISUAL", v),
-            None => std::env::remove_var("VISUAL"),
-        }
-        match old_editor {
-            Some(v) => std::env::set_var("EDITOR", v),
-            None => std::env::remove_var("EDITOR"),
-        }
+        assert_eq!(resolve_editor(), "emacs");
     }
 
     #[test]
     fn open_external_editor_with_nonexistent_editor_returns_error() {
-        let old_visual = std::env::var("VISUAL").ok();
-        let old_editor = std::env::var("EDITOR").ok();
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EditorEnvGuard::new();
         std::env::set_var("VISUAL", "nonexistent_editor_binary_xyz_42");
         std::env::remove_var("EDITOR");
 
         let result = open_external_editor("test content");
         assert!(result.is_err());
-
-        // Restore
-        match old_visual {
-            Some(v) => std::env::set_var("VISUAL", v),
-            None => std::env::remove_var("VISUAL"),
-        }
-        match old_editor {
-            Some(v) => std::env::set_var("EDITOR", v),
-            None => std::env::remove_var("EDITOR"),
-        }
     }
 }

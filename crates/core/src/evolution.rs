@@ -835,25 +835,30 @@ impl EvolutionHook {
 
     /// Check evolution gates and record an evolution event if all prerequisites are met.
     fn attempt_evolution(&self, db: &Database) {
+        // Cheap check: only bother with full replay if total XP could reach level 99
+        let xp_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COALESCE(SUM(xp_delta), 0) FROM evolution_events WHERE event_type = 'xp_gain'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if xp_count < 4900 {
+            return;
+        }
+
         let evo_state = match db.get_evolution_state() {
             Ok(s) => s,
             Err(_) => return,
         };
 
-        // Only trigger at level 99 (stage cap)
-        if evo_state.level < 99 {
+        if evo_state.level < 99 || evo_state.stage == Stage::Final {
             return;
         }
 
-        // Already at final stage
-        if evo_state.stage == Stage::Final {
-            return;
-        }
-
-        // Get bond state for gate checks (use derived key for HMAC verification)
         let bond_events = db.get_all_bond_events().unwrap_or_default();
-        let bond_key = db.derive_hmac_key(crate::bond::BOND_HMAC_DOMAIN);
-        let bond_state = crate::bond::replay_events_with_key(&bond_key, &bond_events);
+        let bond_state = crate::bond::replay_events(&bond_events);
 
         // Get vitals state for gate checks
         let vitals_state = match db.get_vitals_state() {
