@@ -70,6 +70,122 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// Style a system message line with visual hierarchy:
+/// - Icons (✓, ●) → cyan, (⚠) → amber, (✗) → red
+/// - Headers (non-indented, non-separator) → bold white
+/// - History lines `[HH:MM] Role: ...` → styled role labels
+/// - Help lines with `/command` → command bold white
+/// - Everything else → dim
+fn style_system_line(line: &str) -> Line<'static> {
+    let trimmed = line.trim_start();
+
+    // Empty lines
+    if trimmed.is_empty() {
+        return Line::from(Span::styled(line.to_string(), theme::dim()));
+    }
+
+    // Separator lines (all ─ characters)
+    if trimmed.chars().all(|c| c == '─') {
+        return Line::from(Span::styled(line.to_string(), theme::dim()));
+    }
+
+    // Icon lines: ✓ or ● → cyan icon
+    if trimmed.starts_with('✓') || trimmed.starts_with('●') {
+        let indent_len = line.len() - trimmed.len();
+        let icon_len = trimmed.chars().next().map_or(0, char::len_utf8);
+        return Line::from(vec![
+            Span::styled(line[..indent_len].to_string(), theme::dim()),
+            Span::styled(trimmed[..icon_len].to_string(), theme::icon_style()),
+            Span::styled(trimmed[icon_len..].to_string(), theme::dim()),
+        ]);
+    }
+
+    // Icon lines: ⚠ → amber
+    if trimmed.starts_with('⚠') {
+        let indent_len = line.len() - trimmed.len();
+        let icon_len = '⚠'.len_utf8();
+        return Line::from(vec![
+            Span::styled(line[..indent_len].to_string(), theme::dim()),
+            Span::styled(trimmed[..icon_len].to_string(), theme::warning_style()),
+            Span::styled(trimmed[icon_len..].to_string(), theme::dim()),
+        ]);
+    }
+
+    // Icon lines: ✗ → red
+    if trimmed.starts_with('✗') {
+        let indent_len = line.len() - trimmed.len();
+        let icon_len = '✗'.len_utf8();
+        return Line::from(vec![
+            Span::styled(line[..indent_len].to_string(), theme::dim()),
+            Span::styled(trimmed[..icon_len].to_string(), theme::error_style()),
+            Span::styled(trimmed[icon_len..].to_string(), theme::dim()),
+        ]);
+    }
+
+    // History lines: [HH:MM] Role: content
+    if trimmed.starts_with('[') {
+        if let Some(bracket_end) = trimmed.find("] ") {
+            let after_bracket = &trimmed[bracket_end + 2..];
+            // Detect role label
+            let (role_end, role_style) = if after_bracket.starts_with("You:") {
+                (
+                    4,
+                    theme::icon_style().add_modifier(ratatui::style::Modifier::BOLD),
+                )
+            } else if after_bracket.starts_with("Assistant:") {
+                (10, theme::header_style())
+            } else if after_bracket.starts_with("Tool ") {
+                // "Tool (id):" — find the colon
+                if let Some(colon) = after_bracket.find(':') {
+                    (colon + 1, theme::header_style())
+                } else {
+                    (0, theme::dim())
+                }
+            } else {
+                (0, theme::dim())
+            };
+
+            if role_end > 0 {
+                let ts_end = bracket_end + 2; // includes "] "
+                return Line::from(vec![
+                    Span::styled(trimmed[..ts_end].to_string(), theme::dim()),
+                    Span::styled(after_bracket[..role_end].to_string(), role_style),
+                    Span::styled(after_bracket[role_end..].to_string(), theme::dim()),
+                ]);
+            }
+        }
+    }
+
+    // Indented lines — check for /command patterns (for /help)
+    if line.starts_with("  ") {
+        return style_help_commands(line);
+    }
+
+    // Non-indented, non-empty → header (bold white)
+    Line::from(Span::styled(line.to_string(), theme::header_style()))
+}
+
+/// Highlight `/command` patterns in indented lines (for /help output).
+fn style_help_commands(line: &str) -> Line<'static> {
+    if let Some(slash_pos) = line.find('/') {
+        let after_slash = &line[slash_pos + 1..];
+        let cmd_len = after_slash
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(after_slash.len());
+        if cmd_len > 0 {
+            let before = &line[..slash_pos];
+            let cmd = &line[slash_pos..slash_pos + 1 + cmd_len];
+            let rest = &line[slash_pos + 1 + cmd_len..];
+            return Line::from(vec![
+                Span::styled(before.to_string(), theme::dim()),
+                Span::styled(cmd.to_string(), theme::header_style()),
+                Span::styled(rest.to_string(), theme::dim()),
+            ]);
+        }
+    }
+    Line::from(Span::styled(line.to_string(), theme::dim()))
+}
+
 impl HistoryCell {
     pub fn render(
         &self,
@@ -258,10 +374,7 @@ impl HistoryCell {
                 ]
             }
             HistoryCell::System { text } => {
-                let mut lines: Vec<Line<'static>> = text
-                    .lines()
-                    .map(|l| Line::from(Span::styled(l.to_string(), theme::dim())))
-                    .collect();
+                let mut lines: Vec<Line<'static>> = text.lines().map(style_system_line).collect();
                 lines.push(Line::default());
                 lines
             }
@@ -706,5 +819,95 @@ mod tests {
             .collect();
         // Should show "lines above" indicator for truncated lines
         assert!(all_text.contains("lines above"));
+    }
+
+    // -- style_system_line tests --
+
+    #[test]
+    fn style_system_line_header() {
+        let line = style_system_line("Borg Doctor");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style, theme::header_style());
+    }
+
+    #[test]
+    fn style_system_line_separator() {
+        let line = style_system_line("───────────");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style, theme::dim());
+    }
+
+    #[test]
+    fn style_system_line_check_icon() {
+        let line = style_system_line("  ✓ sandbox enabled");
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[1].content.as_ref(), "✓");
+        assert_eq!(line.spans[1].style, theme::icon_style());
+    }
+
+    #[test]
+    fn style_system_line_warning_icon() {
+        let line = style_system_line("  ⚠ updates available");
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[1].content.as_ref(), "⚠");
+        assert_eq!(line.spans[1].style, theme::warning_style());
+    }
+
+    #[test]
+    fn style_system_line_fail_icon() {
+        let line = style_system_line("  ✗ provider missing");
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[1].content.as_ref(), "✗");
+        assert_eq!(line.spans[1].style, theme::error_style());
+    }
+
+    #[test]
+    fn style_system_line_history_you() {
+        let line = style_system_line("[13:05] You: hello");
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[0].content.as_ref(), "[13:05] ");
+        assert_eq!(line.spans[1].content.as_ref(), "You:");
+        assert!(line.spans[1]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD));
+    }
+
+    #[test]
+    fn style_system_line_history_assistant() {
+        let line = style_system_line("[13:05] Assistant: hi there");
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[1].content.as_ref(), "Assistant:");
+        assert_eq!(line.spans[1].style, theme::header_style());
+    }
+
+    #[test]
+    fn style_system_line_history_tool() {
+        let line = style_system_line("[13:13] Tool (toolu_vr): Exit code: 0");
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[1].content.as_ref(), "Tool (toolu_vr):");
+        assert_eq!(line.spans[1].style, theme::header_style());
+    }
+
+    #[test]
+    fn style_system_line_help_command() {
+        let line = style_system_line("  /help      - Show this help");
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[1].content.as_ref(), "/help");
+        assert_eq!(line.spans[1].style, theme::header_style());
+    }
+
+    #[test]
+    fn style_system_line_empty() {
+        let line = style_system_line("");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style, theme::dim());
+    }
+
+    #[test]
+    fn style_system_line_plain_indented() {
+        let line = style_system_line("  some body text");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style, theme::dim());
     }
 }
