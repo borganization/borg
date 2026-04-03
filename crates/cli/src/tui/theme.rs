@@ -4,6 +4,7 @@ pub const CYAN: Color = Color::Rgb(0, 185, 174);
 pub const YELLOW: Color = Color::Rgb(2, 195, 189);
 pub const GREEN: Color = Color::Rgb(0, 159, 147);
 pub const RED: Color = Color::Red;
+pub const AMBER: Color = Color::Rgb(255, 191, 0);
 pub const DIM_WHITE: Color = Color::DarkGray;
 pub const BORDER: Color = Color::Rgb(3, 113, 113);
 
@@ -75,6 +76,20 @@ pub fn check_style() -> Style {
 
 pub fn cross_style() -> Style {
     Style::default().fg(RED).add_modifier(Modifier::BOLD)
+}
+
+pub fn header_style() -> Style {
+    Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn warning_style() -> Style {
+    Style::default().fg(AMBER)
+}
+
+pub fn icon_style() -> Style {
+    Style::default().fg(CYAN)
 }
 
 pub fn thinking_border_style() -> Style {
@@ -214,6 +229,23 @@ mod tests {
         let style = cross_style();
         assert_eq!(style.fg, Some(RED));
         assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn header_style_is_bold_white() {
+        let style = header_style();
+        assert_eq!(style.fg, Some(Color::White));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn warning_style_has_amber_fg() {
+        assert_eq!(warning_style().fg, Some(AMBER));
+    }
+
+    #[test]
+    fn icon_style_has_cyan_fg() {
+        assert_eq!(icon_style().fg, Some(CYAN));
     }
 
     #[test]
