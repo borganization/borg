@@ -305,6 +305,17 @@ pub async fn run() -> Result<()> {
             }
         }
     }
+    // Auto-trigger first conversation if SETUP.md exists (fresh onboarding)
+    if let Ok(data_dir) = Config::data_dir() {
+        let setup_path = data_dir.join("SETUP.md");
+        if setup_path.exists() {
+            app.queued_messages.push_back(app::QueuedMessage {
+                text: String::new(),
+                images: Vec::new(),
+            });
+        }
+    }
+
     let mut event_stream = EventStream::new();
     let tick_rate = Duration::from_millis(100);
 
@@ -440,7 +451,7 @@ async fn run_event_loop(
             // Tick for status bar elapsed time + throbber animation
             _ = tick_interval.tick() => {
                 app.tick_throbber();
-                AppAction::Continue
+                drain_queued_if_idle(app)?
             }
         };
 
