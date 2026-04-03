@@ -362,7 +362,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 22;
+    const CURRENT_VERSION: u32 = 23;
 
     /// Check if a column exists on a table via `PRAGMA table_info`.
     /// Safer than catching ALTER TABLE errors by string matching.
@@ -425,6 +425,7 @@ impl Database {
             Database::migrate_v20,
             Database::migrate_v21,
             Database::migrate_v22,
+            Database::migrate_v23,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -1096,6 +1097,28 @@ impl Database {
         Ok(())
     }
 
+    /// V23: Bond system — event-sourced trust tracking with HMAC chain.
+    fn migrate_v23(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS bond_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                score_delta INTEGER NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                hmac TEXT NOT NULL,
+                prev_hmac TEXT NOT NULL DEFAULT '0',
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_bond_events_created
+                ON bond_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_bond_events_type
+                ON bond_events(event_type);
+            ",
+        )?;
+        Ok(())
+    }
+
     // ── Vitals CRUD (event-sourced) ──
 
     /// Compute vitals state by replaying all verified events from baseline.
@@ -1209,6 +1232,217 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(events)
+    }
+
+    // ── Bond CRUD (event-sourced) ──
+
+    /// Load all bond events ordered chronologically (for replay).
+    pub fn get_all_bond_events(&self) -> Result<Vec<crate::bond::BondEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_type, score_delta, reason, hmac, prev_hmac, created_at
+             FROM bond_events ORDER BY id ASC",
+        )?;
+
+        let events = stmt
+            .query_map([], |row| {
+                Ok(crate::bond::BondEvent {
+                    id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    score_delta: row.get(2)?,
+                    reason: row.get(3)?,
+                    hmac: row.get(4)?,
+                    prev_hmac: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(events)
+    }
+
+    /// Get the HMAC of the most recent bond event (for chaining).
+    pub fn get_last_bond_event_hmac(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT hmac FROM bond_events ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "0".to_string()))
+    }
+
+    /// Append a bond event with pre-computed HMAC (for testing).
+    pub fn record_bond_event(
+        &self,
+        event_type: &str,
+        delta: i32,
+        reason: &str,
+        hmac: &str,
+        prev_hmac: &str,
+        created_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO bond_events (event_type, score_delta, reason, hmac, prev_hmac, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![event_type, delta, reason, hmac, prev_hmac, created_at],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically read prev_hmac, compute HMAC, and insert a bond event.
+    /// Uses BEGIN IMMEDIATE to prevent concurrent writers from reading the same prev_hmac.
+    pub fn record_bond_event_chained(
+        &self,
+        event_type: &str,
+        delta: i32,
+        reason: &str,
+    ) -> Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
+        let result = (|| -> Result<()> {
+            let prev_hmac: String = self
+                .conn
+                .query_row(
+                    "SELECT hmac FROM bond_events ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| "0".to_string());
+
+            let now = chrono::Utc::now().timestamp();
+            let hmac = crate::bond::compute_event_hmac(&prev_hmac, event_type, delta, reason, now);
+
+            self.conn.execute(
+                "INSERT INTO bond_events (event_type, score_delta, reason, hmac, prev_hmac, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![event_type, delta, reason, hmac, prev_hmac, now],
+            )?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Get bond events since a given timestamp (for display, DESC order).
+    pub fn bond_events_since(&self, since: i64) -> Result<Vec<crate::bond::BondEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_type, score_delta, reason, hmac, prev_hmac, created_at
+             FROM bond_events WHERE created_at >= ?1 ORDER BY created_at DESC",
+        )?;
+
+        let events = stmt
+            .query_map(params![since], |row| {
+                Ok(crate::bond::BondEvent {
+                    id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    score_delta: row.get(2)?,
+                    reason: row.get(3)?,
+                    hmac: row.get(4)?,
+                    prev_hmac: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(events)
+    }
+
+    /// Get last N bond events (for history display, DESC order).
+    pub fn bond_events_recent(&self, limit: usize) -> Result<Vec<crate::bond::BondEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_type, score_delta, reason, hmac, prev_hmac, created_at
+             FROM bond_events ORDER BY created_at DESC LIMIT ?1",
+        )?;
+
+        let events = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(crate::bond::BondEvent {
+                    id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    score_delta: row.get(2)?,
+                    reason: row.get(3)?,
+                    hmac: row.get(4)?,
+                    prev_hmac: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(events)
+    }
+
+    /// Count bond events of a given type since a timestamp (for rate limiting).
+    /// Pass empty string for event_type to count all events.
+    pub fn count_bond_events_since(&self, since: i64, event_type: &str) -> Result<u32> {
+        if event_type.is_empty() {
+            let count: u32 = self.conn.query_row(
+                "SELECT COUNT(*) FROM bond_events WHERE created_at >= ?1",
+                params![since],
+                |row| row.get(0),
+            )?;
+            Ok(count)
+        } else {
+            let count: u32 = self.conn.query_row(
+                "SELECT COUNT(*) FROM bond_events WHERE created_at >= ?1 AND event_type = ?2",
+                params![since, event_type],
+                |row| row.get(0),
+            )?;
+            Ok(count)
+        }
+    }
+
+    /// Count task_runs since a timestamp, optionally filtering by status.
+    /// Returns (matching_count, total_count).
+    pub fn count_task_runs_since(&self, since: i64, status: Option<&str>) -> Result<(u32, u32)> {
+        let total: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM task_runs WHERE started_at >= ?1",
+            params![since],
+            |row| row.get(0),
+        )?;
+
+        let matching = if let Some(s) = status {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM task_runs WHERE started_at >= ?1 AND status = ?2",
+                params![since, s],
+                |row| row.get(0),
+            )?
+        } else {
+            total
+        };
+
+        Ok((matching, total))
+    }
+
+    /// Count vitals events by category since a timestamp.
+    /// Returns (category_count, total_count).
+    pub fn count_vitals_events_by_category_since(
+        &self,
+        since: i64,
+        category: &str,
+    ) -> Result<(u32, u32)> {
+        let total: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM vitals_events WHERE created_at >= ?1",
+            params![since],
+            |row| row.get(0),
+        )?;
+
+        let matching: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM vitals_events WHERE created_at >= ?1 AND category = ?2",
+            params![since, category],
+            |row| row.get(0),
+        )?;
+
+        Ok((matching, total))
     }
 
     // ── Embedding Cache CRUD ──
@@ -5723,5 +5957,201 @@ mod tests {
         // State should be valid (both events applied)
         let state = db.get_vitals_state().unwrap();
         assert_eq!(state.focus, 62); // 60 + 1 + 1
+    }
+
+    // ── Bond DB Tests ──
+
+    #[test]
+    fn bond_migration_creates_table() {
+        let db = test_db();
+        // Table should exist after migration
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='bond_events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn bond_no_events_returns_empty() {
+        let db = test_db();
+        let events = db.get_all_bond_events().unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn bond_record_and_read_event() {
+        let db = test_db();
+        let now = chrono::Utc::now().timestamp();
+        let hmac = crate::bond::compute_event_hmac("0", "tool_success", 1, "run_shell", now);
+        db.record_bond_event("tool_success", 1, "run_shell", &hmac, "0", now)
+            .unwrap();
+
+        let events = db.get_all_bond_events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "tool_success");
+        assert_eq!(events[0].score_delta, 1);
+        assert_eq!(events[0].reason, "run_shell");
+        assert_eq!(events[0].hmac, hmac);
+        assert_eq!(events[0].prev_hmac, "0");
+    }
+
+    #[test]
+    fn bond_get_last_hmac() {
+        let db = test_db();
+        // No events — should return "0"
+        let hmac = db.get_last_bond_event_hmac().unwrap();
+        assert_eq!(hmac, "0");
+
+        // Add an event
+        let now = chrono::Utc::now().timestamp();
+        let h1 = crate::bond::compute_event_hmac("0", "tool_success", 1, "test", now);
+        db.record_bond_event("tool_success", 1, "test", &h1, "0", now)
+            .unwrap();
+        assert_eq!(db.get_last_bond_event_hmac().unwrap(), h1);
+
+        // Add another
+        let h2 = crate::bond::compute_event_hmac(&h1, "creation", 2, "write_memory", now + 1);
+        db.record_bond_event("creation", 2, "write_memory", &h2, &h1, now + 1)
+            .unwrap();
+        assert_eq!(db.get_last_bond_event_hmac().unwrap(), h2);
+    }
+
+    #[test]
+    fn bond_events_since_filters() {
+        let db = test_db();
+        let now = chrono::Utc::now().timestamp();
+        let h1 = crate::bond::compute_event_hmac("0", "tool_success", 1, "a", now);
+        db.record_bond_event("tool_success", 1, "a", &h1, "0", now)
+            .unwrap();
+
+        // Events are timestamped at now(), so "since 0" should include everything
+        let events = db.bond_events_since(0).unwrap();
+        assert_eq!(events.len(), 1);
+
+        // Far future should return nothing
+        let events = db
+            .bond_events_since(chrono::Utc::now().timestamp() + 9999)
+            .unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn bond_events_recent_limits() {
+        let db = test_db();
+        let base = chrono::Utc::now().timestamp();
+        for i in 0..5 {
+            let prev = if i == 0 {
+                "0".to_string()
+            } else {
+                db.get_last_bond_event_hmac().unwrap()
+            };
+            let ts = base + i;
+            let h = crate::bond::compute_event_hmac(&prev, "tool_success", 1, "t", ts);
+            db.record_bond_event("tool_success", 1, "t", &h, &prev, ts)
+                .unwrap();
+        }
+
+        let events = db.bond_events_recent(3).unwrap();
+        assert_eq!(events.len(), 3);
+    }
+
+    #[test]
+    fn bond_count_events_since() {
+        let db = test_db();
+        let base = chrono::Utc::now().timestamp();
+        let h1 = crate::bond::compute_event_hmac("0", "tool_success", 1, "a", base);
+        db.record_bond_event("tool_success", 1, "a", &h1, "0", base)
+            .unwrap();
+        let h2 = crate::bond::compute_event_hmac(&h1, "creation", 2, "b", base + 1);
+        db.record_bond_event("creation", 2, "b", &h2, &h1, base + 1)
+            .unwrap();
+        let h3 = crate::bond::compute_event_hmac(&h2, "tool_success", 1, "c", base + 2);
+        db.record_bond_event("tool_success", 1, "c", &h3, &h2, base + 2)
+            .unwrap();
+
+        // All events (empty type = all)
+        let total = db.count_bond_events_since(0, "").unwrap();
+        assert_eq!(total, 3);
+
+        // Filter by type
+        let ts = db.count_bond_events_since(0, "tool_success").unwrap();
+        assert_eq!(ts, 2);
+
+        let cr = db.count_bond_events_since(0, "creation").unwrap();
+        assert_eq!(cr, 1);
+    }
+
+    #[test]
+    fn bond_replay_with_db() {
+        let db = test_db();
+        let base = chrono::Utc::now().timestamp();
+        // Record a chain of events
+        let h1 = crate::bond::compute_event_hmac("0", "tool_success", 1, "read_file", base);
+        db.record_bond_event("tool_success", 1, "read_file", &h1, "0", base)
+            .unwrap();
+        let h2 = crate::bond::compute_event_hmac(&h1, "creation", 2, "write_memory", base + 1);
+        db.record_bond_event("creation", 2, "write_memory", &h2, &h1, base + 1)
+            .unwrap();
+
+        let events = db.get_all_bond_events().unwrap();
+        let state = crate::bond::replay_events(&events);
+        assert!(state.chain_valid);
+        // 40 + 1 + 2 = 43
+        assert_eq!(state.score, 43);
+        assert_eq!(state.level, crate::bond::BondLevel::Emerging);
+    }
+
+    #[test]
+    fn bond_record_chained_produces_valid_chain() {
+        let db = test_db();
+        db.record_bond_event_chained("tool_success", 1, "read_file")
+            .unwrap();
+        db.record_bond_event_chained("creation", 2, "write_memory")
+            .unwrap();
+        db.record_bond_event_chained("tool_failure", -1, "run_shell")
+            .unwrap();
+
+        let events = db.get_all_bond_events().unwrap();
+        assert_eq!(events.len(), 3);
+
+        // Replay should verify the chain is valid
+        let state = crate::bond::replay_events(&events);
+        assert!(state.chain_valid);
+        // 40 + 1 + 2 - 1 = 42
+        assert_eq!(state.score, 42);
+
+        // Verify chain linking
+        assert_eq!(events[0].prev_hmac, "0");
+        assert_eq!(events[1].prev_hmac, events[0].hmac);
+        assert_eq!(events[2].prev_hmac, events[1].hmac);
+    }
+
+    #[test]
+    fn bond_count_vitals_events_by_category() {
+        let db = test_db();
+        let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Interaction);
+        db.record_vitals_event("interaction", "session_start", &deltas, None)
+            .unwrap();
+        db.record_vitals_event("interaction", "user_message", &deltas, None)
+            .unwrap();
+        let corr_deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Correction);
+        db.record_vitals_event("correction", "user_message", &corr_deltas, None)
+            .unwrap();
+
+        let (corrections, total) = db
+            .count_vitals_events_by_category_since(0, "correction")
+            .unwrap();
+        assert_eq!(corrections, 1);
+        assert_eq!(total, 3);
+
+        let (interactions, _) = db
+            .count_vitals_events_by_category_since(0, "interaction")
+            .unwrap();
+        assert_eq!(interactions, 2);
     }
 }

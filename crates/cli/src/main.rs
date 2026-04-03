@@ -62,6 +62,11 @@ enum Commands {
     },
     /// Show agent vitals and status
     Status,
+    /// Show bond status and trust metrics
+    Bond {
+        #[command(subcommand)]
+        action: Option<BondAction>,
+    },
     /// Run diagnostics to check configuration, connectivity, and dependencies
     Doctor,
     /// Run as a background daemon (executes scheduled tasks and heartbeat)
@@ -120,6 +125,16 @@ enum Commands {
     Available,
     /// Permanently delete all Borg data and uninstall the service
     Uninstall,
+}
+
+#[derive(Subcommand)]
+enum BondAction {
+    /// Show recent bond event history
+    History {
+        /// Number of events to show
+        #[arg(long, short, default_value_t = 20)]
+        count: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -374,6 +389,10 @@ async fn main() -> Result<()> {
             mode,
         }) => repl::one_shot(&message, yes, json, mode.as_deref()).await?,
         Some(Commands::Status) => run_status()?,
+        Some(Commands::Bond { action }) => match action {
+            Some(BondAction::History { count }) => run_bond_history(count)?,
+            None => run_bond_status()?,
+        },
         Some(Commands::Doctor) => run_doctor()?,
         Some(Commands::Daemon) => service::run_daemon(shutdown).await?,
         Some(Commands::Service { action }) => match action {
@@ -651,6 +670,29 @@ fn run_status() -> Result<()> {
         "{}",
         borg_core::vitals::format_status(&state, &events, &drift)
     );
+    Ok(())
+}
+
+fn run_bond_status() -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    let events = db.get_all_bond_events()?;
+    let state = borg_core::bond::replay_events(&events);
+    let correction_rate = borg_core::bond::compute_correction_rate(&db);
+    let routine_rate = borg_core::bond::compute_routine_success_rate(&db);
+    let pref_count = borg_core::bond::compute_preference_learning_count(&db);
+    let since = (chrono::Utc::now() - chrono::Duration::days(7)).timestamp();
+    let recent = db.bond_events_since(since)?;
+    println!(
+        "{}",
+        borg_core::bond::format_status(&state, correction_rate, routine_rate, pref_count, &recent)
+    );
+    Ok(())
+}
+
+fn run_bond_history(count: usize) -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    let events = db.bond_events_recent(count)?;
+    println!("{}", borg_core::bond::format_history(&events));
     Ok(())
 }
 
