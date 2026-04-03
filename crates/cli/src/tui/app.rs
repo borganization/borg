@@ -714,7 +714,14 @@ impl<'a> App<'a> {
                                 self.command_popup.dismiss();
                                 return self.handle_submit(&name);
                             }
-                            return Ok(AppAction::Continue);
+                            // No matching command — dismiss popup and submit raw text
+                            let text = self.composer.text().trim().to_string();
+                            self.composer.set_text("");
+                            self.command_popup.dismiss();
+                            if text.is_empty() {
+                                return Ok(AppAction::Continue);
+                            }
+                            return self.handle_submit(&text);
                         }
                         KeyCode::Esc => {
                             self.command_popup.dismiss();
