@@ -1,64 +1,68 @@
-# Borg Feature Spec 03: Evolution Tree
+# Borg Feature Spec 03: Evolution System
 
 ## Goal
 
-Add an evolution system so Borg feels like it is becoming uniquely shaped by the user’s real behavior.
+Add an evolution system so Borg feels like it is becoming uniquely shaped by the user's real behavior.
 
 Evolution should be based on:
 
 - actual usage patterns
-- care loop health
+- vitals health
 - bond/trust development
 - connected tools/integrations
-- routines and workflows the user uses
 - domain specialization signals
 
 This feature depends on:
 
-1. care loop
-2. bond system
+1. vitals system (spec 01)
+2. bond system (spec 02)
 
-Evolution is not raw XP. It is behavioral specialization.
+Evolution is behavioral specialization, not raw XP.
 
 ## Product Requirements
 
 ### User outcomes
 
-- Users should feel: “this Borg is mine.”
-- Evolution paths should reflect how the user actually uses the product.
-- Unlocks should feel meaningful: routines, modules, shells/themes, prompts, specialist behavior.
-- CLI/TUI should clearly show current form, path progress, and unlock requirements.
+- Users should feel: "this Borg is mine."
+- Evolution archetypes should reflect how the user actually uses the product.
+- CLI/TUI should clearly show current stage, level, archetype progress, and gate requirements.
 
 ### UX constraints
 
 - Avoid generic gamified jargon.
-- Use themed terms: form, path, specialization, shell, module, evolution.
-- Do not force the user to pick too early.
-- Allow deterministic paths for obvious cases and LLM-assisted classification for ambiguous/custom workflows.
+- Use themed terms: stage, level, archetype, evolution.
+- Allow deterministic classification based on tool usage patterns.
 
 ## Core Model
 
-### Forms
+### Stages
+
+Three permanent stages with Lvl.0–99 per stage:
 
 ```rust
-pub enum EvolutionForm {
-    SeedUnit,
-    LinkedUnit,
-    SpecializedUnit(SpecializationPath),
-    EliteForm(SpecializationPath),
+pub enum Stage {
+    Base,     // Stage 1 — no specialization
+    Evolved,  // Stage 2 — emerging specialization
+    Final,    // Stage 3 — mastery
 }
 ```
 
-### Paths
+### Archetypes
+
+Ten archetypes classify usage patterns:
 
 ```rust
-pub enum SpecializationPath {
-    Ops,
-    Family,
-    Builder,
-    Strategist,
-    Wellness,
-    Scout,
+pub enum Archetype {
+    Ops,           // DevOps, SRE, infrastructure, CI/CD
+    Builder,       // Tool creation, automation, coding
+    Analyst,       // Research, data, metrics, reporting
+    Communicator,  // Messaging, email, outreach
+    Guardian,      // Security, compliance, monitoring
+    Strategist,    // Planning, decision-making
+    Creator,       // Content, writing, marketing
+    Caretaker,     // Home, wellness, personal management
+    Merchant,      // E-commerce, sales, finance
+    Tinkerer,      // Hardware, homelab, experimentation
 }
 ```
 
@@ -66,15 +70,16 @@ pub enum SpecializationPath {
 
 ```rust
 pub struct EvolutionState {
-    pub current_form: EvolutionForm,
-    pub active_path: Option<SpecializationPath>,
-    pub path_scores: std::collections::HashMap<SpecializationPath, u32>,
-    pub unlocked_modules: Vec<String>,
-    pub unlocked_shells: Vec<String>,
-    pub unlocked_routines: Vec<String>,
-    pub unlocked_traits: Vec<String>,
-    pub evolution_history: Vec<EvolutionEvent>,
-    pub last_evaluated_at: DateTime<Utc>,
+    pub stage: Stage,
+    pub level: u8,                    // 0-99
+    pub total_xp: u32,
+    pub xp_to_next_level: u32,
+    pub dominant_archetype: Option<Archetype>,
+    pub evolution_name: Option<String>,
+    pub evolution_description: Option<String>,
+    pub archetype_scores: HashMap<Archetype, u32>,
+    pub total_events: u32,
+    pub chain_valid: bool,
 }
 ```
 
@@ -82,436 +87,196 @@ pub struct EvolutionState {
 
 ```rust
 pub struct EvolutionEvent {
-    pub timestamp: DateTime<Utc>,
-    pub from_form: String,
-    pub to_form: String,
-    pub reason: String,
+    pub id: i64,
+    pub event_type: String,           // xp_gain, evolution, classification, archetype_shift
+    pub xp_delta: i32,
+    pub archetype: Option<String>,
+    pub source: String,
+    pub metadata_json: Option<String>,
+    pub created_at: i64,
+    pub hmac: String,
+    pub prev_hmac: String,
 }
 ```
 
-## Persistence
+## Persistence (Event-Sourced)
 
-Add DB migration.
+State is **never stored directly**. The `evolution_events` table is the single source of truth. Current state is computed by replaying all verified events from baseline.
 
-### New tables
+### Anti-tamper: HMAC chain
 
-#### `evolution_state`
+Each event carries an HMAC-SHA256 signature using the shared `hmac_chain` module. Fields are concatenated directly (no separators, for backward compatibility). Domain: `borg-evolution-chain-v1`. During replay, events with broken chains are skipped.
 
-Singleton row.
+### Anti-gaming: Rate limiting
 
-Columns:
+During replay, events are capped per hour:
+- xp_gain: 30/hr, evolution: 3/hr, classification: 3/hr, archetype_shift: 5/hr
+- Per-source: 10/hr (prevents one tool from dominating)
 
-- `id INTEGER PRIMARY KEY CHECK (id = 1)`
-- `current_form TEXT NOT NULL`
-- `active_path TEXT NULL`
-- `last_evaluated_at TEXT NOT NULL`
-- `updated_at TEXT NOT NULL`
-
-#### `evolution_path_scores`
-
-Columns:
-
-- `path TEXT PRIMARY KEY`
-- `score INTEGER NOT NULL`
-- `updated_at TEXT NOT NULL`
-
-#### `evolution_unlocks`
-
-Columns:
-
-- `id INTEGER PRIMARY KEY`
-- `kind TEXT NOT NULL` // module | shell | routine | trait
-- `key TEXT NOT NULL`
-- `unlocked_at TEXT NOT NULL`
-- `metadata_json TEXT NULL`
+### DB Migration (V24)
 
 #### `evolution_events`
+Append-only ledger — the single source of truth.
 
-Columns:
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| event_type | TEXT NOT NULL | xp_gain, evolution, classification, archetype_shift |
+| xp_delta | INTEGER NOT NULL | XP gained (0 for non-XP events) |
+| archetype | TEXT | Which archetype relates to event |
+| source | TEXT NOT NULL | Tool name, "session_start", etc. |
+| metadata_json | TEXT | Classification results, evolution details |
+| created_at | INTEGER NOT NULL | Unix timestamp |
+| hmac | TEXT NOT NULL | HMAC-SHA256 signature |
+| prev_hmac | TEXT NOT NULL DEFAULT '0' | Chain link |
 
-- `id INTEGER PRIMARY KEY`
-- `timestamp TEXT NOT NULL`
-- `from_form TEXT NOT NULL`
-- `to_form TEXT NOT NULL`
-- `reason TEXT NOT NULL`
-- `metadata_json TEXT NULL`
+Indexes on `created_at` and `archetype`.
 
-#### `workflow_classifications`
+V25 adds append-only triggers (prevent UPDATE/DELETE).
 
-For non-obvious custom workflows.
+## XP System
 
-Columns:
+### XP awards per action
 
-- `id INTEGER PRIMARY KEY`
-- `workflow_key TEXT NOT NULL`
-- `workflow_name TEXT NOT NULL`
-- `source TEXT NOT NULL` // tool | routine | skill | inferred
-- `classification_json TEXT NOT NULL`
-- `classifier_version TEXT NOT NULL`
-- `confidence REAL NOT NULL`
-- `classified_at TEXT NOT NULL`
+| Action | Base XP | Archetype Bonus |
+|--------|---------|-----------------|
+| Tool call (success) | +1 | +2 if aligned |
+| Creation event | +3 | +3 if aligned |
+| Session interaction | +1 | — |
+| Tool failure | 0 | — |
 
-## Evolution Forms and Gates
+### XP curve (WoW-style)
 
-### Seed Unit
-
-Default.
-
-Capabilities:
-
-- answers questions
-- stores a few preferences
-- simple reminders
-- beginner missions
-
-### Linked Unit
-
-Unlock when all are true:
-
-- at least 3 tools/integrations/channels/skills connected in meaningful use
-- first 5 missions completed (or equivalent MVP completion events)
-- at least 10 preferences/memory teachings
-
-Unlocks:
-
-- daily briefing
-- cross-app suggestions
-- saved routines
-
-### Specialized Unit
-
-Eligible when:
-
-- current form is `LinkedUnit`
-- one path score clearly leads
-- bond score >= 55
-- sync average over last 14 days >= threshold
-- at least 1 active routine or workflow in the dominant path
-
-Paths:
-
-- Ops
-- Family
-- Builder
-- Strategist
-- Wellness
-- Scout
-
-Unlocks:
-
-- path-specific shell
-- stronger modules
-- path-specific mission suggestions
-- more proactive domain recommendations
-
-### Elite Form
-
-Eligible when:
-
-- current form is `SpecializedUnit`
-- 30-day sync consistency passes threshold
-- at least 3 active automations/routines
-- bond score >= 75
-- domain mastery criteria met for active path
-
-Unlocks:
-
-- rare workflows
-- advanced automation chains
-- prestige shell
-- specialist sub-agent scaffolding hooks for future work
-
-## Deterministic Path Signals
-
-Compute path scores from real usage.
-
-### Ops
-
-Signals:
-
-- calendar usage
-- meeting prep
-- reminders
-- recurring checklists
-- scheduling routines
-- daily/weekly briefings
-
-### Family
-
-Signals:
-
-- shopping workflows
-- family reminders
-- shared calendar usage
-- meal planning
-- household routines
-
-### Builder
-
-Signals:
-
-- custom tools created
-- apply_patch usage
-- skill creation
-- multi-step automations
-- workflow chaining
-- code/project-local memory usage
-
-### Strategist
-
-Signals:
-
-- planning sessions
-- prioritization notes
-- summaries/comparisons
-- decision-support queries
-- weekly calibrations
-
-### Wellness
-
-Signals:
-
-- health routines
-- habit check-ins
-- sleep/exercise/meal planning workflows
-- reminder consistency around wellness domains
-
-### Scout
-
-Signals:
-
-- research workflows
-- comparisons
-- discovery queries
-- travel planning
-- investigation-heavy sessions
-
-## Workflow Classification for Ambiguous Cases
-
-Some user-created workflows will not map deterministically:
-
-- grocery buy flow
-- Amazon cart optimizer
-- YouTube review comment workflow
-- custom shopping/research/admin automations
-
-For these, add an optional LLM-assisted classifier.
-
-### Requirements
-
-- Use deterministic scoring first.
-- Only invoke LLM classifier for unknown/ambiguous workflows.
-- Cache results in `workflow_classifications`.
-- Include confidence score.
-- Keep cost bounded.
-
-### Classifier input
-
-Provide:
-
-- workflow/tool/skill name
-- description
-- parameter schema if available
-- recent usage context summary
-- examples of when it runs
-
-### Classifier output
-
-Structured JSON like:
-
-```json
-{
-    "primary_path": "Family",
-    "secondary_paths": ["Ops"],
-    "tags": ["shopping", "household", "routine"],
-    "confidence": 0.82,
-    "reason": "This workflow supports household logistics and recurring family shopping."
-}
+```
+xp_for_level(stage, n) = stage_base + floor(n ^ stage_curve)
 ```
 
-### Safety/robustness
+| Stage | Base | Curve | Target Duration |
+|-------|------|-------|-----------------|
+| 1 (Base) | 2 | 1.0 (linear) | 2-5 days |
+| 2 (Evolved) | 8 | 1.2 | ~30 days |
+| 3 (Final) | 20 | 1.5 | 6-12 months |
 
-- Never let one low-confidence classification force evolution by itself.
-- Use classifications as weighted path score inputs, not sole authority.
-- Reclassify only when workflow definition changes materially.
+## Archetype Classification
 
-## Path Score Model
+### Deterministic (tool name)
 
-Use weighted additive scoring.
+| Tool | Archetype |
+|------|-----------|
+| create_tool, apply_patch, apply_skill_patch, create_channel | Builder |
+| security_audit | Guardian |
+| browser, search, read_pdf, memory_search | Analyst |
+| calendar, notion, linear, manage_tasks | Strategist |
+| gmail, outlook | Communicator |
+| write_memory | Creator |
+| Channel names containing telegram/slack/discord/etc. | Communicator |
+| Integration names containing docker/git/database | Ops |
 
-Example:
+### Shell command keyword scanning
 
-- successful calendar routine => Ops +4
-- create custom tool => Builder +5
-- weekly planning calibration => Strategist +4
-- shopping routine success => Family +4
-- research session => Scout +3
+`run_shell` commands are classified by keyword matching:
+- **Ops**: deploy, kubernetes, docker, terraform, kubectl, etc.
+- **Builder**: cargo, npm, pip, gcc, build, compile, etc.
+- **Analyst**: query, select, analyze, csv, psql, etc.
+- **Guardian**: firewall, ufw, nmap, chmod, audit, etc.
+- **Strategist**: plan, prioritize, compare, evaluate, etc.
+- **Tinkerer**: homelab, proxmox, pihole, wireguard, raspberry, etc.
 
-Use rolling windows:
+## Evolution Gates
 
-- 30-day primary score
-- lifetime score
-- recent momentum bonus
+### Stage 1→2 (Base → Evolved)
 
-Suggested formula:
-`effective_score = lifetime * 0.35 + last_30d * 0.65`
+All must pass:
+1. Level = 99 at Stage 1
+2. Bond score >= 30
+3. Dominant archetype >= 1.3x runner-up score
+4. Minimum vital (min of all 5 stats) >= 20
 
-This lets current behavior steer the form.
+### Stage 2→3 (Evolved → Final)
 
-## CLI / TUI Requirements
+All must pass:
+1. Level = 99 at Stage 2
+2. Bond score >= 55
+3. Correction rate < 20% (last 14 days)
+4. Dominant archetype stable for 14+ consecutive days
 
-Add commands:
+When gates pass, an evolution event is recorded with `{"gates_verified": true}` in metadata. During replay, evolution events without this flag are rejected.
 
-- `borg evolve`
-- `borg evolve status`
-- `borg evolve paths`
-- `borg evolve review`
-- `borg evolve classify <workflow>`
+## CLI / TUI
 
-### `borg evolve`
+### `borg status` (includes evolution section)
 
-Show:
+Shows current stage, level, description, stage progress bar, XP progress.
 
-- current form
-- active path
-- next unlock requirements
-- path score leaderboard
-- recently unlocked modules/routines/shells
+### `borg status archetypes`
 
-Example:
+Shows archetype score breakdown with bar chart for all 10 archetypes.
 
-```text
-Evolution Status
-Current Form     SpecializedUnit(Builder)
-Active Path      Builder
+### `borg status history`
 
-Path Scores
-Builder          74
-Strategist       41
-Ops              33
-Scout            27
-Family           12
-Wellness         8
+Shows evolution history timeline (stage transitions with dates and names).
 
-Next Evolution
-Elite Builder Form
-Requirements:
-- Bond score 75+      [68]
-- 30-day sync         [24/30 good days]
-- Active automations  [2/3]
-- Builder mastery     [in progress]
+### TUI session header
 
-Recent Unlocks
-- Module: Workflow Forge
-- Routine: Patch Review Chain
-- Shell: Builder Frame I
+Compact one-liner: `[Pipeline Warden Lvl.42 | Ops]`
+
+## System prompt injection
+
+Compact XML context injected at BeforeAgentStart and BeforeLlmCall:
+
+```xml
+<evolution_context>
+Stage: Evolved | Pipeline Warden Lvl.42
+Archetype: Ops (score: 74)
+</evolution_context>
 ```
 
-### `borg evolve review`
+## Configuration
 
-Show why the current path was chosen:
+`evolution.enabled` (boolean, default: true) — can be toggled via `borg settings`.
 
-- top signal sources
-- recent classified workflows
-- bond/care gating blockers
+When disabled, the EvolutionHook is not registered and no XP events are recorded.
 
-### `borg evolve classify <workflow>`
+## Hook integration
 
-Manual maintenance command:
+`EvolutionHook` implements the `Hook` trait:
+- **SessionStart**: Record interaction XP
+- **BeforeAgentStart**: InjectContext (evolution context)
+- **BeforeLlmCall**: InjectContext (evolution context)
+- **AfterToolCall**: Classify tool, record XP, attempt evolution
 
-- inspect cached classification
-- optionally re-run classifier if requested
-- useful for debugging ambiguous paths
+Registered AFTER VitalsHook and BondHook in CLI and TUI.
 
-## Unlock System
+## Architecture
 
-Define unlock metadata in code or embedded data.
+### Core module
+- `crates/core/src/evolution.rs` — all types, scoring, classification, gates, HMAC chain, formatting, EvolutionHook
+- `crates/core/src/hmac_chain.rs` — shared HMAC builder, chain verification, rate limiting (used by vitals, bond, evolution)
 
-### Unlock kinds
-
-- modules
-- shells
-- routines
-- traits
-
-Examples:
-
-- `daily-briefing`
-- `cross-app-suggestions`
-- `saved-routines`
-- `builder-frame-i`
-- `family-ops-pack`
-- `rare-weekly-planning-engine`
-
-Keep unlock application deterministic and idempotent.
-
-## Integration Points
-
-### Care loop dependencies
-
-Evolution should read:
-
-- average sync
-- cleanliness
-- stability
-- mission completions if added there
-
-### Bond dependencies
-
-Evolution should read:
-
-- bond score
-- bond level
-- routine success rates
-- preference learning counts
-
-### Customizations / marketplace
-
-Evolution should be able to consider:
-
-- installed templates from `customizations`
-- connected channels/integrations
-- active tools/skills
-
-### Agent prompt context
-
-Inject a tiny evolution summary:
-
-- current form
-- active path
-- unlocked traits/modules relevant to behavior
-
-Do not bloat tokens.
-
-## Evaluation Cadence
-
-Recompute evolution:
-
-- on startup
-- after meaningful sessions
-- after workflow/routine creation
-- after tool/integration install
-- after bond milestone changes
-- after care milestone changes
-
-Avoid recomputing every turn if expensive.
+### Extensibility
+- Bond system is queried for gate checks
+- Vitals system is queried for gate checks (correction rate, min vital)
+- Event types are extensible without schema changes
+- HMAC chain provides audit trail
 
 ## Acceptance Criteria
 
-- Evolution state persists in DB.
-- `borg evolve` and related status commands work.
-- Seed -> Linked progression works deterministically.
-- Specialized path selection works from real usage signals.
-- Elite gating respects care + bond + routine criteria.
-- Ambiguous workflows can be classified with optional LLM help and cached.
-- Unlocks are visible in CLI/TUI output.
-- The system is explainable: user can inspect why a path/form was chosen.
+- Evolution state persists in DB via event-sourced ledger.
+- `borg status` shows evolution section with stage, level, archetype.
+- `borg status archetypes` shows archetype score breakdown.
+- `borg status history` shows evolution timeline.
+- Base → Evolved → Final progression works with gate checks.
+- Archetype classification is deterministic from tool usage.
+- HMAC chain detects tampered events.
+- Rate limiting prevents gaming.
+- Evolution gates respect bond score and vitals health.
+- 43+ unit tests pass.
+- No safety regressions — autonomy is informational only.
 
 ## Implementation Notes
 
-- Build deterministic first, classifier second.
+- Build deterministic first — no LLM classifier needed.
 - Keep scoring auditable and debuggable.
-- Cache all expensive classifications.
-- Do not force user-facing path choice unless tie-breaking is needed.
-- Expose enough reasoning in CLI so the system does not feel arbitrary.
-- Structure code so future shell/avatar/cosmetic UI can consume the same unlock model.
+- Evolution should be hard to game with shallow usage (rate limiting enforces this).
+- Autonomy concept is owned by the bond system, not evolution.
+- HMAC chain uses shared `hmac_chain` module (no field separators for backward compatibility).

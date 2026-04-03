@@ -6,14 +6,12 @@
 //! impact per category per hour to prevent gaming.
 
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
 use regex::Regex;
-use sha2::Sha256;
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::LazyLock;
 
 use crate::db::Database;
+use crate::hmac_chain;
 use crate::hooks::{Hook, HookAction, HookContext, HookData, HookPoint};
 
 // ── HMAC ──
@@ -22,12 +20,10 @@ use crate::hooks::{Hook, HookAction, HookContext, HookData, HookPoint};
 pub(crate) const VITALS_HMAC_DOMAIN: &[u8] = b"borg-vitals-chain-v1";
 
 /// Legacy compiled-in secret for installations without per-install salt.
+#[cfg(test)]
 const VITALS_HMAC_LEGACY: &[u8] = b"borg-vitals-chain-v1";
 
-type HmacSha256 = Hmac<Sha256>;
-
-/// Compute HMAC for an event, chaining from the previous event's HMAC.
-#[allow(clippy::expect_used)]
+/// Compute HMAC for a vitals event using the shared HMAC chain module.
 pub(crate) fn compute_event_hmac(
     key: &[u8],
     prev_hmac: &str,
@@ -36,31 +32,24 @@ pub(crate) fn compute_event_hmac(
     deltas: StatDeltas,
     created_at: i64,
 ) -> String {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key size");
-    mac.update(prev_hmac.as_bytes());
-    mac.update(category.as_bytes());
-    mac.update(source.as_bytes());
-    mac.update(&deltas.stability.to_le_bytes());
-    mac.update(&deltas.focus.to_le_bytes());
-    mac.update(&deltas.sync.to_le_bytes());
-    mac.update(&deltas.growth.to_le_bytes());
-    mac.update(&deltas.charge.to_le_bytes());
-    mac.update(&created_at.to_le_bytes());
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .fold(String::new(), |mut s, b| {
-            use std::fmt::Write;
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    hmac_chain::compute_hmac(
+        key,
+        &[
+            prev_hmac.as_bytes(),
+            category.as_bytes(),
+            source.as_bytes(),
+            &deltas.stability.to_le_bytes(),
+            &deltas.focus.to_le_bytes(),
+            &deltas.sync.to_le_bytes(),
+            &deltas.growth.to_le_bytes(),
+            &deltas.charge.to_le_bytes(),
+            &created_at.to_le_bytes(),
+        ],
+    )
 }
 
 /// Verify an event's HMAC against the expected chain.
 fn verify_event_hmac(key: &[u8], event: &VitalsEvent, expected_prev_hmac: &str) -> bool {
-    if event.prev_hmac != expected_prev_hmac {
-        return false;
-    }
     let deltas = StatDeltas {
         stability: event.stability_delta as i8,
         focus: event.focus_delta as i8,
@@ -68,7 +57,7 @@ fn verify_event_hmac(key: &[u8], event: &VitalsEvent, expected_prev_hmac: &str) 
         growth: event.growth_delta as i8,
         charge: event.charge_delta as i8,
     };
-    let expected = compute_event_hmac(
+    let recomputed = compute_event_hmac(
         key,
         &event.prev_hmac,
         &event.category,
@@ -76,7 +65,12 @@ fn verify_event_hmac(key: &[u8], event: &VitalsEvent, expected_prev_hmac: &str) 
         deltas,
         event.created_at,
     );
-    event.hmac == expected
+    hmac_chain::verify_chain_link(
+        &event.hmac,
+        &event.prev_hmac,
+        expected_prev_hmac,
+        &recomputed,
+    )
 }
 
 // ── Rate Limiting ──
@@ -91,6 +85,11 @@ pub(crate) fn rate_limit_for(category: &str) -> u32 {
         "creation" => 5,
         _ => 5,
     }
+}
+
+/// Create a rate limiter configured for vitals events.
+fn new_rate_limiter() -> hmac_chain::HourlyRateLimiter {
+    hmac_chain::HourlyRateLimiter::new(None, None)
 }
 
 // ── Types ──
@@ -275,6 +274,7 @@ fn clamp_add(val: u8, delta: i8) -> u8 {
 
 /// Replay verified events from baseline to compute current state.
 /// Verifies HMAC chain and applies per-category-per-hour rate limits.
+#[cfg(test)]
 pub fn replay_events(events: &[VitalsEvent]) -> VitalsState {
     replay_events_with_key(VITALS_HMAC_LEGACY, events)
 }
@@ -284,8 +284,7 @@ pub fn replay_events_with_key(key: &[u8], events: &[VitalsEvent]) -> VitalsState
     let mut state = baseline();
     let mut expected_prev_hmac = "0".to_string();
     let mut chain_valid = true;
-    // Rate limit: (hour_bucket, category) -> count
-    let mut hourly_counts: HashMap<(i64, &str), u32> = HashMap::new();
+    let mut rate_limiter = new_rate_limiter();
     let mut last_interaction_at: Option<i64> = None;
 
     for event in events {
@@ -298,14 +297,10 @@ pub fn replay_events_with_key(key: &[u8], events: &[VitalsEvent]) -> VitalsState
         expected_prev_hmac = event.hmac.clone();
 
         // Rate limit per category per hour
-        let hour_bucket = event.created_at / 3600;
-        let key = (hour_bucket, event.category.as_str());
-        let count = hourly_counts.entry(key).or_insert(0);
         let cap = rate_limit_for(&event.category);
-        if *count >= cap {
-            continue; // Skip — hit rate limit ceiling
+        if !rate_limiter.check_and_consume(event.created_at, &event.category, cap, false) {
+            continue;
         }
-        *count += 1;
 
         // Apply deltas
         let deltas = StatDeltas {
@@ -1090,6 +1085,73 @@ mod tests {
             let le_bytes = val.to_le_bytes();
             assert_eq!(as_u8, le_bytes[0], "mismatch for {val}");
         }
+    }
+
+    #[test]
+    fn test_mid_chain_corruption_skips_tail() {
+        // Build a 3-event chain: event1 (valid) → event2 (corrupted) → event3 (valid chain from event2)
+        let deltas = deltas_for(EventCategory::Success);
+
+        let hmac1 = compute_event_hmac(VITALS_HMAC_LEGACY, "0", "success", "test", deltas, 1000);
+        let event1 = VitalsEvent {
+            id: 1,
+            category: "success".to_string(),
+            source: "test".to_string(),
+            stability_delta: deltas.stability as i32,
+            focus_delta: deltas.focus as i32,
+            sync_delta: deltas.sync as i32,
+            growth_delta: deltas.growth as i32,
+            charge_delta: deltas.charge as i32,
+            metadata_json: None,
+            created_at: 1000,
+            hmac: hmac1.clone(),
+            prev_hmac: "0".to_string(),
+        };
+
+        // Event 2: corrupted HMAC
+        let event2 = VitalsEvent {
+            id: 2,
+            category: "success".to_string(),
+            source: "test".to_string(),
+            stability_delta: deltas.stability as i32,
+            focus_delta: deltas.focus as i32,
+            sync_delta: deltas.sync as i32,
+            growth_delta: deltas.growth as i32,
+            charge_delta: deltas.charge as i32,
+            metadata_json: None,
+            created_at: 2000,
+            hmac: "corrupted".to_string(),
+            prev_hmac: hmac1.clone(),
+        };
+
+        // Event 3: valid chain from event2's corrupted hmac — should still be skipped
+        let hmac3 = compute_event_hmac(
+            VITALS_HMAC_LEGACY,
+            "corrupted",
+            "success",
+            "test",
+            deltas,
+            3000,
+        );
+        let event3 = VitalsEvent {
+            id: 3,
+            category: "success".to_string(),
+            source: "test".to_string(),
+            stability_delta: deltas.stability as i32,
+            focus_delta: deltas.focus as i32,
+            sync_delta: deltas.sync as i32,
+            growth_delta: deltas.growth as i32,
+            charge_delta: deltas.charge as i32,
+            metadata_json: None,
+            created_at: 3000,
+            hmac: hmac3,
+            prev_hmac: "corrupted".to_string(),
+        };
+
+        let state = replay_events(&[event1, event2, event3]);
+        // Only event1 should be applied (stability +1)
+        assert_eq!(state.stability, 81); // 80 + 1
+        assert!(!state.chain_valid);
     }
 
     #[test]

@@ -8,12 +8,11 @@
 //! XP curve is WoW-style: early levels fast, late levels exponentially harder.
 //! Stage 1 completes in 2-5 days, Stage 2 in ~30 days, Stage 3 Lvl.99 in 6-12 months.
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use std::collections::HashMap;
 use std::fmt;
 
 use crate::db::Database;
+use crate::hmac_chain;
 use crate::hooks::{Hook, HookAction, HookContext, HookData, HookPoint};
 
 // ── HMAC ──
@@ -22,12 +21,10 @@ use crate::hooks::{Hook, HookAction, HookContext, HookData, HookPoint};
 pub(crate) const EVOLUTION_HMAC_DOMAIN: &[u8] = b"borg-evolution-chain-v1";
 
 /// Legacy compiled-in secret for installations without per-install salt.
+#[cfg(test)]
 const EVOLUTION_HMAC_LEGACY: &[u8] = b"borg-evolution-chain-v1";
 
-type HmacSha256 = Hmac<Sha256>;
-
-/// Compute HMAC for an evolution event, chaining from the previous event's HMAC.
-#[allow(clippy::expect_used)]
+/// Compute HMAC for an evolution event using the shared HMAC chain module.
 pub(crate) fn compute_event_hmac(
     key: &[u8],
     prev_hmac: &str,
@@ -37,29 +34,22 @@ pub(crate) fn compute_event_hmac(
     source: &str,
     created_at: i64,
 ) -> String {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key size");
-    mac.update(prev_hmac.as_bytes());
-    mac.update(event_type.as_bytes());
-    mac.update(&xp_delta.to_le_bytes());
-    mac.update(archetype.as_bytes());
-    mac.update(source.as_bytes());
-    mac.update(&created_at.to_le_bytes());
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .fold(String::new(), |mut s, b| {
-            use std::fmt::Write;
-            let _ = write!(s, "{b:02x}");
-            s
-        })
+    hmac_chain::compute_hmac(
+        key,
+        &[
+            prev_hmac.as_bytes(),
+            event_type.as_bytes(),
+            &xp_delta.to_le_bytes(),
+            archetype.as_bytes(),
+            source.as_bytes(),
+            &created_at.to_le_bytes(),
+        ],
+    )
 }
 
 /// Verify an event's HMAC against the expected chain.
 fn verify_event_hmac(key: &[u8], event: &EvolutionEvent, expected_prev_hmac: &str) -> bool {
-    if event.prev_hmac != expected_prev_hmac {
-        return false;
-    }
-    let expected = compute_event_hmac(
+    let recomputed = compute_event_hmac(
         key,
         &event.prev_hmac,
         &event.event_type,
@@ -68,7 +58,12 @@ fn verify_event_hmac(key: &[u8], event: &EvolutionEvent, expected_prev_hmac: &st
         &event.source,
         event.created_at,
     );
-    event.hmac == expected
+    hmac_chain::verify_chain_link(
+        &event.hmac,
+        &event.prev_hmac,
+        expected_prev_hmac,
+        &recomputed,
+    )
 }
 
 // ── Rate Limiting ──
@@ -185,34 +180,6 @@ impl fmt::Display for Stage {
             Self::Base => write!(f, "base"),
             Self::Evolved => write!(f, "evolved"),
             Self::Final => write!(f, "final"),
-        }
-    }
-}
-
-/// Autonomy tier derived 1:1 from Stage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AutonomyTier {
-    Observe,
-    Assist,
-    Autonomous,
-}
-
-impl AutonomyTier {
-    pub fn from_stage(stage: Stage) -> Self {
-        match stage {
-            Stage::Base => Self::Observe,
-            Stage::Evolved => Self::Assist,
-            Stage::Final => Self::Autonomous,
-        }
-    }
-}
-
-impl fmt::Display for AutonomyTier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Observe => write!(f, "Observe"),
-            Self::Assist => write!(f, "Assist"),
-            Self::Autonomous => write!(f, "Autonomous"),
         }
     }
 }
@@ -439,6 +406,7 @@ const BASE_XP_INTERACTION: i32 = 1;
 
 /// Replay verified events from baseline to compute current evolution state.
 /// Verifies HMAC chain and applies rate limits per event type per hour.
+#[cfg(test)]
 pub fn replay_events(events: &[EvolutionEvent]) -> EvolutionState {
     replay_events_with_key(EVOLUTION_HMAC_LEGACY, events)
 }
@@ -453,11 +421,7 @@ pub fn replay_events_with_key(key: &[u8], events: &[EvolutionEvent]) -> Evolutio
     let mut chain_valid = true;
     let mut expected_prev_hmac = "0".to_string();
     let mut accepted_events: u32 = 0;
-
-    // Rate limiting: (hour_bucket, event_type) -> count
-    let mut hourly_type_counts: HashMap<(i64, &str), u32> = HashMap::new();
-    // Rate limiting: (hour_bucket, source) -> count
-    let mut hourly_source_counts: HashMap<(i64, String), u32> = HashMap::new();
+    let mut rate_limiter = hmac_chain::HourlyRateLimiter::new(None, None);
 
     for event in events {
         // Verify HMAC chain
@@ -471,21 +435,14 @@ pub fn replay_events_with_key(key: &[u8], events: &[EvolutionEvent]) -> Evolutio
         }
         expected_prev_hmac = event.hmac.clone();
 
-        // Rate limiting
-        let hour_bucket = event.created_at / 3600;
-        let type_key = (hour_bucket, event.event_type.as_str());
-        let type_count = hourly_type_counts.entry(type_key).or_insert(0);
-        if *type_count >= rate_limit_for(&event.event_type) {
+        // Rate limiting: per-type and per-source
+        let type_cap = rate_limit_for(&event.event_type);
+        if !rate_limiter.check_and_consume(event.created_at, &event.event_type, type_cap, false) {
             continue;
         }
-        *type_count += 1;
-
-        let source_key = (hour_bucket, event.source.clone());
-        let source_count = hourly_source_counts.entry(source_key).or_insert(0);
-        if *source_count >= SOURCE_RATE_LIMIT {
+        if !rate_limiter.check_source(event.created_at, &event.source, SOURCE_RATE_LIMIT) {
             continue;
         }
-        *source_count += 1;
 
         accepted_events += 1;
 
@@ -813,7 +770,6 @@ pub fn format_evolution_context(state: &EvolutionState) -> String {
         Stage::Evolved => "Evolved",
         Stage::Final => "Final",
     };
-    let autonomy = AutonomyTier::from_stage(state.stage);
     let arch = state
         .dominant_archetype
         .map(|a| {
@@ -824,7 +780,7 @@ pub fn format_evolution_context(state: &EvolutionState) -> String {
         .unwrap_or_default();
 
     format!(
-        "<evolution_context>\nStage: {stage} | {name} Lvl.{}{arch}\nAutonomy: {autonomy}\n</evolution_context>",
+        "<evolution_context>\nStage: {stage} | {name} Lvl.{}{arch}\n</evolution_context>",
         state.level
     )
 }
@@ -1599,7 +1555,7 @@ mod tests {
         assert!(ctx.contains("<evolution_context>"));
         assert!(ctx.contains("Pipeline Warden Lvl.42"));
         assert!(ctx.contains("Ops"));
-        assert!(ctx.contains("Assist"));
+        assert!(ctx.contains("Evolved"));
     }
 
     // ── Enum roundtrips ──
@@ -1703,5 +1659,57 @@ mod tests {
             legacy, derived,
             "derived key should produce different HMAC than legacy"
         );
+    }
+
+    #[test]
+    fn xp_overflow_saturates() {
+        // Build events with massive XP to test u32 saturation
+        let key = EVOLUTION_HMAC_LEGACY;
+        let mut events = Vec::new();
+        let mut prev_hmac = "0".to_string();
+
+        for i in 0..10 {
+            let ts = 1000 + i * 3600; // spread across hours
+            let hmac = compute_event_hmac(key, &prev_hmac, "xp_gain", i32::MAX, "ops", "test", ts);
+            events.push(EvolutionEvent {
+                id: i + 1,
+                event_type: "xp_gain".to_string(),
+                xp_delta: i32::MAX,
+                archetype: Some("ops".to_string()),
+                source: "test".to_string(),
+                metadata_json: None,
+                created_at: ts,
+                hmac: hmac.clone(),
+                prev_hmac,
+            });
+            prev_hmac = hmac;
+        }
+
+        let state = replay_events(&events);
+        // Should not panic — saturating_add handles overflow
+        assert_eq!(state.level, 99);
+        assert!(state.chain_valid);
+    }
+
+    #[test]
+    fn no_autonomy_tier_in_evolution() {
+        // Verify AutonomyTier no longer exists in evolution module.
+        // Bond owns the autonomy concept. Evolution uses Stage directly.
+        let state = EvolutionState {
+            stage: Stage::Evolved,
+            level: 50,
+            total_xp: 5000,
+            xp_to_next_level: 100,
+            dominant_archetype: Some(Archetype::Ops),
+            evolution_name: Some("Test".to_string()),
+            evolution_description: None,
+            archetype_scores: HashMap::new(),
+            total_events: 10,
+            chain_valid: true,
+        };
+        let ctx = format_evolution_context(&state);
+        // Should contain Stage name, not autonomy tier
+        assert!(ctx.contains("Stage: Evolved"));
+        assert!(!ctx.contains("Autonomy:"));
     }
 }

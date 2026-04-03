@@ -709,7 +709,8 @@ fn run_status() -> Result<()> {
 
     // Bond
     if let Ok(bond_events) = db.get_all_bond_events() {
-        let bond_state = borg_core::bond::replay_events(&bond_events);
+        let bond_key = db.derive_hmac_key(borg_core::bond::BOND_HMAC_DOMAIN);
+        let bond_state = borg_core::bond::replay_events_with_key(&bond_key, &bond_events);
         println!("Bond");
         println!(
             "  score        {}  {} ({})",
@@ -766,7 +767,8 @@ fn run_status_archetypes() -> Result<()> {
 fn run_bond_status() -> Result<()> {
     let db = borg_core::db::Database::open()?;
     let events = db.get_all_bond_events()?;
-    let state = borg_core::bond::replay_events(&events);
+    let bond_key = db.derive_hmac_key(borg_core::bond::BOND_HMAC_DOMAIN);
+    let state = borg_core::bond::replay_events_with_key(&bond_key, &events);
     let correction_rate = borg_core::bond::compute_correction_rate(&db);
     let routine_rate = borg_core::bond::compute_routine_success_rate(&db);
     let pref_count = borg_core::bond::compute_preference_learning_count(&db);

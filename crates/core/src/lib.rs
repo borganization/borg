@@ -12,6 +12,7 @@ pub mod embeddings;
 pub mod error_format;
 pub mod evolution;
 pub mod git;
+pub mod hmac_chain;
 pub mod hooks;
 pub mod host_audit;
 pub mod identity;
