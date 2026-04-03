@@ -217,12 +217,6 @@ pub enum AgentEvent {
         command: String,
         respond: oneshot::Sender<bool>,
     },
-    /// Request confirmation for a dangerous tool operation. Send `true` to approve.
-    ToolConfirmation {
-        tool_name: String,
-        reason: String,
-        respond: oneshot::Sender<bool>,
-    },
     /// Real-time output line from a running tool.
     ToolOutputDelta {
         name: String,
@@ -1557,41 +1551,6 @@ impl Agent {
                 RateDecision::Allow => {}
             }
 
-            // HITL for dangerous operations
-            if self.config.security.hitl_dangerous_ops {
-                let args_value: Option<serde_json::Value> = match serde_json::from_str(args) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        warn!(tool = %name, "Failed to parse tool args for HITL check: {e}");
-                        None
-                    }
-                };
-                if let Some(reason) = requires_confirmation(name, args_value.as_ref()) {
-                    let (confirm_tx, confirm_rx) = oneshot::channel();
-                    let _ = event_tx
-                        .send(AgentEvent::ToolConfirmation {
-                            tool_name: name.clone(),
-                            reason: reason.clone(),
-                            respond: confirm_tx,
-                        })
-                        .await;
-                    match confirm_rx.await {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            self.skip_tool_call(&tool_call.id, "Operation denied by user.");
-                            continue;
-                        }
-                        Err(_) => {
-                            self.skip_tool_call(
-                                &tool_call.id,
-                                "Operation cancelled (no response).",
-                            );
-                            continue;
-                        }
-                    }
-                }
-            }
-
             let _ = event_tx
                 .send(AgentEvent::ToolExecuting {
                     name: name.clone(),
@@ -1986,60 +1945,6 @@ mod tests {
         assert!(result.contains(id));
     }
 
-    // ── requires_confirmation tests ──
-
-    #[test]
-    fn requires_confirmation_apply_patch_with_delete() {
-        let args = serde_json::json!({"patch": "*** Delete File: old.py\n*** End Patch"});
-        let result = requires_confirmation("apply_patch", Some(&args));
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("delete"));
-    }
-
-    #[test]
-    fn requires_confirmation_apply_patch_without_delete() {
-        let args = serde_json::json!({"patch": "*** Add File: new.py\n+hello\n*** End Patch"});
-        assert!(requires_confirmation("apply_patch", Some(&args)).is_none());
-    }
-
-    #[test]
-    fn requires_confirmation_write_memory_identity() {
-        let args = serde_json::json!({"filename": "IDENTITY.md", "content": "new personality"});
-        let result = requires_confirmation("write_memory", Some(&args));
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("IDENTITY.md"));
-    }
-
-    #[test]
-    fn requires_confirmation_write_memory_other_file() {
-        let args = serde_json::json!({"filename": "MEMORY.md", "content": "notes"});
-        assert!(requires_confirmation("write_memory", Some(&args)).is_none());
-    }
-
-    #[test]
-    fn requires_confirmation_unknown_tool() {
-        let args = serde_json::json!({"key": "value"});
-        assert!(requires_confirmation("list_tools", Some(&args)).is_none());
-    }
-
-    #[test]
-    fn requires_confirmation_apply_patch_no_args() {
-        // Fail safe: require confirmation when args are unparseable
-        assert!(requires_confirmation("apply_patch", None).is_some());
-    }
-
-    #[test]
-    fn requires_confirmation_write_memory_no_args() {
-        // Fail safe: require confirmation when args are unparseable
-        assert!(requires_confirmation("write_memory", None).is_some());
-    }
-
-    #[test]
-    fn requires_confirmation_browser_no_args() {
-        // Fail safe: require confirmation when args are unparseable
-        assert!(requires_confirmation("browser", None).is_some());
-    }
-
     // ── classify_action tests ──
 
     #[test]
@@ -2178,75 +2083,6 @@ mod tests {
     fn request_user_input_is_mutating() {
         // request_user_input blocks execution, so it should be blocked in plan mode
         assert!(is_mutating_tool("request_user_input"));
-    }
-}
-
-/// Check if a tool call requires user confirmation before execution.
-fn requires_confirmation(tool_name: &str, args: Option<&serde_json::Value>) -> Option<String> {
-    match tool_name {
-        "apply_patch" => {
-            let Some(args) = args else {
-                // Fail safe: require confirmation when args are unparseable
-                return Some("Will modify files (args unparseable)".to_string());
-            };
-            if let Some(patch) = args.get("patch").and_then(|v| v.as_str()) {
-                if patch.contains("*** Delete File:") {
-                    return Some("Will delete file(s) in working directory".to_string());
-                }
-            }
-            None
-        }
-        "write_memory" => {
-            let Some(args) = args else {
-                return Some("Will modify memory (args unparseable)".to_string());
-            };
-            if args.get("filename").and_then(|v| v.as_str()) == Some("IDENTITY.md") {
-                return Some("Will modify agent identity (IDENTITY.md)".to_string());
-            }
-            None
-        }
-        "browser" => {
-            let Some(args) = args else {
-                return Some("Will execute browser action (args unparseable)".to_string());
-            };
-            if args.get("action").and_then(|v| v.as_str()) == Some("evaluate_js") {
-                return Some("Will execute JavaScript in browser".to_string());
-            }
-            None
-        }
-        "create_channel" => {
-            Some("Will create/modify webhook channel integration in ~/.borg/channels/".to_string())
-        }
-        "apply_skill_patch" => {
-            Some("Will create/modify agent skill instructions in ~/.borg/skills/".to_string())
-        }
-        "manage_scripts" => {
-            if let Some(args) = args {
-                let action = args.get("action").and_then(|v| v.as_str());
-                if action == Some("create") {
-                    let profile = args
-                        .get("sandbox_profile")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("default");
-                    if profile == "trusted" {
-                        return Some(
-                            "Will create script with UNRESTRICTED (unsandboxed) execution"
-                                .to_string(),
-                        );
-                    }
-                    return Some("Will create executable script in ~/.borg/scripts/".to_string());
-                }
-            }
-            None
-        }
-        "run_script" => {
-            let name = args
-                .and_then(|a| a.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            Some(format!("Will execute script: {name}"))
-        }
-        _ => None,
     }
 }
 
