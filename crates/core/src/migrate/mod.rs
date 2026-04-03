@@ -229,6 +229,20 @@ pub struct MigrationResult {
     pub warnings: Vec<String>,
 }
 
+/// Map a provider name from a legacy tool to Borg's canonical provider string.
+pub fn map_provider_name(name: &str) -> &'static str {
+    match name.to_lowercase().as_str() {
+        "openrouter" => "openrouter",
+        "anthropic" => "anthropic",
+        "openai" => "openai",
+        "google" | "gemini" => "gemini",
+        "deepseek" => "deepseek",
+        "groq" => "groq",
+        "ollama" => "ollama",
+        _ => "openrouter",
+    }
+}
+
 /// Parse source data for a given migration source.
 pub fn parse_source(
     source: MigrationSource,
@@ -290,6 +304,15 @@ mod tests {
             assert!(c.get(i));
         }
         assert!(!c.get(99));
+    }
+
+    #[test]
+    fn map_provider_name_known() {
+        assert_eq!(super::map_provider_name("anthropic"), "anthropic");
+        assert_eq!(super::map_provider_name("openai"), "openai");
+        assert_eq!(super::map_provider_name("google"), "gemini");
+        assert_eq!(super::map_provider_name("Gemini"), "gemini");
+        assert_eq!(super::map_provider_name("unknown"), "openrouter");
     }
 
     #[test]
