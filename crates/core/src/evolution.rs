@@ -646,7 +646,25 @@ pub fn format_status_section(state: &EvolutionState) -> String {
     // Description
     match &state.evolution_description {
         Some(desc) => out.push_str(&format!("  \"{desc}\"\n")),
-        None => out.push_str("  Discovering your patterns...\n"),
+        None => {
+            out.push('\n');
+            out.push_str("  \u{256D}\u{2500}\u{2500}\u{2500} How Evolution Works \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256E}\n");
+            out.push_str("  \u{2502}                                            \u{2502}\n");
+            out.push_str("  \u{2502}  Your borg is learning how you use it.     \u{2502}\n");
+            out.push_str("  \u{2502}  Every tool call, shell command, and task   \u{2502}\n");
+            out.push_str("  \u{2502}  shapes what it becomes.                   \u{2502}\n");
+            out.push_str("  \u{2502}                                            \u{2502}\n");
+            out.push_str(
+                "  \u{2502}  Evolution is permanent \u{2014} earned through    \u{2502}\n",
+            );
+            out.push_str("  \u{2502}  sustained usage, not toggled. Your usage   \u{2502}\n");
+            out.push_str("  \u{2502}  patterns determine your borg's archetype  \u{2502}\n");
+            out.push_str("  \u{2502}  and unlock a unique evolution name.       \u{2502}\n");
+            out.push_str("  \u{2502}                                            \u{2502}\n");
+            out.push_str("  \u{2502}  Keep using borg the way you imagine.      \u{2502}\n");
+            out.push_str("  \u{2502}                                            \u{2502}\n");
+            out.push_str("  \u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256F}\n");
+        }
     }
 
     out.push('\n');
@@ -1689,6 +1707,51 @@ mod tests {
         // Should not panic — saturating_add handles overflow
         assert_eq!(state.level, 99);
         assert!(state.chain_valid);
+    }
+
+    #[test]
+    fn status_section_shows_tip_card_when_no_description() {
+        let state = EvolutionState {
+            stage: Stage::Base,
+            level: 5,
+            total_xp: 20,
+            xp_to_next_level: 3,
+            dominant_archetype: None,
+            evolution_name: None,
+            evolution_description: None,
+            archetype_scores: HashMap::new(),
+            total_events: 10,
+            chain_valid: true,
+        };
+        let section = format_status_section(&state);
+        assert!(
+            section.contains("How Evolution Works"),
+            "tip card should appear when no evolution description"
+        );
+        assert!(section.contains("learning how you use it"));
+        assert!(section.contains("Evolution is permanent"));
+    }
+
+    #[test]
+    fn status_section_hides_tip_card_when_description_present() {
+        let state = EvolutionState {
+            stage: Stage::Evolved,
+            level: 42,
+            total_xp: 1000,
+            xp_to_next_level: 50,
+            dominant_archetype: Some(Archetype::Ops),
+            evolution_name: Some("Pipeline Warden".to_string()),
+            evolution_description: Some("A vigilant guardian".to_string()),
+            archetype_scores: HashMap::new(),
+            total_events: 100,
+            chain_valid: true,
+        };
+        let section = format_status_section(&state);
+        assert!(
+            !section.contains("How Evolution Works"),
+            "tip card should not appear when description exists"
+        );
+        assert!(section.contains("A vigilant guardian"));
     }
 
     #[test]
