@@ -565,6 +565,10 @@ async fn run_event_loop(
                     app.push_system_message(format!("Warning: failed to sync agent config: {e}"));
                 }
             }
+            AppAction::ConfigReloaded => {
+                let mut agent = agent.lock().await;
+                *agent.config_mut() = app.config.clone();
+            }
             AppAction::SaveSession => {
                 let mut agent = agent.lock().await;
                 agent.auto_save();
