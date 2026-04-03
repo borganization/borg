@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use borg_core::agent::AgentEvent;
 use borg_core::config::Config;
+use borg_core::doctor::DiagnosticCheck;
 use borg_heartbeat::scheduler::HeartbeatEvent;
 use throbber_widgets_tui::{Throbber, ThrobberState, BRAILLE_EIGHT};
 
@@ -64,6 +65,23 @@ pub enum BacktrackPhase {
     },
 }
 
+/// Events sent from the async doctor task to the TUI event loop.
+pub enum DoctorEvent {
+    /// Progress indicator before a check category runs.
+    Analyzing { label: String },
+    /// Completed check category with results.
+    Result {
+        label: String,
+        checks: Vec<DiagnosticCheck>,
+    },
+    /// All checks done; final summary counts.
+    Done {
+        pass: usize,
+        warn: usize,
+        fail: usize,
+    },
+}
+
 pub enum AppAction {
     Continue,
     Quit,
@@ -112,6 +130,7 @@ pub enum AppAction {
         dev: bool,
     },
     Uninstall,
+    RunDoctor,
 }
 
 pub struct App<'a> {
@@ -156,6 +175,7 @@ pub struct App<'a> {
     /// Cached evolution title for banner display.
     pub evolution_title: Option<String>,
     pub status_popup: StatusPopup,
+    pub doctor_rx: Option<mpsc::Receiver<DoctorEvent>>,
 }
 
 impl<'a> App<'a> {
@@ -200,6 +220,7 @@ impl<'a> App<'a> {
                 .and_then(|db| db.get_evolution_state().ok())
                 .map(|state| borg_core::evolution::format_compact(&state)),
             status_popup: StatusPopup::new(),
+            doctor_rx: None,
         }
     }
 
@@ -823,6 +844,29 @@ impl<'a> App<'a> {
         self.cells.push(HistoryCell::System { text });
     }
 
+    /// Process a doctor event from the async diagnostics task.
+    pub fn process_doctor_event(&mut self, event: DoctorEvent) {
+        match event {
+            DoctorEvent::Analyzing { label } => {
+                self.push_system_message(format!("⏳ Analyzing {label}..."));
+            }
+            DoctorEvent::Result { label, checks } => {
+                let mut text = format!("{label}\n");
+                for check in &checks {
+                    text.push_str(&check.format_line());
+                    text.push('\n');
+                }
+                self.push_system_message(text.trim_end().to_string());
+            }
+            DoctorEvent::Done { pass, warn, fail } => {
+                self.push_system_message(format!(
+                    "Summary: {pass} passed, {warn} warning(s), {fail} failed"
+                ));
+                self.doctor_rx = None;
+            }
+        }
+    }
+
     fn handle_submit(&mut self, input: &str) -> Result<AppAction> {
         let trimmed = input.trim();
 
@@ -988,9 +1032,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/doctor" => {
-                let report = borg_core::doctor::run_diagnostics(&self.config);
-                self.push_system_message(report.format());
-                return Ok(AppAction::Continue);
+                return Ok(AppAction::RunDoctor);
             }
             "/update" => {
                 return Ok(AppAction::SelfUpdate { dev: false });
