@@ -1471,11 +1471,13 @@ impl<'a> App<'a> {
                 }
             }
             AgentEvent::ToolResult { name, result } => {
-                // Mark matching ToolStart as completed and compute duration
+                // Mark matching ToolStart as completed and compute duration + display label
                 let mut duration_ms = None;
+                let mut matched_args = None;
                 for cell in self.cells.iter_mut().rev() {
                     if let HistoryCell::ToolStart {
                         name: ref start_name,
+                        args,
                         completed,
                         start_time,
                         ..
@@ -1483,6 +1485,7 @@ impl<'a> App<'a> {
                     {
                         if start_name == &name && !*completed {
                             *completed = true;
+                            matched_args = Some(args.clone());
                             if let Some(t) = start_time {
                                 duration_ms = Some(t.elapsed().as_millis() as u64);
                             }
@@ -1490,12 +1493,19 @@ impl<'a> App<'a> {
                         }
                     }
                 }
+                let display_label = if let Some(ref args) = matched_args {
+                    let cat = super::tool_display::classify_tool(&name, args);
+                    super::tool_display::tool_result_label(&cat)
+                } else {
+                    format!("Ran {name}")
+                };
                 let is_error = result.starts_with("Error:");
                 self.cells.push(HistoryCell::ToolResult {
                     name,
                     output: result,
                     is_error,
                     duration_ms,
+                    display_label,
                 });
                 if self.auto_scroll {
                     self.scroll_offset = 0;

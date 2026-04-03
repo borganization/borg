@@ -28,10 +28,12 @@ pub enum HistoryCell {
         start_time: Option<std::time::Instant>,
     },
     ToolResult {
+        #[allow(dead_code)]
         name: String,
         output: String,
         is_error: bool,
         duration_ms: Option<u64>,
+        display_label: String,
     },
     ShellApproval {
         command: String,
@@ -327,38 +329,32 @@ impl HistoryCell {
                 completed,
                 ..
             } => {
-                let preview = if name == "apply_patch" || name == "apply_skill_patch" {
-                    // Hide verbose patch content; just show a short summary
-                    let file_count = args.matches("*** Add File:").count()
-                        + args.matches("*** Update File:").count()
-                        + args.matches("*** Delete File:").count();
-                    if file_count > 0 {
-                        format!("({file_count} file(s))")
-                    } else {
-                        String::new()
-                    }
-                } else if args.len() > 80 {
-                    format!("{}...", truncate_str(args, 77))
-                } else {
-                    args.clone()
-                };
+                let cat = super::tool_display::classify_tool(name, args);
                 let bullet_style = if *completed {
                     theme::tool_bullet_done()
                 } else {
                     theme::tool_bullet_active()
                 };
-                let name_style = theme::code_style().add_modifier(ratatui::style::Modifier::BOLD);
-                vec![Line::from(vec![
-                    Span::styled(format!("{} ", theme::BULLET), bullet_style),
-                    Span::styled(name.clone(), name_style),
-                    Span::styled(format!(" {preview}"), theme::dim()),
-                ])]
+                let mut header_spans =
+                    vec![Span::styled(format!("{} ", theme::BULLET), bullet_style)];
+                header_spans.extend(super::tool_display::tool_header_spans(&cat));
+                let mut lines = vec![Line::from(header_spans)];
+                if let Some(detail_spans) = super::tool_display::tool_detail_line(&cat) {
+                    let mut spans = vec![Span::styled(
+                        format!("  {} ", theme::TREE_END),
+                        theme::dim(),
+                    )];
+                    spans.extend(detail_spans);
+                    lines.push(Line::from(spans));
+                }
+                lines
             }
             HistoryCell::ToolResult {
-                name,
                 output,
                 is_error,
                 duration_ms,
+                display_label,
+                ..
             } => {
                 let style = if *is_error {
                     theme::error_style()
@@ -407,7 +403,7 @@ impl HistoryCell {
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {indicator} "), ind_style),
-                    Span::styled(format!("Ran {name}{duration_str}"), theme::dim()),
+                    Span::styled(format!("{display_label}{duration_str}"), theme::dim()),
                 ]));
                 lines
             }
@@ -736,26 +732,84 @@ mod tests {
     fn render_tool_start_patch_summary() {
         let cell = HistoryCell::ToolStart {
             name: "apply_patch".to_string(),
-            args: "*** Add File: a.rs\n*** Update File: b.rs".to_string(),
+            args: r#"{"patch":"*** Begin Patch\n*** Add File: a.rs\n+x\n*** Update File: b.rs\n@@\n*** End Patch"}"#.to_string(),
             completed: true,
             start_time: None,
         };
         let lines = cell.render(80, None);
-        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("(2 file(s))"));
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            header.contains("Edited"),
+            "header should say Edited, got: {header}"
+        );
+        // Detail line should show files
+        assert!(lines.len() >= 2, "should have detail line");
+        let detail: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            detail.contains("a.rs"),
+            "detail should contain filenames, got: {detail}"
+        );
+        assert!(
+            detail.contains("2 file(s)"),
+            "detail should show count, got: {detail}"
+        );
     }
 
     #[test]
-    fn render_tool_start_truncates_long_args() {
+    fn render_tool_start_run_shell() {
         let cell = HistoryCell::ToolStart {
             name: "run_shell".to_string(),
-            args: "a".repeat(100),
+            args: r#"{"command":"cargo test --all"}"#.to_string(),
             completed: false,
             start_time: None,
         };
         let lines = cell.render(80, None);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("..."));
+        assert!(text.contains("Ran"), "should say Ran, got: {text}");
+        assert!(
+            text.contains("cargo test --all"),
+            "should show command, got: {text}"
+        );
+    }
+
+    #[test]
+    fn render_tool_start_read_file() {
+        let cell = HistoryCell::ToolStart {
+            name: "read_file".to_string(),
+            args: r#"{"path":"src/main.rs"}"#.to_string(),
+            completed: true,
+            start_time: None,
+        };
+        let lines = cell.render(80, None);
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            header.contains("Explored"),
+            "should say Explored, got: {header}"
+        );
+        assert!(lines.len() >= 2, "should have detail line");
+        let detail: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(detail.contains("Read"), "detail should have Read label");
+        assert!(detail.contains("main.rs"), "detail should have basename");
+    }
+
+    #[test]
+    fn render_tool_start_generic_truncates() {
+        let cell = HistoryCell::ToolStart {
+            name: "custom_tool".to_string(),
+            args: format!(r#"{{"data":"{}"}}"#, "a".repeat(100)),
+            completed: false,
+            start_time: None,
+        };
+        let lines = cell.render(80, None);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("custom_tool"),
+            "should show tool name, got: {text}"
+        );
+        assert!(
+            text.contains("..."),
+            "should truncate long args, got: {text}"
+        );
     }
 
     #[test]
@@ -769,6 +823,7 @@ mod tests {
             output,
             is_error: false,
             duration_ms: Some(1500),
+            display_label: "Ran test".to_string(),
         };
         let lines = cell.render(80, None);
         let all_text: String = lines
@@ -778,6 +833,27 @@ mod tests {
             .collect();
         assert!(all_text.contains("+5 more lines"));
         assert!(all_text.contains("1.5s"));
+    }
+
+    #[test]
+    fn render_tool_result_uses_display_label() {
+        let cell = HistoryCell::ToolResult {
+            name: "run_shell".to_string(),
+            output: "ok".to_string(),
+            is_error: false,
+            duration_ms: Some(200),
+            display_label: "Ran `ls`".to_string(),
+        };
+        let lines = cell.render(80, None);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_text.contains("Ran `ls`"),
+            "should use display_label, got: {all_text}"
+        );
     }
 
     #[test]
