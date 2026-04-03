@@ -57,7 +57,7 @@ const COMMANDS: &[SlashCommandDef] = &[
     },
     SlashCommandDef {
         name: "/skills",
-        description: "List skills",
+        description: "Manage skills",
     },
     SlashCommandDef {
         name: "/history",

@@ -11,6 +11,7 @@ mod plan_overlay;
 mod plugins_popup;
 mod schedule_popup;
 mod settings_popup;
+mod skills_popup;
 mod status_popup;
 pub(crate) mod theme;
 
@@ -943,6 +944,34 @@ async fn run_event_loop(
                 }
                 if !results.is_empty() {
                     app.push_system_message(results.join("\n"));
+                }
+            }
+            AppAction::RunSkillActions { actions } => {
+                let mut results: Vec<String> = Vec::new();
+                if let Ok(db) = borg_core::db::Database::open() {
+                    for action in actions {
+                        match action {
+                            skills_popup::SkillAction::SetEnabled { name, enabled } => {
+                                let key = format!("skills.entries.{name}.enabled");
+                                let val = enabled.to_string();
+                                match app.config.apply_setting(&key, &val) {
+                                    Ok(_) => {
+                                        let _ = db.set_setting(&key, &val);
+                                        let status = if enabled { "enabled" } else { "disabled" };
+                                        results.push(format!("{name}: {status}"));
+                                    }
+                                    Err(e) => {
+                                        results.push(format!("Error updating {name}: {e}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    results.push("Error: could not open database".to_string());
+                }
+                if !results.is_empty() {
+                    app.push_system_message(format!("Skills updated:\n{}", results.join("\n")));
                 }
             }
             AppAction::RestartGateway => {
