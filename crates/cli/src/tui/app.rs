@@ -42,6 +42,7 @@ pub enum AppState {
         respond: Option<oneshot::Sender<String>>,
     },
     PlanReview,
+    ConfirmingUninstall,
 }
 
 /// A message queued during streaming, preserving both text and image attachments.
@@ -262,6 +263,16 @@ impl<'a> App<'a> {
         use crossterm::event::{KeyCode, KeyModifiers};
 
         match &mut self.state {
+            AppState::ConfirmingUninstall => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    return Ok(AppAction::Uninstall);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.push_system_message("Uninstall cancelled.".to_string());
+                    self.state = AppState::Idle;
+                }
+                _ => {}
+            },
             AppState::AwaitingApproval { respond } => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     if let Some(tx) = respond.take() {
@@ -1207,16 +1218,14 @@ impl<'a> App<'a> {
         // /uninstall — undocumented destructive command (not in autocomplete)
         if trimmed == "/uninstall" {
             self.push_system_message(
-                "WARNING: This will permanently delete all Borg data (~/.borg/)\n\
+                "⚠ WARNING: This will permanently delete all Borg data (~/.borg/)\n\
                  including config, memory, tools, skills, channels, database,\n\
-                 and attempt to remove the binary.\n\n\
-                 Type /uninstall confirm to proceed."
+                 and remove the binary.\n\n\
+                 Proceed with uninstall? (Y/n)"
                     .to_string(),
             );
+            self.state = AppState::ConfirmingUninstall;
             return Ok(AppAction::Continue);
-        }
-        if trimmed == "/uninstall confirm" {
-            return Ok(AppAction::Uninstall);
         }
 
         // Reject unknown slash commands
@@ -1704,6 +1713,10 @@ impl<'a> App<'a> {
                 format!(" {} Plan ready — choose an action", theme::BULLET),
                 theme::tool_style(),
             )]),
+            AppState::ConfirmingUninstall => Line::from(vec![Span::styled(
+                format!(" {} Confirm uninstall — press Y or N", theme::BULLET),
+                theme::error_style(),
+            )]),
             AppState::Idle => Line::default(),
         };
         frame.render_widget(Paragraph::new(line), area);
@@ -1780,6 +1793,7 @@ impl<'a> App<'a> {
             AppState::PlanReview => {
                 "shift+tab: cycle  •  1-3: jump  •  enter: confirm  •  esc: dismiss".to_string()
             }
+            AppState::ConfirmingUninstall => "Y to uninstall  •  n to cancel".to_string(),
         };
         let line = Line::from(Span::styled(format!(" {left}"), theme::dim()));
         frame.render_widget(Paragraph::new(line), area);
@@ -2860,10 +2874,11 @@ mod tests {
     // --- /uninstall ---
 
     #[test]
-    fn uninstall_without_confirm_shows_warning() {
+    fn uninstall_shows_warning_and_enters_confirming_state() {
         let mut app = make_app();
         let action = app.handle_submit("/uninstall").unwrap();
         assert!(matches!(action, AppAction::Continue));
+        assert!(matches!(app.state, AppState::ConfirmingUninstall));
         assert!(app
             .cells
             .iter()
@@ -2871,10 +2886,32 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_confirm_returns_uninstall_action() {
+    fn uninstall_confirm_y_returns_uninstall_action() {
         let mut app = make_app();
-        let action = app.handle_submit("/uninstall confirm").unwrap();
+        app.state = AppState::ConfirmingUninstall;
+        let action = app
+            .handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char('y'),
+            ))
+            .unwrap();
         assert!(matches!(action, AppAction::Uninstall));
+    }
+
+    #[test]
+    fn uninstall_confirm_n_returns_to_idle() {
+        let mut app = make_app();
+        app.state = AppState::ConfirmingUninstall;
+        let action = app
+            .handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char('n'),
+            ))
+            .unwrap();
+        assert!(matches!(action, AppAction::Continue));
+        assert!(matches!(app.state, AppState::Idle));
+        assert!(app
+            .cells
+            .iter()
+            .any(|c| matches!(c, HistoryCell::System { text } if text.contains("cancelled"))));
     }
 
     #[test]
