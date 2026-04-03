@@ -14,14 +14,14 @@ Thanks for your interest in contributing! This guide will help you get set up an
    ```sh
    cp .env.example .env
    ```
-4. Add at least one LLM provider API key to `.env` (see [docs/configuration.md](docs/configuration.md) for options)
+4. Add at least one LLM provider API key to `.env` — requires one of: `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, or a running [Ollama](https://ollama.ai) instance (see [docs/configuration.md](docs/configuration.md) for details)
 5. Build the project:
    ```sh
-   cargo build
+   cargo build --release
    ```
-6. Run locally:
+6. Run the onboarding wizard:
    ```sh
-   cargo run --bin borg
+   ./target/release/borg init
    ```
 7. Set up git hooks:
    ```sh

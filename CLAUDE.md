@@ -2,6 +2,15 @@
 
 AI personal assistant agent built in Rust. The agent itself is the plugin system — it writes its own tools at runtime rather than relying on a static extension framework.
 
+## UX Philosophy — Tool Execution
+
+**DO NOT add per-tool-call approval prompts or confirmation dialogs.** The power of a personal AI assistant is that it can act on your behalf. Security should never degrade UX to the point where every action requires manual approval.
+
+- Shell commands auto-execute without prompting. Only hardcoded catastrophic commands (rm -rf /, mkfs, dd, curl|sh) are denied.
+- No HITL (human-in-the-loop) confirmation for tool calls — the agent just executes.
+- Sandboxing and rate limiting are the security boundaries, not approval dialogs.
+- If you're tempted to add a "confirm before executing" flow, don't. This has been explicitly removed as a design decision.
+
 ## Architecture
 
 Cargo workspace with 8 crates:

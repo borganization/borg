@@ -16,16 +16,7 @@ The installer detects your OS, downloads the right binary, and walks you through
 
 Or download manually from [Releases](https://github.com/borganization/borg/releases).
 
-## Build from Source
-
-```sh
-git clone https://github.com/borganization/borg.git
-cd borg
-cargo build --release
-./target/release/borg init
-```
-
-Requires [Rust 1.87+](https://rustup.rs/) and one of: `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, or a running [Ollama](https://ollama.ai) instance.
+Or [build from source](CONTRIBUTING.md#development-setup).
 
 ## Usage
 
