@@ -1497,6 +1497,16 @@ impl Config {
                 self.skills.max_context_tokens = parse_usize(value, key)?;
                 Ok(format!("{key} = {}", self.skills.max_context_tokens))
             }
+            key if key.starts_with("skills.entries.") && key.ends_with(".enabled") => {
+                let name = key
+                    .strip_prefix("skills.entries.")
+                    .and_then(|s| s.strip_suffix(".enabled"))
+                    .ok_or_else(|| anyhow::anyhow!("Invalid skill entry key: {key}"))?
+                    .to_string();
+                let enabled = parse_bool(value, key)?;
+                self.skills.entries.entry(name).or_default().enabled = enabled;
+                Ok(format!("{key} = {enabled}"))
+            }
             "conversation.max_iterations" => {
                 self.conversation.max_iterations = parse_u32(value, key)?;
                 Ok(format!("{key} = {}", self.conversation.max_iterations))

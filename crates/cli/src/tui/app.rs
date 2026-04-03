@@ -24,6 +24,7 @@ use super::plan_overlay::{PlanOption, PlanOverlay};
 use super::plugins_popup::{PluginAction, PluginsPopup};
 use super::schedule_popup::{ScheduleAction, SchedulePopup};
 use super::settings_popup::SettingsPopup;
+use super::skills_popup::{SkillAction, SkillsPopup};
 use super::status_popup::StatusPopup;
 use super::theme;
 
@@ -103,6 +104,9 @@ pub enum AppAction {
     RunScheduleActions {
         actions: Vec<ScheduleAction>,
     },
+    RunSkillActions {
+        actions: Vec<SkillAction>,
+    },
 }
 
 pub struct App<'a> {
@@ -134,6 +138,7 @@ pub struct App<'a> {
     pub plan_overlay: PlanOverlay,
     pub plan_mode: bool,
     pub schedule_popup: SchedulePopup,
+    pub skills_popup: SkillsPopup,
     pub file_popup: FileSearchPopup,
     pub throbber_state: ThrobberState,
     transcript_area: Rect,
@@ -178,6 +183,7 @@ impl<'a> App<'a> {
             plan_overlay: PlanOverlay::new(),
             plan_mode: false,
             schedule_popup: SchedulePopup::new(),
+            skills_popup: SkillsPopup::new(),
             file_popup: FileSearchPopup::new(),
             throbber_state: ThrobberState::default(),
             transcript_area: Rect::default(),
@@ -500,6 +506,13 @@ impl<'a> App<'a> {
                 if self.schedule_popup.is_visible() {
                     if let Some(actions) = self.schedule_popup.handle_key(key) {
                         return Ok(AppAction::RunScheduleActions { actions });
+                    }
+                    return Ok(AppAction::Continue);
+                }
+
+                if self.skills_popup.is_visible() {
+                    if let Some(actions) = self.skills_popup.handle_key(key) {
+                        return Ok(AppAction::RunSkillActions { actions });
                     }
                     return Ok(AppAction::Continue);
                 }
@@ -880,8 +893,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/skills" => {
-                let text = borg_core::tool_handlers::handle_list_skills(&self.config)?;
-                self.push_system_message(text);
+                self.skills_popup.show(&self.config);
                 return Ok(AppAction::Continue);
             }
             "/history" => {
@@ -1541,6 +1553,7 @@ impl<'a> App<'a> {
         self.settings_popup.render(frame, &self.config);
         self.plugins_popup.render(frame);
         self.schedule_popup.render(frame);
+        self.skills_popup.render(frame);
         self.status_popup.render(frame);
     }
 

@@ -311,15 +311,17 @@ impl SettingsPopup {
                 KeyCode::Enter => {
                     let entry = &self.entries[self.selected];
                     match entry.kind {
-                        SettingKind::Bool => return self.toggle_bool(config),
-                        SettingKind::Select => return self.cycle_select(config, true),
+                        SettingKind::Bool | SettingKind::Select => {
+                            self.dismiss();
+                            Ok(None)
+                        }
                         _ => {
                             let current = self.current_value(config, entry.key);
                             self.mode = EditMode::Editing { buffer: current };
                             self.status_message = None;
+                            Ok(None)
                         }
                     }
-                    Ok(None)
                 }
                 KeyCode::Char('r') | KeyCode::Char('R') => {
                     self.mode = EditMode::ConfirmReset;
@@ -591,10 +593,10 @@ impl SettingsPopup {
 
         let area = frame.area();
         let popup_width = (area.width * 60 / 100)
-            .max(40)
+            .max(44)
             .min(area.width.saturating_sub(4));
         let popup_height = (area.height * 80 / 100)
-            .max(10)
+            .max(12)
             .min(area.height.saturating_sub(2));
         let x = (area.width.saturating_sub(popup_width)) / 2;
         let y = (area.height.saturating_sub(popup_height)) / 2;
@@ -610,7 +612,7 @@ impl SettingsPopup {
         let inner = block.inner(popup_area);
         frame.render_widget(block, popup_area);
 
-        if inner.height < 3 || inner.width < 10 {
+        if inner.height < 5 || inner.width < 12 {
             return;
         }
 
@@ -739,14 +741,14 @@ impl SettingsPopup {
             EditMode::Browsing => {
                 let entry = &self.entries[self.selected];
                 match entry.kind {
+                    SettingKind::Bool => " Space: toggle  Enter: apply  r: reset  Esc: close",
                     SettingKind::Select => {
-                        " \u{25C0}\u{25B6}: cycle  Enter: next  r: reset all  Esc: close"
+                        " \u{25C0}\u{25B6}: cycle  Enter: apply  r: reset  Esc: close"
                     }
-                    SettingKind::Bool => " Space: toggle  r: reset all  Esc: close",
                     SettingKind::Float => {
-                        " Enter: edit  \u{25C0}\u{25B6}: \u{00B1}0.1  r: reset all  Esc: close"
+                        " \u{25C0}\u{25B6}: adjust  Enter: edit  r: reset  Esc: close"
                     }
-                    _ => " Enter: edit  r: reset all  Esc: close",
+                    _ => " Enter: edit  r: reset  Esc: close",
                 }
             }
             EditMode::ConfirmReset => {
@@ -1026,21 +1028,21 @@ mod tests {
     }
 
     #[test]
-    fn select_enter_cycles_forward() {
+    fn select_enter_dismisses() {
         let mut popup = SettingsPopup::new();
         let mut cfg = Config::default();
         popup.show(&cfg);
 
-        // Provider is entry 0 — Enter should cycle forward, not open edit mode
+        // Provider is entry 0 — Enter should dismiss (apply), not cycle
         popup.selected = 0;
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         popup.handle_key(enter, &mut cfg).unwrap();
-        // Should NOT enter editing mode
-        assert!(matches!(popup.mode, EditMode::Browsing));
-        // Should have cycled
-        assert_eq!(popup.provider_index, 1);
+        // Should dismiss the popup
+        assert!(!popup.is_visible());
+        // Should NOT have cycled
+        assert_eq!(popup.provider_index, 0);
     }
 
     #[test]
