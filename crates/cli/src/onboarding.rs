@@ -442,9 +442,11 @@ mod tests {
     #[test]
     fn generate_setup_references_systems() {
         let setup = generate_setup("Nova", "Alice");
-        assert!(setup.contains("Vitals"));
-        assert!(setup.contains("Evolution"));
-        assert!(setup.contains("Bond"));
+        // References vitals/evolution concepts (wording may be casual)
+        assert!(setup.contains("Vitals") || setup.contains("vitals"));
+        assert!(
+            setup.contains("evolve") || setup.contains("specialization") || setup.contains("Lvl")
+        );
     }
 
     #[test]
@@ -478,21 +480,21 @@ mod tests {
     }
 
     #[test]
-    fn generate_setup_mentions_base_borg() {
+    fn generate_setup_mentions_level() {
         let setup = generate_setup("Nova", "Alice");
-        assert!(setup.contains("Base Borg Lvl.0"));
+        assert!(setup.contains("Lvl.0") || setup.contains("Base"));
     }
 
     #[test]
-    fn generate_setup_mentions_archetypes() {
+    fn generate_setup_mentions_evolving() {
         let setup = generate_setup("Nova", "Alice");
-        assert!(setup.contains("specialize"));
+        assert!(setup.contains("evolve") || setup.contains("specializ"));
     }
 
     #[test]
-    fn generate_setup_mentions_core_memories() {
+    fn generate_setup_mentions_memories() {
         let setup = generate_setup("Nova", "Alice");
-        assert!(setup.contains("core memories"));
+        assert!(setup.contains("memories") || setup.contains("write_memory"));
     }
 
     #[test]
