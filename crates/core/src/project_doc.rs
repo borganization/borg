@@ -268,4 +268,236 @@ mod tests {
         let result = discover_project_docs(&sub).unwrap().unwrap();
         assert!(result.contains("---")); // HR separator between docs
     }
+
+    // --- collect_doc_paths coverage ---
+
+    #[test]
+    fn collect_doc_paths_multiple_dirs_with_docs() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "root").unwrap();
+
+        let sub = tmp.path().join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("CLAUDE.md"), "leaf").unwrap();
+
+        let paths = collect_doc_paths(tmp.path(), &sub);
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].ends_with("AGENTS.md"));
+        assert!(paths[1].ends_with("CLAUDE.md"));
+    }
+
+    #[test]
+    fn collect_doc_paths_intermediate_dir_without_docs() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "root").unwrap();
+
+        // middle/ has no docs, middle/leaf/ has CLAUDE.md
+        let leaf = tmp.path().join("middle").join("leaf");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("CLAUDE.md"), "leaf").unwrap();
+
+        let paths = collect_doc_paths(tmp.path(), &leaf);
+        assert_eq!(paths.len(), 2);
+        // Root doc first, then leaf — middle skipped
+        assert!(paths[0].ends_with("AGENTS.md"));
+        assert!(paths[1].ends_with("CLAUDE.md"));
+    }
+
+    #[test]
+    fn collect_doc_paths_deep_nesting() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "root").unwrap();
+
+        let l1 = tmp.path().join("a");
+        std::fs::create_dir_all(&l1).unwrap();
+        std::fs::write(l1.join("CLAUDE.md"), "l1").unwrap();
+
+        let l2 = l1.join("b");
+        std::fs::create_dir_all(&l2).unwrap();
+        std::fs::write(l2.join("AGENTS.md"), "l2").unwrap();
+
+        let l3 = l2.join("c");
+        std::fs::create_dir_all(&l3).unwrap();
+        std::fs::write(l3.join("CLAUDE.md"), "l3").unwrap();
+
+        let paths = collect_doc_paths(tmp.path(), &l3);
+        assert_eq!(paths.len(), 4);
+        assert!(paths[0].ends_with("AGENTS.md")); // root
+        assert!(paths[1].ends_with("CLAUDE.md")); // l1
+        assert!(paths[2].ends_with("AGENTS.md")); // l2
+        assert!(paths[3].ends_with("CLAUDE.md")); // l3
+    }
+
+    #[test]
+    fn collect_doc_paths_cwd_above_root_fallback() {
+        // When root == cwd (no .git found), should still check cwd
+        let tmp = TempDir::new().unwrap();
+        // No .git directory — find_project_root returns None, discover uses cwd as root
+        std::fs::write(tmp.path().join("CLAUDE.md"), "fallback").unwrap();
+
+        let paths = collect_doc_paths(tmp.path(), tmp.path());
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("CLAUDE.md"));
+    }
+
+    // --- discover_project_docs coverage ---
+
+    #[test]
+    fn discover_empty_doc_file() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "").unwrap();
+
+        let result = discover_project_docs(tmp.path()).unwrap();
+        // Empty file content means the path comment is still generated but
+        // the overall string just has the comment — should still return Some
+        // because the file exists and was read (even if empty)
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn discover_whitespace_only_doc_file() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "   \n\n  ").unwrap();
+
+        let result = discover_project_docs(tmp.path()).unwrap();
+        // Whitespace-only content still gets included with the path comment
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn discover_byte_budget_truncates_second_file() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        // First file uses most of the budget
+        let first_content = "a".repeat(MAX_PROJECT_DOC_BYTES - 500);
+        std::fs::write(tmp.path().join("AGENTS.md"), &first_content).unwrap();
+
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let second_content = "b".repeat(2000);
+        std::fs::write(sub.join("CLAUDE.md"), &second_content).unwrap();
+
+        let result = discover_project_docs(&sub).unwrap().unwrap();
+        // First file should be fully present
+        assert!(result.contains(&first_content));
+        // Second file should be truncated (not all 2000 b's fit)
+        let b_count = result.matches('b').count();
+        assert!(b_count > 0, "second file should be partially included");
+        assert!(b_count < 2000, "second file should be truncated");
+    }
+
+    #[test]
+    fn discover_byte_budget_exhausted_skips_second_file() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        // First file exactly fills the budget
+        let first_content = "a".repeat(MAX_PROJECT_DOC_BYTES);
+        std::fs::write(tmp.path().join("AGENTS.md"), &first_content).unwrap();
+
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("CLAUDE.md"), "should not appear").unwrap();
+
+        let result = discover_project_docs(&sub).unwrap().unwrap();
+        // Budget is consumed by first file; second should not appear
+        assert!(!result.contains("should not appear"));
+    }
+
+    #[test]
+    fn discover_path_comment_for_claude_md() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "instructions").unwrap();
+
+        let result = discover_project_docs(tmp.path()).unwrap().unwrap();
+        assert!(result.contains("<!--"));
+        assert!(result.contains("CLAUDE.md"));
+    }
+
+    #[test]
+    fn discover_no_git_dir_uses_cwd_as_root() {
+        let tmp = TempDir::new().unwrap();
+        // No .git directory anywhere
+        std::fs::write(tmp.path().join("AGENTS.md"), "no git content").unwrap();
+
+        let result = discover_project_docs(tmp.path()).unwrap();
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("no git content"));
+    }
+
+    #[test]
+    fn discover_git_file_as_worktree() {
+        let tmp = TempDir::new().unwrap();
+        // .git as a file (worktree/submodule format)
+        std::fs::write(tmp.path().join(".git"), "gitdir: /some/other/path").unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "worktree content").unwrap();
+
+        // find_project_root uses git::find_repo_root which may or may not
+        // detect .git-as-file. Either way, cwd fallback ensures discovery works.
+        let result = discover_project_docs(tmp.path()).unwrap();
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("worktree content"));
+    }
+
+    // --- floor_char_boundary additional coverage ---
+
+    #[test]
+    fn floor_char_boundary_at_exact_char_boundary() {
+        let s = "ab\u{00e9}cd"; // é is 2 bytes: 0xc3 0xa9
+        let e_start = s.find('\u{00e9}').unwrap(); // byte index 2
+        let e_end = e_start + '\u{00e9}'.len_utf8(); // byte index 4
+        assert_eq!(floor_char_boundary(s, e_end), e_end);
+        assert!(s.is_char_boundary(e_end));
+    }
+
+    // --- discover_project_docs ordering verification ---
+
+    #[test]
+    fn discover_nested_three_levels_ordering() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "ROOT").unwrap();
+
+        let mid = tmp.path().join("mid");
+        std::fs::create_dir_all(&mid).unwrap();
+        std::fs::write(mid.join("CLAUDE.md"), "MID").unwrap();
+
+        let leaf = mid.join("leaf");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(leaf.join("AGENTS.md"), "LEAF").unwrap();
+
+        let result = discover_project_docs(&leaf).unwrap().unwrap();
+        let root_pos = result.find("ROOT").unwrap();
+        let mid_pos = result.find("MID").unwrap();
+        let leaf_pos = result.find("LEAF").unwrap();
+        // Ordering: root → mid → leaf
+        assert!(root_pos < mid_pos);
+        assert!(mid_pos < leaf_pos);
+    }
+
+    #[test]
+    fn collect_doc_paths_agents_preferred_over_claude_per_dir() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "agents").unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "claude").unwrap();
+
+        let paths = collect_doc_paths(tmp.path(), tmp.path());
+        // First-match-wins: only AGENTS.md collected
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("AGENTS.md"));
+    }
+
+    #[test]
+    fn discover_doc_filenames_constant_order() {
+        // Verify the constant order hasn't accidentally changed
+        assert_eq!(DOC_FILENAMES, &["AGENTS.md", "CLAUDE.md"]);
+    }
 }
