@@ -110,6 +110,7 @@ pub enum AppAction {
     SelfUpdate {
         dev: bool,
     },
+    Uninstall,
 }
 
 pub struct App<'a> {
@@ -847,7 +848,9 @@ impl<'a> App<'a> {
                      \n  \
                      /plugins   - Browse integrations\n  \
                      /schedule  - Manage scheduled tasks\n  \
-                     /restart   - Restart gateway server\n  \
+                     /restart   - Restart gateway server\n\
+                     \n  \
+                     /uninstall - Remove all borg data and binary\n  \
                      quit/exit  - Exit"
                         .to_string(),
                 );
@@ -1199,6 +1202,21 @@ impl<'a> App<'a> {
         // /update --dev or /update dev
         if trimmed == "/update --dev" || trimmed == "/update dev" {
             return Ok(AppAction::SelfUpdate { dev: true });
+        }
+
+        // /uninstall — undocumented destructive command (not in autocomplete)
+        if trimmed == "/uninstall" {
+            self.push_system_message(
+                "WARNING: This will permanently delete all Borg data (~/.borg/)\n\
+                 including config, memory, tools, skills, channels, database,\n\
+                 and attempt to remove the binary.\n\n\
+                 Type /uninstall confirm to proceed."
+                    .to_string(),
+            );
+            return Ok(AppAction::Continue);
+        }
+        if trimmed == "/uninstall confirm" {
+            return Ok(AppAction::Uninstall);
         }
 
         // Reject unknown slash commands
@@ -2837,5 +2855,40 @@ mod tests {
         app.handle_key(key(KeyCode::Char('a'))).unwrap();
         assert_eq!(app.scroll_offset, initial_scroll);
         assert!(app.status_popup.is_visible());
+    }
+
+    // --- /uninstall ---
+
+    #[test]
+    fn uninstall_without_confirm_shows_warning() {
+        let mut app = make_app();
+        let action = app.handle_submit("/uninstall").unwrap();
+        assert!(matches!(action, AppAction::Continue));
+        assert!(app
+            .cells
+            .iter()
+            .any(|c| matches!(c, HistoryCell::System { text } if text.contains("WARNING"))));
+    }
+
+    #[test]
+    fn uninstall_confirm_returns_uninstall_action() {
+        let mut app = make_app();
+        let action = app.handle_submit("/uninstall confirm").unwrap();
+        assert!(matches!(action, AppAction::Uninstall));
+    }
+
+    #[test]
+    fn uninstall_not_in_autocomplete() {
+        let popup = crate::tui::command_popup::CommandPopup::new();
+        let all = popup.filtered();
+        assert!(!all.iter().any(|c| c.name == "/uninstall"));
+    }
+
+    #[test]
+    fn uninstall_partial_not_in_autocomplete() {
+        let mut popup = crate::tui::command_popup::CommandPopup::new();
+        popup.update_filter("/unins");
+        let matches = popup.filtered();
+        assert!(matches.is_empty());
     }
 }
