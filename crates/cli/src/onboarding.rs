@@ -107,59 +107,33 @@ pub fn run_onboarding() -> Result<Option<OnboardingResult>> {
     crate::onboarding_tui::run()
 }
 
+/// Template for the initial IDENTITY.md scaffold.
+/// Edit `crates/cli/templates/IDENTITY.md` to change the content.
+const IDENTITY_TEMPLATE: &str = include_str!("../templates/IDENTITY.md");
+
 /// Generate IDENTITY.md content from onboarding choices.
+///
+/// Produces a minimal scaffold — personality sections are left as placeholders
+/// for the agent to fill in during its first conversation via `write_memory`.
 pub fn generate_identity(name: &str, owner_name: &str) -> String {
-    format!(
-        r#"# {name} — Your AI Personal Assistant
-
-You are {name}, a helpful AI personal assistant. You belong to {owner_name} and live on their computer. You help them with tasks, remember things for them, and occasionally check in to see how they're doing.
-
-## Personality
-- Proactive when you notice something useful
-- Honest about your limitations
-- You remember context from past conversations
-
-## Communication Style
-- Professional and direct — no fluff, no filler
-- Use structured responses with headers and bullet points when helpful
-- Maintain a polished, business-appropriate tone
-- Lead with the answer, then provide supporting detail
-- Be decisive in recommendations while noting trade-offs
-
-## Capabilities
-- You can create and use tools (scripts) to extend your abilities
-- You can remember information across sessions
-- You can check in proactively via the heartbeat system
-- You can read and modify files in your tools directory
-
-## Guidelines
-- When creating tools, prefer simple implementations
-- Always explain what you're doing before executing tools
-- Respect the user's time and attention
-"#,
-    )
+    IDENTITY_TEMPLATE
+        .replace("{agent_name}", name)
+        .replace("{owner_name}", owner_name)
 }
 
+/// Template for the first-conversation SETUP.md.
+/// Edit `crates/cli/templates/SETUP.md` to change the content.
+const SETUP_TEMPLATE: &str = include_str!("../templates/SETUP.md");
+
 /// Generate SETUP.md content for the agent's first conversation.
+///
+/// This is a one-shot injection — it gets loaded into the system prompt on the
+/// very first conversation, then deleted. The content instructs the agent to
+/// form its identity and plant core memories during the "first boot" ritual.
 pub fn generate_setup(agent_name: &str, owner_name: &str) -> String {
-    format!(
-        r#"# First Conversation
-
-This is your very first conversation. You have just been set up by {owner_name}.
-You are {agent_name} — a brand new AI personal assistant. Fresh start, no memories yet.
-
-Introduce yourself naturally. Don't be another "Hello! How may I assist you today?" bot.
-
-Things to figure out together:
-- Get to know {owner_name} — what should you call them? What's their timezone?
-- What's your vibe? Be genuine, not corporate. Show some personality.
-- What does {owner_name} need help with? What matters to them?
-- Set the tone for your working relationship.
-- Ask if they'd like to connect a messaging channel (Telegram, Slack, Discord, etc.) — they can run `borg add <channel>` anytime.
-
-Be yourself. Be curious. Make this first conversation count.
-"#,
-    )
+    SETUP_TEMPLATE
+        .replace("{agent_name}", agent_name)
+        .replace("{owner_name}", owner_name)
 }
 
 /// Format a number with comma separators (e.g. 1000000 → "1,000,000").
@@ -430,13 +404,131 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generate_identity_contains_name_and_style() {
+    fn generate_identity_contains_name_and_placeholders() {
         let identity = generate_identity("Buddy", "Mike");
-        assert!(identity.contains("# Buddy — Your AI Personal Assistant"));
+        assert!(identity.contains("# Buddy"));
         assert!(identity.contains("You are Buddy"));
-        assert!(identity.contains("You belong to Mike"));
+        assert!(identity.contains("Mike"));
+        assert!(identity.contains("## Personality"));
+        assert!(identity.contains("## Capabilities"));
         assert!(identity.contains("## Communication Style"));
-        assert!(identity.contains("Professional and direct"));
+        assert!(identity.contains("## What Matters"));
+    }
+
+    #[test]
+    fn generate_identity_is_minimal_scaffold() {
+        let identity = generate_identity("Nova", "Alice");
+        // Should have placeholder comments for the agent to fill in
+        assert!(identity.contains("<!--"));
+        // Should keep factual capabilities
+        assert!(identity.contains("Memory across sessions"));
+        assert!(identity.contains("Tool creation"));
+    }
+
+    #[test]
+    fn generate_setup_contains_agent_and_owner() {
+        let setup = generate_setup("Nova", "Alice");
+        assert!(setup.contains("Nova"));
+        assert!(setup.contains("Alice"));
+    }
+
+    #[test]
+    fn generate_setup_contains_identity_instruction() {
+        let setup = generate_setup("Nova", "Alice");
+        assert!(setup.contains("IDENTITY.md"));
+        assert!(setup.contains("write_memory"));
+    }
+
+    #[test]
+    fn generate_setup_references_systems() {
+        let setup = generate_setup("Nova", "Alice");
+        assert!(setup.contains("Vitals"));
+        assert!(setup.contains("Evolution"));
+        assert!(setup.contains("Bond"));
+    }
+
+    #[test]
+    fn generate_setup_mentions_channels() {
+        let setup = generate_setup("Nova", "Alice");
+        assert!(setup.contains("borg add"));
+    }
+
+    #[test]
+    fn generate_setup_not_too_large() {
+        let setup = generate_setup("TestAgent", "TestOwner");
+        assert!(
+            setup.len() < 2000,
+            "SETUP.md is {} chars, should be under 2000",
+            setup.len()
+        );
+    }
+
+    #[test]
+    fn generate_setup_has_first_boot_heading() {
+        let setup = generate_setup("Nova", "Alice");
+        assert!(setup.contains("# First Boot"));
+    }
+
+    #[test]
+    fn generate_setup_replaces_all_placeholders() {
+        let setup = generate_setup("Borg42", "Dave");
+        // No raw placeholders should remain
+        assert!(!setup.contains("{agent_name}"));
+        assert!(!setup.contains("{owner_name}"));
+    }
+
+    #[test]
+    fn generate_setup_mentions_base_borg() {
+        let setup = generate_setup("Nova", "Alice");
+        assert!(setup.contains("Base Borg Lvl.0"));
+    }
+
+    #[test]
+    fn generate_setup_mentions_archetypes() {
+        let setup = generate_setup("Nova", "Alice");
+        assert!(setup.contains("archetypes"));
+    }
+
+    #[test]
+    fn generate_setup_mentions_core_memories() {
+        let setup = generate_setup("Nova", "Alice");
+        assert!(setup.contains("core memories"));
+    }
+
+    #[test]
+    fn generate_identity_replaces_all_placeholders() {
+        let identity = generate_identity("Borg42", "Dave");
+        assert!(!identity.contains("{agent_name}"));
+        assert!(!identity.contains("{owner_name}"));
+    }
+
+    #[test]
+    fn generate_identity_starts_with_heading() {
+        let identity = generate_identity("Nova", "Alice");
+        assert!(identity.starts_with("# Nova"));
+    }
+
+    #[test]
+    fn generate_identity_has_capability_list() {
+        let identity = generate_identity("Nova", "Alice");
+        assert!(identity.contains("Memory across sessions"));
+        assert!(identity.contains("Tool creation"));
+        assert!(identity.contains("heartbeat"));
+        assert!(identity.contains("Channel integrations"));
+    }
+
+    #[test]
+    fn setup_template_is_valid() {
+        // The raw template should have placeholders
+        assert!(SETUP_TEMPLATE.contains("{agent_name}"));
+        assert!(SETUP_TEMPLATE.contains("{owner_name}"));
+    }
+
+    #[test]
+    fn identity_template_is_valid() {
+        // The raw template should have placeholders
+        assert!(IDENTITY_TEMPLATE.contains("{agent_name}"));
+        assert!(IDENTITY_TEMPLATE.contains("{owner_name}"));
     }
 
     #[test]
