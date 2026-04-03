@@ -4,6 +4,7 @@ use std::sync::{LazyLock, Mutex};
 use tracing::debug;
 
 use crate::config::{Config, EmbeddingsConfig};
+use crate::constants::{GEMINI_EMBEDDING_DIM, MAX_EMBEDDING_INPUT_CHARS, OPENAI_EMBEDDING_DIM};
 use crate::db::{ChunkData, Database};
 
 /// Shared HTTP client for all embedding API calls (connection pooling + keep-alive).
@@ -24,10 +25,49 @@ pub struct EmbeddingProvider {
     pub dimension: usize,
 }
 
+/// Static metadata for each supported embedding provider.
+struct EmbeddingProviderMeta {
+    name: &'static str,
+    env_var: &'static str,
+    endpoint: &'static str,
+    default_model: &'static str,
+    default_dim: usize,
+}
+
+/// Single source of truth for embedding provider configuration.
+/// Order determines auto-detection priority (first match wins).
+const EMBEDDING_PROVIDERS: &[EmbeddingProviderMeta] = &[
+    EmbeddingProviderMeta {
+        name: "openai",
+        env_var: "OPENAI_API_KEY",
+        endpoint: "https://api.openai.com/v1/embeddings",
+        default_model: "text-embedding-3-small",
+        default_dim: OPENAI_EMBEDDING_DIM,
+    },
+    EmbeddingProviderMeta {
+        name: "openrouter",
+        env_var: "OPENROUTER_API_KEY",
+        endpoint: "https://openrouter.ai/api/v1/embeddings",
+        default_model: "openai/text-embedding-3-small",
+        default_dim: OPENAI_EMBEDDING_DIM,
+    },
+    EmbeddingProviderMeta {
+        name: "gemini",
+        env_var: "GEMINI_API_KEY",
+        endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/embeddings",
+        default_model: "text-embedding-004",
+        default_dim: GEMINI_EMBEDDING_DIM,
+    },
+];
+
+/// Look up provider metadata by name.
+fn find_provider_meta(name: &str) -> Option<&'static EmbeddingProviderMeta> {
+    EMBEDDING_PROVIDERS.iter().find(|p| p.name == name)
+}
+
 impl EmbeddingProvider {
     /// Resolve an embedding provider from config, returning None if unavailable.
     pub fn from_config(config: &EmbeddingsConfig) -> Option<Self> {
-        // If embeddings are disabled, return None
         if !config.enabled {
             debug!("Embeddings disabled in config");
             return None;
@@ -35,11 +75,13 @@ impl EmbeddingProvider {
 
         // Determine provider and API key
         let (provider_name, api_key) = if let Some(ref explicit_provider) = config.provider {
-            // Explicit provider configured
+            let default_env = find_provider_meta(explicit_provider)
+                .map(|m| m.env_var)
+                .unwrap_or("OPENAI_API_KEY");
             let env_var = config
                 .api_key_env
                 .clone()
-                .unwrap_or_else(|| default_env_var(explicit_provider).to_string());
+                .unwrap_or_else(|| default_env.to_string());
             match std::env::var(&env_var) {
                 Ok(key) if !key.is_empty() => (explicit_provider.clone(), key),
                 _ => {
@@ -51,18 +93,16 @@ impl EmbeddingProvider {
                 }
             }
         } else {
-            // Auto-detect: try OpenAI -> OpenRouter -> Gemini
-            let candidates = [
-                ("openai", "OPENAI_API_KEY"),
-                ("openrouter", "OPENROUTER_API_KEY"),
-                ("gemini", "GEMINI_API_KEY"),
-            ];
+            // Auto-detect: iterate EMBEDDING_PROVIDERS in priority order
             let mut found = None;
-            for (name, env_var) in candidates {
-                if let Ok(key) = std::env::var(env_var) {
+            for meta in EMBEDDING_PROVIDERS {
+                if let Ok(key) = std::env::var(meta.env_var) {
                     if !key.is_empty() {
-                        debug!("Embeddings: auto-detected provider '{name}' via {env_var}");
-                        found = Some((name.to_string(), key));
+                        debug!(
+                            "Embeddings: auto-detected provider '{}' via {}",
+                            meta.name, meta.env_var
+                        );
+                        found = Some((meta.name.to_string(), key));
                         break;
                     }
                 }
@@ -78,24 +118,10 @@ impl EmbeddingProvider {
             }
         };
 
-        let (endpoint, default_model, default_dim) = match provider_name.as_str() {
-            "openai" => (
-                "https://api.openai.com/v1/embeddings".to_string(),
-                "text-embedding-3-small",
-                1536,
-            ),
-            "openrouter" => (
-                "https://openrouter.ai/api/v1/embeddings".to_string(),
-                "openai/text-embedding-3-small",
-                1536,
-            ),
-            "gemini" => (
-                "https://generativelanguage.googleapis.com/v1beta/openai/embeddings".to_string(),
-                "text-embedding-004",
-                768,
-            ),
-            other => {
-                debug!("Embeddings: unknown provider '{other}', cannot resolve endpoint");
+        let meta = match find_provider_meta(&provider_name) {
+            Some(m) => m,
+            None => {
+                debug!("Embeddings: unknown provider '{provider_name}', cannot resolve endpoint");
                 return None;
             }
         };
@@ -103,11 +129,11 @@ impl EmbeddingProvider {
         let model = config
             .model
             .clone()
-            .unwrap_or_else(|| default_model.to_string());
-        let dimension = config.dimension.unwrap_or(default_dim);
+            .unwrap_or_else(|| meta.default_model.to_string());
+        let dimension = config.dimension.unwrap_or(meta.default_dim);
 
         Some(Self {
-            endpoint,
+            endpoint: meta.endpoint.to_string(),
             api_key,
             model,
             dimension,
@@ -150,24 +176,15 @@ pub fn invalidate_provider_cache() {
     *cache = None;
 }
 
-fn default_env_var(provider: &str) -> &str {
-    match provider {
-        "openai" => "OPENAI_API_KEY",
-        "openrouter" => "OPENROUTER_API_KEY",
-        "gemini" => "GEMINI_API_KEY",
-        _ => "OPENAI_API_KEY",
-    }
-}
-
 /// Generate an embedding vector via OpenAI-compatible API.
 pub async fn generate_embedding(
     client: &reqwest::Client,
     provider: &EmbeddingProvider,
     text: &str,
 ) -> Result<Vec<f32>> {
-    // Truncate to ~8000 tokens (~32000 chars as rough estimate)
-    let truncated = if text.len() > 32000 {
-        let mut end = 32000;
+    // Truncate to ~8000 tokens (rough char estimate)
+    let truncated = if text.len() > MAX_EMBEDDING_INPUT_CHARS {
+        let mut end = MAX_EMBEDDING_INPUT_CHARS;
         while !text.is_char_boundary(end) && end > 0 {
             end -= 1;
         }
@@ -804,18 +821,27 @@ mod tests {
         assert!(EmbeddingProvider::from_config(&config).is_none());
     }
 
-    // -- default_env_var --
+    // -- find_provider_meta --
 
     #[test]
-    fn default_env_var_known_providers() {
-        assert_eq!(default_env_var("openai"), "OPENAI_API_KEY");
-        assert_eq!(default_env_var("openrouter"), "OPENROUTER_API_KEY");
-        assert_eq!(default_env_var("gemini"), "GEMINI_API_KEY");
+    fn find_provider_meta_known_providers() {
+        assert_eq!(
+            find_provider_meta("openai").unwrap().env_var,
+            "OPENAI_API_KEY"
+        );
+        assert_eq!(
+            find_provider_meta("openrouter").unwrap().env_var,
+            "OPENROUTER_API_KEY"
+        );
+        assert_eq!(
+            find_provider_meta("gemini").unwrap().env_var,
+            "GEMINI_API_KEY"
+        );
     }
 
     #[test]
-    fn default_env_var_unknown_falls_back() {
-        assert_eq!(default_env_var("somethingelse"), "OPENAI_API_KEY");
+    fn find_provider_meta_unknown_returns_none() {
+        assert!(find_provider_meta("somethingelse").is_none());
     }
 
     // -- config_fingerprint --
