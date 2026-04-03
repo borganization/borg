@@ -15,7 +15,7 @@ use crate::provider::Provider;
 use crate::retry::backoff_delay;
 use crate::types::{Message, Role, ToolCall, ToolDefinition};
 
-const MAX_SSE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
+const MAX_SSE_BUFFER: usize = crate::constants::MAX_SSE_BUFFER;
 
 // ── Error classification ──
 

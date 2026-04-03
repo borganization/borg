@@ -12,7 +12,7 @@ use anyhow::Result;
 const DOC_FILENAMES: &[&str] = &["AGENTS.md", "CLAUDE.md"];
 
 /// Maximum total bytes to read from project docs (32 KiB).
-const MAX_PROJECT_DOC_BYTES: usize = 32 * 1024;
+const MAX_PROJECT_DOC_BYTES: usize = crate::constants::MAX_PROJECT_DOC_BYTES;
 
 /// Walk upward from `cwd` to the project root, collecting AGENTS.md / CLAUDE.md files.
 ///
