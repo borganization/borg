@@ -303,7 +303,6 @@ pub async fn run() -> Result<()> {
         if let Ok(state) = db.get_vitals_state() {
             let now = chrono::Utc::now();
             let state = borg_core::vitals::apply_decay(&state, now);
-            app.push_system_message(borg_core::vitals::format_compact(&state));
             let drift = borg_core::vitals::detect_drift(&state, now);
             if let Some(notice) = borg_core::vitals::format_drift_notice(&drift) {
                 app.push_system_message(notice);

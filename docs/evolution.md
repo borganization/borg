@@ -16,7 +16,7 @@ Display format: `Pipeline Warden Lvl.42` (LLM-generated name + current level).
 
 | Stage | Name | What it means |
 |-------|------|---------------|
-| 1 | **Base Form** | Generic agent. No specialization yet. Learning your patterns. |
+| 1 | **Base Borg** | Generic agent. No specialization yet. Learning your patterns. |
 | 2 | **Evolved Form** | Specialization emerges. Agent receives a unique LLM-generated name tied to an archetype. |
 | 3 | **Final Form** | Mastery. Deep specialization confirmed through sustained, consistent usage. |
 
@@ -327,7 +327,7 @@ Bond
 At Stage 1 (pre-evolution), the header shows:
 
 ```
-  Base Form Lvl.14
+  Base Borg Lvl.14
   Discovering your patterns...
 ```
 
