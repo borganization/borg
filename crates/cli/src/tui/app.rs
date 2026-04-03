@@ -84,6 +84,8 @@ pub enum AppAction {
         key: String,
         value: String,
     },
+    /// All settings were reset to defaults; reload agent config entirely.
+    ConfigReloaded,
     SaveSession,
     NewSession,
     LoadSession {
