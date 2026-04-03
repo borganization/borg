@@ -1749,7 +1749,8 @@ impl<'a> App<'a> {
             all_lines.extend(cell.render(width, throbber_state));
         }
 
-        self.total_lines = estimate_wrapped_height(&all_lines, width);
+        let paragraph = Paragraph::new(all_lines).wrap(Wrap { trim: false });
+        self.total_lines = paragraph.line_count(width);
 
         let visible_height = area.height as usize;
         let max_scroll = self.total_lines.saturating_sub(visible_height);
@@ -1759,9 +1760,7 @@ impl<'a> App<'a> {
         // Clamp to u16 for ratatui's scroll API
         let scroll_pos_u16 = u16::try_from(scroll_pos).unwrap_or(u16::MAX);
 
-        let paragraph = Paragraph::new(all_lines)
-            .scroll((scroll_pos_u16, 0))
-            .wrap(Wrap { trim: false });
+        let paragraph = paragraph.scroll((scroll_pos_u16, 0));
 
         frame.render_widget(paragraph, area);
 
@@ -1979,26 +1978,6 @@ fn mouse_y_to_scroll_offset(y: usize, visible_height: usize, max_scroll: usize) 
     }
     let fraction = y as f64 / (visible_height - 1) as f64;
     (((1.0 - fraction) * max_scroll as f64).round() as usize).min(max_scroll)
-}
-
-/// Estimate the number of screen rows after wrapping.
-fn estimate_wrapped_height(lines: &[Line<'_>], width: u16) -> usize {
-    let w = width.max(1) as usize;
-    lines
-        .iter()
-        .map(|line| {
-            let line_width: usize = line
-                .spans
-                .iter()
-                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
-            if line_width == 0 {
-                1
-            } else {
-                line_width.div_ceil(w)
-            }
-        })
-        .sum()
 }
 
 /// Extract the query portion after the last `@` in text, if it looks like a file
