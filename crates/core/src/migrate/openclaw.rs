@@ -17,7 +17,11 @@ pub fn parse_from(root: &Path, categories: &MigrationCategories) -> Result<Sourc
     let mut data = SourceData::default();
 
     if categories.config {
-        parse_config(root, &mut data, categories.credentials)?;
+        parse_config(
+            root,
+            &mut data,
+            categories.credentials, /* extract_channel_tokens */
+        )?;
     }
 
     if categories.credentials {
@@ -39,7 +43,7 @@ pub fn parse_from(root: &Path, categories: &MigrationCategories) -> Result<Sourc
     Ok(data)
 }
 
-fn parse_config(root: &Path, data: &mut SourceData, include_credentials: bool) -> Result<()> {
+fn parse_config(root: &Path, data: &mut SourceData, extract_channel_tokens: bool) -> Result<()> {
     let config_path = root.join("openclaw.json");
     if !config_path.exists() {
         return Ok(());
@@ -131,7 +135,7 @@ fn parse_config(root: &Path, data: &mut SourceData, include_credentials: bool) -
     }
 
     // Channel tokens from config (only if credentials category is enabled)
-    if include_credentials {
+    if extract_channel_tokens {
         extract_channel_token(
             &json,
             "/channels/telegram/botToken",
@@ -177,83 +181,94 @@ fn extract_channel_token(
     }
 }
 
-fn map_openclaw_provider(provider: &str) -> &str {
-    match provider.to_lowercase().as_str() {
-        "openrouter" => "openrouter",
-        "anthropic" => "anthropic",
-        "openai" => "openai",
-        "google" | "gemini" => "gemini",
-        "deepseek" => "deepseek",
-        "groq" => "groq",
-        "ollama" => "ollama",
-        _ => "openrouter",
-    }
+fn map_openclaw_provider(provider: &str) -> &'static str {
+    super::map_provider_name(provider)
 }
 
 fn strip_json_comments(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut in_string = false;
     let mut escape_next = false;
-    let chars: Vec<char> = input.chars().collect();
+    let bytes = input.as_bytes();
     let mut i = 0;
 
-    while i < chars.len() {
+    while i < bytes.len() {
+        let ch = bytes[i];
+
         if escape_next {
-            out.push(chars[i]);
+            out.push(ch as char);
             escape_next = false;
             i += 1;
             continue;
         }
 
         if in_string {
-            if chars[i] == '\\' {
+            if ch == b'\\' {
                 escape_next = true;
-                out.push(chars[i]);
-            } else if chars[i] == '"' {
+            } else if ch == b'"' {
                 in_string = false;
-                out.push(chars[i]);
-            } else {
-                out.push(chars[i]);
             }
+            out.push(ch as char);
             i += 1;
             continue;
         }
 
-        if chars[i] == '"' {
+        if ch == b'"' {
             in_string = true;
-            out.push(chars[i]);
+            out.push(ch as char);
             i += 1;
             continue;
         }
 
         // Single-line comment
-        if chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-            // Skip to end of line
-            while i < chars.len() && chars[i] != '\n' {
+        if ch == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
                 i += 1;
             }
             continue;
         }
 
         // Block comment
-        if chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+        if ch == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
             i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
                 i += 1;
             }
             i += 2; // skip */
             continue;
         }
 
-        out.push(chars[i]);
+        out.push(ch as char);
         i += 1;
     }
 
-    // Also strip trailing commas before } or ]
-    out.replace(",\n}", "\n}")
-        .replace(",\n]", "\n]")
-        .replace(", }", " }")
-        .replace(", ]", " ]")
+    // Strip trailing commas before } or ] (handles spaces, tabs, newlines)
+    strip_trailing_commas(&out)
+}
+
+fn strip_trailing_commas(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b',' {
+            // Look ahead past whitespace for } or ]
+            let mut j = i + 1;
+            while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r') {
+                j += 1;
+            }
+            if j < bytes.len() && matches!(bytes[j], b'}' | b']') {
+                // Skip the comma, keep the whitespace
+                i += 1;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+
+    out
 }
 
 fn parse_credentials(root: &Path, data: &mut SourceData) -> Result<()> {
