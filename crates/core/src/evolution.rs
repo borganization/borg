@@ -627,9 +627,9 @@ pub fn format_compact(state: &EvolutionState) -> String {
         (None, Some(arch)) => {
             let arch_display = format!("{arch}");
             let capitalized = capitalize_first(&arch_display);
-            format!("[Base Form Lvl.{} | {capitalized}]", state.level)
+            format!("[Base Borg Lvl.{} | {capitalized}]", state.level)
         }
-        (None, None) => format!("[Base Form Lvl.{}]", state.level),
+        (None, None) => format!("[Base Borg Lvl.{}]", state.level),
     }
 }
 
@@ -640,7 +640,7 @@ pub fn format_status_section(state: &EvolutionState) -> String {
     // Header: name + level
     match &state.evolution_name {
         Some(name) => out.push_str(&format!("  {name} Lvl.{}\n", state.level)),
-        None => out.push_str(&format!("  Base Form Lvl.{}\n", state.level)),
+        None => out.push_str(&format!("  Base Borg Lvl.{}\n", state.level)),
     }
 
     // Description
@@ -764,7 +764,7 @@ pub fn format_history(events: &[EvolutionEvent]) -> String {
 
 /// XML evolution context for system prompt injection.
 pub fn format_evolution_context(state: &EvolutionState) -> String {
-    let name = state.evolution_name.as_deref().unwrap_or("Base Form");
+    let name = state.evolution_name.as_deref().unwrap_or("Base Borg");
     let stage = match state.stage {
         Stage::Base => "Base",
         Stage::Evolved => "Evolved",
@@ -1489,7 +1489,7 @@ mod tests {
     fn compact_format_base() {
         let state = replay_events(&[]);
         let compact = format_compact(&state);
-        assert!(compact.contains("Base Form"));
+        assert!(compact.contains("Base Borg"));
         assert!(compact.contains("Lvl.0"));
     }
 
