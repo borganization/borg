@@ -11,6 +11,7 @@ mod plan_overlay;
 mod plugins_popup;
 mod schedule_popup;
 mod settings_popup;
+mod status_popup;
 pub(crate) mod theme;
 
 use std::io::stdout;
