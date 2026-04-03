@@ -159,16 +159,7 @@ impl StatusPopup {
             return;
         }
 
-        let area = frame.area();
-        let popup_width = (area.width * 70 / 100)
-            .max(44)
-            .min(area.width.saturating_sub(4));
-        let popup_height = (area.height * 80 / 100)
-            .max(12)
-            .min(area.height.saturating_sub(2));
-        let x = (area.width.saturating_sub(popup_width)) / 2;
-        let y = (area.height.saturating_sub(popup_height)) / 2;
-        let popup_area = Rect::new(x, y, popup_width, popup_height);
+        let popup_area = frame.area();
 
         frame.render_widget(Clear, popup_area);
 
@@ -195,7 +186,7 @@ impl StatusPopup {
 
         // Footer hint
         let footer_y = popup_area.y + popup_area.height.saturating_sub(1);
-        if footer_y < area.height && popup_area.width > 20 {
+        if popup_area.width > 20 {
             let hint = " Esc=close  \u{2191}\u{2193}=scroll ";
             let hint_x = popup_area.x + 2;
             let hint_area = Rect::new(hint_x, footer_y, hint.len() as u16, 1);
