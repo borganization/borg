@@ -16,6 +16,7 @@ mod settings_popup;
 mod skills_popup;
 mod status_popup;
 pub(crate) mod theme;
+mod tool_display;
 
 use std::io::stdout;
 use std::panic;
