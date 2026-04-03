@@ -1041,10 +1041,12 @@ async fn run_event_loop(
                     }
                 }
 
-                // Close browser and exit
+                // Close browser
                 agent.lock().await.close_browser().await;
-                app.push_system_message("Goodbye!".to_string());
-                terminal.draw(|f| app.render(f))?;
+
+                // Fullscreen ASCII art goodbye
+                render_goodbye_screen(terminal)?;
+                tokio::time::sleep(Duration::from_secs(3)).await;
                 return Ok(());
             }
             AppAction::RunDoctor => {
@@ -1076,6 +1078,62 @@ async fn run_event_loop(
             AppAction::Continue => {}
         }
     }
+}
+
+fn render_goodbye_screen(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
+    use ratatui::layout::{Constraint, Layout};
+    use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::Paragraph;
+
+    const GOODBYE_ART: &[&str] = &[
+        r"  .oooooo.                        .o8  .o8                              ",
+        r" d8P'  `Y8b                      '888 '888                              ",
+        r"888            .ooooo.   .ooooo.   888  888  .oooo.o  .ooooo.   .ooooo. ",
+        r"888           d88' `88b d88' `88b  888  888 d88(  '8 d88' `88b d88' `88b",
+        r"888     ooooo 888   888 888   888  888  888 `'Y88b.  888ooo888 888ooo888",
+        r"`88.    .88'  888   888 888   888  888  888 o.  )88b 888    .o 888    .o",
+        r" `Y8bood8P'   `Y8bod8P' `Y8bod8P' o888oo888o8''888P' `Y8bod8P' `Y8bod8P'",
+    ];
+
+    let color = theme::CYAN;
+    let style = Style::default().fg(color);
+
+    terminal.draw(|f| {
+        let area = f.area();
+        // Clear the entire screen
+        f.render_widget(ratatui::widgets::Clear, area);
+
+        let art_height = GOODBYE_ART.len() as u16;
+        let art_width = GOODBYE_ART.iter().map(|l| l.len()).max().unwrap_or(0) as u16;
+
+        // Center vertically
+        let v_pad = area.height.saturating_sub(art_height) / 2;
+        let chunks = Layout::vertical([
+            Constraint::Length(v_pad),
+            Constraint::Length(art_height),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+        // Center horizontally
+        let h_pad = area.width.saturating_sub(art_width) / 2;
+        let h_chunks = Layout::horizontal([
+            Constraint::Length(h_pad),
+            Constraint::Length(art_width),
+            Constraint::Min(0),
+        ])
+        .split(chunks[1]);
+
+        let lines: Vec<Line> = GOODBYE_ART
+            .iter()
+            .map(|l| Line::from(Span::styled(*l, style)))
+            .collect();
+
+        f.render_widget(Paragraph::new(lines), h_chunks[1]);
+    })?;
+
+    Ok(())
 }
 
 #[cfg(test)]
