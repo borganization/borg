@@ -206,10 +206,21 @@ pub fn replay_events(events: &[BondEvent]) -> BondState {
 
 /// Replay events with a specific HMAC key (for per-installation derived keys).
 pub fn replay_events_with_key(key: &[u8], events: &[BondEvent]) -> BondState {
+    const VALID_EVENT_TYPES: &[&str] = &[
+        "tool_success",
+        "tool_failure",
+        "creation",
+        "correction",
+        "suggestion_accepted",
+        "suggestion_rejected",
+    ];
+
     let mut score: i32 = BASELINE_SCORE;
     let mut expected_prev_hmac = "0".to_string();
-    // Rate limit: (hour_bucket, event_type) -> count
+    // Rate limits: per-type, total per hour, positive-delta per hour
     let mut hourly_counts: HashMap<(i64, &str), u32> = HashMap::new();
+    let mut hourly_total: HashMap<i64, u32> = HashMap::new();
+    let mut hourly_positive: HashMap<i64, u32> = HashMap::new();
     let mut chain_valid = true;
 
     for event in events {
@@ -223,13 +234,35 @@ pub fn replay_events_with_key(key: &[u8], events: &[BondEvent]) -> BondState {
         // since they are verified and trusted, just capped for scoring.
         expected_prev_hmac.clone_from(&event.hmac);
 
-        // Rate limit per type per hour
+        // Defense-in-depth: skip unknown event types
+        if !VALID_EVENT_TYPES.contains(&event.event_type.as_str()) {
+            continue;
+        }
+
         let hour_bucket = event.created_at / 3600;
-        let key = (hour_bucket, event.event_type.as_str());
-        let count = hourly_counts.entry(key).or_insert(0);
+
+        // Total events per hour cap (30)
+        let total_count = hourly_total.entry(hour_bucket).or_insert(0);
+        if *total_count >= 30 {
+            continue;
+        }
+        *total_count += 1;
+
+        // Positive-delta events per hour cap (15)
+        if event.score_delta > 0 {
+            let pos_count = hourly_positive.entry(hour_bucket).or_insert(0);
+            if *pos_count >= 15 {
+                continue;
+            }
+            *pos_count += 1;
+        }
+
+        // Per-type per hour rate limit
+        let rate_key = (hour_bucket, event.event_type.as_str());
+        let count = hourly_counts.entry(rate_key).or_insert(0);
         let cap = rate_limit_for(&event.event_type);
         if *count >= cap {
-            continue; // Skip — hit rate limit ceiling
+            continue;
         }
         *count += 1;
 
@@ -456,9 +489,10 @@ pub struct BondHook {
 impl BondHook {
     pub fn new() -> anyhow::Result<Self> {
         let db = Database::open()?;
-        // Pre-compute initial state
+        // Pre-compute initial state using per-installation derived key
         let events = db.get_all_bond_events().unwrap_or_default();
-        let state = replay_events(&events);
+        let hmac_key = db.derive_hmac_key(BOND_HMAC_DOMAIN);
+        let state = replay_events_with_key(&hmac_key, &events);
         Ok(Self {
             db: std::sync::Mutex::new(db),
             cached_state: std::sync::Mutex::new(Some(state)),
@@ -490,7 +524,8 @@ impl BondHook {
             }
         }
         let events = db.get_all_bond_events().unwrap_or_default();
-        let state = replay_events(&events);
+        let hmac_key = db.derive_hmac_key(BOND_HMAC_DOMAIN);
+        let state = replay_events_with_key(&hmac_key, &events);
         if let Ok(mut cache) = self.cached_state.lock() {
             *cache = Some(state.clone());
         }
@@ -1103,5 +1138,165 @@ mod tests {
     fn test_bar_half() {
         let b = bar(50, 10);
         assert_eq!(b.chars().count(), 10);
+    }
+
+    // ── Anti-tamper hardening tests ──
+
+    #[test]
+    fn test_replay_with_derived_key() {
+        let derived_key = b"derived-test-key-for-testing";
+        let hmac1 = compute_event_hmac(derived_key, "0", "tool_success", 1, "test", 1000);
+        let events = vec![BondEvent {
+            id: 1,
+            event_type: "tool_success".to_string(),
+            score_delta: 1,
+            reason: "test".to_string(),
+            hmac: hmac1.clone(),
+            prev_hmac: "0".to_string(),
+            created_at: 1000,
+        }];
+        let state = replay_events_with_key(derived_key, &events);
+        assert!(state.chain_valid);
+        assert_eq!(state.score, BASELINE_SCORE as u8 + 1);
+        // Legacy key should NOT validate derived-key events
+        let state_legacy = replay_events(&events);
+        assert!(!state_legacy.chain_valid);
+        assert_eq!(state_legacy.score, BASELINE_SCORE as u8);
+    }
+
+    #[test]
+    fn test_total_hourly_rate_limit() {
+        let mut events = Vec::new();
+        let mut prev_hmac = "0".to_string();
+        let hour_base = 3600 * 100;
+        for i in 0..35i64 {
+            let (event_type, delta) = match i % 3 {
+                0 => ("tool_success", 1),
+                1 => ("creation", 2),
+                _ => ("suggestion_accepted", 1),
+            };
+            let created_at = hour_base + i;
+            let hmac = compute_event_hmac(
+                BOND_HMAC_LEGACY,
+                &prev_hmac,
+                event_type,
+                delta,
+                "test",
+                created_at,
+            );
+            events.push(BondEvent {
+                id: i + 1,
+                event_type: event_type.to_string(),
+                score_delta: delta,
+                reason: "test".to_string(),
+                hmac: hmac.clone(),
+                prev_hmac: prev_hmac.clone(),
+                created_at,
+            });
+            prev_hmac = hmac;
+        }
+        let state = replay_events(&events);
+        assert!(state.chain_valid);
+        let all_sum: i32 = events.iter().map(|e| e.score_delta).sum();
+        assert!((state.score as i32) < BASELINE_SCORE + all_sum);
+    }
+
+    #[test]
+    fn test_positive_delta_hourly_rate_limit() {
+        let mut events = Vec::new();
+        let mut prev_hmac = "0".to_string();
+        let hour_base = 3600 * 200;
+        for i in 0..20i64 {
+            let created_at = hour_base + i;
+            let hmac = compute_event_hmac(
+                BOND_HMAC_LEGACY,
+                &prev_hmac,
+                "tool_success",
+                1,
+                "test",
+                created_at,
+            );
+            events.push(BondEvent {
+                id: i + 1,
+                event_type: "tool_success".to_string(),
+                score_delta: 1,
+                reason: "test".to_string(),
+                hmac: hmac.clone(),
+                prev_hmac: prev_hmac.clone(),
+                created_at,
+            });
+            prev_hmac = hmac;
+        }
+        let state = replay_events(&events);
+        assert!(state.chain_valid);
+        assert_eq!(state.score, BASELINE_SCORE as u8 + 15);
+    }
+
+    #[test]
+    fn test_invalid_event_type_skipped_in_replay() {
+        let hmac1 = compute_event_hmac(BOND_HMAC_LEGACY, "0", "custom_exploit", 99, "test", 1000);
+        let events = vec![BondEvent {
+            id: 1,
+            event_type: "custom_exploit".to_string(),
+            score_delta: 99,
+            reason: "test".to_string(),
+            hmac: hmac1,
+            prev_hmac: "0".to_string(),
+            created_at: 1000,
+        }];
+        let state = replay_events(&events);
+        assert_eq!(state.score, BASELINE_SCORE as u8);
+    }
+
+    #[test]
+    fn test_negative_events_bypass_positive_cap() {
+        let mut events = Vec::new();
+        let mut prev_hmac = "0".to_string();
+        let hour_base = 3600 * 300;
+        for i in 0..15i64 {
+            let created_at = hour_base + i;
+            let hmac = compute_event_hmac(
+                BOND_HMAC_LEGACY,
+                &prev_hmac,
+                "tool_success",
+                1,
+                "test",
+                created_at,
+            );
+            events.push(BondEvent {
+                id: i + 1,
+                event_type: "tool_success".to_string(),
+                score_delta: 1,
+                reason: "test".to_string(),
+                hmac: hmac.clone(),
+                prev_hmac: prev_hmac.clone(),
+                created_at,
+            });
+            prev_hmac = hmac;
+        }
+        for i in 0..10i64 {
+            let created_at = hour_base + 15 + i;
+            let hmac = compute_event_hmac(
+                BOND_HMAC_LEGACY,
+                &prev_hmac,
+                "tool_failure",
+                -1,
+                "test",
+                created_at,
+            );
+            events.push(BondEvent {
+                id: 15 + i + 1,
+                event_type: "tool_failure".to_string(),
+                score_delta: -1,
+                reason: "test".to_string(),
+                hmac: hmac.clone(),
+                prev_hmac: prev_hmac.clone(),
+                created_at,
+            });
+            prev_hmac = hmac;
+        }
+        let state = replay_events(&events);
+        assert!(state.chain_valid);
+        assert_eq!(state.score, 45); // 40 + 15 - 10
     }
 }

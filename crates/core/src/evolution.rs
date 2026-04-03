@@ -510,9 +510,10 @@ pub fn replay_events_with_key(key: &[u8], events: &[EvolutionEvent]) -> Evolutio
                     .unwrap_or(false);
                 if !gates_verified {
                     tracing::warn!(
-                        "evolution: event {} lacks gates_verified — may be legacy or tampered",
+                        "evolution: rejecting event {} without gates_verified",
                         event.id
                     );
+                    continue;
                 }
                 // Stage transition: reset XP, advance stage
                 stage = match stage {
@@ -621,6 +622,38 @@ pub fn check_stage2_gates(
     }
 
     true
+}
+
+/// Compute how many consecutive days the dominant archetype has been stable.
+pub fn compute_archetype_stable_days(db: &Database) -> u32 {
+    let events = db.load_all_evolution_events().unwrap_or_default();
+    if events.is_empty() {
+        return 0;
+    }
+
+    let mut scores: HashMap<Archetype, u32> = HashMap::new();
+    let mut last_dominant: Option<Archetype> = None;
+    let mut stable_since: i64 = events.first().map(|e| e.created_at).unwrap_or(0);
+
+    for event in &events {
+        if event.event_type == "xp_gain" {
+            if let Some(ref arch_str) = event.archetype {
+                if let Some(arch) = Archetype::parse(arch_str) {
+                    let score = scores.entry(arch).or_insert(0);
+                    *score = score.saturating_add(event.xp_delta.max(0) as u32);
+                }
+            }
+        }
+        let current_dominant = scores.iter().max_by_key(|(_, &v)| v).map(|(&k, _)| k);
+        if current_dominant != last_dominant && current_dominant.is_some() {
+            stable_since = event.created_at;
+            last_dominant = current_dominant;
+        }
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let seconds = (now - stable_since).max(0) as u64;
+    (seconds / 86400) as u32
 }
 
 // ── Formatting ──
@@ -870,9 +903,10 @@ impl EvolutionHook {
         let gates_passed = match evo_state.stage {
             Stage::Base => check_stage1_gates(&evo_state, bond_state.score, min_vital),
             Stage::Evolved => {
-                // Compute correction rate from vitals events
+                // Compute correction rate from vitals events (last 14 days)
+                let fourteen_days_ago = chrono::Utc::now().timestamp() - 14 * 86400;
                 let (corrections, total) = db
-                    .count_vitals_events_by_category_since(0, "correction")
+                    .count_vitals_events_by_category_since(fourteen_days_ago, "correction")
                     .unwrap_or((0, 1));
                 let correction_rate = if total > 0 {
                     corrections as f64 / total as f64
@@ -880,7 +914,7 @@ impl EvolutionHook {
                     0.0
                 };
                 // Approximate archetype stable days from first event with current dominant archetype
-                let archetype_stable_days = 30; // TODO: compute from event history
+                let archetype_stable_days = compute_archetype_stable_days(db);
                 check_stage2_gates(
                     &evo_state,
                     bond_state.score,
@@ -1329,10 +1363,9 @@ mod tests {
     #[test]
     fn replay_stage_transition() {
         let e1 = make_event(1, "xp_gain", 999_999, None, "test", 1000, "0");
-        let meta = r#"{"name":"Pipeline Warden","description":"A vigilant guardian"}"#;
+        let meta = r#"{"gates_verified":true,"name":"Pipeline Warden","description":"A vigilant guardian"}"#;
         let mut e2 = make_event(2, "evolution", 0, None, "system", 2000, &e1.hmac);
         e2.metadata_json = Some(meta.to_string());
-        // Recompute HMAC since we changed metadata (metadata isn't in HMAC, so it's fine)
 
         let state = replay_events(&[e1, e2]);
         assert_eq!(state.stage, Stage::Evolved);
@@ -1386,7 +1419,7 @@ mod tests {
     fn replay_multiple_stages() {
         let e1 = make_event(1, "xp_gain", 999_999, Some("ops"), "run_shell", 1000, "0");
         let mut e2 = make_event(2, "evolution", 0, None, "system", 2000, &e1.hmac);
-        e2.metadata_json = Some(r#"{"name":"Sentinel"}"#.to_string());
+        e2.metadata_json = Some(r#"{"gates_verified":true,"name":"Sentinel"}"#.to_string());
         let e3 = make_event(
             3,
             "xp_gain",
@@ -1397,8 +1430,10 @@ mod tests {
             &e2.hmac,
         );
         let mut e4 = make_event(4, "evolution", 0, None, "system", 4000, &e3.hmac);
-        e4.metadata_json =
-            Some(r#"{"name":"Overseer","description":"Supreme commander"}"#.to_string());
+        e4.metadata_json = Some(
+            r#"{"gates_verified":true,"name":"Overseer","description":"Supreme commander"}"#
+                .to_string(),
+        );
         let e5 = make_event(5, "xp_gain", 50, Some("ops"), "run_shell", 5000, &e4.hmac);
 
         let state = replay_events(&[e1, e2, e3, e4, e5]);
@@ -1596,16 +1631,15 @@ mod tests {
     // ── Gate Enforcement Tests ──
 
     #[test]
-    fn replay_warns_on_unverified_evolution_event() {
-        // An evolution event without gates_verified metadata should still be applied (backward compat)
-        // but the chain should remain valid
+    fn replay_rejects_unverified_evolution_event() {
+        // An evolution event without gates_verified metadata should be rejected
         let e1 = make_event(1, "xp_gain", 5, Some("ops"), "test", 1000, "0");
         let e2 = make_event(2, "evolution", 0, None, "system", 2000, &e1.hmac);
         let state = replay_events(&[e1, e2]);
         assert_eq!(
             state.stage,
-            Stage::Evolved,
-            "evolution event without gates_verified should still apply"
+            Stage::Base,
+            "evolution event without gates_verified should be rejected"
         );
         assert!(state.chain_valid);
     }
