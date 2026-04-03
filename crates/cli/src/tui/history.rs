@@ -174,7 +174,7 @@ fn style_system_line(line: &str) -> Line<'static> {
 
     // Indented lines — check for /command patterns (for /help)
     if line.starts_with("  ") {
-        return style_help_commands(line);
+        return style_indented_line(line);
     }
 
     // XML tags → bold white
@@ -212,24 +212,46 @@ fn style_system_line(line: &str) -> Line<'static> {
     Line::from(Span::styled(line.to_string(), theme::dim()))
 }
 
-/// Highlight `/command` patterns in indented lines (for /help output).
-fn style_help_commands(line: &str) -> Line<'static> {
-    if let Some(slash_pos) = line.find('/') {
-        let after_slash = &line[slash_pos + 1..];
-        let cmd_len = after_slash
+/// Style indented lines: `/command` patterns (for /help) and `name  desc` tool listings.
+fn style_indented_line(line: &str) -> Line<'static> {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+
+    // Slash commands: trimmed starts with "/" (actual commands from /help)
+    if let Some(after_slash) = trimmed.strip_prefix('/') {
+        let word_len = after_slash
             .find(|c: char| !c.is_alphanumeric() && c != '_')
             .unwrap_or(after_slash.len());
-        if cmd_len > 0 {
-            let before = &line[..slash_pos];
-            let cmd = &line[slash_pos..slash_pos + 1 + cmd_len];
-            let rest = &line[slash_pos + 1 + cmd_len..];
+        if word_len > 0 {
+            let cmd_len = 1 + word_len; // include the '/'
             return Line::from(vec![
-                Span::styled(before.to_string(), theme::dim()),
-                Span::styled(cmd.to_string(), theme::header_style()),
+                Span::styled(indent.to_string(), theme::dim()),
+                Span::styled(trimmed[..cmd_len].to_string(), theme::header_style()),
+                Span::styled(trimmed[cmd_len..].to_string(), theme::dim()),
+            ]);
+        }
+    }
+
+    // Tool listing: "name<2+ spaces>description" — make name white
+    if let Some(gap) = trimmed.find("  ") {
+        let name = &trimmed[..gap];
+        // Tool names are single words with underscores, no spaces
+        if !name.is_empty()
+            && !name.contains(' ')
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            let rest = &trimmed[gap..];
+            return Line::from(vec![
+                Span::styled(indent.to_string(), theme::dim()),
+                Span::styled(
+                    name.to_string(),
+                    ratatui::style::Style::default().fg(ratatui::style::Color::White),
+                ),
                 Span::styled(rest.to_string(), theme::dim()),
             ]);
         }
     }
+
     Line::from(Span::styled(line.to_string(), theme::dim()))
 }
 
@@ -998,6 +1020,16 @@ mod tests {
         let line = style_system_line("# My Memory Topic");
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].style, theme::header_style());
+    }
+
+    #[test]
+    fn style_system_line_tool_listing() {
+        let line = style_system_line("  write_memory       Write/append to memory files");
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[1].content.as_ref(), "write_memory");
+        assert_eq!(line.spans[1].style.fg, Some(ratatui::style::Color::White));
+        // Description stays dim — no bold/white on the slash in "Write/append"
+        assert_eq!(line.spans[2].style, theme::dim());
     }
 
     #[test]
