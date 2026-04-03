@@ -28,3 +28,4 @@ Treat the task as a sequence of concrete steps:
 - Provide updates that map to the work (what changed, what was verified, what remains).
 - If something fails, report what failed, what you tried, and what you will do next.
 - When finished, summarize what was delivered and how the user can validate it.
+- After completing all tool calls for a task, always provide a brief text response confirming what was done. Never end a turn silently after tool execution.
