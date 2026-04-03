@@ -192,6 +192,66 @@ pub const MAX_TOOL_ARGS_LEN: usize = 1_000_000;
 /// Max number of tool calls allowed in a single LLM response.
 pub const MAX_TOOL_CALLS_PER_RESPONSE: usize = 50;
 
+// ── LLM / Agent ───────────────────────────────────────────────────
+
+/// SSE streaming buffer size (10 MB).
+pub const MAX_SSE_BUFFER: usize = 10 * 1024 * 1024;
+
+/// Hard upper bound on tool-call array indices during SSE stream parsing.
+/// Prevents OOM from malformed events. Distinct from `MAX_TOOL_CALLS_PER_RESPONSE`
+/// which caps how many tool calls are forwarded to execution.
+pub const MAX_AGENT_TOOL_CALLS: usize = 128;
+
+/// Character limit when truncating messages for memory flush transcripts.
+pub const FLUSH_MESSAGE_TRUNCATE_CHARS: usize = 500;
+
+/// Cap on total transcript characters for memory flush.
+pub const FLUSH_TRANSCRIPT_CAP_CHARS: usize = 20_000;
+
+// ── Conversation / Tokens ─────────────────────────────────────────
+
+/// Conservative token estimate per image (OpenAI high-detail ≈ 765).
+pub const IMAGE_TOKEN_ESTIMATE: usize = 765;
+
+/// Minimum token estimate for audio content.
+pub const AUDIO_TOKEN_ESTIMATE_MIN: usize = 200;
+
+/// Bytes per token for audio content estimation.
+pub const AUDIO_BYTES_PER_TOKEN: usize = 16;
+
+/// Token threshold below which tool results are not compacted.
+pub const TOOL_RESULT_COMPACT_THRESHOLD: usize = 20;
+
+// ── Web ───────────────────────────────────────────────────────────
+
+/// Timeout in seconds for web fetch requests.
+pub const WEB_FETCH_TIMEOUT_SECS: u64 = 30;
+
+/// Max characters returned from web fetch.
+pub const WEB_FETCH_MAX_CHARS: usize = 50_000;
+
+/// Max number of search results to return.
+pub const WEB_MAX_SEARCH_RESULTS: usize = 8;
+
+/// Max response body size for web fetches (10 MB).
+pub const WEB_MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+/// Max HTTP redirects to follow.
+pub const WEB_REDIRECT_LIMIT: usize = 5;
+
+// ── Project docs ──────────────────────────────────────────────────
+
+/// Maximum total bytes to read from project docs (32 KiB).
+pub const MAX_PROJECT_DOC_BYTES: usize = 32 * 1024;
+
+// ── HMAC chain ────────────────────────────────────────────────────
+
+/// How often to write HMAC chain checkpoints (every N verified events).
+pub const HMAC_CHECKPOINT_INTERVAL: u32 = 100;
+
+/// Seconds per hour, used for rate-limit hour bucketing.
+pub const SECS_PER_HOUR: i64 = 3600;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +353,52 @@ mod tests {
         assert!(SLACK_DEDUP_CAPACITY > 0);
         assert!(SLACK_ECHO_CACHE_CAPACITY > 0);
         assert!(SELF_CHAT_CACHE_MAX_ENTRIES > 0);
+    }
+
+    #[test]
+    fn agent_tool_calls_exceeds_per_response() {
+        assert!(MAX_AGENT_TOOL_CALLS > MAX_TOOL_CALLS_PER_RESPONSE);
+    }
+
+    #[test]
+    fn flush_limits_positive() {
+        assert!(FLUSH_MESSAGE_TRUNCATE_CHARS > 0);
+        assert!(FLUSH_TRANSCRIPT_CAP_CHARS > FLUSH_MESSAGE_TRUNCATE_CHARS);
+    }
+
+    #[test]
+    fn token_estimates_positive() {
+        assert!(IMAGE_TOKEN_ESTIMATE > 0);
+        assert!(AUDIO_TOKEN_ESTIMATE_MIN > 0);
+        assert!(AUDIO_BYTES_PER_TOKEN > 0);
+        assert!(TOOL_RESULT_COMPACT_THRESHOLD > 0);
+    }
+
+    #[test]
+    fn web_constants_positive() {
+        assert!(WEB_FETCH_TIMEOUT_SECS > 0);
+        assert!(WEB_FETCH_MAX_CHARS > 0);
+        assert!(WEB_MAX_SEARCH_RESULTS > 0);
+        assert!(WEB_MAX_BODY_BYTES >= 1024 * 1024);
+        assert!(WEB_REDIRECT_LIMIT > 0);
+    }
+
+    #[test]
+    fn embedding_dims_positive() {
+        assert!(OPENAI_EMBEDDING_DIM > 0);
+        assert!(GEMINI_EMBEDDING_DIM > 0);
+        assert!(MAX_EMBEDDING_INPUT_CHARS > 0);
+    }
+
+    #[test]
+    fn session_and_project_limits_positive() {
+        assert!(MAX_SESSION_MESSAGE_CHARS > 0);
+        assert!(MAX_PROJECT_DOC_BYTES > 0);
+    }
+
+    #[test]
+    fn hmac_constants_valid() {
+        assert!(HMAC_CHECKPOINT_INTERVAL > 0);
+        assert_eq!(SECS_PER_HOUR, 3600);
     }
 }

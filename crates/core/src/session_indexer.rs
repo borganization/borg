@@ -7,6 +7,7 @@ use anyhow::Result;
 use tracing::debug;
 
 use crate::config::Config;
+use crate::constants;
 use crate::db::Database;
 
 /// Index a single session's messages into searchable chunks.
@@ -85,7 +86,7 @@ fn build_transcript(messages: &[crate::db::MessageRow]) -> String {
             };
             let truncated: String = content
                 .chars()
-                .take(crate::constants::MAX_SESSION_MESSAGE_CHARS)
+                .take(constants::MAX_SESSION_MESSAGE_CHARS)
                 .collect();
             transcript.push_str(&format!("{role_label}: {truncated}\n\n"));
 

@@ -12,9 +12,9 @@ const COMPACTION_MARKER_TOKENS: usize = constants::COMPACTION_MARKER_TOKENS;
 /// Max characters from the transcript sent to the LLM summarizer.
 const MAX_TRANSCRIPT_CHARS: usize = constants::MAX_TRANSCRIPT_CHARS;
 /// Conservative token estimate per image (OpenAI high-detail ≈ 765).
-const IMAGE_TOKEN_ESTIMATE: usize = 765;
+const IMAGE_TOKEN_ESTIMATE: usize = constants::IMAGE_TOKEN_ESTIMATE;
 /// Rough token estimate for audio (based on ~1 token per 4 bytes of decoded audio).
-const AUDIO_TOKEN_ESTIMATE_MIN: usize = 200;
+const AUDIO_TOKEN_ESTIMATE_MIN: usize = constants::AUDIO_TOKEN_ESTIMATE_MIN;
 
 /// Estimate the token count of a single message, including role overhead.
 fn message_tokens(msg: &Message) -> usize {
@@ -33,7 +33,7 @@ fn message_tokens(msg: &Message) -> usize {
                     // Rough estimate: base64 length / 4 * 3 gives decoded bytes,
                     // then ~1 token per 16 bytes of audio data.
                     let decoded_bytes = media.data.len() * 3 / 4;
-                    (decoded_bytes / 16).max(AUDIO_TOKEN_ESTIMATE_MIN)
+                    (decoded_bytes / constants::AUDIO_BYTES_PER_TOKEN).max(AUDIO_TOKEN_ESTIMATE_MIN)
                 }
             })
             .sum(),
@@ -126,7 +126,7 @@ pub fn compact_tool_results(history: &mut [Message], max_tokens: usize) {
             Some(MessageContent::Text(s)) => estimate_tokens(s),
             _ => continue,
         };
-        if msg_toks > 20 {
+        if msg_toks > constants::TOOL_RESULT_COMPACT_THRESHOLD {
             msg.content = Some(MessageContent::Text(placeholder.to_string()));
         }
     }
@@ -254,12 +254,18 @@ async fn summarize_with_llm(messages: &[Message], llm: &LlmClient) -> String {
         match &msg.content {
             Some(MessageContent::Parts(parts)) => {
                 let full = summarize_parts(parts);
-                let truncated: String = full.chars().take(500).collect();
+                let truncated: String = full
+                    .chars()
+                    .take(constants::FLUSH_MESSAGE_TRUNCATE_CHARS)
+                    .collect();
                 transcript.push_str(&format!("{role_label}{ts}: {truncated}\n"));
             }
             _ => {
                 if let Some(content) = msg.text_content() {
-                    let truncated: String = content.chars().take(500).collect();
+                    let truncated: String = content
+                        .chars()
+                        .take(constants::FLUSH_MESSAGE_TRUNCATE_CHARS)
+                        .collect();
                     transcript.push_str(&format!("{role_label}{ts}: {truncated}\n"));
                 }
             }
