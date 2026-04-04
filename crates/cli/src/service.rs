@@ -257,7 +257,18 @@ async fn spawn_task_execution(
     let permit = semaphore.acquire_owned().await;
     let task_name = task.name.clone();
     let task_id = task.id.clone();
-    let task_prompt = task.prompt.clone();
+    let task_prompt = match task.id.as_str() {
+        borg_core::daily_summary::DAILY_SUMMARY_TASK_ID => {
+            match borg_core::daily_summary::build_daily_summary_prompt() {
+                Ok(enriched) => enriched,
+                Err(e) => {
+                    tracing::warn!("Daily summary data gathering failed: {e}");
+                    task.prompt.clone()
+                }
+            }
+        }
+        _ => task.prompt.clone(),
+    };
     let task_timeout = std::time::Duration::from_millis(task.timeout_ms as u64);
     let max_retries = task.max_retries;
     let retry_count = task.retry_count;

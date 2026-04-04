@@ -436,7 +436,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 26;
+    const CURRENT_VERSION: u32 = 27;
 
     /// Check if a column exists on a table via `PRAGMA table_info`.
     /// Safer than catching ALTER TABLE errors by string matching.
@@ -503,6 +503,7 @@ impl Database {
             Database::migrate_v24,
             Database::migrate_v25,
             Database::migrate_v26,
+            Database::migrate_v27,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -1020,6 +1021,24 @@ impl Database {
                 now,
             ],
         )?;
+
+        const DAILY_SUMMARY_CRON: &str = "0 0 9 * * 1-5"; // 9 AM Mon-Fri (6-field: sec min hr dom mon dow)
+        let next_run_daily = crate::tasks::calculate_next_run("cron", DAILY_SUMMARY_CRON)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO scheduled_tasks
+             (id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at, max_retries, timeout_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, 3, 300000)",
+            params![
+                crate::daily_summary::DAILY_SUMMARY_TASK_ID,
+                "Daily Summary",
+                "Produce a daily standup summary of recent activity. Review sessions, tasks, and memory for what was done, what's planned, and any blockers.",
+                "cron",
+                DAILY_SUMMARY_CRON,
+                "local",
+                next_run_daily,
+                now,
+            ],
+        )?;
         Ok(())
     }
 
@@ -1269,6 +1288,12 @@ impl Database {
                 ON hmac_checkpoints(domain, event_id);
             ",
         )?;
+        Ok(())
+    }
+
+    /// V27: Seed daily summary default task
+    fn migrate_v27(&self) -> Result<()> {
+        self.seed_default_tasks()?;
         Ok(())
     }
 
@@ -2989,6 +3014,27 @@ impl Database {
         )?;
         let rows = stmt
             .query_map(params![limit as i64], |row| {
+                Ok(SessionRow {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    total_tokens: row.get(3)?,
+                    model: row.get(4)?,
+                    title: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Return sessions updated since a given Unix timestamp, ordered by most recent first.
+    pub fn sessions_since(&self, since: i64) -> Result<Vec<SessionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, created_at, updated_at, total_tokens, model, title
+             FROM sessions WHERE updated_at >= ?1 ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![since], |row| {
                 Ok(SessionRow {
                     id: row.get(0)?,
                     created_at: row.get(1)?,
@@ -5474,6 +5520,46 @@ mod tests {
             audit_count, 1,
             "should have exactly one security audit task"
         );
+        let daily_count = tasks
+            .iter()
+            .filter(|t| t.id == crate::daily_summary::DAILY_SUMMARY_TASK_ID)
+            .count();
+        assert_eq!(daily_count, 1, "should have exactly one daily summary task");
+    }
+
+    #[test]
+    fn seed_default_tasks_creates_daily_summary() {
+        let db = test_db();
+        let task = db
+            .get_task_by_id(crate::daily_summary::DAILY_SUMMARY_TASK_ID)
+            .expect("get")
+            .expect("task should exist");
+        assert_eq!(task.name, "Daily Summary");
+        assert_eq!(task.schedule_type, "cron");
+        assert_eq!(task.schedule_expr, "0 0 9 * * 1-5");
+        assert_eq!(task.timezone, "local");
+        assert_eq!(task.status, "active");
+        assert_eq!(task.max_retries, 3);
+        assert_eq!(task.timeout_ms, 300_000);
+        assert!(task.next_run.is_some());
+        assert!(task.prompt.contains("daily standup"));
+    }
+
+    #[test]
+    fn sessions_since_filters_by_time() {
+        let db = test_db();
+        let now = chrono::Utc::now().timestamp();
+        // Recent session
+        db.upsert_session("recent", now - 100, now - 50, 100, "m", "Recent")
+            .unwrap();
+        // Old session
+        db.upsert_session("old", now - 200_000, now - 200_000, 100, "m", "Old")
+            .unwrap();
+
+        let since = now - 86400;
+        let sessions = db.sessions_since(since).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "recent");
     }
 
     #[test]
