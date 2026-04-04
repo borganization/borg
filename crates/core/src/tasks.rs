@@ -91,14 +91,20 @@ pub fn format_task(task: &ScheduledTaskRow) -> String {
         })
         .unwrap_or_else(|| "—".to_string());
 
+    let payload_label = if task.task_type == "command" {
+        "Command"
+    } else {
+        "Prompt"
+    };
     format!(
-        "  {} [{}] ({})\n    Schedule: {} {}\n    Next run: {}\n    Prompt: {}",
+        "  {} [{}] ({})\n    Schedule: {} {}\n    Next run: {}\n    {}: {}",
         task.name,
         task.status,
         task.id.chars().take(8).collect::<String>(),
         task.schedule_type,
         task.schedule_expr,
         next,
+        payload_label,
         truncate_str(&task.prompt, 80),
     )
 }
@@ -158,6 +164,31 @@ pub fn parse_interval(s: &str) -> Option<std::time::Duration> {
 pub fn retry_delay_secs(attempt: i32) -> i64 {
     const DELAYS: [i64; 5] = [30, 60, 300, 900, 3600];
     DELAYS.get(attempt as usize).copied().unwrap_or(3600)
+}
+
+/// Convert a 5-field Linux cron expression to the 7-field format used by the `cron` crate.
+/// Prepends "0" for seconds and appends "*" for year.
+/// Input: "*/5 * * * *" → Output: "0 */5 * * * * *"
+pub fn convert_5_to_7_field(expr: &str) -> String {
+    format!("0 {} *", expr.trim())
+}
+
+/// Parse a combined cron line like "*/5 * * * * echo hello" (Linux crontab format).
+/// Returns (seven_field_cron_expr, command).
+/// The first 5 whitespace-separated tokens are the cron schedule, the rest is the command.
+pub fn parse_cron_line(line: &str) -> Result<(String, String)> {
+    let parts: Vec<&str> = line.trim().splitn(6, char::is_whitespace).collect();
+    if parts.len() < 6 || parts[5].is_empty() {
+        anyhow::bail!(
+            "Expected 5 cron fields followed by a command. Example: */5 * * * * echo hello"
+        );
+    }
+    let cron_5 = parts[..5].join(" ");
+    let command = parts[5].trim().to_string();
+    let cron_7 = convert_5_to_7_field(&cron_5);
+    // Validate
+    Schedule::from_str(&cron_7).with_context(|| format!("Invalid cron expression: {cron_5}"))?;
+    Ok((cron_7, command))
 }
 
 /// Check if an error message indicates a transient failure worth retrying.
@@ -328,6 +359,48 @@ mod tests {
         let result = truncate_str(s, 6);
         assert!(result.ends_with("..."));
         assert_eq!(result.chars().count(), 9); // 6 + "..."
+    }
+
+    // ── Cron line parser tests ──
+
+    #[test]
+    fn convert_5_to_7_field_basic() {
+        assert_eq!(convert_5_to_7_field("*/5 * * * *"), "0 */5 * * * * *");
+    }
+
+    #[test]
+    fn convert_5_to_7_field_specific() {
+        assert_eq!(convert_5_to_7_field("0 3 * * *"), "0 0 3 * * * *");
+    }
+
+    #[test]
+    fn parse_cron_line_echo() {
+        let (cron, cmd) = parse_cron_line("*/5 * * * * echo hello").unwrap();
+        assert_eq!(cron, "0 */5 * * * * *");
+        assert_eq!(cmd, "echo hello");
+    }
+
+    #[test]
+    fn parse_cron_line_script() {
+        let (cron, cmd) = parse_cron_line("0 3 * * * python3 /opt/test/myscript.py").unwrap();
+        assert_eq!(cron, "0 0 3 * * * *");
+        assert_eq!(cmd, "python3 /opt/test/myscript.py");
+    }
+
+    #[test]
+    fn parse_cron_line_too_few_fields() {
+        assert!(parse_cron_line("*/5 * * *").is_err());
+    }
+
+    #[test]
+    fn parse_cron_line_no_command() {
+        assert!(parse_cron_line("*/5 * * * *").is_err());
+    }
+
+    #[test]
+    fn parse_cron_line_command_with_spaces() {
+        let (_, cmd) = parse_cron_line("0 0 * * * echo hello world").unwrap();
+        assert_eq!(cmd, "echo hello world");
     }
 
     // ── Retry logic tests ──
