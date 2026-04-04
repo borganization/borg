@@ -143,7 +143,6 @@ Plan mode uses an allowlist of non-mutating tools — new tools default to block
 
 - **Ghost commits**: On session start, creates a snapshot of the entire repo using a temp git index (never touches HEAD or user's index). Enables atomic undo via `restore_ghost_commit`.
 - **Git context**: Enriches system prompt with branch, commit hash, recent commits, uncommitted changes status.
-- **Turn diff tracking**: `capture_turn_diff()` reports files added/modified/deleted since a baseline.
 
 ## Project Doc Discovery
 

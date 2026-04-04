@@ -15,19 +15,24 @@ fn tokenize(text: &str) -> HashSet<String> {
 
 /// Jaccard similarity between two texts (tokenized as word sets).
 /// Returns 0.0 for disjoint, 1.0 for identical token sets.
-pub fn jaccard_similarity(a: &str, b: &str) -> f32 {
+#[cfg(test)]
+fn jaccard_similarity(a: &str, b: &str) -> f32 {
     let set_a = tokenize(a);
     let set_b = tokenize(b);
+    jaccard_sim_sets(&set_a, &set_b)
+}
 
-    if set_a.is_empty() && set_b.is_empty() {
+/// Jaccard similarity between pre-tokenized sets.
+fn jaccard_sim_sets(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
+    if a.is_empty() && b.is_empty() {
         return 1.0;
     }
-    if set_a.is_empty() || set_b.is_empty() {
+    if a.is_empty() || b.is_empty() {
         return 0.0;
     }
 
-    let intersection = set_a.intersection(&set_b).count();
-    let union = set_a.union(&set_b).count();
+    let intersection = a.intersection(b).count();
+    let union = a.union(b).count();
 
     if union == 0 {
         0.0
@@ -113,23 +118,6 @@ pub fn mmr_rerank(results: &[(usize, f32, &str)], lambda: f32, max_results: usiz
 
     // Map back to original indices
     selected.iter().map(|&i| results[i].0).collect()
-}
-
-/// Jaccard similarity between pre-tokenized sets.
-fn jaccard_sim_sets(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
-    }
-    let intersection = a.intersection(b).count();
-    let union = a.union(b).count();
-    if union == 0 {
-        0.0
-    } else {
-        intersection as f32 / union as f32
-    }
 }
 
 #[cfg(test)]
