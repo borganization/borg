@@ -10,7 +10,7 @@ use borg_core::config::HeartbeatConfig;
 use borg_core::tasks::parse_interval;
 
 /// Minimum allowed heartbeat interval (60 seconds) to prevent API waste.
-const MIN_INTERVAL_SECS: u64 = 60;
+const MIN_INTERVAL_SECS: u64 = borg_core::constants::MIN_HEARTBEAT_INTERVAL_SECS;
 
 #[derive(Debug, Clone)]
 pub enum HeartbeatEvent {
