@@ -47,10 +47,42 @@ pub fn generate_profile(
     if let Some(bin) = runtime_bin {
         validate_seatbelt_path(bin)?;
         profile.push_str(&format!("(allow process-exec (literal \"{bin}\"))\n"));
+
+        // Allow the runtime binary's parent directory (handles non-standard install
+        // paths like ~/.local/bin, ~/.pyenv/shims, /opt/homebrew/Cellar/...)
+        if let Some(parent) = Path::new(bin).parent() {
+            let parent_str = parent.to_string_lossy();
+            if parent_str != "/" && validate_seatbelt_path(&parent_str).is_ok() {
+                profile.push_str(&format!(
+                    "(allow process-exec (subpath \"{parent_str}\"))\n"
+                ));
+            }
+        }
+
+        // Also allow the symlink-resolved binary and its directory
+        if let Ok(canonical) = Path::new(bin).canonicalize() {
+            let canon_str = canonical.to_string_lossy().to_string();
+            if canon_str != bin {
+                if validate_seatbelt_path(&canon_str).is_ok() {
+                    profile.push_str(&format!("(allow process-exec (literal \"{canon_str}\"))\n"));
+                }
+                if let Some(canon_parent) = canonical.parent() {
+                    let canon_parent_str = canon_parent.to_string_lossy();
+                    if canon_parent_str != "/" && validate_seatbelt_path(&canon_parent_str).is_ok()
+                    {
+                        profile.push_str(&format!(
+                            "(allow process-exec (subpath \"{canon_parent_str}\"))\n"
+                        ));
+                    }
+                }
+            }
+        }
+
         // Allow standard system binaries that scripts may invoke (cat, grep, curl, etc.)
         profile.push_str("(allow process-exec (subpath \"/bin\"))\n");
         profile.push_str("(allow process-exec (subpath \"/usr/bin\"))\n");
         profile.push_str("(allow process-exec (subpath \"/usr/local/bin\"))\n");
+        profile.push_str("(allow process-exec (subpath \"/opt/homebrew/bin\"))\n");
     } else {
         profile.push_str("(allow process-exec)\n");
     }
@@ -280,6 +312,55 @@ mod tests {
         let profile = generate_profile(&default_policy(), Path::new("/tmp/my-tool"), None).unwrap();
         // Tool dir (possibly canonicalized) should be writable
         assert!(profile.contains("(allow file-write* (subpath \"/"));
+    }
+
+    #[test]
+    fn profile_allows_runtime_parent_directory() {
+        let profile = generate_profile(
+            &default_policy(),
+            Path::new("/tmp/tool"),
+            Some("/home/user/.local/bin/python3"),
+        )
+        .unwrap();
+        // Literal rule for the binary itself
+        assert!(
+            profile.contains("(allow process-exec (literal \"/home/user/.local/bin/python3\"))")
+        );
+        // Subpath rule for the parent directory
+        assert!(profile.contains("(allow process-exec (subpath \"/home/user/.local/bin\"))"));
+    }
+
+    #[test]
+    fn profile_allows_homebrew_path() {
+        let profile = generate_profile(
+            &default_policy(),
+            Path::new("/tmp/tool"),
+            Some("/usr/bin/python3"),
+        )
+        .unwrap();
+        assert!(profile.contains("(allow process-exec (subpath \"/opt/homebrew/bin\"))"));
+    }
+
+    #[test]
+    fn profile_allows_opt_homebrew_runtime() {
+        let profile = generate_profile(
+            &default_policy(),
+            Path::new("/tmp/tool"),
+            Some("/opt/homebrew/bin/python3"),
+        )
+        .unwrap();
+        assert!(profile.contains("(allow process-exec (literal \"/opt/homebrew/bin/python3\"))"));
+        assert!(profile.contains("(allow process-exec (subpath \"/opt/homebrew/bin\"))"));
+    }
+
+    #[test]
+    fn profile_runtime_parent_skips_root() {
+        let profile =
+            generate_profile(&default_policy(), Path::new("/tmp/tool"), Some("/python3")).unwrap();
+        // Should NOT add (subpath "/") — that would be overly broad
+        assert!(!profile.contains("(allow process-exec (subpath \"/\"))"));
+        // But the literal should still be there
+        assert!(profile.contains("(allow process-exec (literal \"/python3\"))"));
     }
 
     #[test]
