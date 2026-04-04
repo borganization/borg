@@ -6,6 +6,7 @@ pub mod config;
 pub mod config_watcher;
 pub mod constants;
 pub mod conversation;
+pub mod daily_summary;
 pub mod db;
 pub mod doctor;
 pub mod embeddings;
