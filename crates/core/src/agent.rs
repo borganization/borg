@@ -113,15 +113,24 @@ enum BudgetCheck {
     Exceeded(String),
 }
 
+/// Events emitted by the agent loop during a conversation turn.
 pub enum AgentEvent {
+    /// Incremental text token from the LLM.
     TextDelta(String),
+    /// Incremental thinking/reasoning token from the LLM.
     ThinkingDelta(String),
+    /// A tool is about to execute.
     ToolExecuting {
+        /// Tool name.
         name: String,
+        /// Serialized tool arguments.
         args: String,
     },
+    /// A tool has finished executing.
     ToolResult {
+        /// Tool name.
         name: String,
+        /// Tool output text.
         result: String,
     },
     /// Request confirmation from the user for a shell command. Send `true` to approve.
@@ -135,20 +144,21 @@ pub enum AgentEvent {
         delta: String,
         is_stderr: bool,
     },
+    /// Token usage stats for the completed LLM call.
     Usage(UsageData),
+    /// Progress update from a spawned sub-agent.
     SubAgentUpdate {
+        /// Unique identifier for the sub-agent.
         agent_id: String,
+        /// Human-readable sub-agent name.
         nickname: String,
+        /// Current status description.
         status: String,
     },
     /// A user steer message was received and injected into history at a tool boundary.
-    SteerReceived {
-        text: String,
-    },
+    SteerReceived { text: String },
     /// The agent's plan has been updated (structured step tracking).
-    PlanUpdated {
-        steps: Vec<crate::types::PlanStep>,
-    },
+    PlanUpdated { steps: Vec<crate::types::PlanStep> },
     /// The agent is requesting user input mid-turn. Send the user's response via the channel.
     UserInputRequest {
         prompt: String,
@@ -156,7 +166,9 @@ pub enum AgentEvent {
     },
     /// Emitted between tool result and next LLM stream to indicate preparation work.
     Preparing,
+    /// The agent turn has completed (no more tool calls).
     TurnComplete,
+    /// An error occurred during the agent turn.
     Error(String),
 }
 
@@ -170,6 +182,7 @@ fn should_nudge_for_response(
     text_content.trim().is_empty() && needs_response && !already_nudged
 }
 
+/// Core conversation agent: manages history, tools, and the LLM interaction loop.
 pub struct Agent {
     /// Primary config. Must be kept in sync with `config_arc` — update both in `reload_config`.
     config: Config,
@@ -270,6 +283,7 @@ impl Agent {
         resolved
     }
 
+    /// Create a new agent with the given config and metrics.
     pub fn new(config: Config, metrics: BorgMetrics) -> Result<Self> {
         let common = build_common(&config)?;
         let agent_control = if config.agents.enabled {
@@ -337,6 +351,7 @@ impl Agent {
         self.config = new_config;
     }
 
+    /// Create a sub-agent that shares the parent's config but has its own session.
     pub fn new_sub_agent(
         config: Config,
         spawn_depth: u32,
@@ -387,10 +402,12 @@ impl Agent {
         })
     }
 
+    /// Inject a message directly into the conversation history.
     pub fn inject_history_message(&mut self, msg: Message) {
         self.history.push(msg);
     }
 
+    /// Get a mutable reference to the hook registry for registering lifecycle hooks.
     pub fn hook_registry_mut(&mut self) -> &mut HookRegistry {
         &mut self.hook_registry
     }
@@ -516,28 +533,34 @@ impl Agent {
         self.history.push(msg);
     }
 
+    /// Get a reference to the current session.
     pub fn session(&self) -> &Session {
         &self.session
     }
 
+    /// Get the current conversation history.
     pub fn history(&self) -> &[Message] {
         &self.history
     }
 
+    /// Get a reference to the current config.
     pub fn config(&self) -> &Config {
         &self.config
     }
 
+    /// Get a mutable reference to the current config.
     pub fn config_mut(&mut self) -> &mut Config {
         &mut self.config
     }
 
+    /// Get a reference to the telemetry metrics.
     pub fn metrics(&self) -> &BorgMetrics {
         &self.metrics
     }
 
     /// Compact conversation history using LLM summarization, returning (before_tokens, after_tokens).
     #[instrument(skip_all, fields(session_id = %self.session.meta.id))]
+    /// Compact conversation history to fit within context limits. Returns (before, after) message counts.
     pub async fn compact(&mut self) -> (usize, usize) {
         let before = history_tokens(&self.history);
         let llm = match LlmClient::new(&self.config) {
@@ -939,6 +962,7 @@ Rules:
     }
 
     #[instrument(skip_all, fields(session_id = %self.session.meta.id))]
+    /// Send a user message and run the agent loop, emitting events to the channel.
     pub async fn send_message(
         &mut self,
         user_input: &str,
@@ -949,6 +973,7 @@ Rules:
     }
 
     #[instrument(skip_all, fields(session_id = %self.session.meta.id, turn_count = self.turn_count))]
+    /// Send a user message with cancellation support.
     pub async fn send_message_with_cancel(
         &mut self,
         user_input: &str,
@@ -963,6 +988,7 @@ Rules:
 
     /// Send a pre-constructed Message (e.g. multimodal) through the agent loop.
     #[instrument(skip_all, fields(session_id = %self.session.meta.id, turn_count = self.turn_count))]
+    /// Send a message and run the agent loop, returning the final assistant text.
     pub async fn send_message_raw(
         &mut self,
         msg: Message,
@@ -1081,6 +1107,7 @@ Rules:
         }
     }
 
+    /// Core agent loop: stream LLM, execute tool calls, repeat until text-only response.
     pub async fn run_agent_loop(
         &mut self,
         event_tx: mpsc::Sender<AgentEvent>,
@@ -1859,6 +1886,7 @@ Rules:
 
     /// Close the browser session if active.
     #[instrument(skip_all)]
+    /// Close the headless browser session if one is open.
     pub async fn close_browser(&mut self) {
         if let Some(session) = self.browser_session.take() {
             let _ = session.close().await;

@@ -74,6 +74,7 @@ struct AppState {
     tts_synthesizer: Option<Arc<borg_core::tts::TtsSynthesizer>>,
 }
 
+/// HTTP webhook server for messaging channel integrations.
 pub struct GatewayServer {
     config: Config,
     shutdown: CancellationToken,
@@ -82,6 +83,7 @@ pub struct GatewayServer {
 }
 
 impl GatewayServer {
+    /// Create a new gateway server with the given config and shutdown token.
     pub fn new(
         config: Config,
         shutdown: CancellationToken,
@@ -97,6 +99,7 @@ impl GatewayServer {
     }
 
     #[instrument(skip_all)]
+    /// Start the HTTP server and listen for webhook requests until shutdown.
     pub async fn run(self) -> Result<()> {
         let gateway_config = &self.config.gateway;
         let addr = format!("{}:{}", gateway_config.host, gateway_config.port);

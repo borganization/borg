@@ -2,12 +2,17 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 
+/// Message sender role in the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
+    /// System prompt or instruction.
     System,
+    /// Human user input.
     User,
+    /// LLM-generated response.
     Assistant,
+    /// Tool execution result.
     Tool,
 }
 
@@ -192,6 +197,7 @@ impl MessageContent {
         }
     }
 
+    /// Returns true if the content is empty or contains only empty text parts.
     pub fn is_empty(&self) -> bool {
         match self {
             MessageContent::Text(s) => s.is_empty(),
@@ -238,6 +244,7 @@ impl<'de> Deserialize<'de> for MessageContent {
     }
 }
 
+/// A single message in the conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -250,6 +257,7 @@ pub struct Message {
     pub timestamp: Option<String>,
 }
 
+/// An LLM-requested tool invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
@@ -258,12 +266,14 @@ pub struct ToolCall {
     pub function: FunctionCall,
 }
 
+/// Function name and serialized arguments for a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
     pub arguments: String,
 }
 
+/// Result returned from executing a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool_call_id: String,
@@ -271,6 +281,7 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+/// Schema definition for a tool, sent to the LLM each turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]
@@ -278,6 +289,7 @@ pub struct ToolDefinition {
     pub function: FunctionDefinition,
 }
 
+/// JSON Schema definition of a tool's function signature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDefinition {
     pub name: String,
@@ -290,6 +302,7 @@ impl Message {
         chrono::Local::now().to_rfc3339()
     }
 
+    /// Create a system message (no timestamp).
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: Role::System,
@@ -300,6 +313,7 @@ impl Message {
         }
     }
 
+    /// Create a user message with current timestamp.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: Role::User,
@@ -310,6 +324,7 @@ impl Message {
         }
     }
 
+    /// Create an assistant message with current timestamp.
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
@@ -320,6 +335,7 @@ impl Message {
         }
     }
 
+    /// Create a tool result message with current timestamp.
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
@@ -330,6 +346,7 @@ impl Message {
         }
     }
 
+    /// Create a multimodal user message (text + images/audio).
     pub fn user_multimodal(parts: Vec<ContentPart>) -> Self {
         Self {
             role: Role::User,
@@ -340,6 +357,7 @@ impl Message {
         }
     }
 
+    /// Extract the first text content from this message.
     pub fn text_content(&self) -> Option<&str> {
         self.content.as_ref().and_then(|c| c.text())
     }
@@ -387,6 +405,7 @@ impl From<Result<String, anyhow::Error>> for ToolOutput {
 }
 
 impl Message {
+    /// Create a multimodal tool result (text + images).
     pub fn tool_result_multimodal(
         tool_call_id: impl Into<String>,
         parts: Vec<ContentPart>,
@@ -402,6 +421,7 @@ impl Message {
 }
 
 impl ToolDefinition {
+    /// Create a new function-type tool definition with the given JSON Schema parameters.
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,

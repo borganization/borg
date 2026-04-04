@@ -20,6 +20,7 @@ pub use crate::llm_error::*;
 
 // ── Data types ──
 
+/// Token usage statistics from an LLM call.
 #[derive(Debug, Clone, Default)]
 pub struct UsageData {
     pub prompt_tokens: u64,
@@ -29,18 +30,25 @@ pub struct UsageData {
     pub model: String,
 }
 
+/// Events emitted during SSE streaming from the LLM.
 #[derive(Debug)]
 pub enum StreamEvent {
+    /// Incremental text content.
     TextDelta(String),
+    /// Incremental reasoning/thinking content.
     ThinkingDelta(String),
+    /// Incremental tool call data.
     ToolCallDelta {
         index: usize,
         id: Option<String>,
         name: Option<String>,
         arguments_delta: String,
     },
+    /// Token usage report.
     Usage(UsageData),
+    /// Stream completed.
     Done,
+    /// Stream error.
     Error(String),
 }
 
@@ -160,6 +168,7 @@ struct ProviderSlot {
     cooldown: ProviderCooldown,
 }
 
+/// Multi-provider streaming LLM client with failover and key rotation.
 pub struct LlmClient {
     client: Client,
     llm_config: LlmConfig,
@@ -183,6 +192,7 @@ impl LlmClient {
             .unwrap_or_else(|| self.provider.base_url())
     }
 
+    /// Create a new LLM client from config (resolves provider and API keys).
     pub fn new(config: &Config) -> Result<Self> {
         let (provider, mut keys) = config.resolve_api_keys()?;
         let debug_logging = config.debug.llm_logging;
@@ -346,6 +356,7 @@ impl LlmClient {
     }
 
     #[instrument(skip_all, fields(llm.provider = %self.provider, llm.model = %self.llm_config.model))]
+    /// Stream a chat completion, sending events to the channel.
     pub async fn stream_chat(
         &mut self,
         messages: &[Message],
@@ -380,6 +391,7 @@ impl LlmClient {
     /// Supports multi-key fallback: on 401/429 errors, rotates to the next available key.
     /// On exhausted retries, attempts failover to the next provider in the fallback chain.
     #[instrument(skip_all, fields(llm.provider = %self.provider, llm.model = %self.llm_config.model))]
+    /// Stream a chat completion with cancellation support.
     pub async fn stream_chat_with_cancel(
         &mut self,
         messages: &[Message],
@@ -489,6 +501,7 @@ impl LlmClient {
 
     /// Non-streaming call for heartbeat and simple requests
     #[instrument(skip_all, fields(llm.provider = %self.provider, llm.model = %self.llm_config.model))]
+    /// Non-streaming chat completion, returning assembled tool calls.
     pub async fn chat(
         &self,
         messages: &[Message],

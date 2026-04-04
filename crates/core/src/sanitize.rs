@@ -68,15 +68,23 @@ static INJECTION_PATTERNS: LazyLock<Vec<InjectionPattern>> = LazyLock::new(|| {
         .collect()
 });
 
+/// Result of prompt injection scanning.
 #[derive(Debug, PartialEq)]
 pub enum ThreatLevel {
+    /// No injection patterns detected.
     Clean,
+    /// Suspicious patterns detected (moderate score).
     Flagged {
+        /// Cumulative injection score.
         score: u8,
+        /// Labels of matched patterns.
         patterns: Vec<&'static str>,
     },
+    /// High-risk injection detected (high score).
     HighRisk {
+        /// Cumulative injection score.
         score: u8,
+        /// Labels of matched patterns.
         patterns: Vec<&'static str>,
     },
 }

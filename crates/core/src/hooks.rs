@@ -1,20 +1,29 @@
 use tracing::debug;
 
+/// Points in the agent lifecycle where hooks can intercept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookPoint {
     /// Fired once when a new session begins (before any turns).
     SessionStart,
     /// Fired when a session ends (graceful shutdown or explicit close).
     SessionEnd,
+    /// Before the agent starts processing a user message.
     BeforeAgentStart,
+    /// Before sending messages to the LLM.
     BeforeLlmCall,
+    /// After receiving a complete LLM response.
     AfterLlmResponse,
+    /// Before executing a tool call.
     BeforeToolCall,
+    /// After a tool call completes.
     AfterToolCall,
+    /// After a full agent turn (all tool calls resolved).
     TurnComplete,
+    /// When an error occurs during the agent loop.
     OnError,
 }
 
+/// Context passed to hooks when they are dispatched.
 #[derive(Debug, Clone)]
 pub struct HookContext {
     pub point: HookPoint,
@@ -23,55 +32,85 @@ pub struct HookContext {
     pub data: HookData,
 }
 
+/// Event-specific data carried by a hook context.
 #[derive(Debug, Clone)]
 pub enum HookData {
-    SessionStart {
-        session_id: String,
-    },
+    /// Session started.
+    SessionStart { session_id: String },
+    /// Session ended.
     SessionEnd {
+        /// Session identifier.
         session_id: String,
+        /// Total turns in the session.
         total_turns: u32,
     },
+    /// Agent starting to process a user message.
     AgentStart {
+        /// The user's input message.
         user_message: String,
     },
+    /// About to call the LLM.
     LlmCall {
+        /// Number of messages in the conversation.
         message_count: usize,
     },
+    /// LLM response received.
     LlmResponse {
+        /// Whether the response contains tool calls.
         has_tool_calls: bool,
+        /// Length of the text response.
         text_length: usize,
     },
+    /// Tool call about to execute.
     ToolCall {
+        /// Tool name.
         name: String,
+        /// Serialized arguments.
         args: String,
     },
+    /// Tool call completed.
     ToolResult {
+        /// Tool name.
         name: String,
+        /// Tool output.
         result: String,
+        /// Whether the tool returned an error.
         is_error: bool,
     },
+    /// Turn completed.
     TurnEnd {
+        /// Total tool calls in this turn.
         total_tool_calls: u32,
     },
+    /// Error occurred.
     Error {
+        /// Error description.
         message: String,
     },
 }
 
+/// Action a hook can return to influence the agent loop.
 #[derive(Debug, Clone)]
 pub enum HookAction {
+    /// No-op, continue normally.
     Continue,
+    /// Append text to the system prompt.
     InjectContext(String),
+    /// Skip the current action (e.g., skip a tool call).
     Skip,
 }
 
+/// Trait for implementing lifecycle hooks on the agent loop.
 pub trait Hook: Send + Sync {
+    /// Human-readable hook name for logging.
     fn name(&self) -> &str;
+    /// Which hook points this hook listens on.
     fn points(&self) -> &[HookPoint];
+    /// Execute the hook and return an action.
     fn execute(&self, ctx: &HookContext) -> HookAction;
 }
 
+/// Registry of lifecycle hooks dispatched during the agent loop.
 pub struct HookRegistry {
     hooks: Vec<Box<dyn Hook>>,
 }
@@ -83,15 +122,18 @@ impl Default for HookRegistry {
 }
 
 impl HookRegistry {
+    /// Create an empty hook registry.
     pub fn new() -> Self {
         Self { hooks: Vec::new() }
     }
 
+    /// Register a hook to be dispatched on matching hook points.
     pub fn register(&mut self, hook: Box<dyn Hook>) {
         debug!("Registered hook: {}", hook.name());
         self.hooks.push(hook);
     }
 
+    /// Dispatch a hook context to all registered hooks. Returns merged action.
     pub fn dispatch(&self, ctx: &HookContext) -> HookAction {
         let mut result = HookAction::Continue;
 
@@ -121,6 +163,7 @@ impl HookRegistry {
         result
     }
 
+    /// Number of registered hooks.
     pub fn hook_count(&self) -> usize {
         self.hooks.len()
     }
