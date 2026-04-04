@@ -1576,7 +1576,7 @@ impl Database {
         let expected_delta = match event_type {
             "tool_success" => 1,
             "tool_failure" => -1,
-            "creation" => 2,
+            "creation" => 1,
             "correction" => -2,
             "suggestion_accepted" => 1,
             "suggestion_rejected" => -1,
@@ -1594,24 +1594,24 @@ impl Database {
             let now = chrono::Utc::now().timestamp();
             let hour_start = now - (now % 3600);
 
-            // Total events per hour cap (30)
+            // Total events per hour cap (15)
             let total_this_hour: i64 = self.conn.query_row(
                 "SELECT COUNT(*) FROM bond_events WHERE created_at >= ?1",
                 params![hour_start],
                 |row| row.get(0),
             )?;
-            if total_this_hour >= 30 {
+            if total_this_hour >= 15 {
                 return Ok(()); // silently drop — at capacity
             }
 
-            // Positive-delta events per hour cap (15)
+            // Positive-delta events per hour cap (8)
             if delta > 0 {
                 let pos_this_hour: i64 = self.conn.query_row(
                     "SELECT COUNT(*) FROM bond_events WHERE score_delta > 0 AND created_at >= ?1",
                     params![hour_start],
                     |row| row.get(0),
                 )?;
-                if pos_this_hour >= 15 {
+                if pos_this_hour >= 8 {
                     return Ok(()); // silently drop — at capacity
                 }
             }
@@ -6363,11 +6363,11 @@ mod tests {
     fn vitals_state_baseline_no_events() {
         let db = test_db();
         let state = db.get_vitals_state().unwrap();
-        assert_eq!(state.stability, 50);
-        assert_eq!(state.focus, 50);
-        assert_eq!(state.sync, 50);
-        assert_eq!(state.growth, 50);
-        assert_eq!(state.happiness, 50);
+        assert_eq!(state.stability, 40);
+        assert_eq!(state.focus, 40);
+        assert_eq!(state.sync, 40);
+        assert_eq!(state.growth, 40);
+        assert_eq!(state.happiness, 40);
     }
 
     #[test]
@@ -6377,11 +6377,11 @@ mod tests {
         db.record_vitals_event("creation", "create_tool", &deltas, None)
             .unwrap();
         let state = db.get_vitals_state().unwrap();
-        assert_eq!(state.stability, 52); // 50 + 2
-        assert_eq!(state.focus, 51); // 50 + 1
-        assert_eq!(state.sync, 51); // 50 + 1
-        assert_eq!(state.growth, 53); // 50 + 3
-        assert_eq!(state.happiness, 53); // 50 + 3
+        assert_eq!(state.stability, 41); // 40 + 1
+        assert_eq!(state.focus, 40); // 40 + 0
+        assert_eq!(state.sync, 40); // 40 + 0
+        assert_eq!(state.growth, 41); // 40 + 1
+        assert_eq!(state.happiness, 41); // 40 + 1
     }
 
     #[test]
@@ -6409,9 +6409,9 @@ mod tests {
         }
         let events = db.vitals_events_since(0).unwrap();
         assert_eq!(events.len(), 5);
-        // State replayed from events: stability 50 + 5*1 = 55
+        // State replayed from events: stability 40 + 5*1 = 45
         let state = db.get_vitals_state().unwrap();
-        assert_eq!(state.stability, 55);
+        assert_eq!(state.stability, 45);
     }
 
     #[test]
@@ -6428,7 +6428,7 @@ mod tests {
         assert!(!events[1].hmac.is_empty());
         // State should be valid (both events applied)
         let state = db.get_vitals_state().unwrap();
-        assert_eq!(state.focus, 52); // 50 + 1 + 1
+        assert_eq!(state.sync, 42); // 40 + 1 + 1
     }
 
     // ── Bond DB Tests ──
@@ -6633,18 +6633,18 @@ mod tests {
             b"borg-bond-chain-v1",
             &h1,
             "creation",
-            2,
+            1,
             "write_memory",
             base + 1,
         );
-        db.record_bond_event("creation", 2, "write_memory", &h2, &h1, base + 1)
+        db.record_bond_event("creation", 1, "write_memory", &h2, &h1, base + 1)
             .unwrap();
 
         let events = db.get_all_bond_events().unwrap();
         let state = crate::bond::replay_events(&events);
         assert!(state.chain_valid);
-        // 40 + 1 + 2 = 43
-        assert_eq!(state.score, 43);
+        // 25 + 1 + 1 = 27
+        assert_eq!(state.score, 27);
         assert_eq!(state.level, crate::bond::BondLevel::Emerging);
     }
 
@@ -6653,7 +6653,7 @@ mod tests {
         let db = test_db();
         db.record_bond_event_chained("tool_success", 1, "read_file")
             .unwrap();
-        db.record_bond_event_chained("creation", 2, "write_memory")
+        db.record_bond_event_chained("creation", 1, "write_memory")
             .unwrap();
         db.record_bond_event_chained("tool_failure", -1, "run_shell")
             .unwrap();
@@ -6665,8 +6665,8 @@ mod tests {
         let key = db.derive_hmac_key(crate::bond::BOND_HMAC_DOMAIN);
         let state = crate::bond::replay_events_with_key(&key, &events);
         assert!(state.chain_valid);
-        // 40 + 1 + 2 - 1 = 42
-        assert_eq!(state.score, 42);
+        // 25 + 1 + 1 - 1 = 26
+        assert_eq!(state.score, 26);
 
         // Verify chain linking
         assert_eq!(events[0].prev_hmac, "0");
@@ -6693,7 +6693,7 @@ mod tests {
     #[test]
     fn bond_record_total_hourly_cap() {
         let db = test_db();
-        for i in 0..30 {
+        for i in 0..15 {
             let event_type = match i % 6 {
                 0 => "tool_success",
                 1 => "tool_failure",
@@ -6705,37 +6705,37 @@ mod tests {
             let delta = match event_type {
                 "tool_success" | "suggestion_accepted" => 1,
                 "tool_failure" | "suggestion_rejected" => -1,
-                "creation" => 2,
+                "creation" => 1,
                 "correction" => -2,
                 _ => unreachable!(),
             };
             db.record_bond_event_chained(event_type, delta, "test")
                 .unwrap();
         }
-        // 31st event should be silently dropped
-        db.record_bond_event_chained("tool_success", 1, "test")
+        // 16th event should be silently dropped (total cap = 15)
+        db.record_bond_event_chained("tool_failure", -1, "test")
             .unwrap();
         let events = db.get_all_bond_events().unwrap();
-        assert_eq!(events.len(), 30);
+        assert_eq!(events.len(), 15);
     }
 
     #[test]
     fn bond_record_positive_delta_hourly_cap() {
         let db = test_db();
-        for _ in 0..15 {
+        for _ in 0..8 {
             db.record_bond_event_chained("tool_success", 1, "test")
                 .unwrap();
         }
-        // 16th positive event should be dropped
+        // 9th positive event should be dropped
         db.record_bond_event_chained("suggestion_accepted", 1, "test")
             .unwrap();
         let events = db.get_all_bond_events().unwrap();
-        assert_eq!(events.len(), 15);
+        assert_eq!(events.len(), 8);
         // Negative event should still work
         db.record_bond_event_chained("tool_failure", -1, "test")
             .unwrap();
         let events = db.get_all_bond_events().unwrap();
-        assert_eq!(events.len(), 16);
+        assert_eq!(events.len(), 9);
     }
 
     #[test]
@@ -6768,39 +6768,39 @@ mod tests {
     fn vitals_record_time_rate_limiting() {
         let db = test_db();
         let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Correction);
-        // Correction cap is 5/hour
+        // Correction cap is 3/hour
         for _ in 0..10 {
             db.record_vitals_event("correction", "test", &deltas, None)
                 .unwrap();
         }
-        // Only 5 should actually be recorded
+        // Only 3 should actually be recorded
         let events = db.vitals_events_since(0).unwrap();
         assert_eq!(
             events.len(),
-            5,
-            "record-time rate limiting should cap at 5 correction events/hour"
+            3,
+            "record-time rate limiting should cap at 3 correction events/hour"
         );
     }
 
     #[test]
     fn bond_record_time_rate_limiting() {
         let db = test_db();
-        // creation cap is 5/hour
+        // creation cap is 3/hour
         for _ in 0..10 {
-            db.record_bond_event_chained("creation", 2, "test").unwrap();
+            db.record_bond_event_chained("creation", 1, "test").unwrap();
         }
         let events = db.get_all_bond_events().unwrap();
         assert_eq!(
             events.len(),
-            5,
-            "record-time rate limiting should cap at 5 creation events/hour"
+            3,
+            "record-time rate limiting should cap at 3 creation events/hour"
         );
     }
 
     #[test]
     fn evolution_record_time_rate_limiting() {
         let db = test_db();
-        // xp_gain cap is 30/hour
+        // xp_gain cap is 15/hour
         for _ in 0..35 {
             db.record_evolution_event("xp_gain", 5, Some("builder"), "test", None)
                 .unwrap();
@@ -6808,8 +6808,8 @@ mod tests {
         let events = db.load_all_evolution_events().unwrap();
         assert_eq!(
             events.len(),
-            30,
-            "record-time rate limiting should cap at 30 xp_gain events/hour"
+            15,
+            "record-time rate limiting should cap at 15 xp_gain events/hour"
         );
     }
 

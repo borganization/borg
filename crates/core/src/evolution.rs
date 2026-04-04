@@ -71,7 +71,7 @@ fn verify_event_hmac(key: &[u8], event: &EvolutionEvent, expected_prev_hmac: &st
 /// Maximum events per bucket per hour during replay.
 pub(crate) fn rate_limit_for(event_type: &str) -> u32 {
     match event_type {
-        "xp_gain" => 30,
+        "xp_gain" => 15,
         "evolution" => 3,
         "classification" => 3,
         "archetype_shift" => 5,
@@ -80,7 +80,7 @@ pub(crate) fn rate_limit_for(event_type: &str) -> u32 {
 }
 
 /// Source-specific rate limit per hour.
-const SOURCE_RATE_LIMIT: u32 = 10;
+const SOURCE_RATE_LIMIT: u32 = 5;
 
 // ── Types ──
 
@@ -220,9 +220,9 @@ pub struct EvolutionState {
 pub fn xp_for_level(stage: &Stage, level: u8) -> u32 {
     let n = level as f64;
     match stage {
-        Stage::Base => 2 + level as u32, // base=2, curve=1.0 (linear)
-        Stage::Evolved => 8 + (n.powf(1.2)) as u32, // base=8, curve=1.2
-        Stage::Final => 20 + (n.powf(1.5)) as u32, // base=20, curve=1.5
+        Stage::Base => 20 + (n.powf(1.4)) as u32, // base=20, curve=1.4
+        Stage::Evolved => 40 + (n.powf(1.55)) as u32, // base=40, curve=1.55
+        Stage::Final => 80 + (n.powf(1.8)) as u32, // base=80, curve=1.8
     }
 }
 
@@ -394,11 +394,11 @@ fn classify_shell_command(metadata: Option<&str>) -> Option<Archetype> {
 /// Base XP awarded for a successful tool call.
 const BASE_XP_TOOL_SUCCESS: i32 = 1;
 /// Bonus XP for archetype-aligned tool success.
-const BONUS_XP_ALIGNED: i32 = 2;
+const BONUS_XP_ALIGNED: i32 = 1;
 /// Base XP for creation events.
-const BASE_XP_CREATION: i32 = 3;
+const BASE_XP_CREATION: i32 = 2;
 /// Bonus XP for archetype-aligned creation.
-const BONUS_XP_CREATION_ALIGNED: i32 = 3;
+const BONUS_XP_CREATION_ALIGNED: i32 = 1;
 /// Base XP for session interaction.
 const BASE_XP_INTERACTION: i32 = 1;
 
@@ -1044,9 +1044,15 @@ mod tests {
 
     #[test]
     fn xp_for_level_stage1_boundaries() {
-        assert_eq!(xp_for_level(&Stage::Base, 0), 2);
-        assert_eq!(xp_for_level(&Stage::Base, 50), 52);
-        assert_eq!(xp_for_level(&Stage::Base, 99), 101);
+        assert_eq!(xp_for_level(&Stage::Base, 0), 20);
+        assert_eq!(
+            xp_for_level(&Stage::Base, 50),
+            20 + (50.0_f64.powf(1.4)) as u32
+        );
+        assert_eq!(
+            xp_for_level(&Stage::Base, 99),
+            20 + (99.0_f64.powf(1.4)) as u32
+        );
     }
 
     #[test]
@@ -1054,8 +1060,8 @@ mod tests {
         let s1_total = total_xp_for_level(&Stage::Base, 99);
         let s2_total = total_xp_for_level(&Stage::Evolved, 99);
         assert!(
-            s2_total > s1_total * 2,
-            "Stage 2 total {s2_total} should be much larger than Stage 1 {s1_total}"
+            s2_total > s1_total,
+            "Stage 2 total {s2_total} should be larger than Stage 1 {s1_total}"
         );
     }
 
@@ -1358,12 +1364,12 @@ mod tests {
 
     #[test]
     fn replay_level_up() {
-        // Stage 1: level 0 costs 2 XP, level 1 costs 3 XP
+        // Stage 1: level 0 costs 20 XP
         let e1 = make_event(1, "xp_gain", 5, None, "test", 1000, "0");
         let state = replay_events(&[e1]);
         assert_eq!(state.total_xp, 5);
-        // 5 XP: level 0 costs 2, level 1 costs 3 → at level 2
-        assert_eq!(state.level, 2);
+        // 5 XP: level 0 costs 20 → still at level 0
+        assert_eq!(state.level, 0);
     }
 
     #[test]
@@ -1399,7 +1405,7 @@ mod tests {
 
     #[test]
     fn replay_rate_limiting() {
-        // Create 35 events in the same hour (limit is 30 for xp_gain)
+        // Create 35 events in the same hour (limit is 15 for xp_gain)
         let mut events = Vec::new();
         let mut prev = "0".to_string();
         for i in 0..35 {
@@ -1416,9 +1422,9 @@ mod tests {
             events.push(e);
         }
         let state = replay_events(&events);
-        // Only 30 should count (rate limited), but source limit is 10
-        // Since all have same source "test", only 10 should count
-        assert_eq!(state.total_xp, 10);
+        // Only 15 should count (rate limited), but source limit is 5
+        // Since all have same source "test", only 5 should count
+        assert_eq!(state.total_xp, 5);
     }
 
     #[test]
