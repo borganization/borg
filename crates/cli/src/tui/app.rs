@@ -1519,7 +1519,6 @@ impl<'a> App<'a> {
                 };
                 let is_error = result.starts_with("Error:");
                 self.cells.push(HistoryCell::ToolResult {
-                    name,
                     output: result,
                     is_error,
                     duration_ms,
@@ -1628,15 +1627,12 @@ impl<'a> App<'a> {
                 // Sub-agent updates are informational; no TUI action needed yet.
             }
             AgentEvent::ToolOutputDelta {
-                name,
-                delta,
-                is_stderr,
+                delta, is_stderr, ..
             } => {
                 if let Some(HistoryCell::ToolStreaming { lines, .. }) = self.cells.last_mut() {
                     lines.push((delta, is_stderr));
                 } else {
                     self.cells.push(HistoryCell::ToolStreaming {
-                        name,
                         lines: vec![(delta, is_stderr)],
                     });
                 }

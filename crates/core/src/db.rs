@@ -50,20 +50,6 @@ pub struct ScheduledTaskRow {
     pub task_type: String,
 }
 
-impl ScheduledTaskRow {
-    /// Parse the allowed_tools field into a set of tool names.
-    /// Returns `None` if no allowlist is configured (all tools allowed).
-    pub fn allowed_tools_set(&self) -> Option<std::collections::HashSet<String>> {
-        self.allowed_tools.as_ref().map(|tools| {
-            tools
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-    }
-}
-
 /// Task run log row from SQLite.
 #[derive(Debug, Clone)]
 pub struct TaskRunRow {
