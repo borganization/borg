@@ -66,7 +66,7 @@ impl ToolGroup {
             Self::Discovery => &["list"],
             Self::Web => &["web_fetch", "web_search"],
             Self::Ui => &["browser"],
-            Self::Scheduling => &["manage_tasks"],
+            Self::Scheduling => &["manage_tasks", "manage_cron"],
             Self::Media => &["read_pdf", "generate_image"],
             Self::Security => &["security_audit"],
             Self::Integration => &["gmail", "outlook", "google_calendar", "notion", "linear"],
@@ -173,7 +173,7 @@ pub fn tool_group(name: &str) -> Option<ToolGroup> {
         "list" | "list_skills" | "list_channels" | "list_agents" => Some(ToolGroup::Discovery),
         "web_fetch" | "web_search" => Some(ToolGroup::Web),
         "browser" => Some(ToolGroup::Ui),
-        "manage_tasks" => Some(ToolGroup::Scheduling),
+        "manage_tasks" | "manage_cron" => Some(ToolGroup::Scheduling),
         "read_pdf" | "generate_image" => Some(ToolGroup::Media),
         "security_audit" => Some(ToolGroup::Security),
         "gmail" | "outlook" | "google_calendar" | "notion" | "linear" => {

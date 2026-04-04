@@ -275,6 +275,7 @@ async fn spawn_task_execution(
     let delivery_channel = task.delivery_channel.clone();
     let delivery_target = task.delivery_target.clone();
     let schedule_type = task.schedule_type.clone();
+    let task_type = task.task_type.clone();
 
     tokio::spawn(async move {
         let _permit = permit;
@@ -286,89 +287,248 @@ async fn spawn_task_execution(
         tracing::info!("Executing scheduled task: {task_name} ({task_id}){attempt_label}");
         let started_at = chrono::Utc::now().timestamp();
 
-        let identity = borg_core::identity::load_identity().unwrap_or_default();
-        let memory = borg_core::memory::load_memory_context(4000).unwrap_or_default();
-        let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-
-        let system = format!(
-            "{identity}\n\n# Current Time\n{time}\n\n{memory}\n\n\
-             # Scheduled Task\nYou are executing a scheduled task: \"{task_name}\"\n\
-             Respond with the task result. Be concise."
-        );
-
-        let messages = vec![
-            borg_core::types::Message::system(system),
-            borg_core::types::Message::user(&task_prompt),
-        ];
-
-        let llm = match borg_core::llm::LlmClient::new(&config) {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!("Failed to create LLM client for task '{task_name}': {e}");
-                if let Ok(db) = borg_core::db::Database::open() {
-                    let _ = db.complete_task_run(run_id, 0, None, Some(&format!("{e}")));
-                }
-                return;
-            }
+        let exec_ctx = TaskExecContext {
+            task_name,
+            task_id,
+            prompt_or_command: task_prompt,
+            timeout: task_timeout,
+            run_id,
+            started_at,
+            retry_count,
+            max_retries,
+            schedule_type,
+            delivery_channel,
+            delivery_target,
+            config,
         };
-        let result = tokio::time::timeout(task_timeout, llm.chat(&messages, None)).await;
-
-        match result {
-            Ok(Ok(response)) => {
-                let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
-                let result_text = response.text_content().unwrap_or("");
-                if let Ok(db) = borg_core::db::Database::open() {
-                    if let Err(e) =
-                        db.complete_task_run(run_id, duration_ms, Some(result_text), None)
-                    {
-                        tracing::warn!("Failed to complete task run for '{task_name}': {e}");
-                    }
-                    if let Err(e) = db.clear_task_retry(&task_id) {
-                        tracing::warn!("Failed to clear retry state for '{task_name}': {e}");
-                    }
-                }
-                tracing::info!(
-                    "Task '{task_name}' completed: {}",
-                    &result_text[..result_text.len().min(100)]
-                );
-                if let (Some(ch), Some(tgt)) = (&delivery_channel, &delivery_target) {
-                    deliver_task_result(ch, tgt, &task_name, result_text, &config).await;
-                }
-            }
-            Ok(Err(e)) => {
-                let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
-                let ctx = TaskFailureContext {
-                    task_id: &task_id,
-                    task_name: &task_name,
-                    run_id,
-                    duration_ms,
-                    retry_count,
-                    max_retries,
-                    schedule_type: &schedule_type,
-                    delivery_channel: &delivery_channel,
-                    delivery_target: &delivery_target,
-                    config: &config,
-                };
-                handle_task_failure(&ctx, &format!("{e}")).await;
-            }
-            Err(_) => {
-                let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
-                let ctx = TaskFailureContext {
-                    task_id: &task_id,
-                    task_name: &task_name,
-                    run_id,
-                    duration_ms,
-                    retry_count,
-                    max_retries,
-                    schedule_type: &schedule_type,
-                    delivery_channel: &delivery_channel,
-                    delivery_target: &delivery_target,
-                    config: &config,
-                };
-                handle_task_failure(&ctx, "Task timed out").await;
-            }
+        if task_type == "command" {
+            execute_command_task(&exec_ctx).await;
+        } else {
+            execute_prompt_task(&exec_ctx).await;
         }
     });
+}
+
+struct TaskExecContext {
+    task_name: String,
+    task_id: String,
+    prompt_or_command: String,
+    timeout: std::time::Duration,
+    run_id: i64,
+    started_at: i64,
+    retry_count: i32,
+    max_retries: i32,
+    schedule_type: String,
+    delivery_channel: Option<String>,
+    delivery_target: Option<String>,
+    config: Config,
+}
+
+async fn execute_command_task(ctx: &TaskExecContext) {
+    let TaskExecContext {
+        task_name,
+        task_id,
+        prompt_or_command: command,
+        timeout,
+        run_id,
+        started_at,
+        retry_count,
+        max_retries,
+        schedule_type,
+        delivery_channel,
+        delivery_target,
+        config,
+    } = ctx;
+    let result = tokio::time::timeout(
+        *timeout,
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(command.as_str())
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let duration_ms = (chrono::Utc::now().timestamp() - *started_at) * 1000;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = if stderr.is_empty() {
+                stdout.to_string()
+            } else {
+                format!("{stdout}\n[stderr]\n{stderr}")
+            };
+
+            if output.status.success() {
+                if let Ok(db) = borg_core::db::Database::open() {
+                    let _ = db.complete_task_run(*run_id, duration_ms, Some(&combined), None);
+                    let _ = db.clear_task_retry(task_id);
+                }
+                tracing::info!(
+                    "Cron job '{}' completed (exit 0): {}",
+                    task_name,
+                    &combined[..combined.len().min(100)]
+                );
+                if let (Some(ch), Some(tgt)) = (delivery_channel, delivery_target) {
+                    deliver_task_result(ch, tgt, task_name, &combined, config).await;
+                }
+            } else {
+                let exit_code = output.status.code().unwrap_or(-1);
+                let error_msg = format!("exit code {exit_code}");
+                if let Ok(db) = borg_core::db::Database::open() {
+                    let _ = db.complete_task_run(
+                        *run_id,
+                        duration_ms,
+                        Some(&combined),
+                        Some(&error_msg),
+                    );
+                }
+                tracing::warn!("Cron job '{task_name}' failed ({error_msg})");
+                // Non-zero exit is not retried (it's a user script error, not transient)
+                if let (Some(ch), Some(tgt)) = (delivery_channel, delivery_target) {
+                    deliver_task_result(
+                        ch,
+                        tgt,
+                        &format!("{task_name} [FAILED]"),
+                        &format!("Error: {error_msg}\n{combined}"),
+                        config,
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            let duration_ms = (chrono::Utc::now().timestamp() - *started_at) * 1000;
+            let fail_ctx = TaskFailureContext {
+                task_id,
+                task_name,
+                run_id: *run_id,
+                duration_ms,
+                retry_count: *retry_count,
+                max_retries: *max_retries,
+                schedule_type,
+                delivery_channel,
+                delivery_target,
+                config,
+            };
+            handle_task_failure(&fail_ctx, &format!("Failed to spawn command: {e}")).await;
+        }
+        Err(_) => {
+            let duration_ms = (chrono::Utc::now().timestamp() - *started_at) * 1000;
+            let fail_ctx = TaskFailureContext {
+                task_id,
+                task_name,
+                run_id: *run_id,
+                duration_ms,
+                retry_count: *retry_count,
+                max_retries: *max_retries,
+                schedule_type,
+                delivery_channel,
+                delivery_target,
+                config,
+            };
+            handle_task_failure(&fail_ctx, "Cron job timed out").await;
+        }
+    }
+}
+
+async fn execute_prompt_task(ctx: &TaskExecContext) {
+    let TaskExecContext {
+        task_name,
+        task_id,
+        prompt_or_command: task_prompt,
+        timeout,
+        run_id,
+        started_at,
+        retry_count,
+        max_retries,
+        schedule_type,
+        delivery_channel,
+        delivery_target,
+        config,
+    } = ctx;
+    let identity = borg_core::identity::load_identity().unwrap_or_default();
+    let memory = borg_core::memory::load_memory_context(4000).unwrap_or_default();
+    let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+
+    let system = format!(
+        "{identity}\n\n# Current Time\n{time}\n\n{memory}\n\n\
+         # Scheduled Task\nYou are executing a scheduled task: \"{task_name}\"\n\
+         Respond with the task result. Be concise."
+    );
+
+    let messages = vec![
+        borg_core::types::Message::system(system),
+        borg_core::types::Message::user(task_prompt),
+    ];
+
+    let llm = match borg_core::llm::LlmClient::new(config) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("Failed to create LLM client for task '{task_name}': {e}");
+            if let Ok(db) = borg_core::db::Database::open() {
+                let _ = db.complete_task_run(*run_id, 0, None, Some(&format!("{e}")));
+            }
+            return;
+        }
+    };
+    let result = tokio::time::timeout(*timeout, llm.chat(&messages, None)).await;
+
+    match result {
+        Ok(Ok(response)) => {
+            let duration_ms = (chrono::Utc::now().timestamp() - *started_at) * 1000;
+            let result_text = response.text_content().unwrap_or("");
+            if let Ok(db) = borg_core::db::Database::open() {
+                if let Err(e) = db.complete_task_run(*run_id, duration_ms, Some(result_text), None)
+                {
+                    tracing::warn!("Failed to complete task run for '{task_name}': {e}");
+                }
+                if let Err(e) = db.clear_task_retry(task_id) {
+                    tracing::warn!("Failed to clear retry state for '{task_name}': {e}");
+                }
+            }
+            tracing::info!(
+                "Task '{}' completed: {}",
+                task_name,
+                &result_text[..result_text.len().min(100)]
+            );
+            if let (Some(ch), Some(tgt)) = (delivery_channel, delivery_target) {
+                deliver_task_result(ch, tgt, task_name, result_text, config).await;
+            }
+        }
+        Ok(Err(e)) => {
+            let duration_ms = (chrono::Utc::now().timestamp() - *started_at) * 1000;
+            let fail_ctx = TaskFailureContext {
+                task_id,
+                task_name,
+                run_id: *run_id,
+                duration_ms,
+                retry_count: *retry_count,
+                max_retries: *max_retries,
+                schedule_type,
+                delivery_channel,
+                delivery_target,
+                config,
+            };
+            handle_task_failure(&fail_ctx, &format!("{e}")).await;
+        }
+        Err(_) => {
+            let duration_ms = (chrono::Utc::now().timestamp() - *started_at) * 1000;
+            let fail_ctx = TaskFailureContext {
+                task_id,
+                task_name,
+                run_id: *run_id,
+                duration_ms,
+                retry_count: *retry_count,
+                max_retries: *max_retries,
+                schedule_type,
+                delivery_channel,
+                delivery_target,
+                config,
+            };
+            handle_task_failure(&fail_ctx, "Task timed out").await;
+        }
+    }
 }
 
 struct TaskFailureContext<'a> {

@@ -456,6 +456,7 @@ mod tests {
                 delivery_channel: None,
                 delivery_target: None,
                 allowed_tools: None,
+                task_type: "prompt".into(),
             },
             original_status: status.into(),
             original_schedule_expr: "0 9 * * *".into(),
