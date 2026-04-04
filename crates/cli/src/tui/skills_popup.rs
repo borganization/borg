@@ -1,11 +1,12 @@
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use borg_core::config::Config;
 use borg_core::skills::load_all_skills;
 
+use super::popup_utils;
 use super::theme;
 
 fn title_case_name(name: &str) -> String {
@@ -155,25 +156,8 @@ impl SkillsPopup {
         }
 
         let area = frame.area();
-        let popup_width = (area.width * 60 / 100)
-            .max(44)
-            .min(area.width.saturating_sub(4));
-        let popup_height = (area.height * 80 / 100)
-            .max(12)
-            .min(area.height.saturating_sub(2));
-        let x = (area.width.saturating_sub(popup_width)) / 2;
-        let y = (area.height.saturating_sub(popup_height)) / 2;
-        let popup_area = Rect::new(x, y, popup_width, popup_height);
-
-        frame.render_widget(Clear, popup_area);
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme::dim())
-            .title(" Skills ");
-
-        let inner = block.inner(popup_area);
-        frame.render_widget(block, popup_area);
+        let popup_area = popup_utils::popup_area(area);
+        let inner = popup_utils::render_popup_frame(frame, popup_area, "Skills");
 
         if inner.height < 5 || inner.width < 12 {
             return;
@@ -242,28 +226,10 @@ impl SkillsPopup {
         frame.render_widget(Paragraph::new(visible_lines), content_area);
 
         // Status line
-        if let Some((ref msg, is_success)) = self.status_message {
-            let style = if is_success {
-                theme::success_style()
-            } else {
-                theme::error_style()
-            };
-            let status_y = inner.y + inner.height - 2;
-            let status_area = Rect::new(inner.x, status_y, inner.width, 1);
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(format!(" {msg}"), style))),
-                status_area,
-            );
-        }
+        popup_utils::render_status_message(frame, inner, self.status_message.as_ref(), 2);
 
         // Footer hint
-        let hint = " Space: toggle  Enter: apply  Esc: close";
-        let footer_y = inner.y + inner.height - 1;
-        let footer_area = Rect::new(inner.x, footer_y, inner.width, 1);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(hint.to_string(), theme::dim()))),
-            footer_area,
-        );
+        popup_utils::render_footer(frame, inner, " Space: toggle  Enter: apply  Esc: close");
     }
 }
 

@@ -47,6 +47,17 @@ pub const SLACK_MAX_FILE_SIZE: usize = 50 * 1024 * 1024;
 /// Max characters shown as tool result preview in REPL.
 pub const TOOL_RESULT_PREVIEW_CHARS: usize = 200;
 
+// ── Script execution limits ──────────────────────────────────────────
+
+/// Default timeout for channel script execution (15s).
+pub const CHANNEL_DEFAULT_TIMEOUT_MS: u64 = 15_000;
+
+/// Default max concurrent channel handlers.
+pub const CHANNEL_DEFAULT_MAX_CONCURRENT: usize = 5;
+
+/// Minimum allowed heartbeat interval in seconds.
+pub const MIN_HEARTBEAT_INTERVAL_SECS: u64 = 60;
+
 // ── Tier B: Operational internals ───────────────────────────────────
 
 /// Injection score at or above which content is considered high-risk.

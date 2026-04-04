@@ -124,10 +124,10 @@ fn default_outbound() -> String {
     "send_outbound.py".to_string()
 }
 fn default_timeout() -> u64 {
-    15000
+    borg_core::constants::CHANNEL_DEFAULT_TIMEOUT_MS
 }
 fn default_max_concurrent() -> usize {
-    5
+    borg_core::constants::CHANNEL_DEFAULT_MAX_CONCURRENT
 }
 
 impl ChannelManifest {
