@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use borg_core::agent::AgentEvent;
 use borg_core::config::Config;
 use borg_core::doctor::DiagnosticCheck;
-use borg_heartbeat::scheduler::HeartbeatEvent;
+use borg_heartbeat::scheduler::{HeartbeatEvent, HeartbeatResult, SkipReason};
 use throbber_widgets_tui::{Throbber, ThrobberState, BRAILLE_EIGHT};
 
 use super::command_popup::CommandPopup;
@@ -1685,12 +1685,33 @@ impl<'a> App<'a> {
                 // Fire events are handled by the TUI event loop (runs agent turn).
                 // If we receive one here, it means the event loop forwarded it.
             }
-            HeartbeatEvent::Message(msg) => {
-                self.cells.push(HistoryCell::Heartbeat { text: msg });
-                if self.auto_scroll {
-                    self.scroll_offset = 0;
-                }
+            HeartbeatEvent::SchedulerStarted { mode } => {
+                self.push_system_message(format!("[heartbeat scheduler started: {mode}]"));
             }
+            HeartbeatEvent::Result(result) => match result {
+                HeartbeatResult::Ran { message, .. } => {
+                    self.cells.push(HistoryCell::Heartbeat { text: message });
+                    if self.auto_scroll {
+                        self.scroll_offset = 0;
+                    }
+                }
+                HeartbeatResult::Skipped { reason } => {
+                    match &reason {
+                        SkipReason::EmptyResponse | SkipReason::DuplicateResponse => {
+                            self.push_system_message(format!(
+                                "[heartbeat: nothing to report ({reason})]"
+                            ));
+                        }
+                        SkipReason::QuietHours => {
+                            // Don't spam the TUI with quiet hours skips
+                            tracing::debug!("Heartbeat skipped: {reason}");
+                        }
+                    }
+                }
+                HeartbeatResult::Failed { error } => {
+                    self.push_system_message(format!("[heartbeat error: {error}]"));
+                }
+            },
         }
     }
 

@@ -5,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 
 use borg_core::agent::{Agent, AgentEvent};
 use borg_core::config::Config;
-use borg_heartbeat::scheduler::{HeartbeatEvent, HeartbeatScheduler};
+use borg_heartbeat::scheduler::{
+    HeartbeatEvent, HeartbeatResult, HeartbeatScheduler, SkipReason,
+};
 
 const LAUNCHD_LABEL: &str = "com.borg.daemon";
 
@@ -693,22 +695,44 @@ async fn send_discord(config: &Config, target: &str, msg: &str) -> anyhow::Resul
     client.send_message(target, msg).await
 }
 
-/// Run a heartbeat agent turn in the daemon and deliver to configured channels.
+/// Returns true if the response hash is a duplicate within the dedup time window.
+pub fn is_duplicate_heartbeat(
+    hash: u64,
+    now_secs: u64,
+    prev_hash: u64,
+    prev_time: u64,
+    dedup_window_secs: u64,
+) -> bool {
+    prev_hash == hash && prev_time > 0 && (now_secs.saturating_sub(prev_time)) < dedup_window_secs
+}
+
 /// Shared heartbeat turn: creates a temporary agent, sends the heartbeat message
-/// (with HEARTBEAT.md checklist if present), deduplicates, and returns the response.
-pub async fn execute_heartbeat_turn(config: &Config) -> Option<String> {
+/// (with HEARTBEAT.md checklist if present), deduplicates, and returns a structured result.
+pub async fn execute_heartbeat_turn(config: &Config) -> HeartbeatResult {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static LAST_HASH: AtomicU64 = AtomicU64::new(0);
+    static LAST_HASH_TIME: AtomicU64 = AtomicU64::new(0);
+
+    let started = std::time::Instant::now();
 
     let metrics = borg_core::telemetry::BorgMetrics::noop();
     let mut agent = match Agent::new(config.clone(), metrics) {
         Ok(a) => a,
         Err(e) => {
+            let error = format!("agent creation: {e}");
             tracing::warn!("Heartbeat: failed to create agent: {e}");
-            return None;
+            if let Ok(adb) = borg_core::db::Database::open() {
+                borg_core::activity_log::log_activity(
+                    &adb,
+                    "warn",
+                    "heartbeat",
+                    &format!("Failed: {error}"),
+                );
+            }
+            return HeartbeatResult::Failed { error };
         }
     };
 
@@ -726,8 +750,17 @@ pub async fn execute_heartbeat_turn(config: &Config) -> Option<String> {
         .send_message_with_cancel(&user_msg, event_tx, cancel)
         .await
     {
-        tracing::warn!("Heartbeat: agent error: {e}");
-        return None;
+        let error = format!("agent error: {e}");
+        tracing::warn!("Heartbeat: {error}");
+        if let Ok(adb) = borg_core::db::Database::open() {
+            borg_core::activity_log::log_activity(
+                &adb,
+                "warn",
+                "heartbeat",
+                &format!("Failed: {error}"),
+            );
+        }
+        return HeartbeatResult::Failed { error };
     }
 
     let mut response = String::new();
@@ -737,18 +770,48 @@ pub async fn execute_heartbeat_turn(config: &Config) -> Option<String> {
         }
     }
 
+    let duration_ms = started.elapsed().as_millis() as u64;
     let trimmed = response.trim().to_string();
+
     if trimmed.is_empty() {
-        return None;
+        tracing::debug!("Heartbeat: empty response after {duration_ms}ms");
+        if let Ok(adb) = borg_core::db::Database::open() {
+            borg_core::activity_log::log_activity(
+                &adb,
+                "debug",
+                "heartbeat",
+                "Heartbeat fired but response was empty",
+            );
+        }
+        return HeartbeatResult::Skipped {
+            reason: SkipReason::EmptyResponse,
+        };
     }
 
-    // Dedup: skip if identical to last heartbeat response
+    // Dedup: skip if identical to last heartbeat response within time window.
+    // Note: DefaultHasher output is not stable across Rust versions — fine for
+    // in-process dedup but should not be persisted. The two atomic swaps below
+    // are not jointly atomic, but the worst case is a single false positive/negative
+    // which is acceptable for dedup.
     let mut hasher = DefaultHasher::new();
     trimmed.hash(&mut hasher);
     let hash = hasher.finish();
-    let prev = LAST_HASH.swap(hash, Ordering::Relaxed);
-    if prev == hash {
-        tracing::debug!("Heartbeat: duplicate response, suppressing");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let prev_hash = LAST_HASH.swap(hash, Ordering::Relaxed);
+    let prev_time = LAST_HASH_TIME.swap(now_secs, Ordering::Relaxed);
+
+    // Dedup window: 2x the configured interval (default 1h for 30m interval)
+    let dedup_window = borg_core::tasks::parse_interval(&config.heartbeat.interval)
+        .unwrap_or(std::time::Duration::from_secs(1800))
+        .as_secs()
+        .saturating_mul(2);
+
+    if is_duplicate_heartbeat(hash, now_secs, prev_hash, prev_time, dedup_window) {
+        tracing::debug!("Heartbeat: duplicate response within {dedup_window}s window, suppressing");
         if let Ok(adb) = borg_core::db::Database::open() {
             borg_core::activity_log::log_activity(
                 &adb,
@@ -757,20 +820,41 @@ pub async fn execute_heartbeat_turn(config: &Config) -> Option<String> {
                 "Duplicate response suppressed",
             );
         }
-        return None;
+        return HeartbeatResult::Skipped {
+            reason: SkipReason::DuplicateResponse,
+        };
     }
 
-    Some(trimmed)
+    if let Ok(adb) = borg_core::db::Database::open() {
+        borg_core::activity_log::log_activity(&adb, "info", "heartbeat", "Heartbeat fired");
+    }
+
+    HeartbeatResult::Ran {
+        message: trimmed,
+        duration_ms,
+    }
 }
 
 /// Run a heartbeat turn in the daemon and deliver to configured channels.
 async fn daemon_heartbeat_turn(config: Config) {
-    if let Some(text) = execute_heartbeat_turn(&config).await {
-        tracing::info!("Heartbeat: {}", &text[..text.len().min(100)]);
-        if let Ok(adb) = borg_core::db::Database::open() {
-            borg_core::activity_log::log_activity(&adb, "info", "heartbeat", "Heartbeat fired");
+    let result = execute_heartbeat_turn(&config).await;
+    match &result {
+        HeartbeatResult::Ran {
+            message,
+            duration_ms,
+        } => {
+            tracing::info!(
+                "Heartbeat ran ({duration_ms}ms): {}",
+                &message[..message.len().min(100)]
+            );
+            deliver_heartbeat_to_channels(&config, message).await;
         }
-        deliver_heartbeat_to_channels(&config, &text).await;
+        HeartbeatResult::Skipped { reason } => {
+            tracing::info!("Heartbeat skipped: {reason}");
+        }
+        HeartbeatResult::Failed { error } => {
+            tracing::warn!("Heartbeat failed: {error}");
+        }
     }
 }
 
@@ -1217,5 +1301,53 @@ mod tests {
     #[test]
     fn launchd_label_constant() {
         assert_eq!(LAUNCHD_LABEL, "com.borg.daemon");
+    }
+
+    #[test]
+    fn dedup_suppresses_within_window() {
+        // Same hash within dedup window should be suppressed
+        assert!(is_duplicate_heartbeat(
+            12345, // hash
+            100,   // now_secs
+            12345, // prev_hash (same)
+            90,    // prev_time (10s ago)
+            3600,  // window (1h)
+        ));
+    }
+
+    #[test]
+    fn dedup_allows_after_window() {
+        // Same hash but outside dedup window should not be suppressed
+        assert!(!is_duplicate_heartbeat(
+            12345, // hash
+            5000,  // now_secs
+            12345, // prev_hash (same)
+            100,   // prev_time (4900s ago)
+            3600,  // window (1h)
+        ));
+    }
+
+    #[test]
+    fn dedup_allows_different_hash() {
+        // Different hash within window should not be suppressed
+        assert!(!is_duplicate_heartbeat(
+            12345, // hash
+            100,   // now_secs
+            99999, // prev_hash (different)
+            90,    // prev_time (10s ago)
+            3600,  // window (1h)
+        ));
+    }
+
+    #[test]
+    fn dedup_allows_first_response() {
+        // First response ever (prev_time = 0) should not be suppressed
+        assert!(!is_duplicate_heartbeat(
+            12345, // hash
+            100,   // now_secs
+            12345, // prev_hash (same — from AtomicU64::new(0) which could match)
+            0,     // prev_time (never set)
+            3600,  // window
+        ));
     }
 }
