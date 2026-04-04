@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use borg_core::config::Config;
@@ -13,6 +13,14 @@ pub struct StatusPopup {
     visible: bool,
     scroll_offset: usize,
     lines: Vec<Line<'static>>,
+    /// Cached evolution state for rebuilding on resize.
+    evo_state: Option<borg_core::evolution::EvolutionState>,
+    /// Index in `lines` where the evolution section starts.
+    evo_line_start: usize,
+    /// Number of lines the evolution section occupies.
+    evo_line_count: usize,
+    /// Last rendered inner width (for detecting resize).
+    last_width: u16,
 }
 
 impl StatusPopup {
@@ -21,6 +29,10 @@ impl StatusPopup {
             visible: false,
             scroll_offset: 0,
             lines: Vec::new(),
+            evo_state: None,
+            evo_line_start: 0,
+            evo_line_count: 0,
+            last_width: 0,
         }
     }
 
@@ -78,7 +90,10 @@ impl StatusPopup {
                 Span::styled(compact, Style::default().fg(theme::CYAN)),
             ]));
             self.lines.push(Line::default());
+            self.evo_line_start = self.lines.len();
             self.push_section(&borg_core::evolution::format_status_section(evo));
+            self.evo_line_count = self.lines.len() - self.evo_line_start;
+            self.evo_state = Some(evo.clone());
         }
 
         // Vitals
@@ -154,7 +169,7 @@ impl StatusPopup {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame) {
+    pub fn render(&mut self, frame: &mut Frame) {
         if !self.visible {
             return;
         }
@@ -175,12 +190,32 @@ impl StatusPopup {
             return;
         }
 
+        // Rebuild evolution card section if width changed
+        if inner.width != self.last_width {
+            self.last_width = inner.width;
+            let rebuilt = self.evo_state.as_ref().map(|evo| {
+                // Card width = inner width minus 2 chars indent on each side
+                let card_width = (inner.width as usize).saturating_sub(4);
+                let section =
+                    borg_core::evolution::format_status_section_with_width(evo, card_width);
+                section
+                    .lines()
+                    .map(|l| Line::from(l.to_string()))
+                    .chain(std::iter::once(Line::default()))
+                    .collect::<Vec<Line<'static>>>()
+            });
+            if let Some(new_lines) = rebuilt {
+                let end = (self.evo_line_start + self.evo_line_count).min(self.lines.len());
+                let count = new_lines.len();
+                self.lines.splice(self.evo_line_start..end, new_lines);
+                self.evo_line_count = count;
+            }
+        }
+
         let max_scroll = self.lines.len().saturating_sub(inner.height as usize);
         let offset = self.scroll_offset.min(max_scroll);
 
-        let paragraph = Paragraph::new(self.lines.clone())
-            .scroll((offset as u16, 0))
-            .wrap(Wrap { trim: false });
+        let paragraph = Paragraph::new(self.lines.clone()).scroll((offset as u16, 0));
 
         frame.render_widget(paragraph, inner);
 
