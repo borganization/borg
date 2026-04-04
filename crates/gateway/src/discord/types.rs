@@ -5,11 +5,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// Uses a custom deserializer to map unknown u8 values to `Unknown(u8)`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InteractionType {
+    /// Ping from Discord to verify the endpoint.
     Ping,
+    /// Slash command invocation.
     ApplicationCommand,
+    /// Button or select menu interaction.
     MessageComponent,
+    /// Autocomplete request for a command option.
     ApplicationCommandAutocomplete,
+    /// Modal form submission.
     ModalSubmit,
+    /// Unrecognized interaction type.
     Unknown(u8),
 }
 
@@ -33,53 +39,74 @@ impl<'de> Deserialize<'de> for InteractionType {
 /// A Discord interaction received via webhook.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Interaction {
+    /// Unique interaction ID.
     pub id: String,
+    /// Type of interaction received.
     #[serde(rename = "type")]
     pub interaction_type: InteractionType,
+    /// ID of the application that owns the interaction.
     pub application_id: Option<String>,
+    /// Command or component data payload.
     pub data: Option<InteractionData>,
+    /// Guild member who triggered the interaction (in guilds).
     pub member: Option<GuildMember>,
+    /// User who triggered the interaction (in DMs).
     pub user: Option<DiscordUser>,
+    /// Continuation token for sending follow-up messages.
     pub token: String,
+    /// Guild ID where the interaction occurred.
     pub guild_id: Option<String>,
+    /// Channel ID where the interaction occurred.
     pub channel_id: Option<String>,
 }
 
 /// Data payload for application commands and components.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InteractionData {
+    /// Command ID (for application commands).
     pub id: Option<String>,
+    /// Command name (for application commands).
     pub name: Option<String>,
+    /// Command options provided by the user.
     pub options: Option<Vec<CommandOption>>,
+    /// Custom ID (for message components and modals).
     pub custom_id: Option<String>,
 }
 
 /// A single command option (name + value).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommandOption {
+    /// Option name.
     pub name: String,
+    /// Option value provided by the user.
     pub value: serde_json::Value,
 }
 
 /// A Discord guild member (may contain a nested user).
 #[derive(Debug, Clone, Deserialize)]
 pub struct GuildMember {
+    /// The user object for this guild member.
     pub user: Option<DiscordUser>,
 }
 
 /// A Discord user.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiscordUser {
+    /// Unique user ID.
     pub id: String,
+    /// Username.
     pub username: String,
+    /// Whether the user is a bot.
     pub bot: Option<bool>,
 }
 
 /// Response sent back to Discord for an interaction.
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractionResponse {
+    /// Response type code (1=Pong, 4=Message, 5=Deferred).
     #[serde(rename = "type")]
     pub response_type: u8,
+    /// Response data payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<InteractionResponseData>,
 }
@@ -87,9 +114,12 @@ pub struct InteractionResponse {
 /// Data within an interaction response.
 #[derive(Debug, Clone, Serialize)]
 pub struct InteractionResponseData {
+    /// Text content of the response message.
     pub content: String,
+    /// Rich embed objects attached to the response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embeds: Option<Vec<Embed>>,
+    /// Action row components (buttons, select menus).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components: Option<Vec<ActionRow>>,
 }
@@ -97,35 +127,49 @@ pub struct InteractionResponseData {
 /// A Discord embed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Embed {
+    /// Embed title.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Embed description text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Color code of the embed sidebar (decimal integer).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<u32>,
+    /// Embed fields displayed in a grid layout.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<EmbedField>,
+    /// Image attached to the embed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<EmbedImage>,
+    /// Footer text at the bottom of the embed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub footer: Option<EmbedFooter>,
 }
 
+/// A field within a Discord embed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbedField {
+    /// Field name (bold header).
     pub name: String,
+    /// Field value text.
     pub value: String,
+    /// Whether this field should display inline with others.
     #[serde(default)]
     pub inline: bool,
 }
 
+/// An image within a Discord embed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbedImage {
+    /// Image URL.
     pub url: String,
 }
 
+/// Footer text for a Discord embed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbedFooter {
+    /// Footer text content.
     pub text: String,
 }
 
@@ -135,20 +179,26 @@ pub struct ActionRow {
     /// Always 1 for ActionRow.
     #[serde(rename = "type")]
     pub component_type: u8,
+    /// Child components within this action row.
     pub components: Vec<Component>,
 }
 
 /// A Discord message component (button or select menu).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Component {
+    /// Component type (2=Button, 3=StringSelect, etc.).
     #[serde(rename = "type")]
     pub component_type: u8,
+    /// Button style (1=Primary, 2=Secondary, 3=Success, 4=Danger, 5=Link).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<u8>,
+    /// Display label text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Developer-defined identifier for the component.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_id: Option<String>,
+    /// URL for link-style buttons.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
@@ -186,14 +236,18 @@ impl InteractionResponse {
 /// Response from GET /users/@me.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CurrentUser {
+    /// User ID.
     pub id: String,
+    /// Username.
     pub username: String,
+    /// Whether the user is a bot.
     pub bot: Option<bool>,
 }
 
 /// Request body for POST /channels/{id}/messages.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateMessageRequest {
+    /// Text content of the message.
     pub content: String,
 }
 

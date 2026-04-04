@@ -7,6 +7,7 @@ use super::Database;
 impl Database {
     // ── Plugins ──
 
+    /// Insert or replace a plugin record in the customizations table.
     pub fn insert_plugin(&self, id: &str, name: &str, kind: &str, category: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(
@@ -17,6 +18,7 @@ impl Database {
         Ok(())
     }
 
+    /// Remove a plugin record. Returns true if it existed.
     pub fn delete_plugin(&self, id: &str) -> Result<bool> {
         let deleted = self
             .conn
@@ -24,6 +26,7 @@ impl Database {
         Ok(deleted > 0)
     }
 
+    /// List all installed plugins ordered by category and name.
     pub fn list_plugins(&self) -> Result<Vec<PluginRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, kind, category, status, version, installed_at, verified_at
@@ -46,6 +49,7 @@ impl Database {
         Ok(rows)
     }
 
+    /// Mark a plugin as verified with the current timestamp.
     pub fn set_plugin_verified(&self, id: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(
@@ -55,6 +59,7 @@ impl Database {
         Ok(())
     }
 
+    /// Store a credential reference for a plugin.
     pub fn insert_credential(
         &self,
         plugin_id: &str,
@@ -78,6 +83,7 @@ impl Database {
         Ok(())
     }
 
+    /// Delete all credentials associated with a plugin. Returns count deleted.
     pub fn delete_credentials_for(&self, plugin_id: &str) -> Result<usize> {
         let count = self.conn.execute(
             "DELETE FROM customization_credentials WHERE customization_id = ?1",
@@ -88,6 +94,7 @@ impl Database {
 
     // ── File hashes (integrity) ──
 
+    /// Store a SHA-256 hash for a plugin's installed file.
     pub fn insert_file_hash(&self, plugin_id: &str, file_path: &str, sha256: &str) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         self.conn.execute(
@@ -98,6 +105,7 @@ impl Database {
         Ok(())
     }
 
+    /// Get all stored file hashes for a plugin as (path, sha256) pairs.
     pub fn get_file_hashes(&self, plugin_id: &str) -> Result<Vec<(String, String)>> {
         let mut stmt = self
             .conn
@@ -110,6 +118,7 @@ impl Database {
         Ok(rows)
     }
 
+    /// Delete all file hashes for a plugin. Returns count deleted.
     pub fn delete_file_hashes(&self, plugin_id: &str) -> Result<usize> {
         let count = self.conn.execute(
             "DELETE FROM file_hashes WHERE customization_id = ?1",
@@ -118,6 +127,7 @@ impl Database {
         Ok(count)
     }
 
+    /// Look up which plugin installed a given tool.
     pub fn get_tool_plugin_id(&self, tool_name: &str) -> Result<Option<String>> {
         let mut stmt = self
             .conn
@@ -129,6 +139,7 @@ impl Database {
         }
     }
 
+    /// Look up which plugin installed a given channel.
     pub fn get_channel_plugin_id(&self, channel_name: &str) -> Result<Option<String>> {
         let mut stmt = self
             .conn
@@ -141,6 +152,7 @@ impl Database {
         }
     }
 
+    /// Record a tool installed by a plugin.
     pub fn insert_installed_tool(
         &self,
         name: &str,
@@ -157,6 +169,7 @@ impl Database {
         Ok(())
     }
 
+    /// Record a channel installed by a plugin.
     pub fn insert_installed_channel(
         &self,
         name: &str,

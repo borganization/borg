@@ -9,25 +9,35 @@ use crate::manifest::ChannelManifest;
 
 /// Trait for manifest types that can be used with `ManifestRegistry`.
 pub trait ManifestItem: Sized {
+    /// Load and parse a manifest from the given file path.
     fn load(path: &Path) -> Result<Self>;
+    /// Return the unique name of this item.
     fn item_name(&self) -> &str;
+    /// Filename to look for inside each subdirectory (e.g. "channel.toml").
     const MANIFEST_FILENAME: &'static str;
+    /// Subdirectory under the data dir where items live (e.g. "channels").
     const SUBDIR: &'static str;
+    /// Human-readable type label for log messages (e.g. "channel").
     const ITEM_TYPE: &'static str;
 }
 
+/// A manifest item together with the directory it was loaded from.
 #[derive(Clone)]
 pub struct RegisteredItem<M: Clone> {
+    /// The parsed manifest.
     pub manifest: M,
+    /// Directory containing the manifest and associated scripts.
     pub dir: PathBuf,
 }
 
+/// Generic registry that scans a directory for manifest-based items.
 pub struct ManifestRegistry<M: Clone> {
     items: HashMap<String, RegisteredItem<M>>,
     base_dir: PathBuf,
 }
 
 impl<M: ManifestItem + Clone> ManifestRegistry<M> {
+    /// Create a registry using the default data directory (`~/.borg/<subdir>`).
     pub fn new() -> Result<Self> {
         let base_dir = std::env::var("BORG_DATA_DIR")
             .map(std::path::PathBuf::from)
@@ -47,6 +57,7 @@ impl<M: ManifestItem + Clone> ManifestRegistry<M> {
         Ok(registry)
     }
 
+    /// Create a registry scanning the given directory.
     pub fn with_dir(dir: PathBuf) -> Result<Self> {
         let mut registry = Self {
             items: HashMap::new(),
@@ -57,6 +68,7 @@ impl<M: ManifestItem + Clone> ManifestRegistry<M> {
         Ok(registry)
     }
 
+    /// Re-scan the base directory, replacing all registered items.
     pub fn scan(&mut self) -> Result<()> {
         self.items.clear();
 
@@ -75,10 +87,12 @@ impl<M: ManifestItem + Clone> ManifestRegistry<M> {
         Ok(())
     }
 
+    /// Look up an item by name.
     pub fn get(&self, name: &str) -> Option<&RegisteredItem<M>> {
         self.items.get(name)
     }
 
+    /// Iterate over all registered items.
     pub fn items(&self) -> impl Iterator<Item = &RegisteredItem<M>> {
         self.items.values()
     }
@@ -101,31 +115,37 @@ impl ManifestItem for ChannelManifest {
 /// Legacy type alias for backward compatibility.
 pub type RegisteredChannel = RegisteredItem<ChannelManifest>;
 
+/// Registry of script-based channel integrations loaded from `~/.borg/channels/`.
 pub struct ChannelRegistry {
     inner: ManifestRegistry<ChannelManifest>,
 }
 
 impl ChannelRegistry {
+    /// Create a channel registry using the default channels directory.
     pub fn new() -> Result<Self> {
         Ok(Self {
             inner: ManifestRegistry::new()?,
         })
     }
 
+    /// Create a channel registry scanning the given directory.
     pub fn with_dir(dir: PathBuf) -> Result<Self> {
         Ok(Self {
             inner: ManifestRegistry::with_dir(dir)?,
         })
     }
 
+    /// Re-scan the channels directory for manifest changes.
     pub fn scan(&mut self) -> Result<()> {
         self.inner.scan()
     }
 
+    /// Look up a channel by name.
     pub fn get(&self, name: &str) -> Option<&RegisteredChannel> {
         self.inner.get(name)
     }
 
+    /// Return human-readable summaries of all registered channels.
     pub fn list_channels(&self) -> Vec<String> {
         self.inner
             .items()
@@ -140,6 +160,7 @@ impl ChannelRegistry {
             .collect()
     }
 
+    /// Iterate over all registered channels.
     pub fn all_channels(&self) -> impl Iterator<Item = &RegisteredChannel> {
         self.inner.items()
     }

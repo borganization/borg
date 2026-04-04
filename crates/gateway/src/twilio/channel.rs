@@ -25,10 +25,15 @@ struct TwilioResponseContext {
 
 /// Twilio native channel implementation (handles SMS, WhatsApp).
 pub struct TwilioChannel {
+    /// Shared Twilio REST API client.
     pub client: Arc<TwilioClient>,
+    /// Auth token for webhook signature verification.
     pub auth_token: Option<String>,
+    /// Outbound SMS phone number (E.164 format).
     pub phone_number: Option<String>,
+    /// Outbound WhatsApp phone number (E.164 format).
     pub whatsapp_number: Option<String>,
+    /// Application configuration.
     pub config: Config,
 }
 

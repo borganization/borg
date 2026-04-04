@@ -13,15 +13,21 @@ use crate::config::{Config, TtsModelConfig};
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioFormat {
+    /// MP3 format (default).
     #[default]
     Mp3,
+    /// Opus format (Ogg container).
     Opus,
+    /// AAC format.
     Aac,
+    /// FLAC lossless format.
     Flac,
+    /// WAV uncompressed format.
     Wav,
 }
 
 impl AudioFormat {
+    /// Returns the MIME type string for this audio format.
     pub fn mime_type(&self) -> &str {
         match self {
             AudioFormat::Mp3 => "audio/mpeg",
@@ -32,6 +38,7 @@ impl AudioFormat {
         }
     }
 
+    /// Returns the file extension for this audio format.
     pub fn extension(&self) -> &str {
         match self {
             AudioFormat::Mp3 => "mp3",
@@ -60,15 +67,20 @@ impl AudioFormat {
 /// Outcome of a single provider synthesis attempt.
 #[derive(Debug, Clone)]
 pub enum SynthesisOutcome {
+    /// Synthesis completed successfully.
     Success,
+    /// Synthesis failed with the given error message.
     Failed(String),
 }
 
 /// Tracks each provider attempt in the fallback chain.
 #[derive(Debug, Clone)]
 pub struct SynthesisAttempt {
+    /// Name of the TTS provider attempted.
     pub provider: String,
+    /// Model identifier used for synthesis, if any.
     pub model: Option<String>,
+    /// Whether the attempt succeeded or failed.
     pub outcome: SynthesisOutcome,
 }
 
@@ -215,10 +227,15 @@ struct TtsProviderEntry {
 
 /// Main TTS engine with multi-provider fallback.
 pub struct TtsSynthesizer {
+    /// Ordered list of provider entries for fallback.
     entries: Vec<TtsProviderEntry>,
+    /// Default voice identifier when none is specified.
     default_voice: String,
+    /// Default audio output format.
     default_format: AudioFormat,
+    /// Maximum allowed input text length in bytes.
     max_text_length: usize,
+    /// Default HTTP timeout for synthesis requests.
     default_timeout: Duration,
 }
 

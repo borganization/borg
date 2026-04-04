@@ -1,11 +1,20 @@
+/// Slack Web API HTTP client.
 pub mod api;
+/// Native channel implementation for Slack.
 pub mod channel;
+/// Event deduplication by event ID.
 pub mod dedup;
+/// Echo cache for filtering self-sent messages.
 pub mod echo;
+/// Markdown-to-Slack mrkdwn formatting.
 pub mod format;
+/// Slack event parsing into inbound messages.
 pub mod parse;
+/// Slack API type definitions and envelope parsing.
 pub mod types;
+/// Typing indicator keepalive for Slack channels.
 pub mod typing;
+/// Request signature verification using signing secret.
 pub mod verify;
 
 use anyhow::Result;

@@ -10,11 +10,16 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
+/// Error encountered while parsing a template string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateParseError {
+    /// Placeholder contains only whitespace.
     EmptyPlaceholder { start: usize },
+    /// A `{{` was found inside an already-open placeholder.
     NestedPlaceholder { start: usize },
+    /// A `}}` was found without a matching `{{`.
     UnmatchedClosingDelimiter { start: usize },
+    /// A `{{` was never closed with `}}`.
     UnterminatedPlaceholder { start: usize },
 }
 
@@ -45,10 +50,14 @@ impl fmt::Display for TemplateParseError {
 
 impl Error for TemplateParseError {}
 
+/// Error encountered while rendering a template with values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateRenderError {
+    /// The same variable name was provided more than once.
     DuplicateValue { name: String },
+    /// A variable was provided that has no matching placeholder.
     ExtraValue { name: String },
+    /// A placeholder has no corresponding variable value.
     MissingValue { name: String },
 }
 
@@ -70,9 +79,12 @@ impl fmt::Display for TemplateRenderError {
 
 impl Error for TemplateRenderError {}
 
+/// Combined error type for template parse and render failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateError {
+    /// Error during template parsing.
     Parse(TemplateParseError),
+    /// Error during template rendering.
     Render(TemplateRenderError),
 }
 
@@ -122,6 +134,7 @@ pub struct Template {
 }
 
 impl Template {
+    /// Parse a template string into a reusable `Template`.
     pub fn parse(source: &str) -> Result<Self, TemplateParseError> {
         let mut placeholders = BTreeSet::new();
         let mut segments = Vec::new();
@@ -170,10 +183,12 @@ impl Template {
         })
     }
 
+    /// Returns an iterator over the unique placeholder names in sorted order.
     pub fn placeholders(&self) -> impl ExactSizeIterator<Item = &str> {
         self.placeholders.iter().map(String::as_str)
     }
 
+    /// Render the template by substituting placeholder values.
     pub fn render<I, K, V>(&self, variables: I) -> Result<String, TemplateRenderError>
     where
         I: IntoIterator<Item = (K, V)>,

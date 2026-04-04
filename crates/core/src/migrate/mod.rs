@@ -1,6 +1,10 @@
+/// Apply a migration plan to the local Borg data directory.
 pub mod apply;
+/// Parser for Hermes Agent data directories.
 pub mod hermes;
+/// Parser for OpenClaw data directories.
 pub mod openclaw;
+/// Build a dry-run migration plan from parsed source data.
 pub mod plan;
 
 use std::path::PathBuf;
@@ -8,11 +12,14 @@ use std::path::PathBuf;
 /// Which tool to migrate from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationSource {
+    /// Hermes Agent data directory (~/.hermes).
     Hermes,
+    /// OpenClaw data directory (~/.openclaw).
     OpenClaw,
 }
 
 impl MigrationSource {
+    /// Human-readable display name for this source.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Hermes => "Hermes Agent",
@@ -20,6 +27,7 @@ impl MigrationSource {
         }
     }
 
+    /// Path to the source tool's data directory.
     pub fn data_dir(&self) -> PathBuf {
         let home = dirs::home_dir().unwrap_or_default();
         match self {
@@ -28,6 +36,7 @@ impl MigrationSource {
         }
     }
 
+    /// Returns true if the source tool's data directory exists.
     pub fn is_installed(&self) -> bool {
         self.data_dir().is_dir()
     }
@@ -44,10 +53,15 @@ pub fn detect_sources() -> Vec<MigrationSource> {
 /// What categories of data to migrate.
 #[derive(Debug, Clone)]
 pub struct MigrationCategories {
+    /// Whether to migrate configuration settings.
     pub config: bool,
+    /// Whether to migrate API keys and tokens.
     pub credentials: bool,
+    /// Whether to migrate memory files.
     pub memory: bool,
+    /// Whether to migrate persona/identity files.
     pub persona: bool,
+    /// Whether to migrate custom skill files.
     pub skills: bool,
 }
 
@@ -64,6 +78,7 @@ impl Default for MigrationCategories {
 }
 
 impl MigrationCategories {
+    /// Human-readable labels for each category, indexed by position.
     pub const LABELS: [&'static str; 5] = [
         "Configuration (LLM, tools, browser settings)",
         "Credentials (API keys, channel tokens)",
@@ -72,6 +87,7 @@ impl MigrationCategories {
         "Skills (custom skill files)",
     ];
 
+    /// Get the enabled state of a category by index.
     pub fn get(&self, index: usize) -> bool {
         match index {
             0 => self.config,
@@ -83,6 +99,7 @@ impl MigrationCategories {
         }
     }
 
+    /// Toggle the enabled state of a category by index.
     pub fn toggle(&mut self, index: usize) {
         match index {
             0 => self.config = !self.config,
@@ -113,9 +130,13 @@ pub struct SourceData {
 /// A single config field change.
 #[derive(Debug, Clone)]
 pub struct ConfigChange {
+    /// TOML section name (e.g. "llm", "sandbox").
     pub section: String,
+    /// Field name within the section.
     pub field: String,
+    /// Original key name in the source tool's config.
     pub source_key: String,
+    /// Value to set in Borg's config.
     pub new_value: String,
 }
 
@@ -128,25 +149,37 @@ impl std::fmt::Display for ConfigChange {
 /// The full migration plan (dry-run output).
 #[derive(Debug, Clone)]
 pub struct MigrationPlan {
+    /// Which tool this plan migrates from.
     pub source: MigrationSource,
+    /// Config changes with current vs new values.
     pub config_changes: Vec<PlanChange>,
+    /// Credential env var names to add.
     pub credentials_to_add: Vec<String>,
+    /// Memory files to copy: (source_path, dest_relative_path).
     pub memory_files: Vec<(PathBuf, String)>,
+    /// Persona/identity file source path, if found.
     pub persona_file: Option<PathBuf>,
+    /// Skill directories to copy: (source_path, dest_name).
     pub skill_dirs: Vec<(PathBuf, String)>,
 }
 
 /// A planned config change with current vs new value.
 #[derive(Debug, Clone)]
 pub struct PlanChange {
+    /// Borg config key (e.g. "llm.model").
     pub key: String,
+    /// Original key name in the source tool's config.
     pub source_key: String,
+    /// Current value in Borg's config, if any.
     pub current_value: Option<String>,
+    /// Proposed new value.
     pub new_value: String,
+    /// Whether this change was skipped (e.g. already set).
     pub skipped: bool,
 }
 
 impl MigrationPlan {
+    /// Returns true if the plan contains no changes to apply.
     pub fn is_empty(&self) -> bool {
         self.config_changes.is_empty()
             && self.credentials_to_add.is_empty()
@@ -155,6 +188,7 @@ impl MigrationPlan {
             && self.skill_dirs.is_empty()
     }
 
+    /// Format the plan as human-readable summary lines.
     pub fn summary_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
 
@@ -213,6 +247,7 @@ impl MigrationPlan {
         lines
     }
 
+    /// Count of config changes that will actually be applied (not skipped).
     pub fn active_change_count(&self) -> usize {
         self.config_changes.iter().filter(|c| !c.skipped).count()
     }
@@ -221,11 +256,17 @@ impl MigrationPlan {
 /// Result of applying a migration.
 #[derive(Debug)]
 pub struct MigrationResult {
+    /// Number of config settings that were changed.
     pub config_changes_applied: usize,
+    /// Number of credentials that were imported.
     pub credentials_added: usize,
+    /// Number of memory files that were copied.
     pub memory_files_copied: usize,
+    /// Whether the persona/identity file was copied.
     pub persona_copied: bool,
+    /// Number of skill directories that were copied.
     pub skills_copied: usize,
+    /// Non-fatal warnings encountered during migration.
     pub warnings: Vec<String>,
 }
 

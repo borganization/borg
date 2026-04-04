@@ -10,21 +10,33 @@ use crate::pairing::DmPolicy;
 
 use super::llm::{LlmFallback, ThinkingLevel};
 
+/// Configuration for the webhook gateway server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GatewayConfig {
+    /// Bind address for the gateway HTTP server.
     pub host: String,
+    /// Port for the gateway HTTP server.
     pub port: u16,
+    /// Maximum concurrent webhook handlers.
     pub max_concurrent: usize,
+    /// Request timeout in milliseconds for agent processing.
     pub request_timeout_ms: u64,
+    /// Maximum inbound requests per minute per sender.
     #[serde(default = "default_rate_limit")]
     pub rate_limit_per_minute: u32,
+    /// Public URL for automatic webhook registration (e.g. Telegram).
     #[serde(default)]
     pub public_url: Option<String>,
+    /// Maximum webhook request body size in bytes.
     pub max_body_size: usize,
+    /// Telegram long-polling timeout in seconds.
     pub telegram_poll_timeout_secs: u64,
+    /// Consecutive failures before Telegram circuit breaker opens.
     pub telegram_circuit_failure_threshold: u32,
+    /// Seconds the Telegram circuit breaker stays open after tripping.
     pub telegram_circuit_suspension_secs: u64,
+    /// Capacity of the Telegram update deduplicator.
     pub telegram_dedup_capacity: usize,
     /// Per-channel agent routing bindings (first match wins).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -3,39 +3,63 @@ use serde::{Deserialize, Serialize};
 /// Telegram Bot API Update object.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Update {
+    /// Unique identifier for the update.
     pub update_id: i64,
+    /// New incoming message.
     pub message: Option<TelegramMessage>,
+    /// Edited version of an existing message.
     pub edited_message: Option<TelegramMessage>,
+    /// Incoming callback query from an inline keyboard button.
     pub callback_query: Option<CallbackQuery>,
 }
 
 /// A Telegram message.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TelegramMessage {
+    /// Unique message identifier within the chat.
     pub message_id: i64,
+    /// Sender of the message.
     pub from: Option<User>,
+    /// Chat the message belongs to.
     pub chat: Chat,
+    /// Unix timestamp when the message was sent.
     pub date: i64,
+    /// Text content of the message.
     pub text: Option<String>,
+    /// Unix timestamp of the last edit.
     pub edit_date: Option<i64>,
+    /// Identifier for a group of related media messages.
     pub media_group_id: Option<String>,
+    /// Forum topic thread identifier.
     pub message_thread_id: Option<i64>,
+    /// Available sizes of an attached photo.
     pub photo: Option<Vec<PhotoSize>>,
+    /// Caption for media messages.
     pub caption: Option<String>,
+    /// Attached document file.
     pub document: Option<Document>,
+    /// Attached video.
     pub video: Option<Video>,
+    /// Attached audio file.
     pub audio: Option<Audio>,
+    /// Attached voice message.
     pub voice: Option<Voice>,
+    /// Attached sticker.
     pub sticker: Option<Sticker>,
+    /// The original message this message is a reply to.
     pub reply_to_message: Option<Box<TelegramMessage>>,
+    /// Unix timestamp of the original forwarded message.
     pub forward_date: Option<i64>,
+    /// Forum topic creation event data.
     pub forum_topic_created: Option<serde_json::Value>,
 }
 
 /// A Telegram chat.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Chat {
+    /// Unique chat identifier.
     pub id: i64,
+    /// Type of chat (e.g. "private", "group", "supergroup", "channel").
     #[serde(rename = "type")]
     pub chat_type: String,
 }
@@ -43,9 +67,13 @@ pub struct Chat {
 /// A Telegram user.
 #[derive(Debug, Clone, Deserialize)]
 pub struct User {
+    /// Unique user identifier.
     pub id: i64,
+    /// User's first name.
     pub first_name: String,
+    /// User's username (without leading @).
     pub username: Option<String>,
+    /// Whether the user is a bot.
     #[serde(default)]
     pub is_bot: bool,
 }
@@ -53,89 +81,133 @@ pub struct User {
 /// A Telegram photo size variant.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PhotoSize {
+    /// Identifier for downloading the file.
     pub file_id: String,
+    /// Unique file identifier that stays the same across re-uploads.
     pub file_unique_id: String,
+    /// Photo width in pixels.
     pub width: i32,
+    /// Photo height in pixels.
     pub height: i32,
+    /// File size in bytes.
     pub file_size: Option<i64>,
 }
 
 /// A Telegram document (file attachment).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Document {
+    /// Identifier for downloading the file.
     pub file_id: String,
+    /// Unique file identifier that stays the same across re-uploads.
     pub file_unique_id: String,
+    /// Original filename.
     pub file_name: Option<String>,
+    /// MIME type of the document.
     pub mime_type: Option<String>,
+    /// File size in bytes.
     pub file_size: Option<i64>,
 }
 
 /// A Telegram video.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Video {
+    /// Identifier for downloading the file.
     pub file_id: String,
+    /// Unique file identifier that stays the same across re-uploads.
     pub file_unique_id: String,
+    /// Video width in pixels.
     pub width: i32,
+    /// Video height in pixels.
     pub height: i32,
+    /// Duration in seconds.
     pub duration: i32,
+    /// File size in bytes.
     pub file_size: Option<i64>,
 }
 
 /// A Telegram audio file.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Audio {
+    /// Identifier for downloading the file.
     pub file_id: String,
+    /// Unique file identifier that stays the same across re-uploads.
     pub file_unique_id: String,
+    /// Duration in seconds.
     pub duration: i32,
+    /// Title of the audio track.
     pub title: Option<String>,
+    /// File size in bytes.
     pub file_size: Option<i64>,
 }
 
 /// A Telegram voice message.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Voice {
+    /// Identifier for downloading the file.
     pub file_id: String,
+    /// Unique file identifier that stays the same across re-uploads.
     pub file_unique_id: String,
+    /// Duration in seconds.
     pub duration: i32,
+    /// File size in bytes.
     pub file_size: Option<i64>,
 }
 
 /// A Telegram sticker.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Sticker {
+    /// Identifier for downloading the file.
     pub file_id: String,
+    /// Unique file identifier that stays the same across re-uploads.
     pub file_unique_id: String,
+    /// Sticker width in pixels.
     pub width: i32,
+    /// Sticker height in pixels.
     pub height: i32,
+    /// Emoji associated with the sticker.
     pub emoji: Option<String>,
+    /// File size in bytes.
     pub file_size: Option<i64>,
 }
 
 /// Telegram file info returned by getFile.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileInfo {
+    /// Identifier for downloading the file.
     pub file_id: String,
+    /// Unique file identifier that stays the same across re-uploads.
     pub file_unique_id: String,
+    /// File size in bytes.
     pub file_size: Option<i64>,
+    /// File path for downloading via the Bot API.
     pub file_path: Option<String>,
 }
 
 /// A Telegram callback query (inline button press).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CallbackQuery {
+    /// Unique callback query identifier.
     pub id: String,
+    /// User who pressed the button.
     pub from: User,
+    /// Message containing the inline keyboard that triggered the callback.
     pub message: Option<TelegramMessage>,
+    /// Data associated with the callback button.
     pub data: Option<String>,
 }
 
 /// Generic Telegram Bot API response wrapper.
 #[derive(Debug, Deserialize)]
 pub struct ApiResponse<T> {
+    /// Whether the request was successful.
     pub ok: bool,
+    /// The response payload on success.
     pub result: Option<T>,
+    /// Human-readable error description.
     pub description: Option<String>,
+    /// HTTP-like error code on failure.
     pub error_code: Option<u16>,
+    /// Seconds to wait before retrying (rate limit).
     #[serde(default)]
     pub retry_after: Option<u64>,
 }
@@ -143,16 +215,23 @@ pub struct ApiResponse<T> {
 /// Request body for sendMessage.
 #[derive(Debug, Serialize)]
 pub struct SendMessageRequest {
+    /// Target chat identifier.
     pub chat_id: i64,
+    /// Text of the message to send.
     pub text: String,
+    /// Parse mode for formatting (e.g. "HTML", "MarkdownV2").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_mode: Option<String>,
+    /// ID of the message to reply to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<i64>,
+    /// Forum topic thread ID to send into.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_thread_id: Option<i64>,
+    /// Inline keyboard markup attached to the message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_markup: Option<InlineKeyboardMarkup>,
+    /// Whether to send the message silently.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_notification: Option<bool>,
 }
@@ -160,15 +239,19 @@ pub struct SendMessageRequest {
 /// Telegram inline keyboard markup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InlineKeyboardMarkup {
+    /// Rows of inline keyboard buttons.
     pub inline_keyboard: Vec<Vec<InlineKeyboardButton>>,
 }
 
 /// A single inline keyboard button.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InlineKeyboardButton {
+    /// Label text on the button.
     pub text: String,
+    /// Data sent in a callback query when pressed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callback_data: Option<String>,
+    /// URL to open when pressed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
@@ -176,11 +259,16 @@ pub struct InlineKeyboardButton {
 /// Request body for sendPoll.
 #[derive(Debug, Serialize)]
 pub struct SendPollRequest {
+    /// Target chat identifier.
     pub chat_id: i64,
+    /// Poll question text.
     pub question: String,
+    /// List of answer options.
     pub options: Vec<String>,
+    /// Whether the poll is anonymous.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_anonymous: Option<bool>,
+    /// Forum topic thread ID to send into.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_thread_id: Option<i64>,
 }
@@ -188,20 +276,26 @@ pub struct SendPollRequest {
 /// Request body for setMessageReaction.
 #[derive(Debug, Serialize)]
 pub struct SetMessageReactionRequest {
+    /// Target chat identifier.
     pub chat_id: i64,
+    /// Message to react to.
     pub message_id: i64,
+    /// List of reaction types to set.
     pub reaction: Vec<ReactionType>,
 }
 
 /// A reaction type for setMessageReaction.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReactionType {
+    /// Reaction kind (e.g. "emoji").
     #[serde(rename = "type")]
     pub reaction_type: String,
+    /// Emoji character for the reaction.
     pub emoji: String,
 }
 
 impl ReactionType {
+    /// Create an emoji reaction type.
     pub fn emoji(emoji: impl Into<String>) -> Self {
         Self {
             reaction_type: "emoji".to_string(),
@@ -213,9 +307,12 @@ impl ReactionType {
 /// Webhook info returned by getWebhookInfo.
 #[derive(Debug, Deserialize)]
 pub struct WebhookInfo {
+    /// Currently registered webhook URL.
     pub url: String,
+    /// Whether a custom HTTPS certificate was provided.
     #[serde(default)]
     pub has_custom_certificate: bool,
+    /// Number of pending updates awaiting delivery.
     #[serde(default)]
     pub pending_update_count: u32,
 }

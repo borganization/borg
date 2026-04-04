@@ -4,27 +4,39 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Activity {
+    /// Unique activity ID.
     pub id: String,
+    /// Activity type (e.g. "message", "conversationUpdate").
     #[serde(rename = "type")]
     pub activity_type: String,
+    /// Text content of the message.
     #[serde(default)]
     pub text: Option<String>,
+    /// Sender of the activity.
     #[serde(default)]
     pub from: Option<ChannelAccount>,
+    /// Conversation the activity belongs to.
     #[serde(default)]
     pub conversation: Option<ConversationAccount>,
+    /// Intended recipient of the activity.
     #[serde(default)]
     pub recipient: Option<ChannelAccount>,
+    /// Bot Framework service URL for sending replies.
     #[serde(default)]
     pub service_url: Option<String>,
+    /// ID of the message being replied to.
     #[serde(default)]
     pub reply_to_id: Option<String>,
+    /// Entities attached to the activity (e.g. @mentions).
     #[serde(default)]
     pub entities: Option<Vec<Entity>>,
+    /// ISO 8601 timestamp of the activity.
     #[serde(default)]
     pub timestamp: Option<String>,
+    /// Members added in a conversationUpdate activity.
     #[serde(default)]
     pub members_added: Option<Vec<ChannelAccount>>,
+    /// Members removed in a conversationUpdate activity.
     #[serde(default)]
     pub members_removed: Option<Vec<ChannelAccount>>,
 }
@@ -32,7 +44,9 @@ pub struct Activity {
 /// A user or bot account in a Teams conversation.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChannelAccount {
+    /// Account ID (user or bot).
     pub id: String,
+    /// Display name.
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -41,9 +55,12 @@ pub struct ChannelAccount {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationAccount {
+    /// Conversation ID.
     pub id: String,
+    /// Conversation display name.
     #[serde(default)]
     pub name: Option<String>,
+    /// Whether this is a group conversation.
     #[serde(default)]
     pub is_group: Option<bool>,
 }
@@ -51,8 +68,10 @@ pub struct ConversationAccount {
 /// An entity attached to an activity (e.g. an @mention).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Entity {
+    /// Entity type (e.g. "mention", "clientInfo").
     #[serde(rename = "type")]
     pub entity_type: String,
+    /// The mentioned user or bot account.
     #[serde(default)]
     pub mentioned: Option<ChannelAccount>,
 }
@@ -60,9 +79,12 @@ pub struct Entity {
 /// An outbound reply activity sent back to Teams.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReplyActivity {
+    /// Activity type (e.g. "message", "typing").
     #[serde(rename = "type")]
     pub activity_type: String,
+    /// Text content of the reply.
     pub text: String,
+    /// Adaptive Card attachments.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<AdaptiveCardAttachment>>,
 }
@@ -103,7 +125,9 @@ impl ReplyActivity {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdaptiveCardAttachment {
+    /// Content type (always "application/vnd.microsoft.card.adaptive").
     pub content_type: String,
+    /// Adaptive Card JSON body.
     pub content: serde_json::Value,
 }
 
@@ -111,8 +135,10 @@ pub struct AdaptiveCardAttachment {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationUpdateData {
+    /// Members added to the conversation.
     #[serde(default)]
     pub members_added: Option<Vec<ChannelAccount>>,
+    /// Members removed from the conversation.
     #[serde(default)]
     pub members_removed: Option<Vec<ChannelAccount>>,
 }
@@ -120,7 +146,9 @@ pub struct ConversationUpdateData {
 /// OAuth2 token response from the Microsoft identity platform.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenResponse {
+    /// Bearer token for authenticating Bot Framework API calls.
     pub access_token: String,
+    /// Token lifetime in seconds.
     pub expires_in: u64,
 }
 

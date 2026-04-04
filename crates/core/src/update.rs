@@ -5,6 +5,7 @@ use std::io::Read;
 
 const GITHUB_API: &str = "https://api.github.com/repos/borganization/borg";
 
+/// Returns the current binary version from Cargo.toml.
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -24,27 +25,46 @@ pub fn platform_asset_name() -> Result<String> {
     Ok(format!("borg-{os}-{arch}.tar.gz"))
 }
 
+/// Metadata for a GitHub release.
 #[derive(Debug, Deserialize)]
 pub struct ReleaseInfo {
+    /// Git tag (e.g. "v0.2.0").
     pub tag_name: String,
+    /// Whether this is a pre-release.
     pub prerelease: bool,
+    /// Downloadable assets attached to the release.
     pub assets: Vec<ReleaseAsset>,
 }
 
+/// A single downloadable file in a GitHub release.
 #[derive(Debug, Deserialize)]
 pub struct ReleaseAsset {
+    /// Filename of the asset (e.g. "borg-darwin-arm64.tar.gz").
     pub name: String,
+    /// Direct download URL.
     pub browser_download_url: String,
 }
 
+/// Outcome of an update check or operation.
 pub enum UpdateStatus {
+    /// The installed version is already the latest.
     AlreadyUpToDate,
-    Updated { from: String, to: String },
+    /// A new version was installed.
+    Updated {
+        /// Previous version string.
+        from: String,
+        /// Newly installed version string.
+        to: String,
+    },
 }
 
+/// Result of a self-update operation.
 pub struct UpdateResult {
+    /// Version that was installed before the update.
     pub current_version: String,
+    /// Latest version available on GitHub.
     pub latest_version: String,
+    /// Whether the update was applied or skipped.
     pub status: UpdateStatus,
 }
 

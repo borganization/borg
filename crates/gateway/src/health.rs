@@ -3,15 +3,24 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+/// Live health state for a single channel.
 #[derive(Debug)]
 pub struct ChannelHealth {
+    /// Timestamp of the most recent inbound message.
     pub last_inbound_at: Option<Instant>,
+    /// Timestamp of the most recent outbound message.
     pub last_outbound_at: Option<Instant>,
+    /// Most recent error message (truncated to 512 chars).
     pub last_error: Option<String>,
+    /// Timestamp of the most recent error.
     pub last_error_at: Option<Instant>,
+    /// Total number of inbound messages received.
     pub inbound_count: u64,
+    /// Total number of outbound messages sent.
     pub outbound_count: u64,
+    /// Total number of errors recorded.
     pub error_count: u64,
+    /// Number of reconnection attempts made.
     pub reconnect_attempts: u64,
     created_at: Instant,
 }
@@ -32,36 +41,51 @@ impl ChannelHealth {
     }
 }
 
+/// Serializable point-in-time snapshot of a channel's health.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelHealthSnapshot {
+    /// Channel name.
     pub name: String,
+    /// Total inbound messages received.
     pub inbound_count: u64,
+    /// Total outbound messages sent.
     pub outbound_count: u64,
+    /// Total errors recorded.
     pub error_count: u64,
+    /// Number of reconnection attempts.
     pub reconnect_attempts: u64,
+    /// Most recent error message, if any.
     pub last_error: Option<String>,
+    /// Seconds since the channel was registered.
     pub uptime_secs: u64,
+    /// Seconds since the last inbound message, if any.
     pub last_inbound_ago_secs: Option<u64>,
+    /// Seconds since the last outbound message, if any.
     pub last_outbound_ago_secs: Option<u64>,
+    /// Seconds since the last error, if any.
     pub last_error_ago_secs: Option<u64>,
 }
 
+/// Tracks health metrics for all gateway channels.
 #[derive(Debug, Default)]
 pub struct ChannelHealthRegistry {
     channels: HashMap<String, ChannelHealth>,
 }
 
 impl ChannelHealthRegistry {
+    /// Create an empty health registry.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Register a channel, initializing its health counters if not already present.
     pub fn register(&mut self, name: &str) {
         self.channels
             .entry(name.to_string())
             .or_insert_with(ChannelHealth::new);
     }
 
+    /// Record an inbound message event for the named channel.
     pub fn record_inbound(&mut self, name: &str) {
         let entry = self
             .channels
@@ -71,6 +95,7 @@ impl ChannelHealthRegistry {
         entry.inbound_count += 1;
     }
 
+    /// Record an outbound message event for the named channel.
     pub fn record_outbound(&mut self, name: &str) {
         let entry = self
             .channels
@@ -80,6 +105,7 @@ impl ChannelHealthRegistry {
         entry.outbound_count += 1;
     }
 
+    /// Record an error event, truncating the message to 512 characters.
     pub fn record_error(&mut self, name: &str, msg: &str) {
         let entry = self
             .channels
@@ -99,6 +125,7 @@ impl ChannelHealthRegistry {
         entry.error_count += 1;
     }
 
+    /// Record a reconnection attempt for the named channel.
     pub fn record_reconnect(&mut self, name: &str) {
         let entry = self
             .channels
@@ -107,6 +134,7 @@ impl ChannelHealthRegistry {
         entry.reconnect_attempts += 1;
     }
 
+    /// Take a point-in-time snapshot of all channels' health metrics.
     pub fn snapshot(&self) -> Vec<ChannelHealthSnapshot> {
         let now = Instant::now();
         self.channels

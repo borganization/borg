@@ -1,10 +1,18 @@
+/// Cache for detecting and filtering echo (self-sent) messages.
 pub mod echo_cache;
+/// Background monitor that polls chat.db for new messages.
 pub mod monitor;
+/// Probe utility to check iMessage availability.
 pub mod probe;
+/// Guard against reflection loops from self-chat messages.
 pub mod reflection_guard;
+/// Input sanitization for iMessage content.
 pub mod sanitize;
+/// Cache for tracking self-chat conversation state.
 pub mod self_chat_cache;
+/// AppleScript-based message sending.
 pub mod send;
+/// iMessage type definitions.
 pub mod types;
 
 use anyhow::Result;

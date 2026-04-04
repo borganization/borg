@@ -41,7 +41,9 @@ pub enum WebhookOutcome {
 
 /// Context passed to the channel during webhook handling.
 pub struct WebhookContext<'a> {
+    /// Gateway configuration.
     pub config: &'a Config,
+    /// Shared health registry for recording metrics.
     pub health: &'a Arc<RwLock<ChannelHealthRegistry>>,
 }
 
@@ -107,6 +109,7 @@ pub struct TypingHandle {
 }
 
 impl TypingHandle {
+    /// Create a new typing handle from a stop signal sender and task handle.
     pub fn new(
         stop_tx: tokio::sync::oneshot::Sender<()>,
         join: tokio::task::JoinHandle<()>,
@@ -117,6 +120,7 @@ impl TypingHandle {
         }
     }
 
+    /// Send the stop signal and wait for the typing task to finish.
     pub async fn stop(mut self) {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());

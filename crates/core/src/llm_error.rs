@@ -8,12 +8,19 @@ use crate::provider::Provider;
 /// Why a provider failed — used for cooldown duration calculation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailoverReason {
+    /// Authentication or authorization failure (401/403).
     Auth,
+    /// Billing or quota exhaustion (402).
     Billing,
+    /// Too many requests (429).
     RateLimit,
+    /// Server overloaded or unavailable (500/502/503/504).
     Overloaded,
+    /// Network timeout or connection failure.
     Timeout,
+    /// Malformed request (400).
     Format,
+    /// Unclassified error.
     Unknown,
 }
 
@@ -31,17 +38,26 @@ impl fmt::Display for FailoverReason {
     }
 }
 
+/// An error from an LLM provider request.
 #[derive(Debug)]
 pub enum LlmError {
+    /// Transient error that may succeed on retry.
     Retryable {
+        /// The underlying error.
         source: anyhow::Error,
+        /// Optional server-suggested retry delay.
         retry_after: Option<Duration>,
+        /// Classification of the failure.
         reason: FailoverReason,
     },
+    /// Permanent error that will not succeed on retry.
     Fatal {
+        /// The underlying error.
         source: anyhow::Error,
+        /// Classification of the failure.
         reason: FailoverReason,
     },
+    /// Request was cancelled via cancellation token.
     Interrupted,
 }
 
@@ -58,10 +74,12 @@ impl fmt::Display for LlmError {
 impl std::error::Error for LlmError {}
 
 impl LlmError {
+    /// Returns `true` if this error is transient and may succeed on retry.
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Retryable { .. })
     }
 
+    /// Returns the failure classification for this error.
     pub fn reason(&self) -> FailoverReason {
         match self {
             Self::Retryable { reason, .. } | Self::Fatal { reason, .. } => *reason,
@@ -120,6 +138,7 @@ pub(crate) fn classify_network_error(err: anyhow::Error) -> LlmError {
     }
 }
 
+/// Extract a `retry_after` duration from a JSON error response body.
 pub fn parse_retry_after(body: &str) -> Option<Duration> {
     // Try to extract retry_after from JSON error body
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {

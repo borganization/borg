@@ -19,20 +19,35 @@ pub enum Role {
 /// Media attachment data.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MediaData {
+    /// MIME type of the media (e.g. "image/png").
     pub mime_type: String,
     /// Base64-encoded binary content.
     pub data: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Optional original filename of the media.
     pub filename: Option<String>,
 }
 
 /// A single content part in a multi-modal message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContentPart {
+    /// Plain text segment.
     Text(String),
-    ImageBase64 { media: MediaData },
-    ImageUrl { url: String },
-    AudioBase64 { media: MediaData },
+    /// Base64-encoded image with metadata.
+    ImageBase64 {
+        /// The image media data.
+        media: MediaData,
+    },
+    /// Image referenced by URL.
+    ImageUrl {
+        /// The image URL.
+        url: String,
+    },
+    /// Base64-encoded audio with metadata.
+    AudioBase64 {
+        /// The audio media data.
+        media: MediaData,
+    },
 }
 
 impl Serialize for ContentPart {
@@ -145,7 +160,9 @@ impl<'de> Deserialize<'de> for ContentPart {
 /// Serializes as string when text-only (backward compat), array when multimodal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageContent {
+    /// Plain text content.
     Text(String),
+    /// Structured multi-modal content parts.
     Parts(Vec<ContentPart>),
 }
 
@@ -247,12 +264,17 @@ impl<'de> Deserialize<'de> for MessageContent {
 /// A single message in the conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// The sender role (system, user, assistant, or tool).
     pub role: Role,
+    /// Message body (text or multimodal parts).
     pub content: Option<MessageContent>,
+    /// Tool calls requested by the assistant in this message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// ID of the tool call this message is a response to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// RFC 3339 timestamp of when this message was created.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
 }
@@ -260,40 +282,53 @@ pub struct Message {
 /// An LLM-requested tool invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    /// Unique identifier for this tool call.
     pub id: String,
+    /// Call type (typically "function").
     #[serde(rename = "type")]
     pub call_type: String,
+    /// The function name and arguments to invoke.
     pub function: FunctionCall,
 }
 
 /// Function name and serialized arguments for a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
+    /// Function name to invoke.
     pub name: String,
+    /// JSON-serialized arguments for the function.
     pub arguments: String,
 }
 
 /// Result returned from executing a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// ID of the tool call this result corresponds to.
     pub tool_call_id: String,
+    /// Output content from the tool execution.
     pub content: String,
+    /// Whether the tool execution failed.
     pub is_error: bool,
 }
 
 /// Schema definition for a tool, sent to the LLM each turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
+    /// Tool type (typically "function").
     #[serde(rename = "type")]
     pub tool_type: String,
+    /// The function schema for this tool.
     pub function: FunctionDefinition,
 }
 
 /// JSON Schema definition of a tool's function signature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDefinition {
+    /// Function name exposed to the LLM.
     pub name: String,
+    /// Human-readable description of what the function does.
     pub description: String,
+    /// JSON Schema describing the function's parameters.
     pub parameters: serde_json::Value,
 }
 
@@ -366,7 +401,9 @@ impl Message {
 /// A step in a structured plan tracked by the `update_plan` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlanStep {
+    /// Short description of this plan step.
     pub title: String,
+    /// Current execution status.
     pub status: PlanStepStatus,
 }
 
@@ -374,17 +411,24 @@ pub struct PlanStep {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanStepStatus {
+    /// Not yet started.
     Pending,
+    /// Currently being executed.
     InProgress,
+    /// Successfully finished.
     Completed,
 }
 
 /// Output from a tool execution: either plain text or multimodal (text + images).
 #[derive(Debug, Clone)]
 pub enum ToolOutput {
+    /// Plain text result.
     Text(String),
+    /// Rich result with text summary and additional content parts.
     Multimodal {
+        /// Text summary of the tool output.
         text: String,
+        /// Additional content parts (images, audio, etc.).
         parts: Vec<ContentPart>,
     },
 }

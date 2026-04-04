@@ -3,10 +3,15 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// Google Chat event types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventType {
+    /// A new message was received.
     Message,
+    /// The bot was added to a space.
     AddedToSpace,
+    /// The bot was removed from a space.
     RemovedFromSpace,
+    /// A card button or action was clicked.
     CardClicked,
+    /// Unrecognized event type.
     Unknown(String),
 }
 
@@ -116,10 +121,12 @@ pub struct Thread {
 /// A simple text response to a Google Chat event (synchronous reply).
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatResponse {
+    /// Response message text.
     pub text: String,
 }
 
 impl ChatResponse {
+    /// Create a new text response.
     pub fn new(text: impl Into<String>) -> Self {
         Self { text: text.into() }
     }
@@ -128,7 +135,9 @@ impl ChatResponse {
 /// Request body for creating a message via the Google Chat API.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateMessageRequest {
+    /// Message text content.
     pub text: String,
+    /// Thread to post the message in (for threaded replies).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread: Option<ThreadRequest>,
 }
@@ -136,6 +145,7 @@ pub struct CreateMessageRequest {
 /// Thread reference for creating a threaded reply.
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadRequest {
+    /// Resource name of the thread to reply in.
     pub name: String,
 }
 

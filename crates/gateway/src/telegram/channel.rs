@@ -25,11 +25,17 @@ struct TelegramResponseContext {
 
 /// Telegram native channel implementation.
 pub struct TelegramChannel {
+    /// Shared Telegram Bot API HTTP client.
     pub client: Arc<TelegramClient>,
+    /// Deduplicator to filter repeated webhook updates.
     pub dedup: Arc<Mutex<UpdateDeduplicator>>,
+    /// Optional webhook secret token for request verification.
     pub secret: Option<String>,
+    /// Bot username used for mention detection in groups.
     pub bot_username: Option<String>,
+    /// Application configuration.
     pub config: Config,
+    /// Optional TTS synthesizer for auto-voice responses.
     pub tts_synthesizer: Option<Arc<borg_core::tts::TtsSynthesizer>>,
 }
 

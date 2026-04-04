@@ -8,15 +8,25 @@ use std::collections::HashSet;
 /// Logical grouping of tools by purpose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolGroup {
+    /// Memory read/write tools.
     Memory,
+    /// Filesystem tools (patch, read, list).
     Fs,
+    /// Shell execution tools.
     Runtime,
+    /// Resource listing/discovery tools.
     Discovery,
+    /// Web fetch and search tools.
     Web,
+    /// Browser automation tools.
     Ui,
+    /// Task and cron scheduling tools.
     Scheduling,
+    /// Image generation tools.
     Media,
+    /// Third-party service integrations (Gmail, Notion, etc.).
     Integration,
+    /// Multi-agent orchestration tools.
     Agents,
 }
 
@@ -80,14 +90,19 @@ impl ToolGroup {
 /// Predefined profiles that select which tool groups are available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolProfile {
+    /// Only memory and discovery tools.
     Minimal,
+    /// Tools for software development workflows.
     Coding,
+    /// Tools for messaging and communication workflows.
     Messaging,
+    /// All available tool groups enabled.
     #[default]
     Full,
 }
 
 impl ToolProfile {
+    /// Parse a profile name from a string (case-insensitive).
     pub fn from_str_opt(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "minimal" => Some(Self::Minimal),

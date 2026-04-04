@@ -1,10 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Operating mode for a channel integration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChannelMode {
+    /// Channel receives messages via HTTP webhooks.
     Webhook,
+    /// Channel actively polls for new messages.
     Poll,
 }
 
@@ -14,30 +17,43 @@ impl Default for ChannelMode {
     }
 }
 
+/// Parsed representation of a `channel.toml` manifest file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelManifest {
+    /// Unique channel name (used in webhook paths and registry keys).
     pub name: String,
+    /// Human-readable description of the channel.
     pub description: String,
+    /// Script runtime (e.g. "python", "node", "bash").
     #[serde(default = "default_runtime")]
     pub runtime: String,
+    /// Script paths for inbound/outbound/verify/poll operations.
     #[serde(default)]
     pub scripts: ScriptsSection,
+    /// Sandbox permissions for script execution.
     #[serde(default)]
     pub sandbox: SandboxSection,
+    /// Authentication environment variable names.
     #[serde(default)]
     pub auth: AuthSection,
+    /// Channel behavior settings (webhook path, timeouts, retry, etc.).
     #[serde(default)]
     pub settings: SettingsSection,
 }
 
+/// Script file paths for channel message handling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptsSection {
+    /// Script that parses raw webhook payloads into normalized messages.
     #[serde(default = "default_inbound")]
     pub inbound: String,
+    /// Script that sends agent responses back to the channel.
     #[serde(default = "default_outbound")]
     pub outbound: String,
+    /// Optional script for webhook signature verification.
     #[serde(default)]
     pub verify: Option<String>,
+    /// Optional script for polling new messages (poll mode only).
     #[serde(default)]
     pub poll: Option<String>,
 }
@@ -53,17 +69,22 @@ impl Default for ScriptsSection {
     }
 }
 
+/// Sandbox permissions for channel script execution.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SandboxSection {
+    /// Whether the script is allowed network access.
     #[serde(default)]
     pub network: bool,
+    /// Filesystem paths the script may read.
     #[serde(default)]
     pub fs_read: Vec<String>,
+    /// Filesystem paths the script may write.
     #[serde(default)]
     pub fs_write: Vec<String>,
 }
 
 impl SandboxSection {
+    /// Convert to a `SandboxPolicy` for script execution.
     pub fn to_policy(&self) -> borg_sandbox::policy::SandboxPolicy {
         borg_sandbox::policy::SandboxPolicy {
             network: self.network,
@@ -74,27 +95,39 @@ impl SandboxSection {
     }
 }
 
+/// Authentication configuration for a channel.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AuthSection {
+    /// Env var name holding the webhook verification secret.
     pub secret_env: Option<String>,
+    /// Env var name holding the API/bot token for outbound messages.
     pub token_env: Option<String>,
 }
 
+/// Behavioral settings for a channel integration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsSection {
+    /// Custom webhook URL path (defaults to `/webhook/<name>`).
     pub webhook_path: Option<String>,
+    /// Script execution timeout in milliseconds.
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+    /// Maximum concurrent script executions for this channel.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
+    /// Whether the channel uses webhook or poll mode.
     #[serde(default)]
     pub mode: ChannelMode,
+    /// Poll interval in milliseconds (poll mode only).
     #[serde(default)]
     pub poll_interval_ms: Option<u64>,
+    /// Maximum characters per outbound message chunk.
     #[serde(default)]
     pub max_message_chars: Option<usize>,
+    /// Maximum number of outbound retry attempts.
     #[serde(default)]
     pub retry_max_attempts: Option<u32>,
+    /// Initial delay in milliseconds before first retry.
     #[serde(default)]
     pub retry_initial_delay_ms: Option<u64>,
 }
@@ -131,6 +164,7 @@ fn default_max_concurrent() -> usize {
 }
 
 impl ChannelManifest {
+    /// Load and validate a channel manifest from a `channel.toml` file.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let manifest: Self = toml::from_str(&content)?;
@@ -147,10 +181,12 @@ impl ChannelManifest {
         Ok(manifest)
     }
 
+    /// Returns `true` if the channel operates in poll mode.
     pub fn is_poll_mode(&self) -> bool {
         self.settings.mode == ChannelMode::Poll
     }
 
+    /// Returns the webhook URL path, falling back to `/webhook/<name>`.
     pub fn webhook_path(&self) -> String {
         self.settings
             .webhook_path
@@ -158,6 +194,7 @@ impl ChannelManifest {
             .unwrap_or_else(|| format!("/webhook/{}", self.name))
     }
 
+    /// Build a sandbox policy from this manifest's sandbox section.
     pub fn sandbox_policy(&self) -> borg_sandbox::policy::SandboxPolicy {
         self.sandbox.to_policy()
     }

@@ -97,13 +97,21 @@ fn new_rate_limiter() -> hmac_chain::HourlyRateLimiter {
 /// The 5 vitals stats, all 0..=100.
 #[derive(Debug, Clone)]
 pub struct VitalsState {
+    /// Reliability of tool operations (0..=100).
     pub stability: u8,
+    /// Clarity and directedness of agent activity (0..=100).
     pub focus: u8,
+    /// Frequency of user–agent interaction (0..=100).
     pub sync: u8,
+    /// Rate of capability expansion (0..=100).
     pub growth: u8,
+    /// Overall agent wellbeing indicator (0..=100).
     pub happiness: u8,
+    /// Timestamp of the most recent non-negative interaction.
     pub last_interaction_at: DateTime<Utc>,
+    /// Timestamp of the most recent event of any kind.
     pub updated_at: DateTime<Utc>,
+    /// Whether the HMAC chain is intact across all replayed events.
     pub chain_valid: bool,
 }
 
@@ -111,10 +119,15 @@ pub struct VitalsState {
 /// New tools automatically get classified by the hook based on outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventCategory {
+    /// User or session interaction (e.g. message, session start).
     Interaction,
+    /// Successful tool execution.
     Success,
+    /// Failed tool execution.
     Failure,
+    /// User expressed a correction or frustration.
     Correction,
+    /// Agent created something durable (memory, skill, channel, file).
     Creation,
 }
 
@@ -147,27 +160,44 @@ impl EventCategory {
 /// Stat deltas to apply from an event.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StatDeltas {
+    /// Change to stability.
     pub stability: i8,
+    /// Change to focus.
     pub focus: i8,
+    /// Change to sync.
     pub sync: i8,
+    /// Change to growth.
     pub growth: i8,
+    /// Change to happiness.
     pub happiness: i8,
 }
 
-/// A recorded event from the ledger.
+/// A recorded event from the vitals ledger.
 #[derive(Debug, Clone)]
 pub struct VitalsEvent {
+    /// Auto-incremented row ID.
     pub id: i64,
+    /// Event category (interaction, success, failure, correction, creation).
     pub category: String,
+    /// What triggered this event (tool name, "session_start", etc.).
     pub source: String,
+    /// Delta applied to stability.
     pub stability_delta: i32,
+    /// Delta applied to focus.
     pub focus_delta: i32,
+    /// Delta applied to sync.
     pub sync_delta: i32,
+    /// Delta applied to growth.
     pub growth_delta: i32,
+    /// Delta applied to happiness.
     pub happiness_delta: i32,
+    /// Optional JSON metadata blob.
     pub metadata_json: Option<String>,
+    /// Unix timestamp of event creation.
     pub created_at: i64,
+    /// HMAC for this event in the chain.
     pub hmac: String,
+    /// HMAC of the previous event in the chain.
     pub prev_hmac: String,
 }
 
@@ -202,7 +232,9 @@ impl DriftFlag {
 /// Recommended action with human-readable text.
 #[derive(Debug)]
 pub struct Recommendation {
+    /// Why this recommendation was chosen.
     pub reason: &'static str,
+    /// Actionable advice for the user.
     pub tip: &'static str,
 }
 
