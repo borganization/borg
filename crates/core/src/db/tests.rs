@@ -3410,3 +3410,34 @@ fn test_activity_empty_db() {
     let entries = db.query_activity(10, None, None).unwrap();
     assert!(entries.is_empty());
 }
+
+#[test]
+fn daemon_lock_held_when_fresh() {
+    let db = test_db();
+    let now = chrono::Utc::now().timestamp();
+    assert!(db.acquire_daemon_lock(1234, now).unwrap());
+    assert!(db.is_daemon_lock_held());
+}
+
+#[test]
+fn daemon_lock_not_held_when_empty() {
+    let db = test_db();
+    assert!(!db.is_daemon_lock_held());
+}
+
+#[test]
+fn daemon_lock_not_held_when_stale() {
+    let db = test_db();
+    let stale_time = chrono::Utc::now().timestamp() - 400; // 400s ago > 300s threshold
+    assert!(db.acquire_daemon_lock(1234, stale_time).unwrap());
+    assert!(!db.is_daemon_lock_held());
+}
+
+#[test]
+fn daemon_lock_not_held_after_release() {
+    let db = test_db();
+    let now = chrono::Utc::now().timestamp();
+    assert!(db.acquire_daemon_lock(1234, now).unwrap());
+    db.release_daemon_lock(1234).unwrap();
+    assert!(!db.is_daemon_lock_held());
+}

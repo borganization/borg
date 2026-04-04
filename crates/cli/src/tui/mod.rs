@@ -250,10 +250,16 @@ pub async fn run() -> Result<()> {
 
     let agent = Arc::new(Mutex::new(agent));
 
-    // Start heartbeat if enabled
+    // Start heartbeat scheduler unless daemon is already running its own.
+    // The daemon holds a lock in SQLite that is refreshed every 60s and goes
+    // stale after 300s. If a live daemon is detected, skip the TUI scheduler
+    // to avoid duplicate heartbeat firings.
     let heartbeat_cancel = CancellationToken::new();
     let _heartbeat_guard = heartbeat_cancel.clone().drop_guard();
-    let (heartbeat_rx, heartbeat_event_tx) = if config.heartbeat.enabled {
+    let daemon_running = borg_core::db::Database::open()
+        .map(|db| db.is_daemon_lock_held())
+        .unwrap_or(false);
+    let (heartbeat_rx, heartbeat_event_tx) = if !daemon_running {
         let (hb_tx, hb_rx) = mpsc::channel::<HeartbeatEvent>(32);
         // Keep wake_tx alive so the wake_rx channel doesn't close immediately
         let (wake_tx, wake_rx) = mpsc::channel::<()>(8);
@@ -268,6 +274,9 @@ pub async fn run() -> Result<()> {
         });
         (Some(hb_rx), Some(hb_tx_clone))
     } else {
+        tracing::info!(
+            "Daemon is running — TUI heartbeat scheduler skipped (daemon owns heartbeat)"
+        );
         (None, None)
     };
 

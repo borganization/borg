@@ -11,7 +11,6 @@ fn default_config_values() {
     assert!((cfg.llm.temperature - 0.7).abs() < f32::EPSILON);
     assert_eq!(cfg.llm.max_tokens, 4096);
     assert!(cfg.llm.base_url.is_none());
-    assert!(!cfg.heartbeat.enabled);
     assert_eq!(cfg.heartbeat.interval, "30m");
     assert_eq!(cfg.tools.default_timeout_ms, 30000);
     assert!(cfg.sandbox.enabled);
@@ -35,7 +34,6 @@ temperature = 0.9
 max_tokens = 2048
 
 [heartbeat]
-enabled = true
 interval = "1h"
 quiet_hours_start = "22:00"
 quiet_hours_end = "08:00"
@@ -592,7 +590,6 @@ initial_retry_delay_ms = 200
 request_timeout_ms = 60000
 
 [heartbeat]
-enabled = false
 interval = "30m"
 
 [tools]

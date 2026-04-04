@@ -334,7 +334,6 @@ mod tests {
     #[test]
     fn quiet_hours_no_config() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -348,7 +347,6 @@ mod tests {
     #[test]
     fn quiet_hours_invalid_format() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: Some("not-a-time".to_string()),
             quiet_hours_end: Some("also-bad".to_string()),
@@ -362,7 +360,6 @@ mod tests {
     #[test]
     fn quiet_hours_uses_timezone() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: Some("00:00".to_string()),
             quiet_hours_end: Some("06:00".to_string()),
@@ -386,7 +383,6 @@ mod tests {
     fn quiet_hours_wraparound_midnight() {
         // Quiet hours that cross midnight: 22:00 - 06:00
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: Some("22:00".to_string()),
             quiet_hours_end: Some("06:00".to_string()),
@@ -402,7 +398,6 @@ mod tests {
     #[test]
     fn quiet_hours_only_start_configured() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: Some("00:00".to_string()),
             quiet_hours_end: None,
@@ -417,7 +412,6 @@ mod tests {
     #[tokio::test]
     async fn scheduler_cancels_cleanly() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -446,7 +440,6 @@ mod tests {
     #[tokio::test]
     async fn wake_signal_triggers_fire() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -484,7 +477,6 @@ mod tests {
     #[tokio::test]
     async fn scheduler_skips_when_channel_full() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -513,7 +505,6 @@ mod tests {
     #[tokio::test]
     async fn scheduler_exits_when_channel_closed() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "1s".to_string(),
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -543,7 +534,6 @@ mod tests {
     #[tokio::test]
     async fn interval_below_minimum_clamped() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30s".to_string(), // below MIN_INTERVAL_SECS (60)
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -575,7 +565,6 @@ mod tests {
     #[tokio::test]
     async fn interval_empty_string_uses_default() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "".to_string(), // empty — falls back to 1800s
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -607,7 +596,6 @@ mod tests {
     #[tokio::test]
     async fn cron_invalid_expression_falls_back() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -639,7 +627,6 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn interval_fires_on_schedule() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "60s".to_string(),
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -684,7 +671,6 @@ mod tests {
     #[tokio::test]
     async fn multiple_rapid_wakes_dont_block() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -722,7 +708,6 @@ mod tests {
     #[tokio::test]
     async fn scheduler_emits_started_event() {
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "30m".to_string(),
             quiet_hours_start: None,
             quiet_hours_end: None,
@@ -761,7 +746,6 @@ mod tests {
     async fn quiet_hours_emits_skip_event() {
         // Set quiet hours to cover the full day so they always apply
         let config = HeartbeatConfig {
-            enabled: true,
             interval: "60s".to_string(),
             quiet_hours_start: Some("00:00".to_string()),
             quiet_hours_end: Some("23:59".to_string()),

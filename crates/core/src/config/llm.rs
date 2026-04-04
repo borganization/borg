@@ -158,7 +158,6 @@ impl CompactionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HeartbeatConfig {
-    pub enabled: bool,
     pub interval: String,
     pub quiet_hours_start: Option<String>,
     pub quiet_hours_end: Option<String>,
@@ -169,7 +168,6 @@ pub struct HeartbeatConfig {
 impl Default for HeartbeatConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             interval: "30m".into(),
             quiet_hours_start: Some("00:00".into()),
             quiet_hours_end: Some("06:00".into()),

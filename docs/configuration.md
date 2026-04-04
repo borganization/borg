@@ -295,7 +295,6 @@ If `provider` is omitted, it is auto-detected based on which API key environment
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `enabled` | `false` | Whether the heartbeat scheduler runs |
 | `interval` | `"30m"` | How often the agent checks in. Supports `s`, `m`, `h` suffixes |
 | `cron` | none | Cron expression (overrides `interval` if set) |
 | `quiet_hours_start` | `"00:00"` | Time to stop heartbeats (24h format) |

@@ -195,7 +195,6 @@ max_tokens = 4096
 # base_url = "https://custom-endpoint/v1/chat/completions"  # optional: override provider's default URL
 
 [heartbeat]
-enabled = false
 interval = "30m"
 cron = "0 */30 * * * *"          # optional, overrides interval
 quiet_hours_start = "00:00"

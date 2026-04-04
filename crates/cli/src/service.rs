@@ -5,9 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use borg_core::agent::{Agent, AgentEvent};
 use borg_core::config::Config;
-use borg_heartbeat::scheduler::{
-    HeartbeatEvent, HeartbeatResult, HeartbeatScheduler, SkipReason,
-};
+use borg_heartbeat::scheduler::{HeartbeatEvent, HeartbeatResult, HeartbeatScheduler, SkipReason};
 
 const LAUNCHD_LABEL: &str = "com.borg.daemon";
 
@@ -97,29 +95,23 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
     let max_concurrent = config.tasks.max_concurrent;
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
-    // Set up heartbeat scheduler
+    // Set up heartbeat scheduler (always on — heartbeat is a core feature)
     let (hb_tx, mut hb_rx) = mpsc::channel::<HeartbeatEvent>(32);
     let (wake_tx, wake_rx) = mpsc::channel::<()>(8);
 
-    if config.heartbeat.enabled {
-        let tz = config.user_timezone();
-        let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), tz, wake_rx);
-        let hb_cancel = shutdown.clone();
-        tokio::spawn(async move {
-            scheduler.run(hb_tx, hb_cancel).await;
-        });
-        println!("Heartbeat scheduler started.");
-    }
+    let tz = config.user_timezone();
+    let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), tz, wake_rx);
+    let hb_cancel = shutdown.clone();
+    tokio::spawn(async move {
+        scheduler.run(hb_tx, hb_cancel).await;
+    });
+    println!("Heartbeat scheduler started.");
 
     // Start gateway server (with wake channel for /internal/wake endpoint)
     {
         let gw_config = config.clone();
         let gw_shutdown = shutdown.clone();
-        let gw_wake_tx = if config.heartbeat.enabled {
-            Some(wake_tx)
-        } else {
-            None
-        };
+        let gw_wake_tx = Some(wake_tx);
         tokio::spawn(async move {
             match borg_gateway::GatewayServer::new(
                 gw_config,
