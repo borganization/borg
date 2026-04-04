@@ -8,12 +8,6 @@ use borg_core::provider::Provider;
 /// Standard subdirectories created under the Borg data directory.
 pub(crate) const BORG_SUBDIRS: &[&str] = &["memory", "tools", "skills", "logs", "cache"];
 
-/// Auto-detect the system's IANA timezone (e.g. "America/New_York").
-#[allow(dead_code)]
-pub(crate) fn detect_system_timezone() -> Option<String> {
-    iana_time_zone::get_timezone().ok()
-}
-
 /// Provider choices with display labels.
 pub(crate) const PROVIDERS: &[(&str, &str, &str)] = &[
     (

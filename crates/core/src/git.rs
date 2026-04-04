@@ -55,14 +55,6 @@ pub struct GitContext {
     pub remote_url: Option<String>,
 }
 
-/// Files modified during a single agent turn.
-#[derive(Debug, Clone, Default)]
-pub struct TurnDiff {
-    pub modified_files: Vec<PathBuf>,
-    pub added_files: Vec<PathBuf>,
-    pub deleted_files: Vec<PathBuf>,
-}
-
 /// Find the git repo root by walking up from `cwd`.
 pub fn find_repo_root(cwd: &Path) -> Option<PathBuf> {
     let mut dir = cwd.to_path_buf();
@@ -251,43 +243,6 @@ pub async fn restore_ghost_commit(repo_root: &Path, commit: &GhostCommit) -> Res
     Ok(())
 }
 
-/// Capture a lightweight diff of what changed since a reference point.
-pub async fn capture_turn_diff(repo_root: &Path, baseline_ref: &str) -> Result<TurnDiff> {
-    let output = run_git(&["diff", "--name-status", baseline_ref], repo_root)
-        .await
-        .unwrap_or_default();
-
-    let mut diff = TurnDiff::default();
-    for line in output.lines() {
-        let parts: Vec<&str> = line.splitn(2, '\t').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        let path = PathBuf::from(parts[1]);
-        match parts[0] {
-            "A" => diff.added_files.push(path),
-            "D" => diff.deleted_files.push(path),
-            _ => diff.modified_files.push(path),
-        }
-    }
-
-    // Also capture new untracked files as additions
-    let untracked = run_git(&["ls-files", "--others", "--exclude-standard"], repo_root)
-        .await
-        .unwrap_or_default();
-
-    for line in untracked.lines() {
-        if !line.is_empty() {
-            let path = PathBuf::from(line);
-            if !diff.added_files.contains(&path) {
-                diff.added_files.push(path);
-            }
-        }
-    }
-
-    Ok(diff)
-}
-
 /// Format git context as a string block for system prompt injection.
 pub fn format_git_context(ctx: &GitContext) -> String {
     let mut out = String::new();
@@ -388,14 +343,6 @@ mod tests {
         assert!(out.contains("Git commit: abc1234"));
         assert!(out.contains("Uncommitted changes: yes"));
         assert!(out.contains("abc1234 Fix bug"));
-    }
-
-    #[test]
-    fn turn_diff_default_is_empty() {
-        let diff = TurnDiff::default();
-        assert!(diff.modified_files.is_empty());
-        assert!(diff.added_files.is_empty());
-        assert!(diff.deleted_files.is_empty());
     }
 
     #[test]

@@ -28,8 +28,6 @@ pub enum HistoryCell {
         start_time: Option<std::time::Instant>,
     },
     ToolResult {
-        #[allow(dead_code)]
-        name: String,
         output: String,
         is_error: bool,
         duration_ms: Option<u64>,
@@ -49,8 +47,6 @@ pub enum HistoryCell {
         text: String,
     },
     ToolStreaming {
-        #[allow(dead_code)]
-        name: String,
         lines: Vec<(String, bool)>,
     },
     /// Structured plan with step tracking.
@@ -819,7 +815,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let cell = HistoryCell::ToolResult {
-            name: "test".to_string(),
             output,
             is_error: false,
             duration_ms: Some(1500),
@@ -838,7 +833,6 @@ mod tests {
     #[test]
     fn render_tool_result_uses_display_label() {
         let cell = HistoryCell::ToolResult {
-            name: "run_shell".to_string(),
             output: "ok".to_string(),
             is_error: false,
             duration_ms: Some(200),
@@ -952,10 +946,7 @@ mod tests {
         let tool_lines: Vec<(String, bool)> = (0..12)
             .map(|i| (format!("output line {i}"), i % 3 == 0))
             .collect();
-        let cell = HistoryCell::ToolStreaming {
-            name: "test".to_string(),
-            lines: tool_lines,
-        };
+        let cell = HistoryCell::ToolStreaming { lines: tool_lines };
         let rendered = cell.render(80, None);
         let all_text: String = rendered
             .iter()
