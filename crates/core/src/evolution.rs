@@ -633,8 +633,16 @@ pub fn format_compact(state: &EvolutionState) -> String {
     }
 }
 
-/// Full status section for `borg status` output.
+/// Full status section for `borg status` output (default width).
 pub fn format_status_section(state: &EvolutionState) -> String {
+    format_status_section_with_width(state, 48)
+}
+
+/// Full status section with configurable card width.
+///
+/// `card_width` is the total width of the tip card including borders (minimum 34).
+pub fn format_status_section_with_width(state: &EvolutionState, card_width: usize) -> String {
+    let card_width = card_width.max(34);
     let mut out = String::new();
 
     // Header: name + level
@@ -647,43 +655,67 @@ pub fn format_status_section(state: &EvolutionState) -> String {
     match &state.evolution_description {
         Some(desc) => out.push_str(&format!("  \"{desc}\"\n")),
         None => {
+            let inner = card_width - 2; // space between │ and │
+            let title = " How Evolution Works ";
+            let title_len = title.len(); // 21
+            let left_dashes = 3;
+            let right_dashes = inner.saturating_sub(left_dashes + title_len);
+
             out.push('\n');
-            out.push_str("  \u{256D}\u{2500}\u{2500}\u{2500} How Evolution Works \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256E}\n");
-            out.push_str("  \u{2502}                                            \u{2502}\n");
-            out.push_str("  \u{2502}  Your borg is learning how you use it.     \u{2502}\n");
-            out.push_str("  \u{2502}  Every tool call, shell command, and task   \u{2502}\n");
-            out.push_str("  \u{2502}  shapes what it becomes.                   \u{2502}\n");
-            out.push_str("  \u{2502}                                            \u{2502}\n");
-            out.push_str(
-                "  \u{2502}  Evolution is permanent \u{2014} earned through    \u{2502}\n",
-            );
-            out.push_str("  \u{2502}  sustained usage, not toggled. Your usage   \u{2502}\n");
-            out.push_str("  \u{2502}  patterns determine your borg's archetype  \u{2502}\n");
-            out.push_str("  \u{2502}  and unlock a unique evolution name.       \u{2502}\n");
-            out.push_str("  \u{2502}                                            \u{2502}\n");
-            out.push_str("  \u{2502}  Keep using borg the way you imagine.      \u{2502}\n");
-            out.push_str("  \u{2502}                                            \u{2502}\n");
-            out.push_str("  \u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256F}\n");
+            // Top border
+            let left = "\u{2500}".repeat(left_dashes);
+            let right = "\u{2500}".repeat(right_dashes);
+            out.push_str(&format!("  \u{256D}{left}{title}{right}\u{256E}\n"));
+
+            let lines = [
+                "",
+                "Your borg is learning how you use it.",
+                "Every tool call, shell command, and task",
+                "shapes what it becomes.",
+                "",
+                "Evolution is permanent -- earned through",
+                "sustained usage, not toggled. Your usage",
+                "patterns determine your borg's archetype",
+                "and unlock a unique evolution name.",
+                "",
+                "Keep using borg the way you imagine.",
+                "",
+            ];
+            for line in &lines {
+                if line.is_empty() {
+                    out.push_str(&format!("  \u{2502}{}\u{2502}\n", " ".repeat(inner)));
+                } else {
+                    // inner >= 32 because card_width >= 34
+                    let padded = format!("  {:<width$}", line, width = inner - 2);
+                    // Truncate if content is wider than available space
+                    let padded: String = padded.chars().take(inner).collect();
+                    out.push_str(&format!("  \u{2502}{padded}\u{2502}\n"));
+                }
+            }
+
+            // Bottom border
+            out.push_str(&format!("  \u{2570}{}\u{256F}\n", "\u{2500}".repeat(inner)));
         }
     }
 
     out.push('\n');
 
-    // Stage progress bar
+    // Stage progress bar — scale bar to fit card width
+    let bar_width = (card_width - 2).min(30); // bar portion, max 30
     let stage_label = match state.stage {
         Stage::Base => "Base (1/3)",
         Stage::Evolved => "Evolved (2/3)",
         Stage::Final => "Final (3/3)",
     };
     let stage_fill = match state.stage {
-        Stage::Base => 10,
-        Stage::Evolved => 20,
-        Stage::Final => 30,
+        Stage::Base => bar_width / 3,
+        Stage::Evolved => bar_width * 2 / 3,
+        Stage::Final => bar_width,
     };
     let stage_bar = format!(
         "{}{}",
         "\u{2588}".repeat(stage_fill),
-        "\u{2591}".repeat(30 - stage_fill)
+        "\u{2591}".repeat(bar_width - stage_fill)
     );
     out.push_str(&format!("  Stage        {stage_bar}  {stage_label}\n"));
 
@@ -1774,5 +1806,43 @@ mod tests {
         // Should contain Stage name, not autonomy tier
         assert!(ctx.contains("Stage: Evolved"));
         assert!(!ctx.contains("Autonomy:"));
+    }
+
+    #[test]
+    fn tip_card_lines_aligned() {
+        let state = EvolutionState {
+            stage: Stage::Base,
+            level: 1,
+            total_xp: 10,
+            xp_to_next_level: 90,
+            dominant_archetype: None,
+            evolution_name: None,
+            evolution_description: None,
+            archetype_scores: HashMap::new(),
+            total_events: 1,
+            chain_valid: true,
+        };
+        for width in [34, 44, 48, 60, 80] {
+            let section = format_status_section_with_width(&state, width);
+            let card_lines: Vec<&str> = section
+                .lines()
+                .skip_while(|l| !l.contains('\u{256D}'))
+                .take_while(|l| !l.contains('\u{256F}') && !l.is_empty())
+                .chain(section.lines().filter(|l| l.contains('\u{256F}')))
+                .collect();
+            assert!(
+                card_lines.len() >= 2,
+                "card should have borders at width {width}"
+            );
+            let first_len = card_lines[0].chars().count();
+            for (i, line) in card_lines.iter().enumerate() {
+                assert_eq!(
+                    line.chars().count(),
+                    first_len,
+                    "line {i} width mismatch at card_width={width}: {:?}",
+                    line
+                );
+            }
+        }
     }
 }
