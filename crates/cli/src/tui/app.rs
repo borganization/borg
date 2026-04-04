@@ -21,6 +21,7 @@ use super::composer::Composer;
 use super::file_popup::FileSearchPopup;
 use super::history::{ApprovalStatus, HistoryCell};
 use super::layout;
+use super::migrate_popup::{MigrateAction, MigratePopup};
 use super::plan_overlay::{PlanOption, PlanOverlay};
 use super::plugins_popup::{PluginAction, PluginsPopup};
 use super::schedule_popup::{ScheduleAction, SchedulePopup};
@@ -126,6 +127,9 @@ pub enum AppAction {
     RunSkillActions {
         actions: Vec<SkillAction>,
     },
+    RunMigration {
+        actions: Vec<MigrateAction>,
+    },
     SelfUpdate {
         dev: bool,
     },
@@ -163,6 +167,7 @@ pub struct App<'a> {
     pub plan_mode: bool,
     pub schedule_popup: SchedulePopup,
     pub skills_popup: SkillsPopup,
+    pub migrate_popup: MigratePopup,
     pub file_popup: FileSearchPopup,
     pub throbber_state: ThrobberState,
     transcript_area: Rect,
@@ -209,6 +214,7 @@ impl<'a> App<'a> {
             plan_mode: false,
             schedule_popup: SchedulePopup::new(),
             skills_popup: SkillsPopup::new(),
+            migrate_popup: MigratePopup::new(),
             file_popup: FileSearchPopup::new(),
             throbber_state: ThrobberState::default(),
             transcript_area: Rect::default(),
@@ -573,6 +579,13 @@ impl<'a> App<'a> {
                 if self.skills_popup.is_visible() {
                     if let Some(actions) = self.skills_popup.handle_key(key) {
                         return Ok(AppAction::RunSkillActions { actions });
+                    }
+                    return Ok(AppAction::Continue);
+                }
+
+                if self.migrate_popup.is_visible() {
+                    if let Some(actions) = self.migrate_popup.handle_key(key) {
+                        return Ok(AppAction::RunMigration { actions });
                     }
                     return Ok(AppAction::Continue);
                 }
@@ -943,6 +956,7 @@ impl<'a> App<'a> {
                      \n  \
                      /plugins   - Browse integrations\n  \
                      /schedule  - Manage scheduled tasks\n  \
+                     /migrate   - Import from another agent\n  \
                      /restart   - Restart gateway server\n\
                      \n  \
                      /uninstall - Remove all borg data and binary\n  \
@@ -1141,6 +1155,10 @@ impl<'a> App<'a> {
             }
             "/schedule-tasks" | "/schedule" => {
                 self.schedule_popup.show();
+                return Ok(AppAction::Continue);
+            }
+            "/migrate" => {
+                self.migrate_popup.show();
                 return Ok(AppAction::Continue);
             }
             "/restart" => {
@@ -1689,6 +1707,7 @@ impl<'a> App<'a> {
         self.plugins_popup.render(frame);
         self.schedule_popup.render(frame);
         self.skills_popup.render(frame);
+        self.migrate_popup.render(frame);
         self.status_popup.render(frame);
     }
 
