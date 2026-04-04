@@ -3109,16 +3109,17 @@ fn bond_record_time_rate_limiting() {
 #[test]
 fn evolution_record_time_rate_limiting() {
     let db = test_db();
-    // xp_gain cap is 15/hour
+    // Per-source cap is 5/hour, per-type cap is 15/hour, total cap is 20/hour.
+    // With the same source, per-source (5) kicks in first.
     for _ in 0..35 {
-        db.record_evolution_event("xp_gain", 5, Some("builder"), "test", None)
+        db.record_evolution_event("xp_gain", 3, Some("builder"), "test", None)
             .unwrap();
     }
     let events = db.load_all_evolution_events().unwrap();
     assert_eq!(
         events.len(),
-        15,
-        "record-time rate limiting should cap at 15 xp_gain events/hour"
+        5,
+        "record-time per-source rate limiting should cap at 5 events/hour from same source"
     );
 }
 
@@ -3173,7 +3174,7 @@ fn bond_append_only_triggers() {
 #[test]
 fn evolution_append_only_triggers() {
     let db = test_db();
-    db.record_evolution_event("xp_gain", 5, Some("builder"), "test", None)
+    db.record_evolution_event("xp_gain", 3, Some("builder"), "test", None)
         .unwrap();
 
     let update = db.conn.execute(
@@ -3196,7 +3197,7 @@ fn chain_integrity_verification_healthy() {
         .unwrap();
     db.record_bond_event_chained("tool_success", 1, "test")
         .unwrap();
-    db.record_evolution_event("xp_gain", 5, Some("ops"), "test", None)
+    db.record_evolution_event("xp_gain", 3, Some("ops"), "test", None)
         .unwrap();
 
     let health = db.verify_event_chains();
@@ -3440,4 +3441,157 @@ fn daemon_lock_not_held_after_release() {
     assert!(db.acquire_daemon_lock(1234, now).unwrap());
     db.release_daemon_lock(1234).unwrap();
     assert!(!db.is_daemon_lock_held());
+}
+
+// ── Tamper-proof validation tests ──
+
+#[test]
+fn evolution_rejects_inflated_xp_delta() {
+    let db = test_db();
+    let result = db.record_evolution_event("xp_gain", 1000, Some("ops"), "test", None);
+    assert!(result.is_err(), "should reject xp_delta > MAX_XP_DELTA");
+    assert!(
+        result.unwrap_err().to_string().contains("invalid xp_delta"),
+        "error should mention invalid xp_delta"
+    );
+}
+
+#[test]
+fn evolution_rejects_negative_xp_delta() {
+    let db = test_db();
+    let result = db.record_evolution_event("xp_gain", -1, Some("ops"), "test", None);
+    assert!(result.is_err(), "should reject negative xp_delta");
+}
+
+#[test]
+fn evolution_rejects_unknown_event_type() {
+    let db = test_db();
+    let result = db.record_evolution_event("fake_type", 0, None, "test", None);
+    assert!(result.is_err(), "should reject unknown event_type");
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid evolution event_type"),
+        "error should mention invalid event_type"
+    );
+}
+
+#[test]
+fn evolution_rejects_nonzero_delta_for_non_xp_types() {
+    let db = test_db();
+    // evolution events must have xp_delta = 0
+    let result = db.record_evolution_event("evolution", 5, None, "test", None);
+    assert!(
+        result.is_err(),
+        "evolution event should reject nonzero xp_delta"
+    );
+    // classification events must have xp_delta = 0
+    let result = db.record_evolution_event("classification", 1, None, "test", None);
+    assert!(
+        result.is_err(),
+        "classification event should reject nonzero xp_delta"
+    );
+}
+
+#[test]
+fn evolution_accepts_valid_xp_deltas() {
+    let db = test_db();
+    // xp_gain with 1, 2, 3 should all succeed (up to source rate limit)
+    for delta in 1..=3 {
+        db.record_evolution_event("xp_gain", delta, Some("ops"), &format!("src{delta}"), None)
+            .unwrap();
+    }
+    // evolution with 0 should succeed
+    db.record_evolution_event("evolution", 0, None, "gate_check", None)
+        .unwrap();
+    let events = db.load_all_evolution_events().unwrap();
+    assert_eq!(events.len(), 4);
+}
+
+#[test]
+fn evolution_source_rate_limiting_at_write_time() {
+    let db = test_db();
+    // Per-source cap is 5/hour
+    for _ in 0..10 {
+        db.record_evolution_event("xp_gain", 1, Some("ops"), "same_source", None)
+            .unwrap();
+    }
+    let events = db.load_all_evolution_events().unwrap();
+    assert_eq!(
+        events.len(),
+        5,
+        "per-source write-time cap should limit to 5 events"
+    );
+}
+
+#[test]
+fn evolution_total_rate_limiting_at_write_time() {
+    let db = test_db();
+    // Total cap is 20/hour. Use unique sources to avoid per-source cap (5).
+    for i in 0..30 {
+        db.record_evolution_event("xp_gain", 1, Some("ops"), &format!("src{i}"), None)
+            .unwrap();
+    }
+    let events = db.load_all_evolution_events().unwrap();
+    // Per-type cap is 15 for xp_gain, and total cap is 20. Per-type (15) kicks in first.
+    assert_eq!(
+        events.len(),
+        15,
+        "per-type cap (15) should kick in before total cap (20)"
+    );
+}
+
+#[test]
+fn vitals_rejects_inflated_deltas() {
+    let db = test_db();
+    let bad_deltas = crate::vitals::StatDeltas {
+        stability: 100,
+        focus: 0,
+        sync: 0,
+        growth: 0,
+        happiness: 0,
+    };
+    let result = db.record_vitals_event("interaction", "test", &bad_deltas, None);
+    assert!(result.is_err(), "should reject inflated deltas");
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("delta validation failed"),
+        "error should mention delta validation"
+    );
+}
+
+#[test]
+fn vitals_rejects_unknown_category() {
+    let db = test_db();
+    let deltas = crate::vitals::StatDeltas::default();
+    let result = db.record_vitals_event("hacked", "test", &deltas, None);
+    assert!(result.is_err(), "should reject unknown category");
+}
+
+#[test]
+fn vitals_accepts_correct_deltas_for_each_category() {
+    let db = test_db();
+    let categories = [
+        "interaction",
+        "success",
+        "failure",
+        "correction",
+        "creation",
+    ];
+    for cat in &categories {
+        let deltas = crate::vitals::deltas_for(match *cat {
+            "interaction" => crate::vitals::EventCategory::Interaction,
+            "success" => crate::vitals::EventCategory::Success,
+            "failure" => crate::vitals::EventCategory::Failure,
+            "correction" => crate::vitals::EventCategory::Correction,
+            "creation" => crate::vitals::EventCategory::Creation,
+            _ => unreachable!(),
+        });
+        db.record_vitals_event(cat, "test", &deltas, None).unwrap();
+    }
+    let events = db.vitals_events_since(0).unwrap();
+    assert_eq!(events.len(), 5, "all 5 valid categories should persist");
 }

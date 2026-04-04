@@ -158,7 +158,7 @@ impl EventCategory {
 }
 
 /// Stat deltas to apply from an event.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct StatDeltas {
     /// Change to stability.
     pub stability: i8,
@@ -293,6 +293,23 @@ pub fn deltas_for(category: EventCategory) -> StatDeltas {
             happiness: 1,
         },
     }
+}
+
+/// Validate that deltas match the expected values for this category.
+/// Returns Err if category is unknown or deltas don't match.
+pub(crate) fn validate_deltas(category: &str, deltas: StatDeltas) -> Result<(), &'static str> {
+    let expected = match category {
+        "interaction" => deltas_for(EventCategory::Interaction),
+        "success" => deltas_for(EventCategory::Success),
+        "failure" => deltas_for(EventCategory::Failure),
+        "correction" => deltas_for(EventCategory::Correction),
+        "creation" => deltas_for(EventCategory::Creation),
+        _ => return Err("unknown vitals category"),
+    };
+    if deltas != expected {
+        return Err("deltas do not match expected values for category");
+    }
+    Ok(())
 }
 
 /// Apply deltas to a mutable state, clamping each stat to 0..=100.
@@ -1274,5 +1291,49 @@ mod tests {
         let hmac2 = compute_event_hmac(VITALS_HMAC_LEGACY, "0", "correction", "test", deltas, 1000);
         assert_eq!(hmac1, hmac2);
         assert!(!hmac1.is_empty());
+    }
+
+    // ── Delta Validation ──
+
+    #[test]
+    fn validate_deltas_accepts_correct() {
+        let categories = [
+            ("interaction", EventCategory::Interaction),
+            ("success", EventCategory::Success),
+            ("failure", EventCategory::Failure),
+            ("correction", EventCategory::Correction),
+            ("creation", EventCategory::Creation),
+        ];
+        for (name, cat) in &categories {
+            let deltas = deltas_for(*cat);
+            assert!(
+                validate_deltas(name, deltas).is_ok(),
+                "should accept correct deltas for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_deltas_rejects_inflated() {
+        let bad = StatDeltas {
+            stability: 100,
+            focus: 0,
+            sync: 0,
+            growth: 0,
+            happiness: 0,
+        };
+        assert_eq!(
+            validate_deltas("interaction", bad),
+            Err("deltas do not match expected values for category")
+        );
+    }
+
+    #[test]
+    fn validate_deltas_rejects_unknown_category() {
+        let deltas = StatDeltas::default();
+        assert_eq!(
+            validate_deltas("hacked", deltas),
+            Err("unknown vitals category")
+        );
     }
 }
