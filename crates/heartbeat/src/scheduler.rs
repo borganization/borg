@@ -447,6 +447,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interval_below_minimum_clamped() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30s".to_string(), // below MIN_INTERVAL_SECS (60)
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (wake_tx, wake_rx) = mpsc::channel(8);
+        let (fire_tx, mut fire_rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // Should still respond to wake (interval gets clamped, not rejected)
+        wake_tx.send(()).await.unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert!(matches!(event, HeartbeatEvent::Fire));
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn interval_empty_string_uses_default() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "".to_string(), // empty — falls back to 1800s
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (wake_tx, wake_rx) = mpsc::channel(8);
+        let (fire_tx, mut fire_rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // Wake should still work
+        wake_tx.send(()).await.unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert!(matches!(event, HeartbeatEvent::Fire));
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn cron_invalid_expression_falls_back() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: Some("not-a-cron-expression".to_string()),
+            channels: Vec::new(),
+        };
+
+        let (wake_tx, wake_rx) = mpsc::channel(8);
+        let (fire_tx, mut fire_rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // Should fall back to interval mode and respond to wake
+        wake_tx.send(()).await.unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
+            .await
+            .expect("timed out — invalid cron should fall back to interval")
+            .expect("channel closed");
+        assert!(matches!(event, HeartbeatEvent::Fire));
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interval_fires_on_schedule() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "60s".to_string(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (_wake_tx, wake_rx) = mpsc::channel(1);
+        let (fire_tx, mut fire_rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // Let the spawned task start and consume the first immediate tick
+        tokio::task::yield_now().await;
+
+        // Advance past one interval (60s) + buffer.
+        // With start_paused, time only advances when we explicitly advance or sleep.
+        tokio::time::advance(std::time::Duration::from_secs(62)).await;
+
+        // Yield to let the spawned task process the tick
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Should receive a Fire event from the interval (no wake needed)
+        match fire_rx.try_recv() {
+            Ok(event) => assert!(matches!(event, HeartbeatEvent::Fire)),
+            Err(_) => panic!("expected Fire event after advancing past interval"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
     async fn multiple_rapid_wakes_dont_block() {
         let config = HeartbeatConfig {
             enabled: true,

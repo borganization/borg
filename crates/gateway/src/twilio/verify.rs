@@ -119,6 +119,36 @@ mod tests {
     }
 
     #[test]
+    fn verify_invalid_base64_signature() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-twilio-signature",
+            HeaderValue::from_static("not-base64!!!"),
+        );
+        let result =
+            verify_twilio_signature(&headers, "https://example.com/wh", "Body=Hi", "token");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("base64") || err_msg.contains("Base64"),
+            "error should mention base64, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn compute_signature_empty_body() {
+        let sig = compute_signature("https://example.com/wh", "", "my-token").unwrap();
+        assert!(
+            !sig.is_empty(),
+            "signature should be non-empty even for empty body"
+        );
+        // Verify it's valid base64
+        base64::engine::general_purpose::STANDARD
+            .decode(&sig)
+            .expect("signature should be valid base64");
+    }
+
+    #[test]
     fn params_sorted_alphabetically() {
         // Ensure param sorting affects signature
         let url = "https://example.com/wh";

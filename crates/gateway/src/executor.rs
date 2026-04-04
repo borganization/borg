@@ -284,6 +284,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verify_malformed_json_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("verify.sh");
+        std::fs::write(&script, "#!/bin/bash\necho '{\"not_valid_key\": 123}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let manifest: ChannelManifest = toml::from_str(
+            "name = \"test\"\ndescription = \"test\"\nruntime = \"bash\"\n\n[scripts]\ninbound = \"echo.sh\"\noutbound = \"out.sh\"\nverify = \"verify.sh\"\n"
+        ).unwrap();
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor.verify("{}", &[]).await.unwrap();
+        assert!(
+            !result,
+            "malformed JSON without 'valid' key should return false"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_unrecognized_string_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("verify.sh");
+        std::fs::write(&script, "#!/bin/bash\necho 'maybe'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let manifest: ChannelManifest = toml::from_str(
+            "name = \"test\"\ndescription = \"test\"\nruntime = \"bash\"\n\n[scripts]\ninbound = \"echo.sh\"\noutbound = \"out.sh\"\nverify = \"verify.sh\"\n"
+        ).unwrap();
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor.verify("{}", &[]).await.unwrap();
+        assert!(!result, "'maybe' is not a recognized affirmative string");
+    }
+
+    #[tokio::test]
+    async fn verify_bare_1_returns_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("verify.sh");
+        std::fs::write(&script, "#!/bin/bash\necho '1'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let manifest: ChannelManifest = toml::from_str(
+            "name = \"test\"\ndescription = \"test\"\nruntime = \"bash\"\n\n[scripts]\ninbound = \"echo.sh\"\noutbound = \"out.sh\"\nverify = \"verify.sh\"\n"
+        ).unwrap();
+        let executor = ChannelExecutor::new(&manifest, dir.path());
+        let result = executor.verify("{}", &[]).await.unwrap();
+        assert!(result, "'1' should be recognized as truthy");
+    }
+
+    #[tokio::test]
     async fn path_traversal_in_script_name_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = bash_channel_manifest("test-chan", "../../../etc/passwd");

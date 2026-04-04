@@ -118,6 +118,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_whitespace_only_body_no_media() {
+        // Body=+++ decodes to spaces in form encoding
+        let body =
+            "MessageSid=SM999&AccountSid=AC123&From=%2B14155551234&To=%2B14155555678&Body=+++";
+        let result = parse_webhook(body);
+        assert!(
+            result.is_err(),
+            "whitespace-only body with no media should fail"
+        );
+    }
+
+    #[test]
+    fn parse_audio_media_extracts_url() {
+        let body = "MessageSid=SM200&AccountSid=AC123&From=%2B14155551234&To=%2B14155555678&Body=&NumMedia=1&MediaUrl0=https%3A%2F%2Fapi.twilio.com%2Faudio.ogg&MediaContentType0=audio%2Fogg";
+        let result = parse_webhook(body).unwrap();
+        assert_eq!(result.message.text, "[Media message]");
+        assert_eq!(
+            result.audio_url.as_deref(),
+            Some("https://api.twilio.com/audio.ogg")
+        );
+        assert_eq!(result.audio_mime.as_deref(), Some("audio/ogg"));
+    }
+
+    #[test]
     fn parse_invalid_body() {
         assert!(parse_webhook("not valid form data %%%").is_err());
     }

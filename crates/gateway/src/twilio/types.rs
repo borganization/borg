@@ -234,6 +234,41 @@ mod tests {
     }
 
     #[test]
+    fn first_media_partial_returns_none() {
+        // Only URL set, no content type — should return None
+        let wh = TwilioWebhook {
+            message_sid: "SM123".into(),
+            account_sid: "AC123".into(),
+            from: "+14155551234".into(),
+            to: "+14155555678".into(),
+            body: "hello".into(),
+            num_media: Some("1".into()),
+            media_url_0: Some("https://api.twilio.com/media/123".into()),
+            media_content_type_0: None,
+        };
+        assert!(
+            wh.first_media().is_none(),
+            "partial media (URL only) should return None"
+        );
+
+        // Only content type set, no URL — should return None
+        let wh2 = TwilioWebhook {
+            message_sid: "SM456".into(),
+            account_sid: "AC123".into(),
+            from: "+14155551234".into(),
+            to: "+14155555678".into(),
+            body: "hello".into(),
+            num_media: Some("1".into()),
+            media_url_0: None,
+            media_content_type_0: Some("image/jpeg".into()),
+        };
+        assert!(
+            wh2.first_media().is_none(),
+            "partial media (content-type only) should return None"
+        );
+    }
+
+    #[test]
     fn deserialize_status_callback_minimal() {
         let body = "MessageSid=SM789&MessageStatus=queued";
         let cb: StatusCallback = serde_urlencoded::from_str(body).unwrap();
