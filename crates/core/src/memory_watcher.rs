@@ -183,18 +183,24 @@ async fn reindex_loop(
                         continue;
                     }
                     let (scope, filename) = resolve_scope_and_filename(&path, &config);
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        let c = config.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = crate::embeddings::embed_memory_file_chunked(
-                                &c, &filename, &content, &scope,
-                            ).await {
-                                debug!("Memory watcher re-embed failed for {filename}: {e}");
-                            } else {
-                                debug!("Memory watcher re-indexed {scope}/{filename}");
+                    let c = config.clone();
+                    let p = path.clone();
+                    tokio::spawn(async move {
+                        let content = match tokio::fs::read_to_string(&p).await {
+                            Ok(c) => c,
+                            Err(e) => {
+                                debug!("Memory watcher failed to read {}: {e}", p.display());
+                                return;
                             }
-                        });
-                    }
+                        };
+                        if let Err(e) = crate::embeddings::embed_memory_file_chunked(
+                            &c, &filename, &content, &scope,
+                        ).await {
+                            debug!("Memory watcher re-embed failed for {filename}: {e}");
+                        } else {
+                            debug!("Memory watcher re-indexed {scope}/{filename}");
+                        }
+                    });
                 }
             }
         }
