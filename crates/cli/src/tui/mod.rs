@@ -8,6 +8,7 @@ mod goodbye;
 mod history;
 mod layout;
 mod markdown;
+pub(crate) mod migrate_popup;
 mod paste_burst;
 mod plan_overlay;
 mod plugins_popup;
@@ -1001,6 +1002,67 @@ async fn run_event_loop(
                 }
                 if !results.is_empty() {
                     app.push_system_message(format!("Skills updated:\n{}", results.join("\n")));
+                }
+            }
+            AppAction::RunMigration { actions } => {
+                for action in actions {
+                    match action {
+                        migrate_popup::MigrateAction::Apply { plan, source_data } => {
+                            let borg_dir = match borg_core::config::Config::data_dir() {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    app.push_system_message(format!("Migration error: {e}"));
+                                    continue;
+                                }
+                            };
+                            match borg_core::migrate::apply::apply_plan(
+                                &plan,
+                                &source_data,
+                                &borg_dir,
+                            ) {
+                                Ok(result) => {
+                                    let mut msg = String::from("Migration complete:");
+                                    if result.config_changes_applied > 0 {
+                                        msg.push_str(&format!(
+                                            "\n  {} config change(s) applied",
+                                            result.config_changes_applied
+                                        ));
+                                    }
+                                    if result.credentials_added > 0 {
+                                        msg.push_str(&format!(
+                                            "\n  {} credential(s) added",
+                                            result.credentials_added
+                                        ));
+                                    }
+                                    if result.memory_files_copied > 0 {
+                                        msg.push_str(&format!(
+                                            "\n  {} memory file(s) copied",
+                                            result.memory_files_copied
+                                        ));
+                                    }
+                                    if result.persona_copied {
+                                        msg.push_str("\n  Persona copied to IDENTITY.md");
+                                    }
+                                    if result.skills_copied > 0 {
+                                        msg.push_str(&format!(
+                                            "\n  {} skill(s) copied",
+                                            result.skills_copied
+                                        ));
+                                    }
+                                    for warning in &result.warnings {
+                                        msg.push_str(&format!("\n  Warning: {warning}"));
+                                    }
+                                    app.push_system_message(msg);
+                                    // Reload config to pick up migrated settings
+                                    app.config =
+                                        borg_core::config::Config::load().unwrap_or_default();
+                                }
+                                Err(e) => {
+                                    app.push_system_message(format!("Migration failed: {e}"));
+                                }
+                            }
+                        }
+                    }
                 }
             }
             AppAction::RestartGateway => {

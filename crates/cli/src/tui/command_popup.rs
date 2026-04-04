@@ -111,6 +111,10 @@ const COMMANDS: &[SlashCommandDef] = &[
         description: "Manage scheduled tasks",
     },
     SlashCommandDef {
+        name: "/migrate",
+        description: "Import from another agent",
+    },
+    SlashCommandDef {
         name: "/restart",
         description: "Restart gateway server",
     },
@@ -368,6 +372,7 @@ mod tests {
             "/load",
             "/plugins",
             "/schedule",
+            "/migrate",
             "/restart",
         ];
         assert_eq!(COMMANDS.len(), expected.len(), "COMMANDS count mismatch");
