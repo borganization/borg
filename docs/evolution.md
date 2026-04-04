@@ -36,16 +36,16 @@ xp_gained = base_xp + (archetype_bonus if action aligns with dominant archetype)
 
 | Action | Base XP | Archetype Bonus |
 |--------|---------|-----------------|
-| Successful tool call | +1 | +2 if archetype-aligned |
-| Creation event (tool, skill, memory, channel) | +3 | +3 if archetype-aligned |
+| Successful tool call | +1 | +1 if archetype-aligned |
+| Creation event (tool, skill, memory, channel) | +2 | +1 if archetype-aligned |
 | Session interaction | +1 | — |
-| Scheduled task success | +2 | +3 if archetype-aligned |
+| Scheduled task success | +2 | +1 if archetype-aligned |
 | Tool failure | 0 | — |
 | Correction detected | 0 | — |
 
 ### Level Curve (WoW-Style)
 
-The goal is **early payoff, then increasingly slower progression** — like WoW leveling. First evolution comes in days, not months. But reaching Lvl.99 in Final Form is a 6-12 month journey.
+The goal is **slow, earned progression** — each level should feel meaningful. Early levels take about a day, late levels take weeks. Reaching Lvl.99 in Final Form is a multi-year journey.
 
 XP required per level scales **per stage** with increasing exponential curves:
 
@@ -53,19 +53,17 @@ XP required per level scales **per stage** with increasing exponential curves:
 xp_for_level(stage, n) = stage_base + floor(n ^ stage_curve)
 ```
 
-| Stage | Base | Curve | Lvl.1 cost | Lvl.50 cost | Lvl.99 cost | Total Lvl.0→99 | Target duration |
-|-------|------|-------|------------|-------------|-------------|-----------------|-----------------|
-| 1 (Base) | 2 | 1.0 | 3 XP | 52 XP | 101 XP | ~5,150 XP | **2-5 days** |
-| 2 (Evolved) | 8 | 1.2 | 9 XP | 96 XP | 209 XP | ~14,500 XP | **~30 days** |
-| 3 (Final) | 20 | 1.5 | 21 XP | 373 XP | 1,005 XP | ~42,000 XP | **6-12 months** |
+| Stage | Base | Curve | Lvl.1 cost | Lvl.50 cost | Lvl.99 cost | Target duration |
+|-------|------|-------|------------|-------------|-------------|-----------------|
+| 1 (Base) | 20 | 1.4 | 21 XP | 259 XP | 642 XP | **months** |
+| 2 (Evolved) | 40 | 1.55 | 41 XP | 469 XP | 1,279 XP | **6-12 months** |
+| 3 (Final) | 80 | 1.8 | 81 XP | 1,223 XP | 3,989 XP | **1-2+ years** |
 
-**Pacing at ~100 XP/day (active user, 2-3 sessions):**
+**Pacing at ~40 XP/day (active user, 2-3 sessions):**
 
-- Stage 1 completes in ~2-5 days (first evolution = quick dopamine hit)
-- Stage 2 completes in ~1 month (second evolution = commitment reward)
-- Stage 3 Lvl.50 at ~3 months, Lvl.99 at ~12 months (endgame grind)
-
-Early levels in every stage are fast — you get immediate feedback on day one of a new stage. Late levels in Stage 3 are the endgame grind that rewards sustained, long-term usage.
+- Level 0: ~0.5 days — Level 10: ~1 day — Level 50: ~6.5 days — Level 90: ~14 days (2 weeks)
+- Progression is slow and deliberate — levels are milestones, not participation trophies
+- Late-stage levels (90+) take 2+ weeks each
 
 ### XP Rate Limiting
 
@@ -73,9 +71,9 @@ To prevent gaming, XP events are rate-limited during replay:
 
 | Limit | Value |
 |-------|-------|
-| Total XP events per hour | 30 |
-| Same source per hour | 10 |
-| Creation events per hour | 5 |
+| Total XP events per hour | 15 |
+| Same source per hour | 5 |
+| Creation events per hour | 3 |
 
 Events exceeding limits are silently ignored during state computation.
 
