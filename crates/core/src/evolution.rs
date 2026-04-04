@@ -252,9 +252,10 @@ pub fn classify_tool_archetype(tool_name: &str, metadata: Option<&str>) -> Optio
     // Direct tool name mapping
     let archetype = match tool_name {
         "apply_patch" | "apply_skill_patch" | "create_channel" => Some(Archetype::Builder),
-        "security_audit" => Some(Archetype::Guardian),
-        "browser" | "search" | "read_pdf" | "memory_search" => Some(Archetype::Analyst),
-        "calendar" | "notion" | "linear" | "manage_tasks" => Some(Archetype::Strategist),
+        "browser" | "search" | "memory_search" => Some(Archetype::Analyst),
+        "calendar" | "notion" | "linear" | "schedule" | "manage_tasks" => {
+            Some(Archetype::Strategist)
+        }
         "gmail" | "outlook" => Some(Archetype::Communicator),
         "write_memory" => Some(Archetype::Creator),
         "run_shell" => classify_shell_command(metadata),
@@ -1105,8 +1106,9 @@ mod tests {
 
     #[test]
     fn classify_guardian_tools() {
+        // Guardian is reached via shell commands with security keywords
         assert_eq!(
-            classify_tool_archetype("security_audit", None),
+            classify_tool_archetype("run_shell", Some("ufw status")),
             Some(Archetype::Guardian)
         );
     }
@@ -1185,7 +1187,7 @@ mod tests {
             ("apply_patch", None, Archetype::Builder),
             ("browser", None, Archetype::Analyst),
             ("telegram_send", None, Archetype::Communicator),
-            ("security_audit", None, Archetype::Guardian),
+            ("run_shell", Some("ufw status"), Archetype::Guardian),
             ("calendar", None, Archetype::Strategist),
             ("write_memory", None, Archetype::Creator),
             // Caretaker, Merchant are primarily classified by user-created tools

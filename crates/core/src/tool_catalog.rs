@@ -16,7 +16,6 @@ pub enum ToolGroup {
     Ui,
     Scheduling,
     Media,
-    Security,
     Integration,
     Agents,
 }
@@ -33,7 +32,6 @@ impl ToolGroup {
             "ui" => Some(Self::Ui),
             "scheduling" => Some(Self::Scheduling),
             "media" => Some(Self::Media),
-            "security" => Some(Self::Security),
             "integration" => Some(Self::Integration),
             "agents" => Some(Self::Agents),
             _ => None,
@@ -51,7 +49,6 @@ impl ToolGroup {
             Self::Ui => "UI",
             Self::Scheduling => "Scheduling",
             Self::Media => "Media",
-            Self::Security => "Security",
             Self::Integration => "Integration",
             Self::Agents => "Agents",
         }
@@ -66,9 +63,8 @@ impl ToolGroup {
             Self::Discovery => &["list"],
             Self::Web => &["web_fetch", "web_search"],
             Self::Ui => &["browser"],
-            Self::Scheduling => &["manage_tasks", "manage_cron"],
-            Self::Media => &["read_pdf", "generate_image"],
-            Self::Security => &["security_audit"],
+            Self::Scheduling => &["schedule"],
+            Self::Media => &["generate_image"],
             Self::Integration => &["gmail", "outlook", "google_calendar", "notion", "linear"],
             Self::Agents => &[
                 "spawn_agent",
@@ -136,7 +132,6 @@ impl ToolProfile {
                 ToolGroup::Ui,
                 ToolGroup::Scheduling,
                 ToolGroup::Media,
-                ToolGroup::Security,
                 ToolGroup::Integration,
                 ToolGroup::Agents,
             ]
@@ -156,7 +151,6 @@ pub const ALL_GROUPS: &[ToolGroup] = &[
     ToolGroup::Ui,
     ToolGroup::Scheduling,
     ToolGroup::Media,
-    ToolGroup::Security,
     ToolGroup::Integration,
     ToolGroup::Agents,
 ];
@@ -168,14 +162,12 @@ pub fn tool_group(name: &str) -> Option<ToolGroup> {
         "apply_patch" | "apply_skill_patch" | "create_channel" | "read_file" | "list_dir" => {
             Some(ToolGroup::Fs)
         }
-        "run_shell" | "run_script" => Some(ToolGroup::Runtime),
-        "manage_scripts" => Some(ToolGroup::Fs),
+        "run_shell" => Some(ToolGroup::Runtime),
         "list" | "list_skills" | "list_channels" | "list_agents" => Some(ToolGroup::Discovery),
         "web_fetch" | "web_search" => Some(ToolGroup::Web),
         "browser" => Some(ToolGroup::Ui),
-        "manage_tasks" | "manage_cron" => Some(ToolGroup::Scheduling),
-        "read_pdf" | "generate_image" => Some(ToolGroup::Media),
-        "security_audit" => Some(ToolGroup::Security),
+        "schedule" | "manage_tasks" | "manage_cron" => Some(ToolGroup::Scheduling),
+        "generate_image" => Some(ToolGroup::Media),
         "gmail" | "outlook" | "google_calendar" | "notion" | "linear" => {
             Some(ToolGroup::Integration)
         }
@@ -198,7 +190,6 @@ mod tests {
         assert!(groups.contains(&ToolGroup::Runtime));
         assert!(groups.contains(&ToolGroup::Web));
         assert!(groups.contains(&ToolGroup::Ui));
-        assert!(groups.contains(&ToolGroup::Security));
         assert!(groups.contains(&ToolGroup::Integration));
         assert!(groups.contains(&ToolGroup::Agents));
     }
@@ -217,7 +208,6 @@ mod tests {
         assert!(!groups.contains(&ToolGroup::Integration));
         assert!(!groups.contains(&ToolGroup::Agents));
         assert!(!groups.contains(&ToolGroup::Ui));
-        assert!(!groups.contains(&ToolGroup::Security));
     }
 
     #[test]
@@ -280,7 +270,6 @@ mod tests {
             ToolGroup::Ui,
             ToolGroup::Scheduling,
             ToolGroup::Media,
-            ToolGroup::Security,
             ToolGroup::Integration,
             ToolGroup::Agents,
         ];
@@ -315,9 +304,9 @@ mod tests {
     }
 
     #[test]
-    fn profile_full_includes_all_11_groups() {
+    fn profile_full_includes_all_10_groups() {
         let groups = ToolProfile::Full.groups();
-        assert_eq!(groups.len(), 11);
+        assert_eq!(groups.len(), 10);
     }
 
     #[test]
@@ -347,9 +336,8 @@ mod tests {
     #[test]
     fn tool_group_singleton_tools() {
         assert_eq!(tool_group("browser"), Some(ToolGroup::Ui));
-        assert_eq!(tool_group("manage_tasks"), Some(ToolGroup::Scheduling));
-        assert_eq!(tool_group("read_pdf"), Some(ToolGroup::Media));
-        assert_eq!(tool_group("security_audit"), Some(ToolGroup::Security));
+        assert_eq!(tool_group("schedule"), Some(ToolGroup::Scheduling));
+        assert_eq!(tool_group("generate_image"), Some(ToolGroup::Media));
     }
 
     #[test]
@@ -363,7 +351,6 @@ mod tests {
             ("ui", ToolGroup::Ui),
             ("scheduling", ToolGroup::Scheduling),
             ("media", ToolGroup::Media),
-            ("security", ToolGroup::Security),
             ("integration", ToolGroup::Integration),
             ("agents", ToolGroup::Agents),
         ];
@@ -384,7 +371,6 @@ mod tests {
             ToolGroup::Ui,
             ToolGroup::Scheduling,
             ToolGroup::Media,
-            ToolGroup::Security,
             ToolGroup::Integration,
             ToolGroup::Agents,
         ];
@@ -406,7 +392,7 @@ mod tests {
 
     #[test]
     fn all_groups_constant_has_all_variants() {
-        assert_eq!(ALL_GROUPS.len(), 11);
+        assert_eq!(ALL_GROUPS.len(), 10);
         assert!(ALL_GROUPS.contains(&ToolGroup::Memory));
         assert!(ALL_GROUPS.contains(&ToolGroup::Fs));
         assert!(ALL_GROUPS.contains(&ToolGroup::Runtime));
@@ -415,7 +401,6 @@ mod tests {
         assert!(ALL_GROUPS.contains(&ToolGroup::Ui));
         assert!(ALL_GROUPS.contains(&ToolGroup::Scheduling));
         assert!(ALL_GROUPS.contains(&ToolGroup::Media));
-        assert!(ALL_GROUPS.contains(&ToolGroup::Security));
         assert!(ALL_GROUPS.contains(&ToolGroup::Integration));
         assert!(ALL_GROUPS.contains(&ToolGroup::Agents));
     }

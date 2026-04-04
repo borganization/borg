@@ -1751,14 +1751,13 @@ Rules:
             }
             "web_fetch" => tool_handlers::handle_web_fetch(&args, &self.config).await,
             "web_search" => tool_handlers::handle_web_search(&args, &self.config).await,
-            "manage_tasks" => tool_handlers::handle_manage_tasks(&args, &self.config),
-            "manage_cron" => tool_handlers::handle_manage_cron(&args, &self.config),
-            "read_pdf" => tool_handlers::handle_read_pdf(&args),
+            "schedule" | "manage_tasks" | "manage_cron" => {
+                tool_handlers::handle_schedule(&args, &self.config)
+            }
             "read_file" => {
                 return tool_handlers::handle_read_file(&args, &self.config);
             }
             "list_dir" => tool_handlers::handle_list_dir(&args, &self.config),
-            "security_audit" => tool_handlers::handle_security_audit(&args, &self.config),
             "browser" => {
                 return tool_handlers::handle_browser(
                     &args,
@@ -1823,11 +1822,6 @@ Rules:
                 }
             }
             "manage_roles" => crate::multi_agent::tools::handle_manage_roles(&args),
-            "manage_scripts" => tool_handlers::handle_manage_scripts(&args, &self.config),
-            "run_script" => tool_handlers::handle_run_script(&args, &self.config).await,
-            "update_plan" => {
-                return tool_handlers::handle_update_plan(&args, event_tx).await;
-            }
             "request_user_input" => {
                 return tool_handlers::handle_request_user_input(&args, event_tx).await;
             }
@@ -2060,8 +2054,7 @@ mod tests {
         assert!(is_mutating_tool("run_shell"));
         assert!(is_mutating_tool("write_memory"));
         assert!(is_mutating_tool("browser"));
-        assert!(is_mutating_tool("manage_tasks"));
-        assert!(is_mutating_tool("manage_cron"));
+        assert!(is_mutating_tool("schedule"));
         assert!(is_mutating_tool("generate_image"));
     }
 
@@ -2073,10 +2066,8 @@ mod tests {
         assert!(!is_mutating_tool("list"));
         assert!(!is_mutating_tool("read_memory"));
         assert!(!is_mutating_tool("memory_search"));
-        assert!(!is_mutating_tool("read_pdf"));
         assert!(!is_mutating_tool("web_fetch"));
         assert!(!is_mutating_tool("web_search"));
-        assert!(!is_mutating_tool("security_audit"));
     }
 
     #[test]
@@ -2135,11 +2126,6 @@ mod tests {
     }
 
     // -- update_plan tool in plan mode --
-
-    #[test]
-    fn update_plan_is_non_mutating() {
-        assert!(!is_mutating_tool("update_plan"));
-    }
 
     #[test]
     fn request_user_input_is_mutating() {
@@ -2277,21 +2263,15 @@ fn is_mutating_tool(name: &str) -> bool {
             | "list_agents"
             | "read_memory"
             | "memory_search"
-            | "read_pdf"
             | "web_fetch"
             | "web_search"
-            | "security_audit"
-            | "update_plan"
     )
 }
 
 fn classify_action(tool_name: &str) -> ActionType {
     match tool_name {
         "run_shell" => ActionType::ShellCommand,
-        "apply_patch" | "apply_skill_patch" | "create_channel" | "manage_scripts" => {
-            ActionType::FileWrite
-        }
-        "run_script" => ActionType::ShellCommand,
+        "apply_patch" | "apply_skill_patch" | "create_channel" => ActionType::FileWrite,
         "write_memory" => ActionType::MemoryWrite,
         "memory_search" | "read_memory" => ActionType::ToolCall,
         "web_fetch" | "web_search" | "browser" | "text_to_speech" | "generate_image" => {
