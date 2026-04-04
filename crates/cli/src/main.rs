@@ -128,7 +128,10 @@ enum Commands {
     /// Set the agent back to available mode (stops auto-replying)
     Available,
     /// Migrate settings from Hermes Agent or OpenClaw
-    Migrate,
+    Migrate {
+        #[command(subcommand)]
+        action: Option<MigrateSubcommand>,
+    },
     /// Update borg to the latest release
     Update {
         /// Install latest pre-release/dev build instead of stable
@@ -140,6 +143,14 @@ enum Commands {
     },
     /// Permanently delete all Borg data and uninstall the service
     Uninstall,
+}
+
+#[derive(Subcommand)]
+enum MigrateSubcommand {
+    /// Migrate from Hermes Agent (~/.hermes/)
+    Hermes,
+    /// Migrate from OpenClaw (~/.openclaw/)
+    Claw,
 }
 
 #[derive(Subcommand)]
@@ -477,9 +488,80 @@ async fn main() -> Result<()> {
         Some(Commands::Wake) => run_wake().await?,
         Some(Commands::Away { message }) => run_away(message).await?,
         Some(Commands::Available) => run_available().await?,
-        Some(Commands::Migrate) => migrate_tui::run()?,
+        Some(Commands::Migrate { action }) => match action {
+            None => migrate_tui::run()?,
+            Some(MigrateSubcommand::Hermes) => {
+                run_migrate_direct(borg_core::migrate::MigrationSource::Hermes)?
+            }
+            Some(MigrateSubcommand::Claw) => {
+                run_migrate_direct(borg_core::migrate::MigrationSource::OpenClaw)?
+            }
+        },
         Some(Commands::Update { dev, check }) => run_update(dev, check).await?,
         Some(Commands::Uninstall) => run_uninstall()?,
+    }
+
+    Ok(())
+}
+
+fn run_migrate_direct(source: borg_core::migrate::MigrationSource) -> Result<()> {
+    use borg_core::migrate::{self, MigrationCategories};
+
+    if !source.is_installed() {
+        anyhow::bail!(
+            "{} not found at {}",
+            source.label(),
+            source.data_dir().display()
+        );
+    }
+
+    let categories = MigrationCategories::default();
+    let data = migrate::parse_source(source, &categories)?;
+    let config = borg_core::config::Config::load().unwrap_or_default();
+    let borg_dir = borg_core::config::Config::data_dir()?;
+    let plan = migrate::plan::build_plan(source, &data, &config, &borg_dir);
+
+    if plan.is_empty() {
+        eprintln!("Nothing to migrate from {}.", source.label());
+        return Ok(());
+    }
+
+    eprintln!("Migration plan from {}:", source.label());
+    for line in plan.summary_lines() {
+        eprintln!("  {line}");
+    }
+    eprintln!();
+
+    eprint!("Apply migration? [y/N] ");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    if !input.trim().eq_ignore_ascii_case("y") {
+        eprintln!("Cancelled.");
+        return Ok(());
+    }
+
+    let result = migrate::apply::apply_plan(&plan, &data, &borg_dir)?;
+    eprintln!("Migration complete:");
+    if result.config_changes_applied > 0 {
+        eprintln!(
+            "  {} config change(s) applied",
+            result.config_changes_applied
+        );
+    }
+    if result.credentials_added > 0 {
+        eprintln!("  {} credential(s) added", result.credentials_added);
+    }
+    if result.memory_files_copied > 0 {
+        eprintln!("  {} memory file(s) copied", result.memory_files_copied);
+    }
+    if result.persona_copied {
+        eprintln!("  Persona copied to IDENTITY.md");
+    }
+    if result.skills_copied > 0 {
+        eprintln!("  {} skill(s) copied", result.skills_copied);
+    }
+    for warning in &result.warnings {
+        eprintln!("  Warning: {warning}");
     }
 
     Ok(())
