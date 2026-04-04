@@ -338,6 +338,21 @@ impl Database {
         Ok(())
     }
 
+    /// Check if a daemon holds a fresh (non-stale) lock.
+    /// Returns true if another process holds the lock and its heartbeat is within 300s.
+    pub fn is_daemon_lock_held(&self) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        self.conn
+            .query_row(
+                "SELECT heartbeat_at FROM daemon_lock WHERE id = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+            .map(|heartbeat_at| now - heartbeat_at <= 300)
+            .unwrap_or(false)
+    }
+
     /// Release the daemon lock on shutdown.
     pub fn release_daemon_lock(&self, pid: u32) -> Result<()> {
         self.conn.execute(

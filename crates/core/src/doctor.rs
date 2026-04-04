@@ -123,7 +123,7 @@ pub struct DiagnosticRunner {
     step: usize,
 }
 
-const STEP_COUNT: usize = 15;
+const STEP_COUNT: usize = 16;
 
 impl DiagnosticRunner {
     pub fn new() -> Self {
@@ -142,13 +142,14 @@ impl DiagnosticRunner {
             6 => Some("Embeddings"),
             7 => Some("Data"),
             8 => Some("Gateway"),
-            9 => Some("Budget"),
-            10 => Some("Plugins"),
-            11 => Some("Browser"),
-            12 => Some("Agents"),
-            13 => Some("Security"),
-            14 if config.security.host_audit => Some("Host Audit"),
-            14 => None,
+            9 => Some("Heartbeat"),
+            10 => Some("Budget"),
+            11 => Some("Plugins"),
+            12 => Some("Browser"),
+            13 => Some("Agents"),
+            14 => Some("Security"),
+            15 if config.security.host_audit => Some("Host Audit"),
+            15 => None,
             _ => None,
         }
     }
@@ -197,26 +198,30 @@ impl DiagnosticRunner {
                 "Gateway"
             }
             9 => {
+                check_heartbeat(config, &mut checks);
+                "Heartbeat"
+            }
+            10 => {
                 check_budget(config, &mut checks);
                 "Budget"
             }
-            10 => {
+            11 => {
                 check_plugins(&mut checks);
                 "Plugins"
             }
-            11 => {
+            12 => {
                 check_browser(config, &mut checks);
                 "Browser"
             }
-            12 => {
+            13 => {
                 check_agents(config, &mut checks);
                 "Agents"
             }
-            13 => {
+            14 => {
                 check_config_security(config, &mut checks);
                 "Security"
             }
-            14 => {
+            15 => {
                 if config.security.host_audit {
                     crate::host_audit::run_host_security_checks(&mut checks);
                     self.step += 1;
@@ -609,6 +614,118 @@ fn check_gateway(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
                 "Gateway",
                 "channels directory",
                 format!("{e}"),
+            ));
+        }
+    }
+}
+
+/// Format a unix timestamp as a human-readable relative time string.
+pub fn format_relative_time(timestamp: i64) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let delta = now - timestamp;
+    if delta < 0 {
+        return "just now".to_string();
+    }
+    let secs = delta as u64;
+    if secs < 60 {
+        if secs == 1 {
+            "1 second ago".to_string()
+        } else {
+            format!("{secs} seconds ago")
+        }
+    } else if secs < 3600 {
+        let mins = secs / 60;
+        if mins == 1 {
+            "1 minute ago".to_string()
+        } else {
+            format!("{mins} minutes ago")
+        }
+    } else if secs < 86400 {
+        let hours = secs / 3600;
+        if hours == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{hours} hours ago")
+        }
+    } else {
+        let days = secs / 86400;
+        if days == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{days} days ago")
+        }
+    }
+}
+
+fn check_heartbeat(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
+    checks.push(DiagnosticCheck::pass(
+        "Heartbeat",
+        format!("interval: {}", config.heartbeat.interval),
+    ));
+
+    // Check last heartbeat from activity log
+    match crate::db::Database::open() {
+        Ok(db) => {
+            match db.query_activity(1, Some("info"), Some("heartbeat")) {
+                Ok(entries) if !entries.is_empty() => {
+                    let last = &entries[0];
+                    let age_secs = chrono::Utc::now().timestamp() - last.created_at;
+
+                    // Stale threshold: 2x configured interval (default 1h for 30m interval)
+                    let interval_secs = crate::tasks::parse_interval(&config.heartbeat.interval)
+                        .unwrap_or(std::time::Duration::from_secs(1800))
+                        .as_secs() as i64;
+                    let stale_threshold = interval_secs * 2;
+
+                    let relative = format_relative_time(last.created_at);
+                    if age_secs <= stale_threshold {
+                        checks.push(DiagnosticCheck::pass(
+                            "Heartbeat",
+                            format!("last heartbeat: {relative}"),
+                        ));
+                    } else {
+                        checks.push(DiagnosticCheck::warn(
+                            "Heartbeat",
+                            "last heartbeat",
+                            format!("{relative} — may not be running"),
+                        ));
+                    }
+                }
+                Ok(_) => {
+                    checks.push(DiagnosticCheck::warn(
+                        "Heartbeat",
+                        "last heartbeat",
+                        "no heartbeat activity recorded",
+                    ));
+                }
+                Err(e) => {
+                    checks.push(DiagnosticCheck::fail(
+                        "Heartbeat",
+                        "activity query",
+                        format!("{e}"),
+                    ));
+                }
+            }
+
+            // Check if daemon is running (heartbeat runs in daemon or TUI)
+            if db.is_daemon_lock_held() {
+                checks.push(DiagnosticCheck::pass(
+                    "Heartbeat",
+                    "daemon is running (heartbeat active)".to_string(),
+                ));
+            } else {
+                checks.push(DiagnosticCheck::warn(
+                    "Heartbeat",
+                    "daemon status",
+                    "daemon not running — heartbeat only active during TUI sessions",
+                ));
+            }
+        }
+        Err(e) => {
+            checks.push(DiagnosticCheck::fail(
+                "Heartbeat",
+                "database",
+                format!("cannot check heartbeat status: {e}"),
             ));
         }
     }
@@ -1267,5 +1384,57 @@ mod tests {
         let categories: std::collections::HashSet<&str> =
             report.checks.iter().map(|c| c.category).collect();
         assert!(categories.contains("Security"));
+    }
+
+    #[test]
+    fn format_relative_time_seconds() {
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(format_relative_time(now - 30), "30 seconds ago");
+        assert_eq!(format_relative_time(now - 1), "1 second ago");
+    }
+
+    #[test]
+    fn format_relative_time_minutes() {
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(format_relative_time(now - 60), "1 minute ago");
+        assert_eq!(format_relative_time(now - 120), "2 minutes ago");
+        assert_eq!(format_relative_time(now - 1800), "30 minutes ago");
+    }
+
+    #[test]
+    fn format_relative_time_hours() {
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(format_relative_time(now - 3600), "1 hour ago");
+        assert_eq!(format_relative_time(now - 7200), "2 hours ago");
+    }
+
+    #[test]
+    fn format_relative_time_days() {
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(format_relative_time(now - 86400), "1 day ago");
+        assert_eq!(format_relative_time(now - 172800), "2 days ago");
+    }
+
+    #[test]
+    fn format_relative_time_future() {
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(format_relative_time(now + 100), "just now");
+    }
+
+    #[test]
+    fn run_diagnostics_includes_heartbeat_category() {
+        let config = Config::default();
+        let report = run_diagnostics(&config);
+        let categories: std::collections::HashSet<&str> =
+            report.checks.iter().map(|c| c.category).collect();
+        assert!(categories.contains("Heartbeat"));
+    }
+
+    #[test]
+    fn heartbeat_check_shows_interval() {
+        let config = Config::default();
+        let mut checks = Vec::new();
+        check_heartbeat(&config, &mut checks);
+        assert!(checks.iter().any(|c| c.name.contains("interval: 30m")));
     }
 }

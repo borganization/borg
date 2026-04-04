@@ -889,7 +889,7 @@ async fn wake_handler(
         }
         None => (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(serde_json::json!({"error": "heartbeat not enabled"})),
+            axum::Json(serde_json::json!({"error": "heartbeat wake channel not available"})),
         ),
     }
 }

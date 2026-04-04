@@ -15,7 +15,6 @@ The heartbeat system enables proactive check-ins -- the agent can reach out to y
 
 ```toml
 [heartbeat]
-enabled = false               # must be explicitly enabled
 interval = "30m"              # check-in interval
 cron = "0 */30 * * * *"       # optional cron expression (overrides interval)
 quiet_hours_start = "00:00"   # stop heartbeats at this time
