@@ -1,6 +1,6 @@
 # Patch DSL
 
-Borg uses a custom patch DSL for creating, modifying, and deleting files. The agent uses this via four built-in tools: `apply_patch`, `create_tool`, `apply_skill_patch`, and `create_channel`.
+Borg uses a custom patch DSL for creating, modifying, and deleting files. The agent uses this via built-in tools: `apply_patch`, `apply_skill_patch`, and `create_channel`.
 
 ## Format
 
@@ -21,15 +21,13 @@ Creates a new file with the given contents:
 
 ```
 *** Begin Patch
-*** Add File: my-tool/tool.toml
-+name = "my-tool"
-+description = "Does something"
-+runtime = "python"
-+entrypoint = "main.py"
-*** Add File: my-tool/main.py
+*** Add File: src/greeting.py
 +import json, sys
 +args = json.loads(sys.stdin.read())
 +print(f"Hello, {args['name']}!")
+*** Add File: src/config.toml
++name = "greeting"
++description = "A simple greeting script"
 *** End Patch
 ```
 
@@ -91,15 +89,15 @@ A single patch can combine add, update, move, and delete operations:
 
 ```
 *** Begin Patch
-*** Add File: new-tool/tool.toml
-+name = "new-tool"
-+description = "A new tool"
-*** Update File: existing-tool/main.py
+*** Add File: src/new_module.py
++import json, sys
++print("new module")
+*** Update File: src/existing.py
 @@
  import json, sys
 -print("old version")
 +print("new version")
-*** Delete File: deprecated-tool/main.py
+*** Delete File: src/deprecated.py
 *** End Patch
 ```
 
@@ -110,7 +108,6 @@ Each patch tool operates on a different base directory:
 | Tool | Base Directory | Description |
 |------|---------------|-------------|
 | `apply_patch` | `$CWD` (current working directory) | General-purpose file operations |
-| `create_tool` | `~/.borg/tools/` | Create/modify user tools |
 | `apply_skill_patch` | `~/.borg/skills/` | Create/modify user skills |
 | `create_channel` | `~/.borg/channels/` | Create/modify channel integrations |
 

@@ -43,7 +43,7 @@ quiet_hours_end = "06:00"              # resume heartbeats after this time
 # channels = ["telegram"]             # deliver heartbeat to channels (empty = TUI only)
 
 [tools]
-default_timeout_ms = 30000             # subprocess timeout for user tools
+default_timeout_ms = 30000             # subprocess timeout for scripts
 
 [tools.policy]
 profile = "full"                       # tool profile: minimal | coding | messaging | full
@@ -52,7 +52,7 @@ deny = []                              # tools/groups to deny
 subagent_deny = ["manage_tasks", "security_audit", "browser"]  # tools denied to sub-agents
 
 [sandbox]
-enabled = true                         # enable sandboxing for user tools
+enabled = true                         # enable sandboxing for scripts
 mode = "strict"                        # sandbox mode
 
 [memory]
@@ -323,7 +323,7 @@ Quiet hours use the timezone from `[user] timezone`. See [Heartbeat](heartbeat.m
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `enabled` | `true` | Whether user tools run inside a sandbox |
+| `enabled` | `true` | Whether scripts run inside a sandbox |
 | `mode` | `"strict"` | Sandbox strictness level |
 
 See [Sandboxing](sandboxing.md) for how sandbox policies work.

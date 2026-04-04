@@ -48,10 +48,6 @@ const COMMANDS: &[SlashCommandDef] = &[
     },
     // Context
     SlashCommandDef {
-        name: "/tools",
-        description: "List installed tools",
-    },
-    SlashCommandDef {
         name: "/memory",
         description: "Show memory context",
     },
@@ -357,7 +353,6 @@ mod tests {
             "/compact",
             "/clear",
             "/undo",
-            "/tools",
             "/memory",
             "/skills",
             "/history",

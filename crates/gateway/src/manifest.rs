@@ -53,7 +53,26 @@ impl Default for ScriptsSection {
     }
 }
 
-pub use borg_tools::manifest::SandboxSection;
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SandboxSection {
+    #[serde(default)]
+    pub network: bool,
+    #[serde(default)]
+    pub fs_read: Vec<String>,
+    #[serde(default)]
+    pub fs_write: Vec<String>,
+}
+
+impl SandboxSection {
+    pub fn to_policy(&self) -> borg_sandbox::policy::SandboxPolicy {
+        borg_sandbox::policy::SandboxPolicy {
+            network: self.network,
+            fs_read: self.fs_read.clone(),
+            fs_write: self.fs_write.clone(),
+            ..Default::default()
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AuthSection {

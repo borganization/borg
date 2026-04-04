@@ -469,7 +469,6 @@ dependencies = [
  "base64",
  "borg-apply-patch",
  "borg-sandbox",
- "borg-tools",
  "chromiumoxide",
  "chrono",
  "chrono-tz",
@@ -520,7 +519,6 @@ dependencies = [
  "base64",
  "borg-core",
  "borg-sandbox",
- "borg-tools",
  "chrono",
  "dirs",
  "ed25519-dalek",
@@ -585,26 +583,9 @@ dependencies = [
  "anyhow",
  "dirs",
  "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "which 7.0.3",
-]
-
-[[package]]
-name = "borg-tools"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "borg-sandbox",
- "dirs",
- "serde",
- "serde_json",
- "strsim",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "toml",
  "tracing",
  "which 7.0.3",
 ]

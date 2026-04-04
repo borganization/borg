@@ -13,7 +13,7 @@ pub const BUILTIN_ROLES: &[(&str, &str, f32, &[&str])] = &[
         "coder",
         "Code writing and modification. Use this role for tasks that require creating or modifying code files.",
         0.2,
-        &["run_shell", "apply_patch", "create_tool", "read_memory"],
+        &["run_shell", "apply_patch", "read_memory"],
     ),
     (
         "writer",

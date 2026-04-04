@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 borg-core = { path = "../core" }
-borg-tools = { path = "../tools" }
 borg-sandbox = { path = "../sandbox" }
 tokio = { workspace = true }
 serde = { workspace = true }

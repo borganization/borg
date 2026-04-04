@@ -1,6 +1,6 @@
 # Sandboxing
 
-User-created tools run inside a platform-specific sandbox. This isolates tool execution from the host system, limiting filesystem access and network capabilities.
+Scripts and channel integrations run inside a platform-specific sandbox. This isolates execution from the host system, limiting filesystem access and network capabilities.
 
 ## Overview
 
@@ -16,18 +16,16 @@ enabled = true
 mode = "strict"
 ```
 
-## Per-tool sandbox policy
+## Per-script sandbox policy
 
-Each tool defines its sandbox permissions in `tool.toml`:
+Each script or channel defines its sandbox permissions:
 
 ```toml
 [sandbox]
 network = false           # deny network access by default
-fs_read = ["/etc/ssl"]    # additional paths the tool can read
-fs_write = ["/tmp"]       # paths the tool can write to
+fs_read = ["/etc/ssl"]    # additional paths the script can read
+fs_write = ["/tmp"]       # paths the script can write to
 ```
-
-The tool always has read access to its own directory (`~/.borg/tools/<name>/`).
 
 ### Policy fields
 

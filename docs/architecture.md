@@ -70,17 +70,9 @@ A proactive scheduler that runs as a separate tokio task. Fires at a configured 
 
 Key file: `scheduler.rs`
 
-### `tools`
-
-Manages user-created tools:
-
-- **Manifest** (`manifest.rs`) — parses `tool.toml` files and converts parameter definitions to JSON Schema.
-- **Registry** (`registry.rs`) — scans `~/.borg/tools/`, loads manifests, and provides tool definitions to the agent.
-- **Executor** (`executor.rs`) — resolves the runtime binary (python3, node, deno, bash), wraps the command with sandbox policy, and runs the subprocess with JSON args on stdin.
-
 ### `sandbox`
 
-Platform-specific sandboxing for user tools:
+Platform-specific sandboxing and script execution:
 
 - **Policy** (`policy.rs`) — `SandboxPolicy` struct with `network`, `fs_read`, `fs_write`, `deny_read`, `deny_write` fields. Automatic `~/.borg/` protection and blocked path filtering.
 - **Seatbelt** (`seatbelt.rs`) — generates macOS `sandbox-exec` profiles (deny-all default with explicit allows).
@@ -119,7 +111,7 @@ Features: per-channel agent routing via bindings, rate limiting, auto-reply/away
 Plugin marketplace for one-click installation of channel and tool integrations:
 
 - **Catalog** (`catalog.rs`) — plugin registry with all messaging, email, and productivity integrations. Native plugins require only credentials; non-native plugins use embedded template files.
-- **Installer** (`installer.rs`) — installs templates to `~/.borg/channels/` or `~/.borg/tools/`.
+- **Installer** (`installer.rs`) — installs templates to `~/.borg/channels/`.
 - **Verifier** (`verifier.rs`) — file integrity checking for installed plugins.
 - **Keychain** (`keychain.rs`) — platform-specific credential storage helpers.
 
@@ -169,7 +161,7 @@ send_message(user_input)
     │
     ▼
 build system prompt
-build tool definitions (built-in + user tools + conditional tools, filtered by tool policy)
+build tool definitions (built-in + conditional tools, filtered by tool policy)
     │
     ▼
 stream LLM response ──────────────────┐
