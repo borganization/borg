@@ -1,6 +1,9 @@
 use crate::policy::SandboxPolicy;
 use std::path::Path;
 
+/// Standard system paths containing binaries that sandboxed scripts may invoke.
+const STANDARD_EXEC_PATHS: &[&str] = &["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
+
 /// Validate that a path is safe for interpolation into a Seatbelt profile.
 /// Rejects paths containing characters that could inject arbitrary Seatbelt rules.
 fn validate_seatbelt_path(path: &str) -> Result<(), String> {
@@ -79,10 +82,9 @@ pub fn generate_profile(
         }
 
         // Allow standard system binaries that scripts may invoke (cat, grep, curl, etc.)
-        profile.push_str("(allow process-exec (subpath \"/bin\"))\n");
-        profile.push_str("(allow process-exec (subpath \"/usr/bin\"))\n");
-        profile.push_str("(allow process-exec (subpath \"/usr/local/bin\"))\n");
-        profile.push_str("(allow process-exec (subpath \"/opt/homebrew/bin\"))\n");
+        for path in STANDARD_EXEC_PATHS {
+            profile.push_str(&format!("(allow process-exec (subpath \"{path}\"))\n"));
+        }
     } else {
         profile.push_str("(allow process-exec)\n");
     }

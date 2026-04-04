@@ -618,7 +618,6 @@ dependencies = [
  "dirs",
  "serde",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "which 7.0.3",

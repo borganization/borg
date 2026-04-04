@@ -5,6 +5,8 @@
 
 /// Auto-reply state management for channel conversations.
 pub mod auto_reply;
+/// Channel client initialization helpers.
+mod channel_init;
 /// Trait abstraction for native channel implementations.
 pub mod channel_trait;
 /// Message chunking for platforms with length limits.
