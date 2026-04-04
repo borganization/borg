@@ -87,19 +87,30 @@ const SOURCE_RATE_LIMIT: u32 = 5;
 /// The 10 archetypes that classify usage patterns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Archetype {
+    /// Infrastructure and deployment operations.
     Ops,
+    /// Software building and compilation.
     Builder,
+    /// Data analysis and querying.
     Analyst,
+    /// Messaging and email communications.
     Communicator,
+    /// Security auditing and hardening.
     Guardian,
+    /// Planning and decision-making.
     Strategist,
+    /// Content and artifact creation.
     Creator,
+    /// Maintenance and nurturing tasks.
     Caretaker,
+    /// Commerce and transaction workflows.
     Merchant,
+    /// Homelab and hardware tinkering.
     Tinkerer,
 }
 
 impl Archetype {
+    /// All archetype variants in definition order.
     pub const ALL: [Archetype; 10] = [
         Archetype::Ops,
         Archetype::Builder,
@@ -113,6 +124,7 @@ impl Archetype {
         Archetype::Tinkerer,
     ];
 
+    /// Parse an archetype name (case-insensitive) into the enum variant.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "ops" => Some(Self::Ops),
@@ -150,12 +162,16 @@ impl fmt::Display for Archetype {
 /// Three permanent evolution stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
+    /// Initial stage (Stage 1).
     Base,
+    /// Intermediate stage after first evolution (Stage 2).
     Evolved,
+    /// Maximum stage after second evolution (Stage 3).
     Final,
 }
 
 impl Stage {
+    /// Returns the 1-based stage number.
     pub fn number(&self) -> u8 {
         match self {
             Self::Base => 1,
@@ -164,6 +180,7 @@ impl Stage {
         }
     }
 
+    /// Parse a stage name (case-insensitive) into the enum variant.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "base" => Some(Self::Base),
@@ -187,29 +204,48 @@ impl fmt::Display for Stage {
 /// A recorded event from the evolution ledger.
 #[derive(Debug, Clone)]
 pub struct EvolutionEvent {
+    /// Auto-incremented row ID.
     pub id: i64,
+    /// Event type (xp_gain, evolution, classification, archetype_shift).
     pub event_type: String,
+    /// XP amount gained or lost.
     pub xp_delta: i32,
+    /// Archetype associated with this event, if any.
     pub archetype: Option<String>,
+    /// What triggered this event (tool name, hook, etc.).
     pub source: String,
+    /// Optional JSON metadata blob.
     pub metadata_json: Option<String>,
+    /// Unix timestamp of event creation.
     pub created_at: i64,
+    /// HMAC for this event in the chain.
     pub hmac: String,
+    /// HMAC of the previous event in the chain.
     pub prev_hmac: String,
 }
 
 /// Computed evolution state (derived from replaying events).
 #[derive(Debug, Clone)]
 pub struct EvolutionState {
+    /// Current evolution stage.
     pub stage: Stage,
+    /// Current level within the stage (0..=99).
     pub level: u8,
+    /// Total XP accumulated in the current stage.
     pub total_xp: u32,
+    /// XP remaining to reach the next level.
     pub xp_to_next_level: u32,
+    /// Archetype with the highest accumulated score.
     pub dominant_archetype: Option<Archetype>,
+    /// LLM-generated evolution name (set on stage transition).
     pub evolution_name: Option<String>,
+    /// LLM-generated evolution description (set on stage transition).
     pub evolution_description: Option<String>,
+    /// Accumulated XP score per archetype.
     pub archetype_scores: HashMap<Archetype, u32>,
+    /// Number of verified events that were accepted during replay.
     pub total_events: u32,
+    /// Whether the HMAC chain is intact across all replayed events.
     pub chain_valid: bool,
 }
 
@@ -852,10 +888,12 @@ fn capitalize_first(s: &str) -> String {
 
 /// Lifecycle hook that passively records evolution XP events and injects context.
 pub struct EvolutionHook {
+    /// Database handle wrapped in a Mutex for thread-safety.
     db: std::sync::Mutex<Database>,
 }
 
 impl EvolutionHook {
+    /// Create a new evolution hook, opening a database connection.
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
             db: std::sync::Mutex::new(Database::open()?),

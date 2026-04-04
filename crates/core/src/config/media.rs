@@ -63,6 +63,7 @@ pub enum CredentialValue {
 }
 
 impl CredentialValue {
+    /// Resolve the credential to its secret string value.
     pub fn resolve(&self) -> Result<String> {
         match self {
             CredentialValue::EnvVar(var) => {
@@ -73,19 +74,28 @@ impl CredentialValue {
     }
 }
 
+/// Helper for serde default that returns `true`.
 pub fn default_true() -> bool {
     true
 }
 
+/// Configuration for the headless Chrome browser automation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserConfig {
+    /// Whether browser automation is enabled.
     pub enabled: bool,
+    /// Run Chrome in headless mode (no visible window).
     pub headless: bool,
+    /// Optional path to the Chrome executable.
     pub executable: Option<String>,
+    /// Chrome DevTools Protocol port.
     pub cdp_port: u16,
+    /// Disable Chrome's internal sandbox (needed in some containers).
     pub no_sandbox: bool,
+    /// Default command timeout in milliseconds.
     pub timeout_ms: u64,
+    /// Browser launch timeout in milliseconds.
     pub startup_timeout_ms: u64,
     /// Max console log entries to buffer (default: 500).
     pub console_buffer_size: usize,
@@ -138,6 +148,7 @@ pub struct AudioModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
+    /// Whether audio transcription is enabled.
     pub enabled: bool,
     /// Ordered fallback chain of transcription providers.
     #[serde(default)]
@@ -192,6 +203,7 @@ pub struct TtsModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TtsConfig {
+    /// Whether text-to-speech is enabled.
     pub enabled: bool,
     /// Ordered fallback chain of TTS providers.
     #[serde(default)]
@@ -272,9 +284,11 @@ impl Default for ImageGenConfig {
     }
 }
 
+/// Configuration for the agent self-evolution system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EvolutionConfig {
+    /// Whether agent self-evolution is enabled.
     pub enabled: bool,
 }
 
@@ -284,10 +298,13 @@ impl Default for EvolutionConfig {
     }
 }
 
+/// Configuration for tool execution behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolsConfig {
+    /// Default timeout in milliseconds for tool execution.
     pub default_timeout_ms: u64,
+    /// Tool approval/deny policy configuration.
     #[serde(default)]
     pub policy: super::security::ToolPolicyConfig,
 }
@@ -301,10 +318,13 @@ impl Default for ToolsConfig {
     }
 }
 
+/// Configuration for the memory system (loading, embeddings, scoping).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
+    /// Maximum tokens allocated for memory context in the system prompt.
     pub max_context_tokens: usize,
+    /// Embedding and semantic search configuration.
     #[serde(default)]
     pub embeddings: EmbeddingsConfig,
     /// When set, load memory from ~/.borg/memory/scopes/{scope}/ instead of ~/.borg/memory/.
@@ -335,14 +355,21 @@ impl Default for MemoryConfig {
     }
 }
 
+/// Configuration for embedding-based semantic memory search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmbeddingsConfig {
+    /// Whether semantic search via embeddings is enabled.
     pub enabled: bool,
+    /// Override embedding provider (auto-detected from API keys if omitted).
     pub provider: Option<String>,
+    /// Override embedding model name.
     pub model: Option<String>,
+    /// Override embedding vector dimension.
     pub dimension: Option<usize>,
+    /// Override API key env var for the embedding provider.
     pub api_key_env: Option<String>,
+    /// Weight for recency vs similarity (0.0 = pure similarity, 1.0 = pure recency).
     pub recency_weight: f32,
     /// Target token size per chunk when generating chunked embeddings.
     pub chunk_size_tokens: usize,
@@ -377,10 +404,13 @@ impl Default for EmbeddingsConfig {
     }
 }
 
+/// Per-skill override configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillEntryConfig {
+    /// Whether this skill is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Extra environment variables injected when this skill runs.
     #[serde(default)]
     pub env: HashMap<String, String>,
 }
@@ -394,11 +424,15 @@ impl Default for SkillEntryConfig {
     }
 }
 
+/// Configuration for the skills system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SkillsConfig {
+    /// Whether the skills system is enabled.
     pub enabled: bool,
+    /// Maximum tokens allocated for skill instructions in the system prompt.
     pub max_context_tokens: usize,
+    /// Per-skill overrides keyed by skill name.
     #[serde(default)]
     pub entries: HashMap<String, SkillEntryConfig>,
 }
@@ -413,15 +447,23 @@ impl Default for SkillsConfig {
     }
 }
 
+/// Configuration for conversation behavior and context management.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ConversationConfig {
+    /// Maximum tokens retained in conversation history before compaction.
     pub max_history_tokens: usize,
+    /// Maximum agent loop iterations per user turn.
     pub max_iterations: u32,
+    /// Whether to display LLM thinking/reasoning tokens.
     pub show_thinking: bool,
+    /// Maximum tokens for a single tool output before truncation.
     pub tool_output_max_tokens: usize,
+    /// Tokens reserved for the compaction summary marker.
     pub compaction_marker_tokens: usize,
+    /// Maximum characters from the transcript sent to the LLM summarizer.
     pub max_transcript_chars: usize,
+    /// Active collaboration mode (default, execute, or plan).
     #[serde(default)]
     pub collaboration_mode: CollaborationMode,
 }
@@ -440,21 +482,29 @@ impl Default for ConversationConfig {
     }
 }
 
+/// User identity and locale preferences.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserConfig {
+    /// The user's display name.
     #[serde(default)]
     pub name: Option<String>,
+    /// Custom name for the agent.
     #[serde(default)]
     pub agent_name: Option<String>,
+    /// IANA timezone string (e.g. "America/New_York").
     #[serde(default)]
     pub timezone: Option<String>,
 }
 
+/// Configuration for web search and fetch capabilities.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebConfig {
+    /// Whether web tools are enabled.
     pub enabled: bool,
+    /// Search provider name or "auto" for auto-detection.
     pub search_provider: String,
+    /// Override API key env var for the search provider.
     pub search_api_key_env: Option<String>,
 }
 
@@ -468,9 +518,11 @@ impl Default for WebConfig {
     }
 }
 
+/// Configuration for the scheduled tasks daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TasksConfig {
+    /// Maximum number of tasks that can run concurrently.
     pub max_concurrent: usize,
 }
 
@@ -480,6 +532,7 @@ impl Default for TasksConfig {
     }
 }
 
+/// Token budget configuration for usage tracking and limits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BudgetConfig {
@@ -498,10 +551,13 @@ impl Default for BudgetConfig {
     }
 }
 
+/// Configuration for the plugin marketplace system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PluginsConfig {
+    /// Whether the plugin system is enabled.
     pub enabled: bool,
+    /// Automatically verify plugin integrity on install.
     pub auto_verify: bool,
 }
 
@@ -514,12 +570,17 @@ impl Default for PluginsConfig {
     }
 }
 
+/// Configuration for multi-agent spawning and orchestration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MultiAgentConfig {
+    /// Whether sub-agent spawning is enabled.
     pub enabled: bool,
+    /// Maximum nesting depth for spawned sub-agents.
     pub max_spawn_depth: u32,
+    /// Maximum child agents a single parent can spawn.
     pub max_children_per_agent: u32,
+    /// Maximum sub-agents running concurrently.
     pub max_concurrent: u32,
 }
 
@@ -534,13 +595,19 @@ impl Default for MultiAgentConfig {
     }
 }
 
+/// OpenTelemetry tracing and metrics configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
+    /// Enable distributed tracing export.
     pub tracing_enabled: bool,
+    /// Enable metrics export.
     pub metrics_enabled: bool,
+    /// OTLP collector endpoint URL.
     pub otlp_endpoint: String,
+    /// Service name reported in telemetry data.
     pub service_name: String,
+    /// Trace sampling ratio (0.0 to 1.0).
     pub sampling_ratio: f64,
 }
 
@@ -556,6 +623,7 @@ impl Default for TelemetryConfig {
     }
 }
 
+/// Debug and diagnostic configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DebugConfig {
     /// When true, log full LLM request/response to ~/.borg/logs/debug/
@@ -563,6 +631,7 @@ pub struct DebugConfig {
     pub llm_logging: bool,
 }
 
+/// Configuration for the user scripts system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScriptsConfig {

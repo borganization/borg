@@ -72,59 +72,93 @@ pub const APPROX_BYTES_PER_TOKEN: usize = 4;
 /// Maximum input size (bytes) for injection scanning to prevent ReDoS.
 pub const MAX_INJECTION_SCAN_BYTES: usize = 64 * 1024;
 
-// Telegram polling backoff parameters
+/// Minimum backoff duration for Telegram polling retries.
 pub const TELEGRAM_MIN_BACKOFF: Duration = Duration::from_secs(2);
+/// Maximum backoff duration for Telegram polling retries.
 pub const TELEGRAM_MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Exponential backoff multiplier for Telegram polling.
 pub const TELEGRAM_BACKOFF_FACTOR: f64 = 1.8;
+/// Random jitter fraction applied to Telegram backoff delays.
 pub const TELEGRAM_JITTER_FRACTION: f64 = 0.25;
+/// Timeout after which a Telegram poll is considered stalled.
 pub const TELEGRAM_STALL_TIMEOUT: Duration = Duration::from_secs(90);
 
-// Signal SSE backoff parameters
+/// Minimum backoff duration for Signal SSE reconnection.
 pub const SIGNAL_SSE_MIN_BACKOFF: Duration = Duration::from_secs(1);
+/// Maximum backoff duration for Signal SSE reconnection.
 pub const SIGNAL_SSE_MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Exponential backoff multiplier for Signal SSE retries.
 pub const SIGNAL_SSE_BACKOFF_FACTOR: f64 = 2.0;
+/// Random jitter fraction applied to Signal SSE backoff delays.
 pub const SIGNAL_SSE_JITTER_FRACTION: f64 = 0.2;
+/// Timeout after which a Signal SSE connection is considered stalled.
 pub const SIGNAL_SSE_STALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Max characters per Signal message chunk before splitting.
 pub const SIGNAL_MESSAGE_CHUNK_SIZE: usize = 4000;
+/// Timeout in seconds for Signal CLI RPC calls.
 pub const SIGNAL_RPC_TIMEOUT_SECS: u64 = 10;
 
-// Gateway retry defaults
+/// Maximum number of retries for gateway outbound requests.
 pub const RETRY_MAX_RETRIES: u32 = 5;
+/// Initial delay in milliseconds before the first retry.
 pub const RETRY_INITIAL_DELAY_MS: u64 = 5000;
+/// Maximum delay in milliseconds between retries.
 pub const RETRY_MAX_DELAY_MS: u64 = 300_000;
+/// Exponential backoff multiplier for gateway retries.
 pub const RETRY_BACKOFF_FACTOR: f64 = 2.0;
+/// Random jitter factor applied to gateway retry delays.
 pub const RETRY_JITTER_FACTOR: f64 = 0.1;
 
-// iMessage echo cache parameters
+/// TTL for iMessage echo cache entries matched by text content.
 pub const ECHO_CACHE_TEXT_TTL: Duration = Duration::from_secs(5);
+/// TTL for iMessage echo cache entries matched by message ID.
 pub const ECHO_CACHE_ID_TTL: Duration = Duration::from_secs(60);
 
-// iMessage self-chat cache parameters
+/// Maximum entries in the iMessage self-chat dedup cache.
 pub const SELF_CHAT_CACHE_MAX_ENTRIES: usize = 512;
+/// TTL for iMessage self-chat cache entries.
 pub const SELF_CHAT_CACHE_TTL: Duration = Duration::from_secs(10);
 
-// Rate guard defaults (interactive sessions — generous for long-running tasks)
+/// Interactive session: tool call count that triggers a warning.
 pub const RATE_TOOL_CALLS_WARN: u32 = 200;
+/// Interactive session: tool call count that blocks further calls.
 pub const RATE_TOOL_CALLS_BLOCK: u32 = 500;
+/// Interactive session: shell command count that triggers a warning.
 pub const RATE_SHELL_COMMANDS_WARN: u32 = 100;
+/// Interactive session: shell command count that blocks further commands.
 pub const RATE_SHELL_COMMANDS_BLOCK: u32 = 250;
+/// Interactive session: file write count that triggers a warning.
 pub const RATE_FILE_WRITES_WARN: u32 = 50;
+/// Interactive session: file write count that blocks further writes.
 pub const RATE_FILE_WRITES_BLOCK: u32 = 150;
+/// Interactive session: memory write count that triggers a warning.
 pub const RATE_MEMORY_WRITES_WARN: u32 = 20;
+/// Interactive session: memory write count that blocks further writes.
 pub const RATE_MEMORY_WRITES_BLOCK: u32 = 50;
+/// Interactive session: web request count that triggers a warning.
 pub const RATE_WEB_REQUESTS_WARN: u32 = 50;
+/// Interactive session: web request count that blocks further requests.
 pub const RATE_WEB_REQUESTS_BLOCK: u32 = 150;
 
-// Rate guard defaults (gateway sessions — stricter for external senders)
+/// Gateway session: tool call count that triggers a warning.
 pub const GW_RATE_TOOL_CALLS_WARN: u32 = 30;
+/// Gateway session: tool call count that blocks further calls.
 pub const GW_RATE_TOOL_CALLS_BLOCK: u32 = 50;
+/// Gateway session: shell command count that triggers a warning.
 pub const GW_RATE_SHELL_COMMANDS_WARN: u32 = 10;
+/// Gateway session: shell command count that blocks further commands.
 pub const GW_RATE_SHELL_COMMANDS_BLOCK: u32 = 20;
+/// Gateway session: file write count that triggers a warning.
 pub const GW_RATE_FILE_WRITES_WARN: u32 = 10;
+/// Gateway session: file write count that blocks further writes.
 pub const GW_RATE_FILE_WRITES_BLOCK: u32 = 20;
+/// Gateway session: memory write count that triggers a warning.
 pub const GW_RATE_MEMORY_WRITES_WARN: u32 = 5;
+/// Gateway session: memory write count that blocks further writes.
 pub const GW_RATE_MEMORY_WRITES_BLOCK: u32 = 10;
+/// Gateway session: web request count that triggers a warning.
 pub const GW_RATE_WEB_REQUESTS_WARN: u32 = 10;
+/// Gateway session: web request count that blocks further requests.
 pub const GW_RATE_WEB_REQUESTS_BLOCK: u32 = 25;
 
 // ── File reading defaults ──────────────────────────────────────────

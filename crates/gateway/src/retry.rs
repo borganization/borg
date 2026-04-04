@@ -5,12 +5,18 @@ use tracing::{info, warn};
 
 use crate::executor::ChannelExecutor;
 
+/// Configuration for exponential-backoff retry of outbound message delivery.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
+    /// Maximum number of retry attempts after the initial send.
     pub max_retries: u32,
+    /// Base delay in milliseconds before the first retry.
     pub initial_delay_ms: u64,
+    /// Upper bound on delay in milliseconds.
     pub max_delay_ms: u64,
+    /// Multiplier applied to the delay on each successive attempt.
     pub backoff_factor: f64,
+    /// Fraction of the delay used for random jitter (0.0 = none).
     pub jitter_factor: f64,
 }
 
@@ -26,14 +32,19 @@ impl Default for RetryPolicy {
     }
 }
 
+/// Result of a retried outbound send operation.
 #[derive(Debug)]
 pub enum RetryOutcome {
+    /// The send succeeded; contains the script output.
     Success(String),
+    /// A non-retryable failure occurred (exit code 4); contains the error.
     PermanentFailure(String),
+    /// All retry attempts were exhausted; contains the last error.
     Exhausted(String),
 }
 
 impl RetryPolicy {
+    /// Compute the delay before the given retry attempt (0-indexed), with jitter.
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
         let base = self.initial_delay_ms as f64 * self.backoff_factor.powi(attempt as i32);
         let capped = base.min(self.max_delay_ms as f64);
@@ -49,6 +60,7 @@ impl RetryPolicy {
 /// Exit code 4 from outbound scripts signals a permanent/non-retryable failure.
 const PERMANENT_FAILURE_EXIT_CODE: &str = "exited 4:";
 
+/// Send an outbound message with automatic retries using exponential backoff.
 pub async fn send_with_retry(
     executor: &ChannelExecutor<'_>,
     input_json: &str,

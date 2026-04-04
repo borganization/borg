@@ -1,13 +1,24 @@
+/// Telegram Bot API HTTP client.
 pub mod api;
+/// Native channel implementation for Telegram.
 pub mod channel;
+/// Per-chat sequential message queue.
 pub mod chat_queue;
+/// Circuit breaker for Telegram API calls.
 pub mod circuit_breaker;
+/// Update deduplication by update_id.
 pub mod dedup;
+/// Markdown-to-Telegram HTML formatting.
 pub mod format;
+/// Telegram update parsing into inbound messages.
 pub mod parse;
+/// Long-polling transport for Telegram updates.
 pub mod polling;
+/// Telegram API type definitions.
 pub mod types;
+/// Typing indicator keepalive for Telegram chats.
 pub mod typing;
+/// Webhook secret token verification.
 pub mod verify;
 
 use anyhow::Result;

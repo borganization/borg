@@ -1,8 +1,14 @@
+/// Discord Bot API HTTP client.
 pub mod api;
+/// Native channel implementation for Discord.
 pub mod channel;
+/// Discord interaction parsing into inbound messages.
 pub mod parse;
+/// Discord API type definitions.
 pub mod types;
+/// Typing indicator keepalive for Discord channels.
 pub mod typing;
+/// Ed25519 signature verification for interaction webhooks.
 pub mod verify;
 
 use anyhow::Result;

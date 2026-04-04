@@ -1,5 +1,8 @@
+/// Name pool for generating unique sub-agent nicknames.
 pub mod names;
+/// Predefined role definitions for sub-agents.
 pub mod roles;
+/// Tool definitions for multi-agent orchestration.
 pub mod tools;
 
 use std::collections::HashMap;
@@ -15,27 +18,47 @@ use crate::config::Config;
 /// Role definition for a sub-agent.
 #[derive(Debug, Clone)]
 pub struct AgentRole {
+    /// Identifier for this role (e.g. "researcher", "coder").
     pub name: String,
+    /// What this role does.
     pub description: String,
+    /// LLM model override for this role.
     pub model: Option<String>,
+    /// LLM provider override for this role.
     pub provider: Option<String>,
+    /// Temperature override for this role.
     pub temperature: Option<f32>,
+    /// Additional system prompt instructions.
     pub system_instructions: Option<String>,
+    /// Allowlist of tool names this role can use.
     pub tools_allowed: Option<Vec<String>>,
+    /// Maximum agent loop iterations for this role.
     pub max_iterations: Option<u32>,
 }
 
 /// State machine for sub-agent lifecycle.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SubAgentStatus {
+    /// Agent created but not yet started.
     PendingInit,
+    /// Agent is actively processing.
     Running,
-    Completed { result: String },
-    Errored { error: String },
+    /// Agent finished successfully with a result.
+    Completed {
+        /// The final text output from the sub-agent.
+        result: String,
+    },
+    /// Agent encountered an error.
+    Errored {
+        /// Description of the error that occurred.
+        error: String,
+    },
+    /// Agent was explicitly shut down.
     Shutdown,
 }
 
 impl SubAgentStatus {
+    /// Returns a string representation suitable for database storage.
     pub fn as_str(&self) -> &str {
         match self {
             Self::PendingInit => "pending_init",
@@ -46,6 +69,7 @@ impl SubAgentStatus {
         }
     }
 
+    /// Reconstruct a status from database columns.
     pub fn from_db(status: &str, result_text: Option<&str>, error_text: Option<&str>) -> Self {
         match status {
             "pending_init" => Self::PendingInit,
@@ -65,22 +89,34 @@ impl SubAgentStatus {
 /// Metadata for a running or completed sub-agent.
 #[derive(Debug, Clone)]
 pub struct SubAgentInfo {
+    /// Unique identifier for this sub-agent.
     pub id: String,
+    /// Human-friendly name (e.g. "Atlas", "Aurora").
     pub nickname: String,
+    /// Role name this agent was spawned with.
     pub role: String,
+    /// Session ID of the parent agent that spawned this one.
     pub parent_session_id: String,
+    /// This sub-agent's own session ID.
     pub session_id: String,
+    /// Nesting depth (0 = top-level agent).
     pub depth: u32,
+    /// Current lifecycle status.
     pub status: SubAgentStatus,
+    /// Unix timestamp when this agent was created.
     pub created_at: i64,
 }
 
 /// Result delivered from a sub-agent to its parent.
 #[derive(Debug, Clone)]
 pub struct SubAgentCompletion {
+    /// Unique identifier of the completed sub-agent.
     pub agent_id: String,
+    /// Human-friendly name of the sub-agent.
     pub nickname: String,
+    /// Final lifecycle status (Completed, Errored, or Shutdown).
     pub status: SubAgentStatus,
+    /// The sub-agent's final text output, if any.
     pub final_response: Option<String>,
 }
 
@@ -100,7 +136,9 @@ pub struct AgentControl {
     /// Buffer for completions consumed while waiting for a specific agent.
     completion_buffer: Vec<SubAgentCompletion>,
     semaphore: Arc<Semaphore>,
+    /// Maximum allowed nesting depth for spawned sub-agents.
     pub max_spawn_depth: u32,
+    /// Maximum number of active children a single agent can spawn.
     pub max_children_per_agent: u32,
     _max_concurrent: u32,
     name_pool: names::NamePool,
@@ -109,6 +147,7 @@ pub struct AgentControl {
 }
 
 impl AgentControl {
+    /// Create a new controller for the given parent session and depth.
     pub fn new(
         config: &crate::config::MultiAgentConfig,
         parent_session_id: &str,
@@ -507,6 +546,7 @@ impl AgentControl {
         }
     }
 
+    /// Returns true if no sub-agents have been spawned.
     pub fn is_empty(&self) -> bool {
         self.agents.is_empty()
     }

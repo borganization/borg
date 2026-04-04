@@ -8,18 +8,27 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::types::{Message, MessageContent, Role, ToolCall};
 
+/// Lightweight metadata for a conversation session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
+    /// Unique session identifier (UUID).
     pub id: String,
+    /// Display title, auto-derived from first user message.
     pub title: String,
+    /// RFC 3339 timestamp when the session was created.
     pub created_at: String,
+    /// RFC 3339 timestamp of the last update.
     pub updated_at: String,
+    /// Total number of messages in this session.
     pub message_count: usize,
 }
 
+/// A conversation session with metadata and message history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
+    /// Session metadata (id, title, timestamps).
     pub meta: SessionMeta,
+    /// Ordered list of messages in this conversation.
     pub messages: Vec<Message>,
 }
 
@@ -51,6 +60,7 @@ impl Default for Session {
 }
 
 impl Session {
+    /// Create a new session with a fresh UUID and default title.
     pub fn new() -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Local::now().to_rfc3339();
@@ -66,6 +76,7 @@ impl Session {
         }
     }
 
+    /// Persist this session to disk as JSON (atomic write via temp file).
     pub fn save(&self) -> Result<()> {
         let path = session_path(&self.meta.id)?;
         let tmp_path = path.with_extension("json.tmp");
@@ -77,6 +88,7 @@ impl Session {
         Ok(())
     }
 
+    /// Load a session from disk by its ID.
     pub fn load(id: &str) -> Result<Self> {
         let path = session_path(id)?;
         let json =
@@ -85,6 +97,7 @@ impl Session {
         Ok(session)
     }
 
+    /// Update this session's messages and metadata from agent history.
     pub fn update_from_history(&mut self, history: &[Message]) {
         self.messages = history.to_vec();
         self.meta.message_count = history.len();
@@ -106,6 +119,7 @@ impl Session {
     }
 }
 
+/// Load the most recently updated session, if any exist.
 pub fn load_last_session() -> Result<Option<Session>> {
     let sessions = list_sessions()?;
     match sessions.first() {
@@ -388,6 +402,7 @@ mod tests {
     }
 }
 
+/// List all sessions sorted by most recently updated first.
 pub fn list_sessions() -> Result<Vec<SessionMeta>> {
     let dir = sessions_dir()?;
     let mut sessions = Vec::new();

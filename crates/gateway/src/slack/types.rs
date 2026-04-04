@@ -14,57 +14,87 @@ pub enum SlackEnvelope {
 /// An `event_callback` envelope containing a Slack event.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EventCallback {
+    /// Verification token (deprecated; use signing secret instead).
     pub token: Option<String>,
+    /// Workspace identifier.
     pub team_id: Option<String>,
+    /// Unique event identifier for deduplication.
     pub event_id: Option<String>,
+    /// The inner event payload.
     pub event: SlackEvent,
 }
 
 /// Inner Slack event (message or app_mention).
 #[derive(Debug, Clone, Deserialize)]
 pub struct SlackEvent {
+    /// Event type identifier (e.g. "message", "app_mention").
     #[serde(rename = "type")]
     pub event_type: String,
+    /// Message subtype (e.g. "bot_message", "file_share").
     pub subtype: Option<String>,
+    /// User ID of the sender.
     pub user: Option<String>,
+    /// Text content of the message.
     pub text: Option<String>,
+    /// Message timestamp (serves as unique message ID).
     pub ts: Option<String>,
+    /// Parent thread timestamp for threaded replies.
     pub thread_ts: Option<String>,
+    /// Channel ID where the event occurred.
     pub channel: Option<String>,
+    /// Channel type (e.g. "channel", "im", "mpim").
     pub channel_type: Option<String>,
+    /// Bot ID if the message was sent by a bot.
     pub bot_id: Option<String>,
+    /// Files attached to the message.
     pub files: Option<Vec<SlackFile>>,
 }
 
 /// File metadata attached to a Slack message event.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SlackFile {
+    /// Unique file identifier.
     pub id: String,
+    /// Original filename.
     pub name: Option<String>,
+    /// MIME type of the file.
     pub mimetype: Option<String>,
+    /// Authenticated URL to download the file.
     pub url_private: Option<String>,
+    /// File size in bytes.
     pub size: Option<u64>,
+    /// Slack file type identifier (e.g. "pdf", "png").
     pub filetype: Option<String>,
 }
 
 /// Response from Slack `auth.test` API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthTestResponse {
+    /// Whether the authentication test succeeded.
     pub ok: bool,
+    /// Authenticated user ID.
     pub user_id: Option<String>,
+    /// Authenticated user name.
     pub user: Option<String>,
+    /// Workspace name.
     pub team: Option<String>,
+    /// Workspace ID.
     pub team_id: Option<String>,
+    /// Error code on failure.
     pub error: Option<String>,
 }
 
 /// Request body for `chat.postMessage`.
 #[derive(Debug, Serialize)]
 pub struct PostMessageRequest {
+    /// Target channel ID.
     pub channel: String,
+    /// Message text (used as fallback when blocks are present).
     pub text: String,
+    /// Thread timestamp to reply in a thread.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_ts: Option<String>,
+    /// Block Kit layout blocks for rich formatting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<serde_json::Value>>,
 }
@@ -72,14 +102,23 @@ pub struct PostMessageRequest {
 /// Slack slash command payload (application/x-www-form-urlencoded).
 #[derive(Debug, Clone, Deserialize)]
 pub struct SlashCommandPayload {
+    /// The slash command name (e.g. "/borg").
     pub command: String,
+    /// Text following the command.
     pub text: Option<String>,
+    /// ID of the user who invoked the command.
     pub user_id: String,
+    /// Username of the invoking user.
     pub user_name: Option<String>,
+    /// Channel ID where the command was invoked.
     pub channel_id: String,
+    /// Channel name where the command was invoked.
     pub channel_name: Option<String>,
+    /// Workspace ID.
     pub team_id: Option<String>,
+    /// URL for posting delayed responses.
     pub response_url: Option<String>,
+    /// Trigger ID for opening modals.
     pub trigger_id: Option<String>,
 }
 
@@ -87,70 +126,105 @@ pub struct SlashCommandPayload {
 /// Sent as `application/x-www-form-urlencoded` with a `payload` JSON field.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InteractionPayload {
+    /// Interaction type (e.g. "block_actions", "view_submission").
     #[serde(rename = "type")]
     pub interaction_type: String,
+    /// User who triggered the interaction.
     pub user: InteractionUser,
+    /// Channel where the interaction occurred.
     pub channel: Option<InteractionChannel>,
+    /// List of actions triggered by the user.
     pub actions: Option<Vec<BlockAction>>,
+    /// Trigger ID for opening modals.
     pub trigger_id: Option<String>,
+    /// URL for posting delayed responses.
     pub response_url: Option<String>,
+    /// View payload for modal submissions.
     pub view: Option<ViewPayload>,
 }
 
+/// A user in a Slack interaction payload.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InteractionUser {
+    /// User ID.
     pub id: String,
+    /// Username.
     pub username: Option<String>,
 }
 
+/// A channel in a Slack interaction payload.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InteractionChannel {
+    /// Channel ID.
     pub id: String,
+    /// Channel name.
     pub name: Option<String>,
 }
 
+/// A single Block Kit action from an interaction.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BlockAction {
+    /// Unique action identifier defined in the block.
     pub action_id: String,
+    /// Action element type (e.g. "button", "static_select").
     #[serde(rename = "type")]
     pub action_type: Option<String>,
+    /// Value associated with the action (for buttons).
     pub value: Option<String>,
+    /// Block ID containing this action.
     pub block_id: Option<String>,
+    /// Selected option (for select menus).
     pub selected_option: Option<SelectedOption>,
 }
 
+/// A selected option from a Slack select menu.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SelectedOption {
+    /// Value of the selected option.
     pub value: String,
+    /// Display text of the selected option.
     pub text: Option<serde_json::Value>,
 }
 
+/// Payload for a Slack modal view submission or interaction.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ViewPayload {
+    /// Callback ID identifying which view was submitted.
     pub callback_id: Option<String>,
+    /// Current state of the view's input elements.
     pub state: Option<ViewState>,
 }
 
+/// State of input elements in a Slack modal view.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ViewState {
+    /// Map of block_id -> action_id -> action value.
     pub values: std::collections::BTreeMap<String, std::collections::BTreeMap<String, ActionValue>>,
 }
 
+/// Value of an input element in a Slack modal view.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ActionValue {
+    /// Input element type (e.g. "plain_text_input").
     #[serde(rename = "type")]
     pub action_type: Option<String>,
+    /// Text value entered by the user.
     pub value: Option<String>,
+    /// Selected option (for select inputs).
     pub selected_option: Option<SelectedOption>,
 }
 
 /// Generic Slack Web API response.
 #[derive(Debug, Deserialize)]
 pub struct ApiResponse<T> {
+    /// Whether the API call succeeded.
     pub ok: bool,
+    /// Response data (flattened into the top-level object).
     #[serde(flatten)]
     pub data: Option<T>,
+    /// Error code on failure.
     pub error: Option<String>,
+    /// Seconds to wait before retrying (rate limit).
     #[serde(default)]
     pub retry_after: Option<u64>,
 }

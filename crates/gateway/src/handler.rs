@@ -43,9 +43,11 @@ fn sanitize_filename(name: &Option<String>) -> Option<String> {
 /// A media attachment on an inbound message.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InboundAttachment {
+    /// MIME type of the attachment (e.g. "image/png").
     pub mime_type: String,
     /// Base64-encoded binary content.
     pub data: String,
+    /// Original filename, if provided by the platform.
     #[serde(default)]
     pub filename: Option<String>,
 }
@@ -53,16 +55,23 @@ pub struct InboundAttachment {
 /// Normalized inbound message parsed from the channel's inbound script.
 #[derive(Debug, serde::Deserialize)]
 pub struct InboundMessage {
+    /// Unique identifier of the message sender.
     pub sender_id: String,
+    /// Message text content.
     pub text: String,
+    /// Platform channel/chat identifier, if applicable.
     #[serde(default)]
     pub channel_id: Option<String>,
+    /// Thread identifier for threaded conversations.
     #[serde(default)]
     pub thread_id: Option<String>,
+    /// Platform-specific message identifier.
     #[serde(default)]
     pub message_id: Option<String>,
+    /// Slack-style thread timestamp.
     #[serde(default)]
     pub thread_ts: Option<String>,
+    /// Media attachments (images, audio, etc.).
     #[serde(default)]
     pub attachments: Vec<InboundAttachment>,
     /// Emoji reaction event (e.g. from a reaction_added event).

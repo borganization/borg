@@ -10,6 +10,7 @@ pub struct RingBuffer<T> {
 }
 
 impl<T> RingBuffer<T> {
+    /// Create a new ring buffer with the given maximum capacity.
     pub fn new(capacity: usize) -> Self {
         Self {
             buf: VecDeque::with_capacity(capacity.min(1024)),
@@ -17,6 +18,7 @@ impl<T> RingBuffer<T> {
         }
     }
 
+    /// Append an item, evicting the oldest if at capacity.
     pub fn push(&mut self, item: T) {
         if self.capacity == 0 {
             return;
@@ -27,14 +29,17 @@ impl<T> RingBuffer<T> {
         self.buf.push_back(item);
     }
 
+    /// Returns the number of items currently in the buffer.
     pub fn len(&self) -> usize {
         self.buf.len()
     }
 
+    /// Returns true if the buffer contains no items.
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
 
+    /// Returns the maximum number of items this buffer can hold.
     pub fn capacity(&self) -> usize {
         self.capacity
     }
@@ -53,8 +58,11 @@ impl<T> RingBuffer<T> {
 /// A captured console API call (console.log, console.warn, etc.).
 #[derive(Debug, Clone)]
 pub struct ConsoleEntry {
+    /// Log level (e.g. "log", "warn", "error").
     pub level: String,
+    /// The logged message text.
     pub text: String,
+    /// CDP timestamp when the entry was captured.
     pub timestamp: f64,
 }
 
@@ -67,7 +75,9 @@ impl fmt::Display for ConsoleEntry {
 /// A captured unhandled page error / exception.
 #[derive(Debug, Clone)]
 pub struct PageError {
+    /// Error or exception description.
     pub message: String,
+    /// CDP timestamp when the error occurred.
     pub timestamp: f64,
 }
 
@@ -80,9 +90,13 @@ impl fmt::Display for PageError {
 /// A captured network request with optional response status.
 #[derive(Debug, Clone)]
 pub struct NetworkEntry {
+    /// Request URL.
     pub url: String,
+    /// HTTP method (GET, POST, etc.).
     pub method: String,
+    /// Response status code, or None if still pending.
     pub status: Option<u16>,
+    /// CDP timestamp when the request was initiated.
     pub timestamp: f64,
 }
 
@@ -98,12 +112,16 @@ impl fmt::Display for NetworkEntry {
 /// Thread-safe collection of event buffers shared with background drain tasks.
 #[derive(Clone)]
 pub struct EventBuffers {
+    /// Buffer for console.log/warn/error entries.
     pub console: Arc<Mutex<RingBuffer<ConsoleEntry>>>,
+    /// Buffer for unhandled page exceptions.
     pub errors: Arc<Mutex<RingBuffer<PageError>>>,
+    /// Buffer for captured network requests.
     pub network: Arc<Mutex<RingBuffer<NetworkEntry>>>,
 }
 
 impl EventBuffers {
+    /// Create new event buffers with the given capacities.
     pub fn new(console_cap: usize, error_cap: usize, network_cap: usize) -> Self {
         Self {
             console: Arc::new(Mutex::new(RingBuffer::new(console_cap))),

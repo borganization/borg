@@ -87,11 +87,16 @@ pub(crate) fn rate_limit_for(event_type: &str) -> u32 {
 /// Bond levels derived from score ranges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BondLevel {
-    Fragile,  // 0-24
-    Emerging, // 25-44
-    Stable,   // 45-64
-    Trusted,  // 65-84
-    Synced,   // 85-100
+    /// Score 0-24: minimal trust established.
+    Fragile,
+    /// Score 25-44: trust is beginning to form.
+    Emerging,
+    /// Score 45-64: reliable working relationship.
+    Stable,
+    /// Score 65-84: strong trust established.
+    Trusted,
+    /// Score 85-100: maximum trust and autonomy.
+    Synced,
 }
 
 impl fmt::Display for BondLevel {
@@ -110,10 +115,15 @@ impl fmt::Display for BondLevel {
 /// These are informational only — they do not bypass HITL safety checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutonomyTier {
+    /// Watch and report only.
     ObserveOnly,
+    /// Suggest actions for user approval.
     Recommend,
+    /// Draft outputs for user review.
     DraftAssist,
+    /// Execute with light guidance.
     GuidedAction,
+    /// Full autonomous operation.
     HighTrust,
 }
 
@@ -132,22 +142,34 @@ impl fmt::Display for AutonomyTier {
 /// Bond state derived by replaying verified events.
 #[derive(Debug, Clone)]
 pub struct BondState {
+    /// Current bond score (0..=100).
     pub score: u8,
+    /// Bond level derived from the score.
     pub level: BondLevel,
+    /// Autonomy tier derived from the bond level.
     pub autonomy_tier: AutonomyTier,
+    /// Total number of events in the ledger.
     pub total_events: u32,
+    /// Whether the HMAC chain is intact across all replayed events.
     pub chain_valid: bool,
 }
 
 /// A recorded bond event from the ledger.
 #[derive(Debug, Clone)]
 pub struct BondEvent {
+    /// Auto-incremented row ID.
     pub id: i64,
+    /// Event type (tool_success, tool_failure, creation, correction, etc.).
     pub event_type: String,
+    /// Score change applied by this event.
     pub score_delta: i32,
+    /// Human-readable reason for the event.
     pub reason: String,
+    /// HMAC for this event in the chain.
     pub hmac: String,
+    /// HMAC of the previous event in the chain.
     pub prev_hmac: String,
+    /// Unix timestamp of event creation.
     pub created_at: i64,
 }
 
@@ -300,12 +322,12 @@ static REJECTION_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     ).expect("compile-time literal regex")
 });
 
-/// Heuristic: user message looks like acceptance of a suggestion.
+/// Returns `true` if the user message heuristically looks like acceptance.
 pub fn looks_like_acceptance(msg: &str) -> bool {
     ACCEPTANCE_PATTERN.is_match(msg)
 }
 
-/// Heuristic: user message looks like rejection of a suggestion.
+/// Returns `true` if the user message heuristically looks like rejection.
 pub fn looks_like_rejection(msg: &str) -> bool {
     REJECTION_PATTERN.is_match(msg)
 }
@@ -447,17 +469,17 @@ fn recommend(state: &BondState) -> &'static str {
 // ── BondHook ──
 
 /// Lifecycle hook that tracks bond events with HMAC chain integrity.
-/// Wraps Database in a Mutex because Hook requires Send + Sync
-/// but rusqlite::Connection is !Sync.
-///
 /// Caches the last replayed `BondState` to avoid replaying the full event
 /// chain on every `InjectContext` call. Cache is refreshed after recording.
 pub struct BondHook {
+    /// Database handle wrapped in a Mutex for thread-safety.
     db: std::sync::Mutex<Database>,
+    /// Cached bond state to avoid redundant full-chain replays.
     cached_state: std::sync::Mutex<Option<BondState>>,
 }
 
 impl BondHook {
+    /// Create a new bond hook, opening a database connection and pre-computing state.
     pub fn new() -> anyhow::Result<Self> {
         let db = Database::open()?;
         // Pre-compute initial state using per-installation derived key

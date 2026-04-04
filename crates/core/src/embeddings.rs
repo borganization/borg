@@ -19,9 +19,13 @@ static PROVIDER_CACHE: LazyLock<Mutex<CachedProvider>> = LazyLock::new(|| Mutex:
 /// Resolved embedding provider with endpoint, key, model, and dimension.
 #[derive(Debug, Clone)]
 pub struct EmbeddingProvider {
+    /// API endpoint URL for embedding requests.
     pub endpoint: String,
+    /// API key for authentication.
     pub api_key: String,
+    /// Model identifier (e.g. "text-embedding-3-small").
     pub model: String,
+    /// Dimensionality of the output embedding vectors.
     pub dimension: usize,
 }
 
@@ -526,11 +530,17 @@ pub async fn embed_memory_file_chunked(
 /// Result from hybrid memory search.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
+    /// Name of the memory file containing the match.
     pub filename: String,
+    /// Index of the matched chunk within the file.
     pub chunk_index: i64,
+    /// Starting line number of the chunk, if available.
     pub start_line: Option<i64>,
+    /// Ending line number of the chunk, if available.
     pub end_line: Option<i64>,
+    /// Blended relevance score (higher is better).
     pub score: f32,
+    /// Text snippet from the matched chunk.
     pub snippet: String,
 }
 

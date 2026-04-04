@@ -40,15 +40,19 @@ impl ThinkingLevel {
         }
     }
 
+    /// Returns true if extended thinking is active (any level other than Off).
     pub fn is_enabled(&self) -> bool {
         *self != Self::Off
     }
 }
 
+/// Primary LLM provider and model configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LlmConfig {
+    /// LLM provider name (auto-detected from API keys if omitted).
     pub provider: Option<String>,
+    /// Environment variable name holding the API key (legacy).
     pub api_key_env: String,
     /// Single SecretRef for API key (takes priority over api_key_env).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,11 +60,17 @@ pub struct LlmConfig {
     /// Multiple API keys for fallback/rotation (tried in order on auth failure).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub api_keys: Vec<SecretRef>,
+    /// Model identifier (e.g. "anthropic/claude-sonnet-4").
     pub model: String,
+    /// Sampling temperature (0.0 = deterministic, higher = more creative).
     pub temperature: f32,
+    /// Maximum tokens in the LLM response.
     pub max_tokens: u32,
+    /// Maximum retry attempts on transient LLM errors.
     pub max_retries: u32,
+    /// Initial delay in milliseconds before the first retry.
     pub initial_retry_delay_ms: u64,
+    /// Total request timeout in milliseconds.
     pub request_timeout_ms: u64,
     /// Timeout in seconds for receiving each SSE chunk during streaming. 0 = no timeout.
     pub stream_chunk_timeout_secs: u64,
@@ -100,18 +110,26 @@ impl Default for LlmConfig {
 /// A fallback provider configuration for provider-level failover.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmFallback {
+    /// Fallback provider name.
     pub provider: String,
+    /// Fallback model identifier.
     pub model: String,
+    /// Optional API key secret for this fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<SecretRef>,
+    /// Optional API key env var name for this fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    /// Multiple API keys for rotation on this fallback.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_keys: Vec<SecretRef>,
+    /// Override temperature for this fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Override max tokens for this fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Override base URL for this fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 }
@@ -155,13 +173,19 @@ impl CompactionConfig {
     }
 }
 
+/// Configuration for the proactive heartbeat check-in system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HeartbeatConfig {
+    /// Check-in interval (e.g. "30m", "1h").
     pub interval: String,
+    /// Start of quiet hours during which heartbeats are suppressed (HH:MM).
     pub quiet_hours_start: Option<String>,
+    /// End of quiet hours (HH:MM).
     pub quiet_hours_end: Option<String>,
+    /// Optional cron expression that overrides the interval.
     pub cron: Option<String>,
+    /// Channel names to deliver heartbeat messages to.
     pub channels: Vec<String>,
 }
 

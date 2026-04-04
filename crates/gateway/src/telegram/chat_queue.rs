@@ -11,9 +11,13 @@ const MAX_ACTIVE_CHATS: usize = borg_core::constants::MAX_ACTIVE_SESSIONS;
 
 /// A message queued for sequential processing within a chat.
 pub struct QueuedMessage {
+    /// Telegram chat ID this message belongs to.
     pub chat_id: i64,
+    /// Parsed inbound message payload.
     pub inbound: crate::handler::InboundMessage,
+    /// Optional thread/topic ID for forum-style chats.
     pub thread_id: Option<i64>,
+    /// Optional message ID for reply threading.
     pub message_id: Option<i64>,
 }
 
@@ -31,6 +35,7 @@ pub struct ChatQueue {
 }
 
 impl ChatQueue {
+    /// Create a new chat queue with the given message handler.
     pub fn new(handler: MessageHandler) -> Self {
         Self {
             senders: Arc::new(Mutex::new(HashMap::new())),

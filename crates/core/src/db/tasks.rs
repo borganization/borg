@@ -5,6 +5,7 @@ use rusqlite::params;
 use rusqlite::OptionalExtension;
 
 impl Database {
+    /// Insert a new scheduled task into the database.
     pub fn create_task(&self, task: &NewTask<'_>) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
         let max_retries = task.max_retries.unwrap_or(3);
@@ -17,6 +18,7 @@ impl Database {
         Ok(())
     }
 
+    /// List all scheduled tasks ordered by creation time descending.
     pub fn list_tasks(&self) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
@@ -29,6 +31,7 @@ impl Database {
         Ok(rows)
     }
 
+    /// Fetch active tasks whose next_run is at or before `now` and not pending retry.
     pub fn get_due_tasks(&self, now: i64) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
@@ -44,6 +47,7 @@ impl Database {
         Ok(rows)
     }
 
+    /// Update a task's status. Returns true if the task was found.
     pub fn update_task_status(&self, id: &str, status: &str) -> Result<bool> {
         let updated = self.conn.execute(
             "UPDATE scheduled_tasks SET status = ?1 WHERE id = ?2",
@@ -52,6 +56,7 @@ impl Database {
         Ok(updated > 0)
     }
 
+    /// Set a task's next scheduled run time.
     pub fn update_task_next_run(&self, id: &str, next_run: Option<i64>) -> Result<()> {
         self.conn.execute(
             "UPDATE scheduled_tasks SET next_run = ?1 WHERE id = ?2",
@@ -60,6 +65,7 @@ impl Database {
         Ok(())
     }
 
+    /// Record a completed task execution in the task_runs table.
     pub fn record_task_run(
         &self,
         task_id: &str,
@@ -81,6 +87,7 @@ impl Database {
         Ok(())
     }
 
+    /// Fetch recent execution history for a task, newest first.
     pub fn task_run_history(&self, task_id: &str, limit: usize) -> Result<Vec<TaskRunRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, started_at, duration_ms, result, error, status
@@ -102,6 +109,7 @@ impl Database {
         Ok(rows)
     }
 
+    /// Look up a single task by its ID.
     pub fn get_task_by_id(&self, id: &str) -> Result<Option<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
@@ -140,6 +148,7 @@ impl Database {
         })
     }
 
+    /// Mark a task for retry with backoff timing and error details.
     pub fn set_task_retry(
         &self,
         task_id: &str,
@@ -154,6 +163,7 @@ impl Database {
         Ok(())
     }
 
+    /// Reset retry state after a successful run.
     pub fn clear_task_retry(&self, task_id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE scheduled_tasks SET retry_count = 0, retry_after = NULL, last_error = NULL WHERE id = ?1",
@@ -162,6 +172,7 @@ impl Database {
         Ok(())
     }
 
+    /// Fetch tasks whose retry_after time has elapsed.
     pub fn get_tasks_pending_retry(&self, now: i64) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
@@ -338,8 +349,7 @@ impl Database {
         Ok(())
     }
 
-    /// Check if a daemon holds a fresh (non-stale) lock.
-    /// Returns true if another process holds the lock and its heartbeat is within 300s.
+    /// Returns true if a daemon holds a non-stale lock (heartbeat within 300s).
     pub fn is_daemon_lock_held(&self) -> bool {
         let now = chrono::Utc::now().timestamp();
         self.conn
@@ -362,6 +372,7 @@ impl Database {
         Ok(())
     }
 
+    /// Delete a task and all its run history. Returns true if found.
     pub fn delete_task(&self, id: &str) -> Result<bool> {
         self.conn
             .execute("DELETE FROM task_runs WHERE task_id = ?1", params![id])?;
@@ -371,6 +382,7 @@ impl Database {
         Ok(deleted > 0)
     }
 
+    /// Update a task's name, prompt, schedule, or timezone. Returns true if found.
     pub fn update_task(&self, id: &str, update: &UpdateTask<'_>) -> Result<bool> {
         let existing = match self.get_task_by_id(id)? {
             Some(row) => row,
@@ -396,6 +408,7 @@ impl Database {
         Ok(true)
     }
 
+    /// Get the most recent run for a task, if any.
     pub fn last_task_run(&self, task_id: &str) -> Result<Option<TaskRunRow>> {
         let runs = self.task_run_history(task_id, 1)?;
         Ok(runs.into_iter().next())

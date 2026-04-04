@@ -11,11 +11,14 @@ use crate::config::TelemetryConfig;
 /// Guard that shuts down OpenTelemetry providers on drop.
 /// Must live for the program's duration.
 pub struct TelemetryGuard {
+    /// Active tracing provider, shut down on drop.
     tracer_provider: Option<SdkTracerProvider>,
+    /// Active metrics provider, shut down on drop.
     meter_provider: Option<SdkMeterProvider>,
 }
 
 impl TelemetryGuard {
+    /// Create a no-op guard that does not manage any providers.
     pub fn noop() -> Self {
         Self {
             tracer_provider: None,
@@ -39,8 +42,6 @@ impl Drop for TelemetryGuard {
     }
 }
 
-/// Initialize OpenTelemetry tracing and metrics based on config.
-///
 /// Type alias for a boxed tracing layer compatible with Registry.
 pub type BoxedLayer = Box<dyn tracing_subscriber::Layer<Registry> + Send + Sync>;
 
@@ -120,14 +121,23 @@ pub fn init_telemetry(config: &TelemetryConfig) -> Result<(Option<BoxedLayer>, T
 /// Metrics instruments for Borg. Clone-friendly (all instruments are Arc-backed).
 #[derive(Clone)]
 pub struct BorgMetrics {
+    /// Counter for completed agent turns.
     pub agent_turns: Counter<u64>,
+    /// Counter for agent loop iterations.
     pub agent_iterations: Counter<u64>,
+    /// Counter for LLM API requests.
     pub llm_requests: Counter<u64>,
+    /// Histogram of LLM request durations in seconds.
     pub llm_duration: Histogram<f64>,
+    /// Counter for total LLM tokens consumed.
     pub llm_tokens: Counter<u64>,
+    /// Counter for tool executions.
     pub tool_executions: Counter<u64>,
+    /// Histogram of tool execution durations in seconds.
     pub tool_duration: Histogram<f64>,
+    /// Counter for gateway webhook requests.
     pub gateway_requests: Counter<u64>,
+    /// Histogram of gateway request processing durations in seconds.
     pub gateway_duration: Histogram<f64>,
 }
 
@@ -153,7 +163,7 @@ impl BorgMetrics {
         }
     }
 
-    /// Create noop instruments (zero overhead when metrics are disabled).
+    /// Create no-op instruments (zero overhead when metrics are disabled).
     pub fn noop() -> Self {
         // Use the global meter before any provider is installed — it returns noop instruments.
         let meter = opentelemetry::global::meter("borg-noop");

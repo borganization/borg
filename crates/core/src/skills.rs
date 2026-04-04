@@ -6,11 +6,15 @@ use tracing::{debug, instrument};
 use crate::config::{Config, SkillsConfig};
 use crate::tokenizer::estimate_tokens;
 
+/// How much of a skill's content to include in prompt context.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SkillLoadLevel {
-    Metadata, // name + description + status only
-    Summary,  // metadata + first paragraph of body
-    Full,     // entire SKILL.md body
+    /// Name, description, and availability status only.
+    Metadata,
+    /// Metadata plus the first paragraph of the skill body.
+    Summary,
+    /// The entire SKILL.md body.
+    Full,
 }
 
 const BUILTIN_SLACK: &str = include_str!("../skills/slack/SKILL.md");
@@ -47,58 +51,85 @@ const BUNDLED_SKILLS: &[(&str, &str)] = &[
     ("scheduler", BUILTIN_SCHEDULER),
 ];
 
+/// Where a skill was loaded from.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SkillSource {
+    /// Compiled into the binary.
     BuiltIn,
+    /// Loaded from the user's `~/.borg/skills/` directory.
     User,
 }
 
+/// Runtime requirements that must be satisfied for a skill to be available.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct SkillRequires {
+    /// Binaries that must all be present on `$PATH`.
     #[serde(default)]
     pub bins: Vec<String>,
+    /// Environment variables that must all be set.
     #[serde(default)]
     pub env: Vec<String>,
+    /// At least one of these binaries must be present on `$PATH`.
     #[serde(default)]
     pub any_bins: Vec<String>,
 }
 
+/// Platform-specific installation commands for a dependency.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct InstallSpec {
+    /// Homebrew formula name (macOS).
     #[serde(default)]
     pub brew: Option<String>,
+    /// APT package name (Linux).
     #[serde(default)]
     pub apt: Option<String>,
+    /// npm package name (cross-platform).
     #[serde(default)]
     pub npm: Option<String>,
+    /// Manual install URL fallback.
     #[serde(default)]
     pub url: Option<String>,
 }
 
+/// Parsed YAML frontmatter from a SKILL.md file.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SkillManifest {
+    /// Unique skill identifier.
     pub name: String,
+    /// Human-readable description of what the skill does.
     pub description: String,
+    /// Runtime requirements (binaries, env vars).
     #[serde(default)]
     pub requires: SkillRequires,
+    /// Supported operating systems (empty means all).
     #[serde(default)]
     pub os: Vec<String>,
+    /// Per-dependency install instructions keyed by dependency name.
     #[serde(default)]
     pub install: std::collections::HashMap<String, InstallSpec>,
 }
 
+/// A loaded skill with its manifest, body, and runtime metadata.
 #[derive(Debug, Clone)]
 pub struct Skill {
+    /// Parsed YAML frontmatter.
     pub manifest: SkillManifest,
+    /// Markdown body content (instructions and examples).
     pub body: String,
+    /// Whether this skill is built-in or user-defined.
     pub source: SkillSource,
+    /// Whether all runtime requirements are satisfied.
     pub available: bool,
+    /// Whether the user has explicitly disabled this skill.
     pub disabled: bool,
+    /// Reference files from `references/*.md` as `(filename, content)` pairs.
     pub references: Vec<(String, String)>,
+    /// Paths to scripts in the skill's `scripts/` directory.
     pub scripts: Vec<PathBuf>,
 }
 
 impl Skill {
+    /// Returns a display label for the skill's source ("built-in" or "user").
     pub fn source_label(&self) -> &'static str {
         match self.source {
             SkillSource::BuiltIn => "built-in",
@@ -106,6 +137,7 @@ impl Skill {
         }
     }
 
+    /// Returns a human-readable availability status string.
     pub fn status_label(&self) -> &'static str {
         if self.disabled {
             "disabled"
@@ -116,6 +148,7 @@ impl Skill {
         }
     }
 
+    /// Returns a single-character status icon (checkmark, cross, or dash).
     pub fn status_icon(&self) -> &'static str {
         if self.disabled {
             "—"
@@ -126,10 +159,12 @@ impl Skill {
         }
     }
 
+    /// Format the full skill body for system prompt injection.
     pub fn format_for_prompt(&self) -> String {
         self.format_at_level(SkillLoadLevel::Full)
     }
 
+    /// Format the skill at the specified detail level.
     pub fn format_at_level(&self, level: SkillLoadLevel) -> String {
         let source = self.source_label();
         let status = self.status_label();
@@ -160,6 +195,7 @@ impl Skill {
         }
     }
 
+    /// Format a one-line summary with status icon, name, source, and description.
     pub fn summary_line(&self) -> String {
         let mut line = format!(
             "[{}] {} ({}) — {}",
@@ -216,6 +252,7 @@ impl Skill {
     }
 }
 
+/// Parse a SKILL.md file into its YAML manifest and markdown body.
 pub fn parse_skill_md(content: &str) -> Result<(SkillManifest, String)> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
@@ -299,6 +336,7 @@ fn load_builtin_skill(
     })
 }
 
+/// Returns the path to the user skills directory (`~/.borg/skills/`).
 pub fn skills_dir() -> Result<PathBuf> {
     Config::skills_dir()
 }
@@ -326,6 +364,7 @@ pub fn install_default_skills(data_dir: &std::path::Path) -> Result<usize> {
     Ok(installed)
 }
 
+/// Load all skills (built-in and user), with user skills overriding built-ins.
 pub fn load_all_skills(
     resolved_creds: &std::collections::HashMap<String, String>,
     skills_config: &SkillsConfig,
@@ -432,6 +471,7 @@ pub fn load_all_skills(
     Ok(skills)
 }
 
+/// Build the skills section for system prompt injection within a token budget.
 #[instrument(skip_all)]
 pub fn load_skills_context(
     max_tokens: usize,
@@ -539,8 +579,7 @@ pub fn collect_required_env_vars(
     }
 }
 
-/// Install missing dependencies for a skill.
-/// Returns list of successfully installed dependency names.
+/// Install missing dependencies for a skill, returning names of those installed.
 pub fn install_skill_deps(skill: &Skill) -> Result<Vec<String>> {
     let mut installed = Vec::new();
     for (dep_name, spec) in &skill.manifest.install {

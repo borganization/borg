@@ -33,24 +33,34 @@ pub enum RateDecision {
 /// Per-session warn and block thresholds for each action type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionLimits {
+    /// Warn threshold for tool call count.
     #[serde(default = "default_tool_calls_warn")]
     pub tool_calls_warn: u32,
+    /// Block threshold for tool call count.
     #[serde(default = "default_tool_calls_block")]
     pub tool_calls_block: u32,
+    /// Warn threshold for shell command count.
     #[serde(default = "default_shell_commands_warn")]
     pub shell_commands_warn: u32,
+    /// Block threshold for shell command count.
     #[serde(default = "default_shell_commands_block")]
     pub shell_commands_block: u32,
+    /// Warn threshold for file write count.
     #[serde(default = "default_file_writes_warn")]
     pub file_writes_warn: u32,
+    /// Block threshold for file write count.
     #[serde(default = "default_file_writes_block")]
     pub file_writes_block: u32,
+    /// Warn threshold for memory write count.
     #[serde(default = "default_memory_writes_warn")]
     pub memory_writes_warn: u32,
+    /// Block threshold for memory write count.
     #[serde(default = "default_memory_writes_block")]
     pub memory_writes_block: u32,
+    /// Warn threshold for web request count.
     #[serde(default = "default_web_requests_warn")]
     pub web_requests_warn: u32,
+    /// Block threshold for web request count.
     #[serde(default = "default_web_requests_block")]
     pub web_requests_block: u32,
 }
@@ -166,7 +176,9 @@ impl ActionLimits {
 
 /// Per-session rate limiter that tracks action counts against configurable thresholds.
 pub struct SessionRateGuard {
+    /// Running count of each action type in the current session.
     counters: HashMap<ActionType, u32>,
+    /// Configured warn and block thresholds.
     limits: ActionLimits,
 }
 

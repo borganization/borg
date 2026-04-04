@@ -1143,7 +1143,17 @@ mod tests {
 
     #[test]
     fn default_values_not_customized() {
-        let popup = SettingsPopup::new();
+        // Use a popup with no DB so real user settings don't interfere
+        let popup = SettingsPopup {
+            visible: false,
+            entries: SETTINGS,
+            selected: 0,
+            mode: EditMode::Browsing,
+            status_message: None,
+            db: None,
+            provider_index: 0,
+            model_index: 0,
+        };
 
         // With no DB, all sources should be Default
         for entry in popup.entries {

@@ -239,16 +239,27 @@ pub fn verify_script_hmac(key: &[u8], script_dir: &Path, expected_hmac: &str) ->
 
 /// Parameters for creating a new script via the `manage_scripts` tool.
 pub struct CreateScriptParams<'a> {
+    /// Script name (alphanumeric, hyphens, underscores only).
     pub name: &'a str,
+    /// Human-readable description of the script.
     pub description: &'a str,
+    /// Patch DSL content to apply to the script directory.
     pub patch: &'a str,
+    /// Script runtime (e.g. "python", "node", "bash").
     pub runtime: &'a str,
+    /// Filename of the script entrypoint.
     pub entrypoint: &'a str,
+    /// Sandbox profile name ("default", "trusted", or "custom").
     pub sandbox_profile: &'a str,
+    /// Whether the script is allowed network access.
     pub network_access: bool,
+    /// Filesystem paths the script may read.
     pub fs_read: &'a [String],
+    /// Filesystem paths the script may write.
     pub fs_write: &'a [String],
+    /// Whether the script is auto-deleted after execution.
     pub ephemeral: bool,
+    /// Maximum number of scripts allowed before creation is rejected.
     pub max_scripts: usize,
 }
 

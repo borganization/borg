@@ -3,11 +3,17 @@
 /// A raw message row from chat.db.
 #[derive(Debug)]
 pub struct IMessagePayload {
+    /// SQLite row ID from chat.db.
     pub rowid: i64,
+    /// Sender phone number or email.
     pub sender: Option<String>,
+    /// Whether this message was sent by the current user.
     pub is_from_me: bool,
+    /// Text content of the message.
     pub text: Option<String>,
+    /// Chat identifier string (e.g. "iMessage;-;+1234567890").
     pub chat_identifier: Option<String>,
+    /// Whether the message is from a group chat.
     pub is_group: bool,
 }
 
@@ -15,12 +21,18 @@ pub struct IMessagePayload {
 pub enum InboundDecision {
     /// Message should be dispatched to the agent.
     Dispatch {
+        /// Sender identifier (phone number or email).
         sender_id: String,
+        /// Message text content.
         text: String,
+        /// Chat identifier for routing the response.
         channel_id: String,
     },
     /// Message should be dropped silently.
-    Drop { reason: String },
+    Drop {
+        /// Reason the message was dropped.
+        reason: String,
+    },
 }
 
 #[cfg(test)]
