@@ -1,4 +1,5 @@
 pub mod auto_reply;
+pub mod channel_trait;
 pub mod chunker;
 pub mod circuit_breaker;
 pub mod commands;
