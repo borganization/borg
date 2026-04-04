@@ -283,7 +283,6 @@ mod tests {
     #[test]
     fn heartbeat_config_defaults() {
         let cfg = HeartbeatConfig::default();
-        assert!(!cfg.enabled);
         assert_eq!(cfg.interval, "30m");
         assert_eq!(cfg.quiet_hours_start.as_deref(), Some("00:00"));
         assert_eq!(cfg.quiet_hours_end.as_deref(), Some("06:00"));
@@ -294,12 +293,10 @@ mod tests {
     #[test]
     fn heartbeat_config_from_toml() {
         let toml_str = r#"
-            enabled = true
             interval = "1h"
             channels = ["telegram", "slack"]
         "#;
         let cfg: HeartbeatConfig = toml::from_str(toml_str).expect("parse");
-        assert!(cfg.enabled);
         assert_eq!(cfg.interval, "1h");
         assert_eq!(cfg.channels, vec!["telegram", "slack"]);
     }
