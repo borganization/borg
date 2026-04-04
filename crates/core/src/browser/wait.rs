@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chromiumoxide::Page;
+use tracing::instrument;
 
 /// Supported wait conditions for the `wait` browser action.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +92,7 @@ impl WaitCondition {
 const POLL_INTERVAL_MS: u64 = 100;
 
 /// Poll the page until `condition` is met or `timeout` expires.
+#[instrument(skip_all, fields(browser.action = "wait_for"))]
 pub async fn wait_for(page: &Page, condition: &WaitCondition, timeout: Duration) -> Result<String> {
     let js_check = condition.to_js_check();
     let desc = condition.description();

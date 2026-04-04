@@ -1,4 +1,5 @@
 use anyhow::Result;
+use tracing::instrument;
 
 /// Known error message patterns that indicate a recoverable browser issue
 /// (stale target, disconnected page, crashed tab) vs a logic error.
@@ -27,6 +28,7 @@ pub fn is_recoverable_error(err: &anyhow::Error) -> bool {
 
 /// Attempt a health check by sending `Browser.getVersion` via CDP.
 /// Returns `Ok(())` if the browser responds within `timeout`.
+#[instrument(skip_all, fields(browser.action = "health_check"))]
 pub async fn check_browser_health(
     browser: &chromiumoxide::Browser,
     timeout: std::time::Duration,

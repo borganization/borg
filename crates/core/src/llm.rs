@@ -345,6 +345,7 @@ impl LlmClient {
         let _ = std::fs::write(&path, redacted);
     }
 
+    #[instrument(skip_all, fields(llm.provider = %self.provider, llm.model = %self.llm_config.model))]
     pub async fn stream_chat(
         &mut self,
         messages: &[Message],
@@ -487,6 +488,7 @@ impl LlmClient {
     }
 
     /// Non-streaming call for heartbeat and simple requests
+    #[instrument(skip_all, fields(llm.provider = %self.provider, llm.model = %self.llm_config.model))]
     pub async fn chat(
         &self,
         messages: &[Message],
@@ -501,6 +503,7 @@ impl LlmClient {
 
     // ── OpenAI-compatible path ──
 
+    #[instrument(skip_all, fields(llm.provider = %self.provider))]
     async fn send_request(
         &self,
         body: &impl Serialize,
@@ -559,6 +562,7 @@ impl LlmClient {
         Ok(response)
     }
 
+    #[instrument(skip_all, fields(llm.provider = "openai"))]
     async fn stream_chat_openai_inner(
         &self,
         messages: &[Message],
@@ -739,6 +743,7 @@ impl LlmClient {
         }
     }
 
+    #[instrument(skip_all, fields(llm.provider = "openai"))]
     async fn chat_openai(
         &self,
         messages: &[Message],
@@ -860,6 +865,7 @@ impl LlmClient {
         body
     }
 
+    #[instrument(skip_all, fields(llm.provider = "anthropic"))]
     async fn stream_chat_anthropic_inner(
         &self,
         messages: &[Message],
@@ -1108,6 +1114,7 @@ impl LlmClient {
         }
     }
 
+    #[instrument(skip_all, fields(llm.provider = "anthropic"))]
     async fn chat_anthropic(
         &self,
         messages: &[Message],

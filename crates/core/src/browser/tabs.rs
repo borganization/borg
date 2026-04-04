@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chromiumoxide::{Browser, Page};
+use tracing::instrument;
 
 use super::validate_url_scheme;
 
@@ -35,6 +36,7 @@ impl TabManager {
 
     /// Open a new tab, optionally navigating to a URL. Sets it as active.
     /// Enforces the same URL scheme validation as `navigate`.
+    #[instrument(skip_all, fields(browser.action = "new_tab"))]
     pub async fn new_tab(&mut self, browser: &Browser, url: Option<&str>) -> Result<String> {
         let target = url.unwrap_or("about:blank");
         // Validate URL scheme unless it's about:blank (the default)
@@ -66,6 +68,7 @@ impl TabManager {
     }
 
     /// Close the active tab. Cannot close the last tab.
+    #[instrument(skip_all, fields(browser.action = "close_tab"))]
     pub async fn close_tab(&mut self) -> Result<String> {
         if self.pages.len() <= 1 {
             anyhow::bail!("Cannot close the last tab");
@@ -88,6 +91,7 @@ impl TabManager {
     }
 
     /// List all tabs with index, URL, and title.
+    #[instrument(skip_all, fields(browser.action = "list_tabs"))]
     pub async fn list_tabs(&self) -> Result<String> {
         let mut lines = Vec::with_capacity(self.pages.len());
         for (i, page) in self.pages.iter().enumerate() {

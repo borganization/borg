@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 use crate::llm::LlmClient;
 use crate::tokenizer::estimate_tokens;
@@ -162,6 +162,7 @@ pub fn enforce_tool_result_share_limit(history: &mut [Message], max_tokens: usiz
 ///   LLM to generate a rich summary of what was discussed.
 /// - Tool result messages are only kept if their corresponding assistant
 ///   tool-call message is also kept (orphaned tool results confuse the API).
+#[instrument(skip_all, fields(max_tokens = max_tokens))]
 pub async fn compact_history(history: &mut Vec<Message>, max_tokens: usize, llm: &LlmClient) {
     let Some(keep_from) = plan_compaction(history, max_tokens) else {
         return;

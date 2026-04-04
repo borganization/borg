@@ -2,8 +2,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chromiumoxide::Page;
+use tracing::instrument;
 
 /// Hover over an element by CSS selector.
+#[instrument(skip_all, fields(browser.action = "hover"))]
 pub async fn hover(page: &Page, selector: &str, timeout: Duration) -> Result<String> {
     tokio::time::timeout(timeout, async {
         let el = page
@@ -18,6 +20,7 @@ pub async fn hover(page: &Page, selector: &str, timeout: Duration) -> Result<Str
 }
 
 /// Select a value in a dropdown/select element via JS.
+#[instrument(skip_all, fields(browser.action = "select"))]
 pub async fn select(page: &Page, selector: &str, value: &str, timeout: Duration) -> Result<String> {
     let escaped_sel = selector.replace('\\', "\\\\").replace('\'', "\\'");
     let escaped_val = value.replace('\\', "\\\\").replace('\'', "\\'");
@@ -48,6 +51,7 @@ pub async fn select(page: &Page, selector: &str, value: &str, timeout: Duration)
 }
 
 /// Press a keyboard key using CDP Input domain.
+#[instrument(skip_all, fields(browser.action = "press"))]
 pub async fn press(page: &Page, key: &str, timeout: Duration) -> Result<String> {
     use chromiumoxide::cdp::browser_protocol::input::{
         DispatchKeyEventParams, DispatchKeyEventType,
@@ -81,6 +85,7 @@ pub async fn press(page: &Page, key: &str, timeout: Duration) -> Result<String> 
 }
 
 /// Drag from one element to another using synthesized mouse events.
+#[instrument(skip_all, fields(browser.action = "drag"))]
 pub async fn drag(
     page: &Page,
     source_selector: &str,
@@ -170,6 +175,7 @@ pub async fn drag(
 }
 
 /// Fill multiple form fields. `fields` maps CSS selectors to values.
+#[instrument(skip_all, fields(browser.action = "fill"))]
 pub async fn fill(
     page: &Page,
     fields: &serde_json::Map<String, serde_json::Value>,

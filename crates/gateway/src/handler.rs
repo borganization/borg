@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use borg_core::agent::{Agent, AgentEvent};
 use borg_core::config::Config;
@@ -84,6 +84,7 @@ impl InboundMessage {
 }
 
 /// Process a webhook request for a channel end-to-end.
+#[instrument(skip_all, fields(channel = %channel.manifest.name))]
 pub async fn handle_webhook(
     channel: &RegisteredChannel,
     headers_json: serde_json::Value,
@@ -156,6 +157,7 @@ pub async fn handle_webhook(
 }
 
 /// Process a polled message that is already normalized (no verify/parse needed).
+#[instrument(skip_all, fields(channel = %channel.manifest.name))]
 pub async fn handle_polled_message(
     channel: &RegisteredChannel,
     message: InboundMessage,
@@ -238,6 +240,7 @@ pub fn check_activation(
 ///
 /// `bot_identifier` is the platform-specific mention string (e.g. `@botname` for Telegram,
 /// `<@U123>` for Slack) used for group chat activation filtering.
+#[instrument(skip_all, fields(channel = %channel_name))]
 pub async fn invoke_agent(
     channel_name: &str,
     inbound: &InboundMessage,
@@ -249,6 +252,7 @@ pub async fn invoke_agent(
 }
 
 /// Like `invoke_agent` but accepts an optional auto-reply state for away-mode checks.
+#[instrument(skip_all, fields(channel = %channel_name))]
 pub async fn invoke_agent_with_auto_reply(
     channel_name: &str,
     inbound: &InboundMessage,
@@ -625,6 +629,7 @@ pub async fn invoke_agent_with_auto_reply(
 }
 
 /// Shared message processing: session resolution, agent invocation, outbound with retry + chunking.
+#[instrument(skip_all, fields(channel = %channel.manifest.name))]
 async fn process_message(
     channel: &RegisteredChannel,
     inbound: InboundMessage,

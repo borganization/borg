@@ -537,6 +537,7 @@ impl Agent {
     }
 
     /// Compact conversation history using LLM summarization, returning (before_tokens, after_tokens).
+    #[instrument(skip_all, fields(session_id = %self.session.meta.id))]
     pub async fn compact(&mut self) -> (usize, usize) {
         let before = history_tokens(&self.history);
         let llm = match LlmClient::new(&self.config) {
@@ -706,6 +707,7 @@ impl Agent {
     }
 
     /// Load memory context, using semantic ranking if embeddings are available.
+    #[instrument(skip_all)]
     async fn load_memory_with_ranking(&self) -> Result<String> {
         let max_tokens = self.config.memory.max_context_tokens;
 
@@ -776,6 +778,7 @@ impl Agent {
 
     /// Pre-compaction flush: extract durable information from messages about to be dropped
     /// and save to the daily log.
+    #[instrument(skip_all)]
     async fn flush_memory_before_compaction(&self, messages: &[crate::types::Message]) {
         let mut transcript = String::new();
         for msg in messages {
@@ -935,6 +938,7 @@ Rules:
         tools
     }
 
+    #[instrument(skip_all, fields(session_id = %self.session.meta.id))]
     pub async fn send_message(
         &mut self,
         user_input: &str,
@@ -944,6 +948,7 @@ Rules:
             .await
     }
 
+    #[instrument(skip_all, fields(session_id = %self.session.meta.id, turn_count = self.turn_count))]
     pub async fn send_message_with_cancel(
         &mut self,
         user_input: &str,
@@ -957,6 +962,7 @@ Rules:
     }
 
     /// Send a pre-constructed Message (e.g. multimodal) through the agent loop.
+    #[instrument(skip_all, fields(session_id = %self.session.meta.id, turn_count = self.turn_count))]
     pub async fn send_message_raw(
         &mut self,
         msg: Message,
@@ -1517,6 +1523,7 @@ Rules:
     }
 
     /// Drain pending steer messages from the user and inject them into history.
+    #[instrument(skip_all)]
     async fn drain_steers(&mut self, event_tx: &mpsc::Sender<AgentEvent>) {
         // Collect all steers first to avoid borrow conflict with self.persist_message
         let steers: Vec<String> = if let Some(ref mut steer_rx) = self.steer_rx {
@@ -1537,6 +1544,7 @@ Rules:
         }
     }
 
+    #[instrument(skip_all)]
     async fn run_tool_calls(
         &mut self,
         tool_calls: &[&ToolCall],
@@ -1651,6 +1659,7 @@ Rules:
         }
     }
 
+    #[instrument(skip_all, fields(tool.name = %name))]
     async fn execute_tool(
         &mut self,
         name: &str,
@@ -1849,6 +1858,7 @@ Rules:
     }
 
     /// Close the browser session if active.
+    #[instrument(skip_all)]
     pub async fn close_browser(&mut self) {
         if let Some(session) = self.browser_session.take() {
             let _ = session.close().await;
