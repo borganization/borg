@@ -4,8 +4,11 @@ use std::path::Path;
 /// Detected bubblewrap version for feature gating.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BwrapVersion {
+    /// Major version number.
     pub major: u32,
+    /// Minor version number.
     pub minor: u32,
+    /// Patch version number.
     pub patch: u32,
 }
 

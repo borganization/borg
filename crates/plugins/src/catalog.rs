@@ -3,14 +3,23 @@ use crate::{Category, CredentialSpec, Platform, PluginKind, TemplateFile, Templa
 /// A static plugin definition — embedded in the binary.
 #[derive(Debug, Clone)]
 pub struct PluginDef {
+    /// Unique plugin identifier (e.g., "telegram", "gmail").
     pub id: &'static str,
+    /// Human-readable display name.
     pub name: &'static str,
+    /// UI grouping category.
     pub category: Category,
+    /// Channel or tool integration.
     pub kind: PluginKind,
+    /// Short description shown in the marketplace.
     pub description: &'static str,
+    /// Credentials the user must provide during setup.
     pub required_credentials: &'static [CredentialSpec],
+    /// External binaries that must be installed.
     pub required_bins: &'static [&'static str],
+    /// Template files extracted to disk during installation.
     pub templates: &'static [TemplateFile],
+    /// Platform restriction.
     pub platform: Platform,
     /// Native integrations are handled in Rust (gateway crate) and only need credentials, not template files.
     pub is_native: bool,
@@ -61,6 +70,7 @@ const LINEAR_MAIN: &str = include_str!("../templates/productivity/linear/main.py
 
 // ── Catalog entries ──
 
+/// Complete catalog of available plugins, embedded at compile time.
 pub static CATALOG: &[PluginDef] = &[
     // ── Messaging ──
     // Native integrations (handled in Rust, credential-only)

@@ -124,3 +124,145 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
 
     defs
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_tools_include_essential_tools() {
+        let config = Config::default();
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+
+        // Essential tools always present
+        assert!(names.contains(&"write_memory"));
+        assert!(names.contains(&"read_memory"));
+        assert!(names.contains(&"memory_search"));
+        assert!(names.contains(&"list"));
+        assert!(names.contains(&"apply_patch"));
+        assert!(names.contains(&"run_shell"));
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"list_dir"));
+        assert!(names.contains(&"schedule"));
+        assert!(names.contains(&"request_user_input"));
+    }
+
+    #[test]
+    fn browser_tool_excluded_when_disabled() {
+        let mut config = Config::default();
+        config.browser.enabled = false;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(!names.contains(&"browser"));
+    }
+
+    #[test]
+    fn browser_tool_included_when_enabled() {
+        let mut config = Config::default();
+        config.browser.enabled = true;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"browser"));
+    }
+
+    #[test]
+    fn web_tools_excluded_when_disabled() {
+        let mut config = Config::default();
+        config.web.enabled = false;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(!names.contains(&"web_fetch"));
+        assert!(!names.contains(&"web_search"));
+    }
+
+    #[test]
+    fn web_tools_included_when_enabled() {
+        let mut config = Config::default();
+        config.web.enabled = true;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"web_fetch"));
+        assert!(names.contains(&"web_search"));
+    }
+
+    #[test]
+    fn tts_tool_excluded_when_disabled() {
+        let mut config = Config::default();
+        config.tts.enabled = false;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(!names.contains(&"text_to_speech"));
+    }
+
+    #[test]
+    fn tts_tool_included_when_enabled() {
+        let mut config = Config::default();
+        config.tts.enabled = true;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"text_to_speech"));
+    }
+
+    #[test]
+    fn image_gen_tool_excluded_when_disabled() {
+        let mut config = Config::default();
+        config.image_gen.enabled = false;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(!names.contains(&"generate_image"));
+    }
+
+    #[test]
+    fn image_gen_tool_included_when_enabled() {
+        let mut config = Config::default();
+        config.image_gen.enabled = true;
+        let defs = core_tool_definitions(&config);
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"generate_image"));
+    }
+
+    #[test]
+    fn all_tool_definitions_have_valid_schema() {
+        let mut config = Config::default();
+        config.browser.enabled = true;
+        config.web.enabled = true;
+        config.tts.enabled = true;
+        config.image_gen.enabled = true;
+        let defs = core_tool_definitions(&config);
+
+        for def in &defs {
+            assert!(!def.function.name.is_empty(), "tool name must not be empty");
+            assert!(
+                !def.function.description.is_empty(),
+                "tool {} has empty description",
+                def.function.name
+            );
+            // schema must be a JSON object with "type": "object"
+            assert_eq!(
+                def.function.parameters["type"].as_str(),
+                Some("object"),
+                "tool {} schema must have type=object",
+                def.function.name,
+            );
+        }
+    }
+
+    #[test]
+    fn no_duplicate_tool_names() {
+        let mut config = Config::default();
+        config.browser.enabled = true;
+        config.web.enabled = true;
+        config.tts.enabled = true;
+        config.image_gen.enabled = true;
+        let defs = core_tool_definitions(&config);
+        let mut seen = std::collections::HashSet::new();
+        for def in &defs {
+            assert!(
+                seen.insert(&def.function.name),
+                "duplicate tool name: {}",
+                def.function.name
+            );
+        }
+    }
+}

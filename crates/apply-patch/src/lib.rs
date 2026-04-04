@@ -1,3 +1,9 @@
+//! Patch DSL parser and filesystem applicator.
+//!
+//! Provides a simple text-based patch format for creating, updating, and deleting files.
+//! Used by the `apply_patch` tool to modify files in the workspace.
+#![warn(missing_docs)]
+
 pub mod apply;
 pub mod parser;
 mod seek_sequence;
@@ -7,6 +13,7 @@ use std::path::Path;
 
 pub use apply::AffectedPaths;
 
+/// Parse and apply a patch to a directory, returning which files were affected.
 pub fn apply_patch_to_dir(patch_text: &str, base_dir: &Path) -> Result<AffectedPaths> {
     let patch = parser::parse_patch(patch_text)?;
     apply::apply_patch(&patch, base_dir)

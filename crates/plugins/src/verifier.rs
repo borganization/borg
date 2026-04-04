@@ -3,8 +3,11 @@ use crate::catalog::PluginDef;
 /// Result of a verification check.
 #[derive(Debug, Clone)]
 pub struct VerifyResult {
+    /// Plugin identifier that was checked.
     pub id: String,
+    /// Whether verification passed.
     pub ok: bool,
+    /// Human-readable status message.
     pub message: String,
 }
 

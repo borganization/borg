@@ -75,3 +75,89 @@ impl Default for SecurityConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn security_config_defaults() {
+        let cfg = SecurityConfig::default();
+        assert!(cfg.secret_detection);
+        assert!(cfg.host_audit);
+        assert_eq!(cfg.blocked_paths.len(), 7);
+        assert!(cfg.blocked_paths.contains(&".ssh".to_string()));
+        assert!(cfg.blocked_paths.contains(&".aws".to_string()));
+        assert!(cfg.blocked_paths.contains(&".gnupg".to_string()));
+        assert!(cfg.blocked_paths.contains(&".config/gh".to_string()));
+        assert!(cfg.blocked_paths.contains(&".env".to_string()));
+        assert!(cfg.blocked_paths.contains(&"credentials".to_string()));
+        assert!(cfg.blocked_paths.contains(&"private_key".to_string()));
+    }
+
+    #[test]
+    fn security_config_from_toml() {
+        let toml_str = r#"
+            secret_detection = false
+            blocked_paths = [".ssh", ".env"]
+            host_audit = false
+        "#;
+        let cfg: SecurityConfig = toml::from_str(toml_str).expect("parse");
+        assert!(!cfg.secret_detection);
+        assert!(!cfg.host_audit);
+        assert_eq!(cfg.blocked_paths, vec![".ssh", ".env"]);
+    }
+
+    #[test]
+    fn security_config_empty_blocked_paths() {
+        let toml_str = r#"
+            blocked_paths = []
+        "#;
+        let cfg: SecurityConfig = toml::from_str(toml_str).expect("parse");
+        assert!(cfg.blocked_paths.is_empty());
+        // other defaults still apply
+        assert!(cfg.secret_detection);
+    }
+
+    #[test]
+    fn tool_policy_config_defaults() {
+        let cfg = ToolPolicyConfig::default();
+        assert_eq!(cfg.profile, "full");
+        assert!(cfg.allow.is_empty());
+        assert!(cfg.deny.is_empty());
+        assert_eq!(cfg.subagent_deny, vec!["schedule", "browser"]);
+    }
+
+    #[test]
+    fn tool_policy_config_from_toml() {
+        let toml_str = r#"
+            profile = "minimal"
+            allow = ["run_shell"]
+            deny = ["browser"]
+            subagent_deny = []
+        "#;
+        let cfg: ToolPolicyConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.profile, "minimal");
+        assert_eq!(cfg.allow, vec!["run_shell"]);
+        assert_eq!(cfg.deny, vec!["browser"]);
+        assert!(cfg.subagent_deny.is_empty());
+    }
+
+    #[test]
+    fn sandbox_config_defaults() {
+        let cfg = SandboxConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.mode, "strict");
+    }
+
+    #[test]
+    fn sandbox_config_from_toml() {
+        let toml_str = r#"
+            enabled = false
+            mode = "permissive"
+        "#;
+        let cfg: SandboxConfig = toml::from_str(toml_str).expect("parse");
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.mode, "permissive");
+    }
+}

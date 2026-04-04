@@ -21,60 +21,91 @@ use tracing::warn;
 use crate::policy::ExecutionPolicy;
 use crate::provider::Provider;
 
+/// Top-level configuration, loaded from `~/.borg/config.toml`.
+///
+/// All sections default to sensible values — a completely empty TOML file is valid.
+/// Parsed from TOML with `serde`, then runtime overrides applied from the settings DB.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
+    /// LLM provider, model, temperature, retries, and fallback chain.
     #[serde(default)]
     pub llm: LlmConfig,
+    /// Proactive heartbeat scheduling and quiet hours.
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
+    /// Tool execution settings (default timeout).
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Sandbox isolation mode (strict/permissive/disabled).
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    /// Memory system settings (token budget, embeddings, extra paths).
     #[serde(default)]
     pub memory: MemoryConfig,
+    /// Skills loading and token budget.
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Conversation behavior (collaboration mode, compaction).
     #[serde(default)]
     pub conversation: ConversationConfig,
+    /// User profile (name, timezone).
     #[serde(default)]
     pub user: UserConfig,
+    /// Execution policy for collaboration modes.
     #[serde(default)]
     pub policy: ExecutionPolicy,
+    /// Debug flags (verbose logging, token tracking).
     #[serde(default)]
     pub debug: DebugConfig,
+    /// Security settings (secret detection, blocked paths, action limits).
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Web fetching and search capabilities.
     #[serde(default)]
     pub web: WebConfig,
+    /// Scheduled task daemon settings (concurrency, catch-up).
     #[serde(default)]
     pub tasks: TasksConfig,
+    /// Monthly token budget and warning threshold.
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// Gateway server settings (host, port, DM policy).
     #[serde(default)]
     pub gateway: GatewayConfig,
+    /// Plugin marketplace settings.
     #[serde(default, alias = "customizations")]
     pub plugins: PluginsConfig,
+    /// Multi-agent orchestration settings.
     #[serde(default)]
     pub agents: MultiAgentConfig,
+    /// Anonymous telemetry collection.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// Headless Chrome automation settings.
     #[serde(default)]
     pub browser: BrowserConfig,
+    /// Audio input/output settings.
     #[serde(default)]
     pub audio: AudioConfig,
+    /// Text-to-speech settings.
     #[serde(default)]
     pub tts: TtsConfig,
+    /// Media understanding settings.
     #[serde(default)]
     pub media: MediaConfig,
+    /// AI image generation settings.
     #[serde(default)]
     pub image_gen: ImageGenConfig,
+    /// User-created script management.
     #[serde(default)]
     pub scripts: ScriptsConfig,
+    /// Compaction model overrides (use cheaper model for context compaction).
     #[serde(default)]
     pub compaction: CompactionConfig,
+    /// Conversation evolution and personality drift settings.
     #[serde(default)]
     pub evolution: EvolutionConfig,
+    /// Credential store for resolving secrets from env, file, exec, or keychain.
     #[serde(default)]
     pub credentials: HashMap<String, CredentialValue>,
     /// Transient identity override (not serialized). Set by gateway routing.

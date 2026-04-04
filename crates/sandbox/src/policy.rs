@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// Declarative security policy for sandboxed execution.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SandboxPolicy {
+    /// Whether network access is allowed.
     pub network: bool,
+    /// Paths the sandboxed process may read.
     pub fs_read: Vec<String>,
+    /// Paths the sandboxed process may write.
     pub fs_write: Vec<String>,
     /// Glob patterns to deny read access to (e.g. `["~/.borg/**"]`).
     /// Evaluated after fs_read allows; deny takes precedence.
@@ -20,9 +24,12 @@ pub struct SandboxPolicy {
     pub allowed_domains: Vec<String>,
 }
 
+/// A command with its arguments, ready for execution (possibly sandbox-wrapped).
 #[derive(Debug, Clone)]
 pub struct SandboxCommand {
+    /// The program to execute.
     pub program: String,
+    /// Command-line arguments.
     pub args: Vec<String>,
 }
 
@@ -135,6 +142,7 @@ impl SandboxPolicy {
         self
     }
 
+    /// Wrap a command with platform-specific sandbox isolation.
     pub fn wrap_command(
         &self,
         program: &str,

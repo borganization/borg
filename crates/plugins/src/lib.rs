@@ -1,6 +1,16 @@
+//! Plugin marketplace — catalog, installation, and verification of integrations.
+//!
+//! Manages one-click installation of messaging, email, and productivity plugins
+//! with credential storage and file template extraction.
+#![warn(missing_docs)]
+
+/// Plugin catalog with built-in integration definitions.
 pub mod catalog;
+/// Plugin installer: credential prompts, template extraction, keychain storage.
 pub mod installer;
+/// OS keychain operations for storing plugin credentials.
 pub mod keychain;
+/// Installation integrity verification via file hashes.
 pub mod verifier;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +18,9 @@ use serde::{Deserialize, Serialize};
 /// The kind of plugin — determines where files are installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PluginKind {
+    /// A messaging channel integration.
     Channel,
+    /// A standalone tool integration.
     Tool,
 }
 
@@ -24,8 +36,11 @@ impl std::fmt::Display for PluginKind {
 /// Integration category for grouping in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Category {
+    /// Chat and messaging platforms (Telegram, Slack, Discord, etc.).
     Messaging,
+    /// Email services (Gmail, Outlook).
     Email,
+    /// Productivity tools (Calendar, Notion, Linear).
     Productivity,
 }
 
@@ -42,7 +57,9 @@ impl std::fmt::Display for Category {
 /// Target platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
+    /// Available on all platforms.
     All,
+    /// macOS only (e.g., iMessage).
     MacOS,
 }
 
@@ -55,6 +72,7 @@ impl Platform {
         }
     }
 
+    /// Human-readable platform label for the UI (e.g., "macOS only").
     pub fn label(&self) -> Option<&'static str> {
         match self {
             Self::All => None,
@@ -66,24 +84,33 @@ impl Platform {
 /// Specification for a credential required by a plugin.
 #[derive(Debug, Clone)]
 pub struct CredentialSpec {
+    /// Environment variable or keychain key name.
     pub key: &'static str,
+    /// Human-readable label shown during prompts.
     pub label: &'static str,
+    /// URL to documentation for obtaining this credential.
     pub help_url: &'static str,
+    /// Whether the credential can be skipped during setup.
     pub is_optional: bool,
 }
 
 /// A file template to be extracted during installation.
 #[derive(Debug, Clone)]
 pub struct TemplateFile {
+    /// Path relative to the target base directory.
     pub relative_path: &'static str,
+    /// Embedded file content to write.
     pub content: &'static str,
+    /// Where this file should be installed.
     pub target: TemplateTarget,
 }
 
 /// Where template files are installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateTarget {
+    /// Install to `~/.borg/channels/`.
     Channels,
+    /// Install to `~/.borg/tools/`.
     Tools,
 }
 
@@ -100,28 +127,66 @@ impl TemplateTarget {
 /// Metadata about a credential stored in the OS keychain during installation.
 #[derive(Debug, Clone)]
 pub struct CredentialEntry {
+    /// Credential key name.
     pub key: String,
+    /// Keychain service identifier.
     pub service: String,
+    /// Keychain account name.
     pub account: String,
 }
 
 /// Result returned from a successful installation with user-facing notes.
 #[derive(Debug, Clone, Default)]
 pub struct InstallResult {
+    /// User-facing notes to display after installation.
     pub notes: Vec<String>,
+    /// Credentials that were stored in the keychain.
     pub credential_entries: Vec<CredentialEntry>,
+    /// File hashes for integrity verification (path, sha256).
     pub file_hashes: Vec<(String, String)>,
 }
 
 /// Events emitted during installation for progress display.
 #[derive(Debug, Clone)]
 pub enum InstallEvent {
-    Starting { id: String, name: String },
-    WritingFiles { id: String },
-    CredentialPrompt { id: String, label: String },
-    CredentialStored { id: String, key: String },
-    Complete { id: String },
-    Error { id: String, message: String },
+    /// Installation has begun.
+    Starting {
+        /// Plugin identifier.
+        id: String,
+        /// Human-readable plugin name.
+        name: String,
+    },
+    /// Writing template files to disk.
+    WritingFiles {
+        /// Plugin identifier.
+        id: String,
+    },
+    /// Prompting user for a credential.
+    CredentialPrompt {
+        /// Plugin identifier.
+        id: String,
+        /// Credential label being prompted.
+        label: String,
+    },
+    /// A credential was stored in the keychain.
+    CredentialStored {
+        /// Plugin identifier.
+        id: String,
+        /// Credential key that was stored.
+        key: String,
+    },
+    /// Installation completed successfully.
+    Complete {
+        /// Plugin identifier.
+        id: String,
+    },
+    /// Installation failed.
+    Error {
+        /// Plugin identifier.
+        id: String,
+        /// Error description.
+        message: String,
+    },
 }
 
 #[cfg(test)]
