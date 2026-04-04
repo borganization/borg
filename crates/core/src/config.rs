@@ -403,11 +403,7 @@ impl Default for ToolPolicyConfig {
             profile: "full".to_string(),
             allow: Vec::new(),
             deny: Vec::new(),
-            subagent_deny: vec![
-                "manage_tasks".to_string(),
-                "security_audit".to_string(),
-                "browser".to_string(),
-            ],
+            subagent_deny: vec!["schedule".to_string(), "browser".to_string()],
         }
     }
 }
@@ -3036,8 +3032,7 @@ memory_scope = "team"
         assert_eq!(policy.profile, "full");
         assert!(policy.allow.is_empty());
         assert!(policy.deny.is_empty());
-        assert!(policy.subagent_deny.contains(&"manage_tasks".to_string()));
-        assert!(policy.subagent_deny.contains(&"security_audit".to_string()));
+        assert!(policy.subagent_deny.contains(&"schedule".to_string()));
         assert!(policy.subagent_deny.contains(&"browser".to_string()));
     }
 

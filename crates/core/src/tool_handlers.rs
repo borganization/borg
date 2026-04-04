@@ -374,6 +374,61 @@ where
     }
 }
 
+/// Unified schedule handler: dispatches to manage_tasks or manage_cron based on `type` field.
+pub fn handle_schedule(args: &serde_json::Value, config: &Config) -> Result<String> {
+    let job_type = args["type"].as_str().unwrap_or("");
+    let action = args["action"].as_str().unwrap_or("");
+
+    // For create, type is required
+    if action == "create" && job_type.is_empty() {
+        return Ok("Error: 'type' is required for create. Use 'prompt' for AI tasks or 'command' for shell cron jobs.".to_string());
+    }
+
+    // Remap "id" to "task_id"/"job_id" for backward compat with existing helpers
+    let mut remapped = args.clone();
+    if let Some(id) = args.get("id").cloned() {
+        if job_type == "command" {
+            remapped["job_id"] = id.clone();
+        }
+        remapped["task_id"] = id;
+    }
+
+    match job_type {
+        "command" => handle_manage_cron(&remapped, config),
+        "prompt" => handle_manage_tasks(&remapped, config),
+        "" => {
+            // For non-create actions, try to infer type from the task in DB
+            if let Some(id) = remapped
+                .get("id")
+                .or(remapped.get("task_id"))
+                .and_then(|v| v.as_str())
+            {
+                if let Ok(db) = Database::open() {
+                    if let Ok(Some(task)) = db.get_task_by_id(id) {
+                        return if task.task_type == "command" {
+                            handle_manage_cron(&remapped, config)
+                        } else {
+                            handle_manage_tasks(&remapped, config)
+                        };
+                    }
+                }
+            }
+            // Default: list both types, or delegate to tasks for other actions
+            if action == "list" {
+                // Show all jobs (both prompt and command)
+                let tasks_result = handle_manage_tasks(&remapped, config)?;
+                let cron_result = handle_manage_cron(&remapped, config)?;
+                Ok(format!(
+                    "## Prompt Tasks\n{tasks_result}\n\n## Cron Jobs\n{cron_result}"
+                ))
+            } else {
+                handle_manage_tasks(&remapped, config)
+            }
+        }
+        other => Ok(format!("Unknown type: {other}. Use 'prompt' or 'command'.")),
+    }
+}
+
 pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result<String> {
     let action = require_str_param(args, "action")?;
     match action {
@@ -1491,6 +1546,13 @@ pub async fn handle_browser(
     }
 }
 
+/// Build the core tool definitions sent to the LLM.
+///
+/// IMPORTANT: Be conservative adding new tools here. Every tool's JSON schema is
+/// included in the system prompt on every turn, directly consuming context tokens.
+/// Prefer adding actions/parameters to an existing tool over creating a new one.
+/// If a new tool is truly needed, ensure it cannot be achieved via `run_shell` or
+/// an existing tool with an extra action variant.
 pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     let mut defs = vec![
         ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'IDENTITY.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories. Use scope='local' to write to project-local memory (.borg/ in CWD).", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false},"scope":{"type":"string","enum":["global","local"],"description":"Memory scope: 'global' (default, ~/.borg/) or 'local' (CWD/.borg/)","default":"global"}},"required":["filename","content"]})),
@@ -1499,7 +1561,6 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         ToolDefinition::new("list", "List resources. Specify what to list: skills, channels, or agents.", serde_json::json!({"type":"object","properties":{"what":{"type":"string","enum":["skills","channels","agents"],"description":"What to list"}},"required":["what"]})),
         ToolDefinition::new("apply_patch", "Create, update, or delete files using the patch DSL. Use target to choose location: cwd (default), skills (~/.borg/skills/), channels (~/.borg/channels/).", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"},"target":{"type":"string","enum":["cwd","skills","channels"],"description":"Where to apply the patch (default: cwd)","default":"cwd"}},"required":["patch"]})),
         ToolDefinition::new("run_shell", "Execute a shell command. Requires user confirmation before execution.", serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]})),
-        ToolDefinition::new("read_pdf", "Read and extract text from a PDF file.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the PDF file"},"max_chars":{"type":"integer","description":"Maximum characters to return (default: 50000)","default":50000}},"required":["file_path"]})),
         ToolDefinition::new("read_file", "Read a file's contents. Returns text with line numbers for code files, renders images visually, and extracts text from PDFs. Use offset/limit to read specific line ranges of large files.", serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"File path (relative to cwd or absolute)"},"offset":{"type":"integer","description":"Start line, 1-based (default: 1)"},"limit":{"type":"integer","description":"Max lines to read (default: all, truncated at max_chars)"},"max_chars":{"type":"integer","description":"Max characters to return (default: 50000)"}},"required":["path"]})),
         ToolDefinition::new("list_dir", "List the contents of a directory. Returns file and subdirectory names with types and sizes. Use this to explore project structure.", serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"Directory path (relative to cwd or absolute). Defaults to current directory."},"depth":{"type":"integer","description":"Maximum depth to recurse (default: 1, max: 3)"},"include_hidden":{"type":"boolean","description":"Include hidden files/dirs (default: false)"}}})),
     ];
@@ -1509,9 +1570,7 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         defs.push(ToolDefinition::new("web_search", "Search the web and return results with titles, URLs, and snippets.", serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"The search query"}},"required":["query"]})));
     }
 
-    defs.push(ToolDefinition::new("manage_tasks", "Manage scheduled tasks. Actions: create, list, get, update, pause, resume, cancel, delete, runs, run_now.", serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["create","list","get","update","pause","resume","cancel","delete","runs","run_now"],"description":"Action to perform"},"task_id":{"type":"string","description":"Task ID (required for get/update/pause/resume/cancel/delete/runs/run_now)"},"name":{"type":"string","description":"Task name (required for create, optional for update)"},"prompt":{"type":"string","description":"Prompt to execute (required for create, optional for update)"},"schedule_type":{"type":"string","enum":["cron","interval","once"],"description":"Schedule type (required for create, optional for update)"},"schedule_expr":{"type":"string","description":"Cron expression or interval (required for create, optional for update)"},"timezone":{"type":"string","description":"Timezone (default: local)"},"max_retries":{"type":"integer","description":"Max retry attempts for transient failures (default: 3)"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds (default: 300000)"},"delivery_channel":{"type":"string","description":"Channel to deliver results to (telegram, slack, discord)"},"delivery_target":{"type":"string","description":"Target chat/channel ID for delivery"},"limit":{"type":"integer","description":"Number of runs to return (for runs action, default: 5)"}},"required":["action"]})));
-
-    defs.push(ToolDefinition::new("manage_cron", "Manage cron jobs that execute shell commands on a schedule (like Linux cron). Actions: create, list, get, delete, pause, resume, runs, run_now.", serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["create","list","get","delete","pause","resume","runs","run_now"],"description":"Action to perform"},"job_id":{"type":"string","description":"Job ID (required for get/delete/pause/resume/runs/run_now)"},"schedule":{"type":"string","description":"5-field Linux cron expression (e.g. '*/5 * * * *'). Required for create."},"command":{"type":"string","description":"Shell command to execute (e.g. 'python3 /opt/backup.py'). Required for create."},"name":{"type":"string","description":"Optional human-readable name for the job"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds (default: 300000)"},"delivery_channel":{"type":"string","description":"Channel to deliver output to (telegram, slack, discord)"},"delivery_target":{"type":"string","description":"Target chat/channel ID for delivery"},"limit":{"type":"integer","description":"Number of runs to return (for runs action, default: 5)"}},"required":["action"]})));
+    defs.push(ToolDefinition::new("schedule", "Manage scheduled jobs. Use type='prompt' for AI tasks or type='command' for shell cron jobs. Actions: create, list, get, update, pause, resume, cancel, delete, runs, run_now.", serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["create","list","get","update","pause","resume","cancel","delete","runs","run_now"],"description":"Action to perform"},"type":{"type":"string","enum":["prompt","command"],"description":"Job type: 'prompt' for AI tasks, 'command' for shell cron jobs (required for create, used as filter for list)"},"id":{"type":"string","description":"Job ID (required for get/update/pause/resume/cancel/delete/runs/run_now)"},"name":{"type":"string","description":"Job name (required for create, optional for update)"},"prompt":{"type":"string","description":"Prompt to execute (for type=prompt, required for create)"},"command":{"type":"string","description":"Shell command to execute (for type=command, required for create)"},"schedule":{"type":"string","description":"5-field cron expression (e.g. '*/5 * * * *'). Required for type=command create."},"schedule_type":{"type":"string","enum":["cron","interval","once"],"description":"Schedule type (for type=prompt, required for create)"},"schedule_expr":{"type":"string","description":"Cron expression or interval (for type=prompt, required for create)"},"timezone":{"type":"string","description":"Timezone (default: local)"},"max_retries":{"type":"integer","description":"Max retry attempts for transient failures (default: 3)"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds (default: 300000)"},"delivery_channel":{"type":"string","description":"Channel to deliver results to (telegram, slack, discord)"},"delivery_target":{"type":"string","description":"Target chat/channel ID for delivery"},"limit":{"type":"integer","description":"Number of runs to return (for runs action, default: 5)"}},"required":["action"]})));
 
     if config.browser.enabled {
         defs.push(ToolDefinition::new(
@@ -1594,79 +1653,6 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
             }),
         ));
     }
-
-    if config.security.host_audit {
-        defs.push(ToolDefinition::new(
-            "security_audit",
-            "Run a host security audit. Returns diagnostic findings about firewall, open ports, SSH config, file permissions, disk encryption, OS updates, and running services. Review findings and suggest fixes — the user must approve each change.",
-            serde_json::json!({"type":"object","properties":{"category":{"type":"string","description":"Run only a specific check (omit for all)","enum":["firewall","ports","ssh","permissions","encryption","updates","services"]}}}),
-        ));
-    }
-
-    if config.scripts.enabled {
-        defs.push(ToolDefinition::new(
-            "manage_scripts",
-            "Manage agent-created scripts for cron jobs and one-off tasks. Actions: create, list, get, update, delete. Scripts are sandboxed and integrity-verified via HMAC.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["create", "list", "get", "update", "delete"],
-                        "description": "Action to perform"
-                    },
-                    "name": { "type": "string", "description": "Script name (required for create/get/update/delete)" },
-                    "description": { "type": "string", "description": "What the script does (for create)" },
-                    "patch": { "type": "string", "description": "Patch DSL content to create/update script files" },
-                    "runtime": { "type": "string", "enum": ["python", "node", "deno", "bash"], "description": "Script runtime (default: python)" },
-                    "entrypoint": { "type": "string", "description": "Main script filename (default: main.py)" },
-                    "sandbox_profile": { "type": "string", "enum": ["default", "trusted", "custom"], "description": "Sandbox profile (default: default)" },
-                    "network_access": { "type": "boolean", "description": "Allow network access (for custom profile)" },
-                    "fs_read": { "type": "array", "items": { "type": "string" }, "description": "Readable paths (for custom profile)" },
-                    "fs_write": { "type": "array", "items": { "type": "string" }, "description": "Writable paths (for custom profile)" },
-                    "ephemeral": { "type": "boolean", "description": "Auto-cleanup eligible (default: false)" }
-                },
-                "required": ["action"]
-            }),
-        ));
-        defs.push(ToolDefinition::new(
-            "run_script",
-            "Execute a previously created script. Verifies integrity (HMAC) before running. Returns script output.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Script name to execute" },
-                    "args": { "type": "object", "description": "Arguments passed as JSON to script stdin" }
-                },
-                "required": ["name"]
-            }),
-        ));
-    }
-
-    // Structured plan tool — always available
-    defs.push(ToolDefinition::new(
-        "update_plan",
-        "Update the task plan with steps and their statuses. Call this to track progress through multi-step tasks. At most one step should be in_progress at a time.",
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "steps": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": { "type": "string", "description": "Step description" },
-                            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Step status" }
-                        },
-                        "required": ["title", "status"]
-                    },
-                    "description": "List of plan steps with statuses"
-                },
-                "explanation": { "type": "string", "description": "Why the plan is being updated" }
-            },
-            "required": ["steps"]
-        }),
-    ));
 
     // Request user input — always available (disabled at gateway level)
     defs.push(ToolDefinition::new(
@@ -2016,10 +2002,9 @@ mod tests {
         assert!(names.contains(&"list"));
         assert!(names.contains(&"apply_patch"));
         assert!(names.contains(&"run_shell"));
-        assert!(names.contains(&"read_pdf"));
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"list_dir"));
-        assert!(names.contains(&"manage_tasks"));
+        assert!(names.contains(&"schedule"));
         // Consolidated: no longer separate tools
         assert!(!names.contains(&"list_skills"));
         assert!(!names.contains(&"apply_skill_patch"));
@@ -2058,24 +2043,6 @@ mod tests {
         let defs = core_tool_definitions(&config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert!(names.contains(&"text_to_speech"));
-    }
-
-    #[test]
-    fn core_tool_definitions_excludes_security_audit_when_disabled() {
-        let mut config = Config::default();
-        config.security.host_audit = false;
-        let defs = core_tool_definitions(&config);
-        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert!(!names.contains(&"security_audit"));
-    }
-
-    #[test]
-    fn core_tool_definitions_includes_security_audit_when_enabled() {
-        let mut config = Config::default();
-        config.security.host_audit = true;
-        let defs = core_tool_definitions(&config);
-        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert!(names.contains(&"security_audit"));
     }
 
     #[test]
@@ -2331,28 +2298,28 @@ mod tests {
 
     #[test]
     fn core_tool_definitions_count_reduced() {
-        // With all defaults enabled (web, browser, security_audit, scripts):
-        // write_memory, read_memory, memory_search, list, apply_patch, run_shell, read_pdf,
-        // read_file, list_dir, web_fetch, web_search, manage_tasks, manage_cron, browser,
-        // security_audit, manage_scripts, run_script, update_plan, request_user_input = 19
+        // With all defaults enabled (web, browser):
+        // write_memory, read_memory, memory_search, list, apply_patch, run_shell,
+        // read_file, list_dir, web_fetch, web_search, schedule, browser,
+        // request_user_input = 13
         let config = Config::default();
         let defs = core_tool_definitions(&config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert_eq!(
             names.len(),
-            19,
-            "expected 19 core tools (all enabled), got: {names:?}"
+            13,
+            "expected 13 core tools (all enabled), got: {names:?}"
         );
 
-        // With everything disabled: 9 base tools + list_dir + manage_cron + update_plan + request_user_input
+        // With everything disabled: base tools only
+        // write_memory, read_memory, memory_search, list, apply_patch, run_shell,
+        // read_file, list_dir, schedule, request_user_input = 10
         let mut minimal_config = Config::default();
         minimal_config.web.enabled = false;
         minimal_config.browser.enabled = false;
-        minimal_config.security.host_audit = false;
-        minimal_config.scripts.enabled = false;
         let defs = core_tool_definitions(&minimal_config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert_eq!(names.len(), 13, "expected 13 base tools, got: {names:?}");
+        assert_eq!(names.len(), 10, "expected 10 base tools, got: {names:?}");
     }
 
     #[test]
@@ -2758,82 +2725,12 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // -- update_plan tool --
-
-    #[test]
-    fn core_tool_definitions_includes_update_plan() {
-        let config = Config::default();
-        let defs = core_tool_definitions(&config);
-        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert!(names.contains(&"update_plan"));
-    }
-
     #[test]
     fn core_tool_definitions_includes_request_user_input() {
         let config = Config::default();
         let defs = core_tool_definitions(&config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert!(names.contains(&"request_user_input"));
-    }
-
-    #[tokio::test]
-    async fn handle_update_plan_valid_steps() {
-        let args = json!({
-            "steps": [
-                {"title": "Read files", "status": "completed"},
-                {"title": "Write code", "status": "in_progress"},
-                {"title": "Run tests", "status": "pending"}
-            ]
-        });
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
-        let result = handle_update_plan(&args, &event_tx).await.unwrap();
-        match result {
-            crate::types::ToolOutput::Text(t) => assert_eq!(t, "Plan updated."),
-            _ => panic!("expected Text output"),
-        }
-        // Check event was emitted
-        let event = event_rx.try_recv().unwrap();
-        assert!(matches!(
-            event,
-            crate::agent::AgentEvent::PlanUpdated { steps } if steps.len() == 3
-        ));
-    }
-
-    #[tokio::test]
-    async fn handle_update_plan_rejects_multiple_in_progress() {
-        let args = json!({
-            "steps": [
-                {"title": "Step A", "status": "in_progress"},
-                {"title": "Step B", "status": "in_progress"}
-            ]
-        });
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let result = handle_update_plan(&args, &event_tx).await.unwrap();
-        match result {
-            crate::types::ToolOutput::Text(t) => {
-                assert!(t.contains("At most one"), "got: {t}");
-            }
-            _ => panic!("expected Text output"),
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_update_plan_empty_steps_ok() {
-        let args = json!({"steps": []});
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let result = handle_update_plan(&args, &event_tx).await.unwrap();
-        match result {
-            crate::types::ToolOutput::Text(t) => assert_eq!(t, "Plan updated."),
-            _ => panic!("expected Text output"),
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_update_plan_missing_steps_errors() {
-        let args = json!({"explanation": "changed my mind"});
-        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
-        let result = handle_update_plan(&args, &event_tx).await;
-        assert!(result.is_err());
     }
 
     #[tokio::test]

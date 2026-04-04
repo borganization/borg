@@ -149,23 +149,19 @@ Plan mode uses an allowlist of non-mutating tools — new tools default to block
 
 ## Built-in Tools
 
+**IMPORTANT: Be conservative adding new tools.** Every tool's JSON schema is sent to the LLM every turn, directly consuming context tokens (~5KB+ per tool). Prefer adding actions/parameters to an existing tool over creating a new one. If a capability can be achieved via `run_shell` or an existing tool with an extra action, don't create a new tool.
+
 | Tool | Purpose |
 |------|---------|
 | `write_memory` | Write/append to memory files (IDENTITY.md, MEMORY.md, or topic files). Supports `scope` param (`global`/`local`) |
 | `read_memory` | Read a memory file |
-| `apply_patch` | Create/update/delete files in the current working directory via patch DSL |
+| `list` | List resources (tools, skills, channels, agents) |
+| `apply_patch` | Create/update/delete files via patch DSL. Target: cwd (default), skills, or channels |
 | `run_shell` | Execute a shell command |
-| `list_skills` | List all skills with status and source |
-| `apply_skill_patch` | Create/modify files in `~/.borg/skills/` via patch DSL |
-| `read_pdf` | Extract text from a PDF file with token-aware truncation |
 | `read_file` | Read file contents with line numbers, image rendering, PDF extraction |
 | `list_dir` | List directory contents with types and sizes. Supports depth recursion (max 3) and hidden files. Security: checks blocked paths on every entry |
-| `create_channel` | Create/modify channel integrations in `~/.borg/channels/` via patch DSL |
-| `list_channels` | List all messaging channels with status and webhook paths |
 | `browser` | Headless Chrome automation (navigate, click, type, screenshot, get_text, evaluate_js, close). Requires `browser.enabled = true` |
-| `manage_tasks` | Manage scheduled tasks. Actions: create, list, get, update, pause, resume, cancel, delete, runs, run_now. Supports delivery config and retry settings |
-| `manage_cron` | Manage cron jobs (shell commands on a schedule). Actions: create, list, get, delete, pause, resume, runs, run_now. Uses 5-field Linux cron format |
-| `security_audit` | Run host security audit (firewall, ports, SSH, permissions, encryption, updates, services). Requires `security.host_audit = true` |
+| `schedule` | Manage scheduled jobs — both AI prompt tasks (type=prompt) and shell cron jobs (type=command). Actions: create, list, get, update, pause, resume, cancel, delete, runs, run_now |
 
 ## Patch DSL
 
@@ -236,7 +232,7 @@ max_context_tokens = 4000
 [security]
 secret_detection = true
 blocked_paths = [".ssh", ".aws", ".gnupg", ".config/gh", ".env", "credentials", "private_key"]
-host_audit = true                # enable host security checks in doctor + security_audit tool
+host_audit = true                # enable host security checks in doctor command
 action_limits.tool_calls_warn = 50
 action_limits.tool_calls_block = 100
 action_limits.shell_commands_warn = 20
@@ -491,7 +487,7 @@ SQLite at `~/.borg/borg.db` with versioned migrations:
 Linux-style cron jobs that execute shell commands directly (no LLM involved). Uses the same `scheduled_tasks` table with `task_type = "command"` to distinguish from prompt tasks (`task_type = "prompt"`).
 
 - **CLI**: `borg cron add "*/5 * * * * echo hello"` or `borg cron add -s "*/5 * * * *" -c "echo hello"`
-- **Agent tool**: `manage_cron` with actions: create, list, get, delete, pause, resume, runs, run_now
+- **Agent tool**: `schedule` with type=command and actions: create, list, get, delete, pause, resume, runs, run_now
 - **Schedule format**: 5-field Linux cron (`min hour dom month dow`), auto-converted to 7-field internally
 - **Execution**: Direct `sh -c <command>` via `tokio::process::Command` — no LLM client needed
 - **Output**: stdout/stderr captured and stored in `task_runs.result`; non-zero exit stored in `task_runs.error`
