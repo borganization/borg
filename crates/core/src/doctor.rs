@@ -3,13 +3,18 @@ use crate::db::Database;
 use crate::provider::Provider;
 use crate::skills::load_all_skills;
 
+/// Result status for a single diagnostic check.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckStatus {
+    /// Check passed successfully.
     Pass,
+    /// Check passed with a warning.
     Warn(String),
+    /// Check failed.
     Fail(String),
 }
 
+/// A single diagnostic check result with category, name, and status.
 #[derive(Debug, Clone)]
 pub struct DiagnosticCheck {
     pub category: &'static str,
@@ -18,6 +23,7 @@ pub struct DiagnosticCheck {
 }
 
 impl DiagnosticCheck {
+    /// Create a passing check.
     pub fn pass(category: &'static str, name: impl Into<String>) -> Self {
         Self {
             category,
@@ -26,6 +32,7 @@ impl DiagnosticCheck {
         }
     }
 
+    /// Create a warning check.
     pub fn warn(category: &'static str, name: impl Into<String>, msg: impl Into<String>) -> Self {
         Self {
             category,
@@ -34,6 +41,7 @@ impl DiagnosticCheck {
         }
     }
 
+    /// Create a failing check.
     pub fn fail(category: &'static str, name: impl Into<String>, msg: impl Into<String>) -> Self {
         Self {
             category,
@@ -42,6 +50,7 @@ impl DiagnosticCheck {
         }
     }
 
+    /// Create a check with an explicit status.
     pub fn with_status(
         category: &'static str,
         name: impl Into<String>,
@@ -76,11 +85,13 @@ impl DiagnosticCheck {
     }
 }
 
+/// Collection of diagnostic checks grouped by category.
 pub struct DiagnosticReport {
     pub checks: Vec<DiagnosticCheck>,
 }
 
 impl DiagnosticReport {
+    /// Format the report as a human-readable string with status icons.
     pub fn format(&self) -> String {
         let mut output = String::from("Borg Doctor\n───────────\n");
         let mut current_category = "";
@@ -101,6 +112,7 @@ impl DiagnosticReport {
         output
     }
 
+    /// Count (pass, warn, fail) results.
     pub fn counts(&self) -> (usize, usize, usize) {
         let mut pass = 0;
         let mut warn = 0;
@@ -120,12 +132,14 @@ impl DiagnosticReport {
 /// Used by the TUI to show progressive output.
 #[derive(Default)]
 pub struct DiagnosticRunner {
+    /// Current step index.
     step: usize,
 }
 
 const STEP_COUNT: usize = 16;
 
 impl DiagnosticRunner {
+    /// Create a new diagnostic runner starting at step 0.
     pub fn new() -> Self {
         Self::default()
     }
@@ -244,6 +258,7 @@ impl DiagnosticRunner {
     }
 }
 
+/// Run all diagnostic checks and return a report.
 pub fn run_diagnostics(config: &Config) -> DiagnosticReport {
     let mut runner = DiagnosticRunner::new();
     let mut checks = Vec::new();

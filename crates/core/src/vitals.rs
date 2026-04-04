@@ -131,6 +131,7 @@ impl fmt::Display for EventCategory {
 }
 
 impl EventCategory {
+    /// Parse a category name string into the enum variant.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "interaction" => Some(Self::Interaction),
@@ -173,14 +174,20 @@ pub struct VitalsEvent {
 /// Drift issues to surface to the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriftFlag {
+    /// No interaction for over 48 hours.
     InactiveTooLong,
+    /// Stability stat critically low.
     LowStability,
+    /// Sync stat critically low.
     LowSync,
+    /// Happiness stat critically low.
     LowHappiness,
+    /// Multiple recent tool failures.
     RepeatedFailures,
 }
 
 impl DriftFlag {
+    /// Human-readable description of this drift flag.
     pub fn description(&self) -> &'static str {
         match self {
             Self::InactiveTooLong => "Agent inactive for over 48 hours",
@@ -561,11 +568,13 @@ pub fn format_drift_notice(drift: &[DriftFlag]) -> Option<String> {
 /// Lifecycle hook that passively records vitals events.
 /// Wraps Database in a Mutex because Hook requires Send + Sync
 /// but rusqlite::Connection is !Sync.
+/// Lifecycle hook that records vitals events to SQLite on agent interactions.
 pub struct VitalsHook {
     db: std::sync::Mutex<Database>,
 }
 
 impl VitalsHook {
+    /// Create a new vitals hook, opening a database connection.
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
             db: std::sync::Mutex::new(Database::open()?),

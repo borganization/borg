@@ -208,6 +208,7 @@ fn parse_u64(value: &str, key: &str) -> Result<u64> {
 }
 
 impl Config {
+    /// Returns the borg data directory (`~/.borg/` or `$BORG_DATA_DIR`).
     pub fn data_dir() -> Result<PathBuf> {
         if let Ok(dir) = std::env::var("BORG_DATA_DIR") {
             return Ok(PathBuf::from(dir));
@@ -217,6 +218,7 @@ impl Config {
             .join(".borg"))
     }
 
+    /// Returns the memory directory path (`~/.borg/memory/`).
     pub fn memory_dir() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("memory"))
     }
@@ -236,43 +238,53 @@ impl Config {
             .unwrap_or(chrono_tz::Tz::UTC)
     }
 
+    /// Returns the skills directory path (`~/.borg/skills/`).
     pub fn skills_dir() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("skills"))
     }
 
+    /// Returns the channels directory path (`~/.borg/channels/`).
     pub fn channels_dir() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("channels"))
     }
 
+    /// Returns the scripts directory path (`~/.borg/scripts/`).
     pub fn scripts_dir() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("scripts"))
     }
 
+    /// Returns the logs directory path (`~/.borg/logs/`).
     pub fn logs_dir() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("logs"))
     }
 
+    /// Returns the sessions directory path (`~/.borg/sessions/`).
     pub fn sessions_dir() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("sessions"))
     }
 
+    /// Returns the database file path (`~/.borg/borg.db`).
     pub fn db_path() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("borg.db"))
     }
 
+    /// Returns the identity file path (`~/.borg/IDENTITY.md`).
     pub fn identity_path() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("IDENTITY.md"))
     }
 
+    /// Returns the memory index file path (`~/.borg/MEMORY.md`).
     pub fn memory_index_path() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("MEMORY.md"))
     }
 
+    /// Load config from the default path (`~/.borg/config.toml`).
     pub fn load() -> Result<Self> {
         let config_path = Self::data_dir()?.join("config.toml");
         Self::load_from(&config_path)
     }
 
+    /// Load config from a specific file path.
     pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -334,6 +346,7 @@ impl Config {
         output
     }
 
+    /// Serialize and write config to `~/.borg/config.toml`.
     pub fn save(&self) -> Result<()> {
         let config_path = Self::data_dir()?.join("config.toml");
         let content = toml::to_string_pretty(self).with_context(|| "Failed to serialize config")?;
@@ -342,6 +355,7 @@ impl Config {
         Ok(())
     }
 
+    /// Format current settings as a human-readable string.
     pub fn display_settings(&self) -> String {
         let provider = self.llm.provider.as_deref().unwrap_or("(auto-detect)");
         format!(
@@ -382,6 +396,7 @@ impl Config {
         )
     }
 
+    /// Apply a single key=value setting, returning a confirmation string.
     pub fn apply_setting(&mut self, key: &str, value: &str) -> Result<String> {
         match key {
             "model" => {
@@ -529,6 +544,7 @@ impl Config {
         }
     }
 
+    /// Resolve the API key from config or environment.
     pub fn api_key(&self) -> Result<String> {
         // Try SecretRef first, then fall back to env var name
         if let Some(ref secret_ref) = self.llm.api_key {

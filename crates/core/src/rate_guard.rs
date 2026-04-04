@@ -4,22 +4,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants;
 
+/// Categories of actions subject to per-session rate limiting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionType {
+    /// Any tool invocation.
     ToolCall,
+    /// Shell command execution.
     ShellCommand,
+    /// File write operation.
     FileWrite,
+    /// Memory file write.
     MemoryWrite,
+    /// Outbound HTTP request.
     WebRequest,
 }
 
+/// Outcome of a rate limit check.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RateDecision {
+    /// Action is within limits.
     Allow,
+    /// Action is allowed but approaching the limit.
     Warn(String),
+    /// Action is blocked — limit exceeded.
     Block(String),
 }
 
+/// Per-session warn and block thresholds for each action type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionLimits {
     #[serde(default = "default_tool_calls_warn")]
@@ -153,12 +164,14 @@ impl ActionLimits {
     }
 }
 
+/// Per-session rate limiter that tracks action counts against configurable thresholds.
 pub struct SessionRateGuard {
     counters: HashMap<ActionType, u32>,
     limits: ActionLimits,
 }
 
 impl SessionRateGuard {
+    /// Create a new rate guard with the given thresholds.
     pub fn new(limits: ActionLimits) -> Self {
         Self {
             counters: HashMap::new(),

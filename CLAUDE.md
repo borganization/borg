@@ -41,6 +41,19 @@ Binary name is `borg`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `
 
 All integrations are compiled unconditionally into a single binary. iMessage is macOS-only via `#[cfg(target_os = "macos")]`.
 
+Smaller library crates (apply-patch, sandbox, heartbeat, plugins) enforce `#![warn(missing_docs)]`. Core and gateway crates have doc comments on key public APIs — add `///` doc comments to any new public item.
+
+## Code Coverage
+
+Target: **80%+ test coverage**. Coverage is reported via Codecov on every PR. To generate locally:
+
+```sh
+just coverage          # HTML report
+just coverage-summary  # text summary
+```
+
+Requires `cargo-llvm-cov` (`cargo install cargo-llvm-cov`).
+
 ## Installation
 
 ```sh

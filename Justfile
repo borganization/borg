@@ -30,6 +30,15 @@ check:
     cargo fmt --check
     cargo clippy -- -D warnings
 
+# Generate code coverage report (HTML)
+coverage:
+    cargo llvm-cov --workspace --html
+    @echo "Report: target/llvm-cov/html/index.html"
+
+# Generate code coverage summary (text)
+coverage-summary:
+    cargo llvm-cov --workspace
+
 # Run the binary
 run *args="":
     cargo run -- {{args}}

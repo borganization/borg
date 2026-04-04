@@ -6,16 +6,21 @@ use crate::config::Config;
 use crate::tokenizer::estimate_tokens;
 use crate::xml_util::escape_xml_attr;
 
+/// How to write to a memory file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
+    /// Replace the file contents entirely.
     Overwrite,
+    /// Append to the existing file contents.
     Append,
 }
 
+/// Returns the global memory directory path (`~/.borg/memory/`).
 pub fn memory_dir() -> Result<PathBuf> {
     Config::memory_dir()
 }
 
+/// Returns the path to the global memory index (`~/.borg/MEMORY.md`).
 pub fn memory_index_path() -> Result<PathBuf> {
     Config::memory_index_path()
 }
@@ -29,6 +34,7 @@ pub fn load_heartbeat_checklist() -> Option<String> {
 }
 
 #[instrument(skip_all, fields(token_budget = max_tokens))]
+/// Load global and local memory files within the given token budget.
 pub fn load_memory_context(max_tokens: usize) -> Result<String> {
     load_memory_context_scoped(max_tokens, None)
 }
@@ -218,6 +224,7 @@ fn load_memory_files_from_dir(
 /// Files in `ranked_global`/`ranked_local` are loaded in that order.
 /// Files not present in rankings are appended at the end in mtime order.
 #[instrument(skip_all, fields(token_budget = max_tokens))]
+/// Load memory context with files ordered by semantic similarity ranking.
 pub fn load_memory_context_ranked(
     max_tokens: usize,
     ranked_global: &[(String, f32)],
