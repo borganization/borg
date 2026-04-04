@@ -4,7 +4,7 @@ use cron::Schedule;
 use std::str::FromStr;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use borg_core::config::HeartbeatConfig;
 use borg_core::tasks::parse_interval;
@@ -92,6 +92,7 @@ impl HeartbeatScheduler {
         Some((start, end))
     }
 
+    #[instrument(skip_all)]
     pub async fn run(mut self, tx: mpsc::Sender<HeartbeatEvent>, cancel: CancellationToken) {
         if let Some(ref cron_expr) = self.config.cron {
             self.run_cron(cron_expr.clone(), tx, cancel).await;
@@ -101,6 +102,7 @@ impl HeartbeatScheduler {
     }
 
     /// Receive a wake signal, or pend forever if the channel is closed/absent.
+    #[instrument(skip_all)]
     async fn recv_wake(&mut self) {
         match &mut self.wake_rx {
             Some(rx) => match rx.recv().await {
@@ -132,6 +134,7 @@ impl HeartbeatScheduler {
         }
     }
 
+    #[instrument(skip_all)]
     async fn run_interval(&mut self, tx: mpsc::Sender<HeartbeatEvent>, cancel: CancellationToken) {
         let mut interval =
             parse_interval(&self.config.interval).unwrap_or(std::time::Duration::from_secs(1800));
@@ -185,6 +188,7 @@ impl HeartbeatScheduler {
         }
     }
 
+    #[instrument(skip_all)]
     async fn run_cron(
         &mut self,
         cron_expr: String,

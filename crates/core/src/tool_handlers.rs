@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
+use tracing::instrument;
 
 use crate::agent::AgentEvent;
 use crate::browser::{validate_browser_args, BrowserSession};
@@ -253,6 +254,7 @@ async fn stream_child_output(
     Ok((stdout_buf, stderr_buf, status.code()))
 }
 
+#[instrument(skip_all, fields(tool.name = "run_shell"))]
 pub async fn handle_run_shell(
     args: &serde_json::Value,
     config: &Config,
@@ -340,6 +342,7 @@ pub async fn handle_run_shell(
     }
 }
 
+#[instrument(skip_all, fields(tool.name = "web_fetch"))]
 pub async fn handle_web_fetch(args: &serde_json::Value, config: &Config) -> Result<String> {
     if !config.web.enabled {
         return Ok("Web access is disabled. Enable it in config: [web] enabled = true".to_string());
@@ -352,6 +355,7 @@ pub async fn handle_web_fetch(args: &serde_json::Value, config: &Config) -> Resu
     }
 }
 
+#[instrument(skip_all, fields(tool.name = "web_search"))]
 pub async fn handle_web_search(args: &serde_json::Value, config: &Config) -> Result<String> {
     if !config.web.enabled {
         return Ok("Web access is disabled. Enable it in config: [web] enabled = true".to_string());
@@ -1187,6 +1191,7 @@ pub fn handle_manage_scripts(args: &serde_json::Value, config: &Config) -> Resul
     }
 }
 
+#[instrument(skip_all, fields(tool.name = "run_script"))]
 pub async fn handle_run_script(args: &serde_json::Value, config: &Config) -> Result<String> {
     if !config.scripts.enabled {
         return Ok("Scripts system is disabled.".to_string());
@@ -1227,6 +1232,7 @@ pub fn handle_security_audit(args: &serde_json::Value, config: &Config) -> Resul
     Ok(report.format())
 }
 
+#[instrument(skip_all, fields(tool.name = "generate_image"))]
 pub async fn handle_generate_image(args: &serde_json::Value, config: &Config) -> Result<String> {
     if !config.image_gen.enabled {
         return Ok(
@@ -1283,6 +1289,7 @@ pub async fn handle_generate_image(args: &serde_json::Value, config: &Config) ->
     }
 }
 
+#[instrument(skip_all, fields(tool.name = "text_to_speech"))]
 pub async fn handle_text_to_speech(
     args: &serde_json::Value,
     synthesizer: &crate::tts::TtsSynthesizer,
@@ -1328,6 +1335,7 @@ pub fn update_task_status(task_id: &str, status: &str, verb: &str) -> Result<Str
     })
 }
 
+#[instrument(skip_all, fields(tool.name = "browser"))]
 pub async fn handle_browser(
     args: &serde_json::Value,
     config: &Config,
@@ -1656,6 +1664,7 @@ fn search_scope(
 }
 
 /// Execute hybrid memory search (FTS + vector) across global and local scopes.
+#[instrument(skip_all, fields(tool.name = "memory_search"))]
 pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> Result<String> {
     let query = require_str_param(args, "query")?;
     let max_results = args["max_results"].as_u64().unwrap_or(5) as usize;
@@ -1770,6 +1779,7 @@ pub fn format_search_results(results: &[crate::embeddings::SearchResult]) -> Str
 }
 
 /// Handle the `update_plan` tool: parse structured plan steps and emit a PlanUpdated event.
+#[instrument(skip_all, fields(tool.name = "update_plan"))]
 pub async fn handle_update_plan(
     args: &serde_json::Value,
     event_tx: &tokio::sync::mpsc::Sender<crate::agent::AgentEvent>,
@@ -1799,6 +1809,7 @@ pub async fn handle_update_plan(
 }
 
 /// Handle the `request_user_input` tool: prompt the user for input and block until they respond.
+#[instrument(skip_all, fields(tool.name = "request_user_input"))]
 pub async fn handle_request_user_input(
     args: &serde_json::Value,
     event_tx: &tokio::sync::mpsc::Sender<crate::agent::AgentEvent>,
@@ -2658,5 +2669,58 @@ mod tests {
             assert_eq!(shell, "cmd.exe");
             assert_eq!(flag, "/C");
         }
+    }
+
+    /// Records span names created during a test.
+    struct SpanRecorder(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanRecorder {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(attrs.metadata().name().to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_web_fetch_emits_tracing_span() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let spans = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(SpanRecorder(spans.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let config = Config::default();
+        let args = json!({"url": "http://localhost:1"});
+        let _ = handle_web_fetch(&args, &config).await;
+
+        let recorded = spans.lock().unwrap();
+        assert!(
+            recorded.iter().any(|s| s == "handle_web_fetch"),
+            "expected 'handle_web_fetch' span, got: {recorded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_web_search_emits_tracing_span() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let spans = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(SpanRecorder(spans.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let config = Config::default();
+        let args = json!({"query": "test"});
+        let _ = handle_web_search(&args, &config).await;
+
+        let recorded = spans.lock().unwrap();
+        assert!(
+            recorded.iter().any(|s| s == "handle_web_search"),
+            "expected 'handle_web_search' span, got: {recorded:?}"
+        );
     }
 }

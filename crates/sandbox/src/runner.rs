@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::policy::SandboxPolicy;
 
@@ -85,6 +85,7 @@ impl<'a> ScriptRunner<'a> {
         }
     }
 
+    #[instrument(skip_all, fields(sandbox.name = %self.name))]
     pub async fn run(&self, input_json: &str) -> Result<ScriptOutput> {
         let (mut child, timeout) = self.spawn_child("")?;
         self.write_stdin(&mut child, input_json).await;
@@ -102,6 +103,7 @@ impl<'a> ScriptRunner<'a> {
     }
 
     /// Like `run()`, but invokes `on_output` for each line of stdout/stderr as it arrives.
+    #[instrument(skip_all, fields(sandbox.name = %self.name))]
     pub async fn run_streaming<F>(&self, input_json: &str, mut on_output: F) -> Result<ScriptOutput>
     where
         F: FnMut(&str, bool) + Send,
@@ -222,6 +224,7 @@ impl ScriptOutput {
 ///
 /// Shared core logic used by both tool executors and channel executors.
 #[allow(clippy::too_many_arguments)]
+#[instrument(skip_all)]
 pub async fn run_sandboxed_script(
     runtime: &str,
     script_path: &Path,

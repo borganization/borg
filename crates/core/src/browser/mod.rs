@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use futures::StreamExt;
+use tracing::instrument;
 
 use crate::config::BrowserConfig as BorgBrowserConfig;
 
@@ -31,6 +32,7 @@ pub struct BrowserSession {
 
 impl BrowserSession {
     /// Launch Chrome and open a default page.
+    #[instrument(skip_all, fields(browser.action = "launch"))]
     pub async fn launch(config: &BorgBrowserConfig) -> Result<Self> {
         let detection = detection::find_chrome(config.executable.as_deref());
         let chrome_path = detection.executable.context(
@@ -96,12 +98,14 @@ impl BrowserSession {
     // -- Health & Recovery --
 
     /// Check if the browser process is still alive and responsive.
+    #[instrument(skip_all, fields(browser.action = "health_check"))]
     pub async fn health_check(&self) -> Result<()> {
         health::check_browser_health(&self.browser, Duration::from_secs(5)).await
     }
 
     /// Attempt to recover from a stale page/target error.
     /// First tries to open a new page; if that fails, relaunches the browser.
+    #[instrument(skip_all, fields(browser.action = "recover"))]
     pub async fn try_recover(&mut self) -> Result<()> {
         tracing::info!("Attempting browser recovery...");
 
@@ -136,6 +140,7 @@ impl BrowserSession {
     // -- Core Actions --
 
     /// Navigate to a URL. Only http/https URLs are allowed.
+    #[instrument(skip_all, fields(browser.action = "navigate"))]
     pub async fn navigate(&self, url: &str, timeout: Duration) -> Result<String> {
         validate_url_scheme(url)?;
 
@@ -159,6 +164,7 @@ impl BrowserSession {
     }
 
     /// Click an element by CSS selector.
+    #[instrument(skip_all, fields(browser.action = "click"))]
     pub async fn click(&self, selector: &str, timeout: Duration) -> Result<String> {
         let page = self.tab_manager.active_page();
         tokio::time::timeout(timeout, async {
@@ -174,6 +180,7 @@ impl BrowserSession {
     }
 
     /// Type text into an element by CSS selector.
+    #[instrument(skip_all, fields(browser.action = "type_text"))]
     pub async fn type_text(&self, selector: &str, text: &str, timeout: Duration) -> Result<String> {
         let page = self.tab_manager.active_page();
         tokio::time::timeout(timeout, async {
@@ -190,6 +197,7 @@ impl BrowserSession {
     }
 
     /// Take a screenshot. Returns (description, png_bytes).
+    #[instrument(skip_all, fields(browser.action = "screenshot"))]
     pub async fn screenshot(
         &self,
         selector: Option<&str>,
@@ -224,6 +232,7 @@ impl BrowserSession {
     }
 
     /// Get text content from the page or a specific element.
+    #[instrument(skip_all, fields(browser.action = "get_text"))]
     pub async fn get_text(&self, selector: Option<&str>, timeout: Duration) -> Result<String> {
         let page = self.tab_manager.active_page();
         tokio::time::timeout(timeout, async {
@@ -256,6 +265,7 @@ impl BrowserSession {
 
     /// Evaluate a JavaScript expression with an inner Promise.race timeout
     /// to prevent CDP serialization deadlock from stuck JS.
+    #[instrument(skip_all, fields(browser.action = "evaluate_js"))]
     pub async fn evaluate_js(&self, expression: &str, timeout: Duration) -> Result<String> {
         let page = self.tab_manager.active_page();
         let inner_timeout_ms = self.config.js_eval_timeout_ms;
@@ -337,6 +347,7 @@ impl BrowserSession {
     // -- Tab Management --
 
     /// Open a new tab.
+    #[instrument(skip_all, fields(browser.action = "new_tab"))]
     pub async fn new_tab(&mut self, url: Option<&str>) -> Result<String> {
         let result = self.tab_manager.new_tab(&self.browser, url).await?;
         // Attach event listeners to the new page
@@ -353,6 +364,7 @@ impl BrowserSession {
     }
 
     /// Close the active tab.
+    #[instrument(skip_all, fields(browser.action = "close_tab"))]
     pub async fn close_tab(&mut self) -> Result<String> {
         self.tab_manager.close_tab().await
     }
@@ -377,6 +389,7 @@ impl BrowserSession {
     // -- Lifecycle --
 
     /// Close the browser gracefully: CDP close → await handler → abort.
+    #[instrument(skip_all, fields(browser.action = "close"))]
     pub async fn close(self) -> Result<()> {
         // Abort event listener tasks
         for h in &self.event_listener_handles {

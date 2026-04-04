@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use borg_core::config::Config;
 use borg_core::db::Database;
@@ -96,6 +96,7 @@ impl GatewayServer {
         })
     }
 
+    #[instrument(skip_all)]
     pub async fn run(self) -> Result<()> {
         let gateway_config = &self.config.gateway;
         let addr = format!("{}:{}", gateway_config.host, gateway_config.port);
@@ -979,6 +980,7 @@ fn extract_client_ip(
     peer_ip.to_string()
 }
 
+#[instrument(skip_all, fields(channel = %name))]
 async fn webhook_handler(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
@@ -1133,6 +1135,7 @@ fn service_unavailable_response() -> WebhookResponse {
     )
 }
 
+#[instrument(skip_all, fields(channel = "telegram"))]
 async fn handle_telegram_webhook(
     state: &Arc<AppState>,
     tg_client: &Arc<TelegramClient>,
@@ -1278,6 +1281,7 @@ async fn handle_telegram_webhook(
     ok_response()
 }
 
+#[instrument(skip_all, fields(channel = "slack"))]
 async fn handle_slack_webhook(
     state: &Arc<AppState>,
     slack_client: &Arc<SlackClient>,
@@ -1582,6 +1586,7 @@ async fn slack_command_handler(
     ok_response()
 }
 
+#[instrument(skip_all, fields(channel = "twilio"))]
 async fn handle_twilio_webhook(
     state: &Arc<AppState>,
     twilio_client: &Arc<TwilioClient>,
@@ -1762,6 +1767,7 @@ async fn send_telegram_response(
     }
 }
 
+#[instrument(skip_all, fields(channel = "discord"))]
 async fn handle_discord_webhook_route(
     state: &Arc<AppState>,
     discord_client: &Arc<DiscordClient>,
@@ -1894,6 +1900,7 @@ async fn handle_discord_webhook_route(
     }
 }
 
+#[instrument(skip_all, fields(channel = "teams"))]
 async fn handle_teams_webhook_route(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -1997,6 +2004,7 @@ async fn handle_teams_webhook_route(
     ok_response()
 }
 
+#[instrument(skip_all, fields(channel = "google_chat"))]
 async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> WebhookResponse {
     let inbound = match crate::google_chat::handle_google_chat_webhook(
         body,
@@ -2206,6 +2214,7 @@ mod tests {
 }
 
 /// Background task: claim pending deliveries and attempt to send them.
+#[instrument(skip_all)]
 async fn drain_pending_deliveries(
     state: &Arc<AppState>,
     health: &Arc<RwLock<ChannelHealthRegistry>>,

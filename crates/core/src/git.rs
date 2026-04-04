@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 
 /// Timeout for git subprocess calls.
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -69,6 +70,7 @@ pub fn find_repo_root(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// Run a git command with timeout, returns stdout on success.
+#[instrument(skip_all, fields(git.args = ?args))]
 async fn run_git(args: &[&str], cwd: &Path) -> Result<String> {
     let output = tokio::time::timeout(
         GIT_COMMAND_TIMEOUT,
@@ -90,6 +92,7 @@ async fn run_git(args: &[&str], cwd: &Path) -> Result<String> {
 }
 
 /// Collect rich git context for system prompt injection.
+#[instrument(skip_all)]
 pub async fn collect_git_context(cwd: &Path) -> GitContext {
     let repo_root = find_repo_root(cwd);
     let work_dir = repo_root.as_deref().unwrap_or(cwd);
@@ -124,6 +127,7 @@ pub async fn collect_git_context(cwd: &Path) -> GitContext {
 /// 3. `GIT_INDEX_FILE=<tmp> git add --all` (add untracked, excluding ignored dirs)
 /// 4. `GIT_INDEX_FILE=<tmp> git write-tree` (create tree object)
 /// 5. `git commit-tree <tree> -p HEAD -m "borg ghost snapshot"` (create commit)
+#[instrument(skip_all)]
 pub async fn create_ghost_commit(repo_root: &Path) -> Result<GhostCommit> {
     // Check if repo has any commits
     let has_head = run_git(&["rev-parse", "HEAD"], repo_root).await.is_ok();
@@ -189,6 +193,7 @@ pub async fn create_ghost_commit(repo_root: &Path) -> Result<GhostCommit> {
 }
 
 /// Restore working tree to match a ghost commit.
+#[instrument(skip_all)]
 pub async fn restore_ghost_commit(repo_root: &Path, commit: &GhostCommit) -> Result<()> {
     // Restore all tracked files from the ghost commit
     run_git(
@@ -253,6 +258,7 @@ pub fn format_git_context(ctx: &GitContext) -> String {
 }
 
 /// Run a git command with a custom GIT_INDEX_FILE environment variable.
+#[instrument(skip_all, fields(git.args = ?args))]
 async fn run_git_with_index(index_path: &str, args: &[&str], cwd: &Path) -> Result<String> {
     let output = tokio::time::timeout(
         GIT_COMMAND_TIMEOUT,
@@ -460,5 +466,56 @@ mod tests {
         // No git repo, so branch/commit should be None
         assert!(ctx.branch.is_none());
         assert!(ctx.commit_hash.is_none());
+    }
+
+    /// Records span names created during a test.
+    struct SpanRecorder(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanRecorder {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(attrs.metadata().name().to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_git_context_emits_tracing_span() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let spans = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(SpanRecorder(spans.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let cwd = std::env::current_dir().unwrap();
+        let _ = collect_git_context(&cwd).await;
+
+        let recorded = spans.lock().unwrap();
+        assert!(
+            recorded.iter().any(|s| s == "collect_git_context"),
+            "expected 'collect_git_context' span, got: {recorded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_git_emits_tracing_span_with_args() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let spans = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(SpanRecorder(spans.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let cwd = std::env::current_dir().unwrap();
+        let _ = run_git(&["status", "--short"], &cwd).await;
+
+        let recorded = spans.lock().unwrap();
+        assert!(
+            recorded.iter().any(|s| s == "run_git"),
+            "expected 'run_git' span, got: {recorded:?}"
+        );
     }
 }

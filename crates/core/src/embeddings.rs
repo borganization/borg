@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
 use std::sync::{LazyLock, Mutex};
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::config::{Config, EmbeddingsConfig};
 use crate::constants::{GEMINI_EMBEDDING_DIM, MAX_EMBEDDING_INPUT_CHARS, OPENAI_EMBEDDING_DIM};
@@ -177,6 +177,7 @@ pub fn invalidate_provider_cache() {
 }
 
 /// Generate an embedding vector via OpenAI-compatible API.
+#[instrument(skip_all)]
 pub async fn generate_embedding(
     client: &reqwest::Client,
     provider: &EmbeddingProvider,
@@ -289,6 +290,7 @@ pub fn blended_score(similarity: f32, recency_score: f32, recency_weight: f32) -
 }
 
 /// Generate an embedding with cache. Checks DB cache first, falls back to API call.
+#[instrument(skip_all)]
 pub async fn generate_embedding_cached(
     client: &reqwest::Client,
     provider: &EmbeddingProvider,
@@ -328,6 +330,7 @@ pub async fn generate_embedding_cached(
 }
 
 /// Embed a memory file and store in the database. Skips if content unchanged.
+#[instrument(skip_all)]
 pub async fn embed_memory_file(
     config: &Config,
     filename: &str,
@@ -369,6 +372,7 @@ pub async fn embed_memory_file(
 }
 
 /// Generate a query embedding for ranking. Returns (provider, embedding) or None.
+#[instrument(skip_all)]
 pub async fn generate_query_embedding(
     config: &Config,
     query: &str,
@@ -423,6 +427,7 @@ pub fn rank_embeddings_by_similarity(
 }
 
 /// Convenience: rank memories by query text (generates embedding then ranks).
+#[instrument(skip_all)]
 pub async fn rank_memories_by_similarity(
     config: &Config,
     query: &str,
@@ -439,6 +444,7 @@ pub async fn rank_memories_by_similarity(
 /// Embed a memory file using chunking. Chunks the content, hashes each chunk,
 /// skips unchanged chunks, generates embeddings for new/changed chunks,
 /// and upserts all chunks to the database.
+#[instrument(skip_all)]
 pub async fn embed_memory_file_chunked(
     config: &Config,
     filename: &str,
