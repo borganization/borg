@@ -23,8 +23,6 @@ pub enum ToolDisplayCategory {
     Browsed { action: String, url: Option<String> },
     Tasks { action: String },
     Listed { what: String },
-    ReadPdf { filename: String },
-    RanAudit,
     Generic { name: String, preview: String },
 }
 
@@ -112,7 +110,7 @@ pub fn classify_tool(name: &str, args_json: &str) -> ToolDisplayCategory {
             let url = args["url"].as_str().map(ToString::to_string);
             ToolDisplayCategory::Browsed { action, url }
         }
-        "manage_tasks" => {
+        "schedule" | "manage_tasks" | "manage_cron" => {
             let action = args["action"].as_str().unwrap_or("?").to_string();
             ToolDisplayCategory::Tasks { action }
         }
@@ -122,13 +120,6 @@ pub fn classify_tool(name: &str, args_json: &str) -> ToolDisplayCategory {
         "list_channels" => ToolDisplayCategory::Listed {
             what: "channels".to_string(),
         },
-        "read_pdf" => {
-            let path = args["file_path"].as_str().unwrap_or("?");
-            ToolDisplayCategory::ReadPdf {
-                filename: extract_basename(path),
-            }
-        }
-        "security_audit" => ToolDisplayCategory::RanAudit,
         _ => {
             let preview = truncate(args_json, 77);
             ToolDisplayCategory::Generic {
@@ -197,15 +188,6 @@ pub fn tool_header_spans(cat: &ToolDisplayCategory) -> Vec<Span<'static>> {
         }
         ToolDisplayCategory::Listed { what } => {
             vec![Span::styled(format!("Listed {what}"), bold)]
-        }
-        ToolDisplayCategory::ReadPdf { filename } => {
-            vec![
-                Span::styled("Read PDF", bold),
-                Span::styled(format!(" {filename}"), dim),
-            ]
-        }
-        ToolDisplayCategory::RanAudit => {
-            vec![Span::styled("Ran audit", bold)]
         }
         ToolDisplayCategory::Generic { name, preview } => {
             let name_style = theme::code_style().add_modifier(ratatui::style::Modifier::BOLD);
@@ -282,8 +264,6 @@ pub fn tool_result_label(cat: &ToolDisplayCategory) -> String {
         ToolDisplayCategory::Browsed { action, .. } => format!("Browsed {action}"),
         ToolDisplayCategory::Tasks { action } => format!("Tasks {action}"),
         ToolDisplayCategory::Listed { what } => format!("Listed {what}"),
-        ToolDisplayCategory::ReadPdf { filename } => format!("Read {filename}"),
-        ToolDisplayCategory::RanAudit => "Ran audit".to_string(),
         ToolDisplayCategory::Generic { name, .. } => format!("Ran {name}"),
     }
 }
@@ -466,8 +446,8 @@ mod tests {
     }
 
     #[test]
-    fn classify_manage_tasks() {
-        let cat = classify_tool("manage_tasks", r#"{"action":"list"}"#);
+    fn classify_schedule() {
+        let cat = classify_tool("schedule", r#"{"action":"list"}"#);
         assert_eq!(
             cat,
             ToolDisplayCategory::Tasks {
@@ -496,23 +476,6 @@ mod tests {
                 what: "channels".to_string()
             }
         );
-    }
-
-    #[test]
-    fn classify_read_pdf() {
-        let cat = classify_tool("read_pdf", r#"{"file_path":"/tmp/docs/report.pdf"}"#);
-        assert_eq!(
-            cat,
-            ToolDisplayCategory::ReadPdf {
-                filename: "report.pdf".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn classify_security_audit() {
-        let cat = classify_tool("security_audit", r#"{}"#);
-        assert_eq!(cat, ToolDisplayCategory::RanAudit);
     }
 
     #[test]

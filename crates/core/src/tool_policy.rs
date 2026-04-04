@@ -213,11 +213,11 @@ mod tests {
     fn subagent_deny_applied() {
         let tools = vec![
             make_tool("write_memory"),
-            make_tool("manage_tasks"),
-            make_tool("security_audit"),
+            make_tool("schedule"),
+            make_tool("browser"),
         ];
         let mut policy = default_policy();
-        policy.subagent_deny = vec!["manage_tasks".to_string(), "security_audit".to_string()];
+        policy.subagent_deny = vec!["schedule".to_string(), "browser".to_string()];
         let filtered = filter_subagent_tools(tools, &policy);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].function.name, "write_memory");
@@ -250,7 +250,7 @@ mod tests {
             make_tool("apply_patch"),
             make_tool("run_shell"),
             make_tool("gmail"),
-            make_tool("manage_tasks"),
+            make_tool("schedule"),
         ];
         let mut policy = default_policy();
         policy.profile = "messaging".to_string();
@@ -259,7 +259,7 @@ mod tests {
         assert!(names.contains(&"write_memory"));
         assert!(names.contains(&"list"));
         assert!(names.contains(&"gmail"));
-        assert!(names.contains(&"manage_tasks"));
+        assert!(names.contains(&"schedule"));
         assert!(!names.contains(&"apply_patch"));
         assert!(!names.contains(&"run_shell"));
     }
@@ -345,24 +345,23 @@ mod tests {
         let tools = vec![
             make_tool("write_memory"),
             make_tool("browser"),
-            make_tool("manage_tasks"),
+            make_tool("schedule"),
         ];
         let mut policy = default_policy();
         policy.profile = "minimal".to_string();
-        policy.subagent_deny = vec!["manage_tasks".to_string()];
+        policy.subagent_deny = vec!["schedule".to_string()];
         let filtered = filter_subagent_tools(tools, &policy);
         let names: Vec<&str> = filtered.iter().map(|t| t.function.name.as_str()).collect();
-        // browser and manage_tasks should both be gone (browser by profile, tasks by subagent deny)
+        // browser and schedule should both be gone (browser by profile, schedule by subagent deny)
         assert!(names.contains(&"write_memory"));
         assert!(!names.contains(&"browser"));
-        assert!(!names.contains(&"manage_tasks"));
+        assert!(!names.contains(&"schedule"));
     }
 
     #[test]
     fn default_policy_has_subagent_deny_list() {
         let policy = default_policy();
-        assert!(policy.subagent_deny.contains(&"manage_tasks".to_string()));
-        assert!(policy.subagent_deny.contains(&"security_audit".to_string()));
+        assert!(policy.subagent_deny.contains(&"schedule".to_string()));
         assert!(policy.subagent_deny.contains(&"browser".to_string()));
     }
 
