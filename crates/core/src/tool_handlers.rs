@@ -41,28 +41,6 @@ pub fn handle_read_memory(args: &serde_json::Value) -> Result<String> {
     read_memory(filename)
 }
 
-pub fn handle_list_tools(config: &Config) -> Result<String> {
-    use crate::tool_catalog::{ToolProfile, ALL_GROUPS};
-
-    let profile =
-        ToolProfile::from_str_opt(&config.tools.policy.profile).unwrap_or(ToolProfile::Full);
-    let active_groups = profile.groups();
-    let mut out = format!("# Tools (profile: {profile:?})\n\n## Built-in Tools\n");
-
-    for group in ALL_GROUPS {
-        let active = if active_groups.contains(group) {
-            ""
-        } else {
-            " (disabled)"
-        };
-        out.push_str(&format!("\n### {}{}\n", group.label(), active));
-        for name in group.tool_names() {
-            out.push_str(&format!("  - {name}\n"));
-        }
-    }
-    Ok(out)
-}
-
 pub fn handle_list_skills(config: &Config) -> Result<String> {
     let resolved_creds = config.resolve_credentials();
     let skills = load_all_skills(&resolved_creds, &config.skills)?;
@@ -140,7 +118,6 @@ pub fn handle_list(
 ) -> Result<String> {
     let what = require_str_param(args, "what")?;
     match what {
-        "tools" => handle_list_tools(config),
         "skills" => handle_list_skills(config),
         "channels" => handle_list_channels(config),
         "agents" => {
@@ -1519,7 +1496,7 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
         ToolDefinition::new("write_memory", "Write or append to a memory file. Use filename 'IDENTITY.md' to update personality, 'MEMORY.md' for the index, or any other name for topic-specific memories. Use scope='local' to write to project-local memory (.borg/ in CWD).", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file"},"content":{"type":"string","description":"Content to write"},"append":{"type":"boolean","description":"Append instead of overwriting","default":false},"scope":{"type":"string","enum":["global","local"],"description":"Memory scope: 'global' (default, ~/.borg/) or 'local' (CWD/.borg/)","default":"global"}},"required":["filename","content"]})),
         ToolDefinition::new("read_memory", "Read a memory file.", serde_json::json!({"type":"object","properties":{"filename":{"type":"string","description":"Name of the memory file to read"}},"required":["filename"]})),
         ToolDefinition::new("memory_search", "Search memory files semantically. Use before answering questions about prior work, decisions, preferences, or anything previously discussed.", serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"Search query"},"max_results":{"type":"integer","description":"Maximum results to return (default: 5)","default":5},"min_score":{"type":"number","description":"Minimum relevance score 0-1 (default: 0.2)","default":0.2}},"required":["query"]})),
-        ToolDefinition::new("list", "List resources. Specify what to list: tools (built-in), skills, channels, or agents.", serde_json::json!({"type":"object","properties":{"what":{"type":"string","enum":["tools","skills","channels","agents"],"description":"What to list"}},"required":["what"]})),
+        ToolDefinition::new("list", "List resources. Specify what to list: skills, channels, or agents.", serde_json::json!({"type":"object","properties":{"what":{"type":"string","enum":["skills","channels","agents"],"description":"What to list"}},"required":["what"]})),
         ToolDefinition::new("apply_patch", "Create, update, or delete files using the patch DSL. Use target to choose location: cwd (default), skills (~/.borg/skills/), channels (~/.borg/channels/).", serde_json::json!({"type":"object","properties":{"patch":{"type":"string","description":"The patch content in the patch DSL format"},"target":{"type":"string","enum":["cwd","skills","channels"],"description":"Where to apply the patch (default: cwd)","default":"cwd"}},"required":["patch"]})),
         ToolDefinition::new("run_shell", "Execute a shell command. Requires user confirmation before execution.", serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]})),
         ToolDefinition::new("read_pdf", "Read and extract text from a PDF file.", serde_json::json!({"type":"object","properties":{"file_path":{"type":"string","description":"Path to the PDF file"},"max_chars":{"type":"integer","description":"Maximum characters to return (default: 50000)","default":50000}},"required":["file_path"]})),
@@ -2044,9 +2021,7 @@ mod tests {
         assert!(names.contains(&"list_dir"));
         assert!(names.contains(&"manage_tasks"));
         // Consolidated: no longer separate tools
-        assert!(!names.contains(&"list_tools"));
         assert!(!names.contains(&"list_skills"));
-        assert!(!names.contains(&"create_tool"));
         assert!(!names.contains(&"apply_skill_patch"));
     }
 
@@ -2315,14 +2290,6 @@ mod tests {
     }
 
     #[test]
-    fn list_tools_shows_builtins() {
-        let config = Config::default();
-        let args = json!({"what": "tools"});
-        let result = handle_list(&args, &config, None).unwrap();
-        assert!(result.contains("Built-in Tools"));
-    }
-
-    #[test]
     fn list_agents_without_control() {
         let config = Config::default();
         let args = json!({"what": "agents"});
@@ -2471,34 +2438,6 @@ mod tests {
                 std::env::set_var(k, val);
             }
         }
-    }
-
-    // -- handle_list_tools (built-ins only) --
-
-    #[test]
-    fn handle_list_tools_includes_builtins() {
-        let config = Config::default();
-        let result = handle_list_tools(&config).unwrap();
-        assert!(result.contains("Memory"), "should include Memory group");
-        assert!(
-            result.contains("Filesystem"),
-            "should include Filesystem group"
-        );
-        assert!(
-            result.contains("write_memory"),
-            "should list write_memory tool"
-        );
-        assert!(
-            result.contains("apply_patch"),
-            "should list apply_patch tool"
-        );
-    }
-
-    #[test]
-    fn handle_list_tools_shows_profile() {
-        let config = Config::default();
-        let result = handle_list_tools(&config).unwrap();
-        assert!(result.contains("Full"), "should show current profile name");
     }
 
     // -- is_blocked_path --
@@ -2817,23 +2756,6 @@ mod tests {
         });
         let result = handle_manage_tasks(&args, &Config::default());
         assert!(result.is_err());
-    }
-
-    // -- handle_list_tools profile filtering --
-
-    #[test]
-    fn handle_list_tools_minimal_profile_disables_groups() {
-        let mut config = Config::default();
-        config.tools.policy.profile = "minimal".to_string();
-        let result = handle_list_tools(&config).unwrap();
-        assert!(
-            result.contains("(disabled)"),
-            "minimal profile should mark most groups as disabled, got: {result}"
-        );
-        assert!(
-            result.contains("Minimal"),
-            "should show Minimal profile name"
-        );
     }
 
     // -- update_plan tool --

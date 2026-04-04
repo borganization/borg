@@ -251,9 +251,7 @@ pub fn level_from_xp(stage: &Stage, xp: u32) -> (u8, u32) {
 pub fn classify_tool_archetype(tool_name: &str, metadata: Option<&str>) -> Option<Archetype> {
     // Direct tool name mapping
     let archetype = match tool_name {
-        "create_tool" | "apply_patch" | "apply_skill_patch" | "create_channel" => {
-            Some(Archetype::Builder)
-        }
+        "apply_patch" | "apply_skill_patch" | "create_channel" => Some(Archetype::Builder),
         "security_audit" => Some(Archetype::Guardian),
         "browser" | "search" | "read_pdf" | "memory_search" => Some(Archetype::Analyst),
         "calendar" | "notion" | "linear" | "manage_tasks" => Some(Archetype::Strategist),
@@ -998,11 +996,7 @@ impl Hook for EvolutionHook {
                     let archetype = classify_tool_archetype(name, Some(result.as_str()));
                     let is_creation = matches!(
                         name.as_str(),
-                        "create_tool"
-                            | "apply_patch"
-                            | "apply_skill_patch"
-                            | "create_channel"
-                            | "write_memory"
+                        "apply_patch" | "apply_skill_patch" | "create_channel" | "write_memory"
                     );
                     let xp = if is_creation {
                         let bonus = if archetype.is_some() {
@@ -1100,10 +1094,6 @@ mod tests {
     #[test]
     fn classify_builder_tools() {
         assert_eq!(
-            classify_tool_archetype("create_tool", None),
-            Some(Archetype::Builder)
-        );
-        assert_eq!(
             classify_tool_archetype("apply_patch", None),
             Some(Archetype::Builder)
         );
@@ -1192,7 +1182,7 @@ mod tests {
         // Verify each archetype can be reached
         let cases: &[(&str, Option<&str>, Archetype)] = &[
             ("run_shell", Some("docker ps"), Archetype::Ops),
-            ("create_tool", None, Archetype::Builder),
+            ("apply_patch", None, Archetype::Builder),
             ("browser", None, Archetype::Analyst),
             ("telegram_send", None, Archetype::Communicator),
             ("security_audit", None, Archetype::Guardian),
@@ -1220,7 +1210,7 @@ mod tests {
             "xp_gain",
             3,
             "builder",
-            "create_tool",
+            "apply_patch",
             1000,
         );
         let h2 = compute_event_hmac(
@@ -1229,7 +1219,7 @@ mod tests {
             "xp_gain",
             3,
             "builder",
-            "create_tool",
+            "apply_patch",
             1000,
         );
         assert_eq!(h1, h2);

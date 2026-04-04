@@ -432,7 +432,7 @@ pub fn classify_tool(tool_name: &str, is_error: bool) -> EventCategory {
         return EventCategory::Failure;
     }
     match tool_name {
-        "write_memory" | "create_tool" | "apply_skill_patch" | "create_channel" | "apply_patch" => {
+        "write_memory" | "apply_skill_patch" | "create_channel" | "apply_patch" => {
             EventCategory::Creation
         }
         _ => EventCategory::Success,
@@ -717,7 +717,6 @@ mod tests {
             classify_tool("write_memory", false),
             EventCategory::Creation
         );
-        assert_eq!(classify_tool("create_tool", false), EventCategory::Creation);
         assert_eq!(
             classify_tool("apply_skill_patch", false),
             EventCategory::Creation
@@ -999,7 +998,7 @@ mod tests {
             VITALS_HMAC_LEGACY,
             "0",
             "creation",
-            "create_tool",
+            "apply_patch",
             deltas,
             ts,
         );
@@ -1007,7 +1006,7 @@ mod tests {
         let legit = VitalsEvent {
             id: 1,
             category: "creation".to_string(),
-            source: "create_tool".to_string(),
+            source: "apply_patch".to_string(),
             stability_delta: deltas.stability as i32,
             focus_delta: deltas.focus as i32,
             sync_delta: deltas.sync as i32,

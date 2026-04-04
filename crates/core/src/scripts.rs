@@ -399,7 +399,7 @@ pub async fn execute_script(config: &Config, name: &str, args_json: &str) -> Res
         )
     };
 
-    let (ok, output) = borg_tools::runner::run_sandboxed_script(
+    let (ok, output) = borg_sandbox::runner::run_sandboxed_script(
         &runtime,
         &entrypoint_path,
         &script_dir,
