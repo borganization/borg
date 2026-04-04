@@ -27,7 +27,6 @@ use crate::rate_limit::SlidingWindowLimiter;
 use crate::registry::ChannelRegistry;
 use crate::retry::RetryPolicy;
 use crate::session_queue::SessionQueue;
-use crate::signal::api::SignalClient;
 use crate::slack::api::SlackClient;
 use crate::slack::dedup::EventDeduplicator;
 use crate::teams::api::TeamsClient;
@@ -124,233 +123,26 @@ impl GatewayServer {
             None
         };
 
-        let telegram_token = self.config.resolve_credential_or_env("TELEGRAM_BOT_TOKEN");
-        let telegram_secret = self
-            .config
-            .resolve_credential_or_env("TELEGRAM_WEBHOOK_SECRET");
-
-        // Initialize native Telegram client if token is available
-        let (telegram_client, telegram_bot_username) = match telegram_token {
-            Some(token) => {
-                let client = TelegramClient::new(&token)?;
-                match client.get_me().await {
-                    Ok(me) => {
-                        info!(
-                            "Telegram native integration active (bot: @{})",
-                            me.username.as_deref().unwrap_or(&me.first_name)
-                        );
-                        if let Ok(adb) =
-                            Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS)
-                        {
-                            borg_core::activity_log::log_activity(
-                                &adb,
-                                "info",
-                                "gateway",
-                                "Telegram native integration active",
-                            );
-                        }
-                        let bot_username = me.username.clone();
-
-                        // Set webhook if public_url is configured
-                        if let Some(ref url) = self.config.gateway.public_url {
-                            let webhook_url = format!("{url}/webhook/telegram");
-                            if let Err(e) = client
-                                .set_webhook(&webhook_url, telegram_secret.as_deref())
-                                .await
-                            {
-                                warn!("Failed to set Telegram webhook: {e}");
-                            } else {
-                                info!("Telegram webhook set to {webhook_url}");
-                            }
-                        }
-
-                        // Register bot command menu
-                        {
-                            use crate::commands::{NativeCommandRegistration, GATEWAY_COMMANDS};
-                            if let Err(e) = client.register_commands(GATEWAY_COMMANDS).await {
-                                warn!("Failed to register Telegram bot commands: {e}");
-                            } else {
-                                info!("Telegram bot menu commands registered");
-                            }
-                        }
-
-                        (Some(Arc::new(client)), bot_username)
-                    }
-                    Err(e) => {
-                        warn!("TELEGRAM_BOT_TOKEN set but getMe failed: {e}");
-                        (None, None)
-                    }
-                }
-            }
-            None => (None, None),
-        };
-
+        // Initialize channel clients
+        let (telegram_client, telegram_bot_username, telegram_secret) =
+            crate::channel_init::init_telegram(&self.config).await;
         let telegram_dedup = Arc::new(Mutex::new(UpdateDeduplicator::new()));
 
-        let slack_token = self.config.resolve_credential_or_env("SLACK_BOT_TOKEN");
-        let slack_signing_secret = self
-            .config
-            .resolve_credential_or_env("SLACK_SIGNING_SECRET");
+        let (slack_client, slack_signing_secret, slack_bot_user_id) =
+            crate::channel_init::init_slack(&self.config).await;
 
-        // Initialize native Slack client if token is available
-        let (slack_client, slack_bot_user_id) = match slack_token {
-            Some(token) => match SlackClient::new(&token) {
-                Ok(mut client) => match client.auth_test().await {
-                    Ok(resp) => {
-                        info!(
-                            "Slack native integration active (bot: {}, team: {})",
-                            resp.user.as_deref().unwrap_or("unknown"),
-                            resp.team.as_deref().unwrap_or("unknown"),
-                        );
-                        if let Ok(adb) =
-                            Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS)
-                        {
-                            borg_core::activity_log::log_activity(
-                                &adb,
-                                "info",
-                                "gateway",
-                                "Slack native integration active",
-                            );
-                        }
-                        let bot_uid = client.bot_user_id().map(String::from);
-                        (Some(Arc::new(client)), bot_uid)
-                    }
-                    Err(e) => {
-                        warn!("SLACK_BOT_TOKEN set but auth.test failed: {e}");
-                        (None, None)
-                    }
-                },
-                Err(e) => {
-                    warn!("Failed to create Slack HTTP client: {e}");
-                    (None, None)
-                }
-            },
-            None => (None, None),
-        };
+        let (twilio_client, twilio_auth_token, twilio_phone_number, twilio_whatsapp_number) =
+            crate::channel_init::init_twilio(&self.config);
 
-        // Initialize native Twilio client if credentials are available
-        let twilio_account_sid = self.config.resolve_credential_or_env("TWILIO_ACCOUNT_SID");
-        let twilio_auth_token = self.config.resolve_credential_or_env("TWILIO_AUTH_TOKEN");
-        let twilio_phone_number = self.config.resolve_credential_or_env("TWILIO_PHONE_NUMBER");
-        let twilio_whatsapp_number = self
-            .config
-            .resolve_credential_or_env("TWILIO_WHATSAPP_NUMBER");
+        let (discord_client, discord_public_key) =
+            crate::channel_init::init_discord(&self.config).await;
 
-        let twilio_client = match (&twilio_account_sid, &twilio_auth_token) {
-            (Some(sid), Some(token)) => {
-                info!(
-                    "Twilio native integration active (account: {}...)",
-                    &sid[..sid.len().min(8)]
-                );
-                match TwilioClient::new(sid, token) {
-                    Ok(client) => Some(Arc::new(client)),
-                    Err(e) => {
-                        warn!("Failed to create Twilio HTTP client: {e}");
-                        None
-                    }
-                }
-            }
-            _ => None,
-        };
+        let (teams_client, teams_app_secret) = crate::channel_init::init_teams(&self.config)?;
 
-        // Initialize native Discord client if token is available
-        let discord_token = self.config.resolve_credential_or_env("DISCORD_BOT_TOKEN");
-        let discord_public_key = self.config.resolve_credential_or_env("DISCORD_PUBLIC_KEY");
+        let (google_chat_client, google_chat_token) =
+            crate::channel_init::init_google_chat(&self.config)?;
 
-        let discord_client = match discord_token {
-            Some(token) => {
-                let mut client = DiscordClient::new(&token)?;
-                match client.get_current_user().await {
-                    Ok(user) => {
-                        info!("Discord native integration active (bot: {})", user.username);
-                        client.set_application_id(user.id.clone());
-
-                        // Register global slash commands
-                        {
-                            use crate::commands::{NativeCommandRegistration, GATEWAY_COMMANDS};
-                            if let Err(e) = client.register_commands(GATEWAY_COMMANDS).await {
-                                warn!("Failed to register Discord slash commands: {e}");
-                            } else {
-                                info!("Discord slash commands registered");
-                            }
-                        }
-
-                        Some(Arc::new(client))
-                    }
-                    Err(e) => {
-                        warn!("DISCORD_BOT_TOKEN set but /users/@me failed: {e}");
-                        None
-                    }
-                }
-            }
-            None => None,
-        };
-
-        // Initialize native Teams client if credentials are available
-        let teams_app_id = self.config.resolve_credential_or_env("TEAMS_APP_ID");
-        let teams_app_secret = self.config.resolve_credential_or_env("TEAMS_APP_SECRET");
-
-        let teams_client = match (&teams_app_id, &teams_app_secret) {
-            (Some(app_id), Some(app_secret)) => {
-                info!(
-                    "Teams native integration active (app: {}...)",
-                    &app_id[..app_id.len().min(8)]
-                );
-                Some(Arc::new(TeamsClient::new(app_id, app_secret)?))
-            }
-            _ => None,
-        };
-
-        // Initialize native Google Chat client if token is available
-        let google_chat_service_token = self
-            .config
-            .resolve_credential_or_env("GOOGLE_CHAT_SERVICE_TOKEN");
-        let google_chat_token = self
-            .config
-            .resolve_credential_or_env("GOOGLE_CHAT_WEBHOOK_TOKEN");
-
-        let google_chat_client = match google_chat_service_token {
-            Some(token) => {
-                info!("Google Chat native integration active");
-                Some(Arc::new(GoogleChatClient::new(&token)?))
-            }
-            None => None,
-        };
-
-        // Initialize native Signal client if account is configured
-        let signal_account = self.config.resolve_credential_or_env("SIGNAL_ACCOUNT");
-        let signal_client = match signal_account {
-            Some(ref account) => {
-                let host = self
-                    .config
-                    .gateway
-                    .signal_cli_host
-                    .as_deref()
-                    .unwrap_or("localhost");
-                let port = self.config.gateway.signal_cli_port.unwrap_or(8080);
-                let base_url = format!("http://{host}:{port}");
-                match SignalClient::new(&base_url, account) {
-                    Ok(client) => match client.probe().await {
-                        Ok(version) => {
-                            info!(
-                                "Signal native integration active (account: {}, daemon: v{})",
-                                account, version
-                            );
-                            Some(Arc::new(client))
-                        }
-                        Err(e) => {
-                            warn!("SIGNAL_ACCOUNT set but signal-cli daemon not reachable: {e}");
-                            None
-                        }
-                    },
-                    Err(e) => {
-                        warn!("Failed to create Signal client: {e}");
-                        None
-                    }
-                }
-            }
-            None => None,
-        };
+        let signal_client = crate::channel_init::init_signal(&self.config).await;
 
         let state = Arc::new(AppState {
             config: self.config.clone(),

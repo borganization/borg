@@ -205,6 +205,9 @@ pub const MAX_TOOL_CALLS_PER_RESPONSE: usize = 50;
 
 // ── LLM / Agent ───────────────────────────────────────────────────
 
+/// Default timeout (seconds) when waiting for a sub-agent to complete.
+pub const DEFAULT_SUB_AGENT_TIMEOUT_SECS: u64 = 300;
+
 /// SSE streaming buffer size (10 MB).
 pub const MAX_SSE_BUFFER: usize = 10 * 1024 * 1024;
 
@@ -232,6 +235,11 @@ pub const AUDIO_BYTES_PER_TOKEN: usize = 16;
 
 /// Token threshold below which tool results are not compacted.
 pub const TOOL_RESULT_COMPACT_THRESHOLD: usize = 20;
+
+// ── Image generation ──────────────────────────────────────────────
+
+/// Timeout in seconds for image generation API requests.
+pub const IMAGE_GEN_TIMEOUT_SECS: u64 = 120;
 
 // ── Web ───────────────────────────────────────────────────────────
 

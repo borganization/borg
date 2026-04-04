@@ -188,7 +188,9 @@ pub async fn handle_wait_for_agent(
     agent_control: &mut AgentControl,
 ) -> Result<String> {
     let agent_id = require_str_param(args, "agent_id")?;
-    let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(300);
+    let timeout_secs = args["timeout_secs"]
+        .as_u64()
+        .unwrap_or(crate::constants::DEFAULT_SUB_AGENT_TIMEOUT_SECS);
 
     let completion = agent_control.wait_for_agent(agent_id, timeout_secs).await?;
 

@@ -1,0 +1,356 @@
+//! Slash command handlers extracted from `App::handle_submit`.
+//!
+//! Each method corresponds to a TUI slash command (e.g., `/memory`, `/pairing`).
+
+use anyhow::Result;
+
+use super::app::{App, AppAction, AppState};
+
+impl App<'_> {
+    /// Try to handle `input` as a slash command. Returns `Some(action)` if it was a command,
+    /// `None` if it should be treated as a user message.
+    pub(super) fn try_handle_command(&mut self, trimmed: &str) -> Option<Result<AppAction>> {
+        // Exact matches
+        // Exact matches
+        match trimmed {
+            "quit" | "exit" | "/exit" => return Some(Ok(AppAction::Quit)),
+            "help" | "/help" => return Some(self.cmd_help()),
+            "/memory" => return Some(self.cmd_memory()),
+            "/skills" => {
+                self.skills_popup.show(&self.config);
+                return Some(Ok(AppAction::Continue));
+            }
+            "/history" => return Some(self.cmd_history()),
+            "/logs" => return Some(self.handle_logs_command(None)),
+            "/status" => {
+                self.status_popup.show(&self.config);
+                return Some(Ok(AppAction::Continue));
+            }
+            "/doctor" => return Some(Ok(AppAction::RunDoctor)),
+            "/update" => return Some(Ok(AppAction::SelfUpdate { dev: false })),
+            "/pairing" => return Some(self.cmd_pairing()),
+            "/settings" => {
+                self.settings_popup.show(&self.config);
+                return Some(Ok(AppAction::Continue));
+            }
+            "/plugins" => return Some(self.cmd_plugins()),
+            "/schedule-tasks" | "/schedule" => {
+                self.schedule_popup.show();
+                return Some(Ok(AppAction::Continue));
+            }
+            "/migrate" => {
+                self.migrate_popup.show();
+                return Some(Ok(AppAction::Continue));
+            }
+            "/restart" => return Some(Ok(AppAction::RestartGateway)),
+            "/compact" => return Some(Ok(AppAction::CompactHistory)),
+            "/clear" => {
+                self.cells.clear();
+                self.queued_messages.clear();
+                return Some(Ok(AppAction::ClearHistory));
+            }
+            "/usage" => return Some(Ok(AppAction::ShowUsage)),
+            "/undo" => return Some(Ok(AppAction::UndoLastTurn)),
+            "/sessions" => return Some(Ok(AppAction::ListSessions)),
+            "/save" => return Some(Ok(AppAction::SaveSession)),
+            "/new" => return Some(self.cmd_new()),
+            _ => {}
+        }
+
+        // Prefix commands
+        if let Some(rest) = trimmed.strip_prefix("/logs ") {
+            return Some(self.handle_logs_command(Some(rest.trim())));
+        }
+
+        if trimmed == "/mode" {
+            return Some(self.cmd_mode_show());
+        }
+        if let Some(rest) = trimmed.strip_prefix("/mode ") {
+            return Some(self.cmd_mode_set(rest.trim()));
+        }
+
+        if trimmed == "/plan" {
+            return Some(self.cmd_plan_toggle());
+        }
+        if let Some(rest) = trimmed.strip_prefix("/plan ") {
+            return Some(self.cmd_plan_with_message(rest.trim()));
+        }
+
+        if trimmed == "/memory cleanup" {
+            return Some(self.cmd_memory_cleanup());
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("/load ") {
+            return Some(self.cmd_load_session(rest.trim()));
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("/settings ") {
+            return Some(self.cmd_settings_set(rest));
+        }
+
+        if trimmed == "/update --dev" || trimmed == "/update dev" {
+            return Some(Ok(AppAction::SelfUpdate { dev: true }));
+        }
+
+        if trimmed == "/uninstall" {
+            return Some(self.cmd_uninstall());
+        }
+
+        // Reject unknown slash commands
+        if trimmed.starts_with('/') {
+            self.push_system_message(format!(
+                "Unknown command: {trimmed}\nType /help for available commands."
+            ));
+            return Some(Ok(AppAction::Continue));
+        }
+
+        None // Not a command
+    }
+
+    fn cmd_help(&mut self) -> Result<AppAction> {
+        self.push_system_message(
+            "Commands:\n  \
+             /help      - Show this help\n  \
+             /settings  - Configure settings\n  \
+             /usage     - Show usage stats\n  \
+             /plan      - Toggle plan mode\n  \
+             /mode      - Switch mode (default/execute/plan)\n\
+             \n  \
+             /compact   - Compact conversation history\n  \
+             /clear     - Clear conversation\n  \
+             /undo      - Undo last agent turn\n\
+             \n  \
+             /memory    - Show memory\n  \
+             /skills    - List skills\n  \
+             /history   - Show conversation history\n  \
+             /logs      - Show activity log (error|warn|info|debug|all|raw)\n  \
+             /doctor    - Run diagnostics\n  \
+             /status    - Show agent vitals\n  \
+             /pairing   - Show channel pairing info\n  \
+             /update    - Update borg to latest version\n\
+             \n  \
+             /sessions  - Browse saved sessions\n  \
+             /save      - Save current session\n  \
+             /new       - Start new session\n  \
+             /load      - Load a saved session by ID\n\
+             \n  \
+             /plugins   - Browse integrations\n  \
+             /schedule  - Manage scheduled tasks\n  \
+             /migrate   - Import from another agent\n  \
+             /restart   - Restart gateway server\n\
+             \n  \
+             /uninstall - Remove all borg data and binary\n  \
+             quit/exit  - Exit"
+                .to_string(),
+        );
+        Ok(AppAction::Continue)
+    }
+
+    fn cmd_memory(&mut self) -> Result<AppAction> {
+        let memory = borg_core::memory::load_memory_context(self.config.memory.max_context_tokens)?;
+        let text = if memory.is_empty() {
+            "No memories loaded.".to_string()
+        } else {
+            memory
+        };
+        self.push_system_message(text);
+        Ok(AppAction::Continue)
+    }
+
+    fn cmd_history(&mut self) -> Result<AppAction> {
+        match borg_core::logging::read_history_formatted(50, false) {
+            Ok(lines) => {
+                let text = if lines.is_empty() {
+                    "No conversation history for today.".to_string()
+                } else {
+                    lines.join("\n")
+                };
+                self.push_system_message(text);
+            }
+            Err(e) => {
+                self.push_system_message(format!("Error reading history: {e}"));
+            }
+        }
+        Ok(AppAction::Continue)
+    }
+
+    fn cmd_pairing(&mut self) -> Result<AppAction> {
+        let mut output = String::from("Sender Pairing\n");
+        output.push_str("────────────────────────────────\n\n");
+        match borg_core::db::Database::open() {
+            Ok(db) => {
+                output.push_str("Pending Requests\n");
+                match db.list_pairings(None) {
+                    Ok(requests) => {
+                        if requests.is_empty() {
+                            output.push_str("  No pending requests.\n");
+                        } else {
+                            for r in &requests {
+                                output.push_str(&format!(
+                                    "  {} | {} | {}\n    → borg pairing approve {} {}\n",
+                                    r.channel_name, r.sender_id, r.code, r.channel_name, r.code
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => output.push_str(&format!("  Error: {e}\n")),
+                }
+                output.push_str("\nApproved Senders\n");
+                match db.list_approved_senders(None) {
+                    Ok(senders) => {
+                        if senders.is_empty() {
+                            output.push_str("  No approved senders.\n");
+                        } else {
+                            for s in &senders {
+                                let name = s.display_name.as_deref().unwrap_or("—");
+                                output.push_str(&format!(
+                                    "  {} | {} | {}\n",
+                                    s.channel_name, s.sender_id, name
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => output.push_str(&format!("  Error: {e}\n")),
+                }
+            }
+            Err(e) => output.push_str(&format!("Database error: {e}\n")),
+        }
+        self.push_system_message(output);
+        Ok(AppAction::Continue)
+    }
+
+    fn cmd_plugins(&mut self) -> Result<AppAction> {
+        if let Ok(data_dir) = borg_core::config::Config::data_dir() {
+            self.plugins_popup.show(&data_dir);
+        } else {
+            self.push_system_message("Error: could not determine data directory".to_string());
+        }
+        Ok(AppAction::Continue)
+    }
+
+    fn cmd_new(&mut self) -> Result<AppAction> {
+        self.cells.clear();
+        self.queued_messages.clear();
+        self.session_prompt_tokens = 0;
+        self.session_completion_tokens = 0;
+        Ok(AppAction::NewSession)
+    }
+
+    fn cmd_mode_show(&mut self) -> Result<AppAction> {
+        let current = self.config.conversation.collaboration_mode;
+        self.push_system_message(format!(
+            "Current collaboration mode: {current}\nUsage: /mode <default|execute|plan>"
+        ));
+        Ok(AppAction::Continue)
+    }
+
+    fn cmd_mode_set(&mut self, mode_str: &str) -> Result<AppAction> {
+        match mode_str.parse::<borg_core::config::CollaborationMode>() {
+            Ok(mode) => {
+                self.config.conversation.collaboration_mode = mode;
+                self.push_system_message(format!("[collaboration mode: {mode}]"));
+            }
+            Err(e) => {
+                self.push_system_message(format!("Error: {e}"));
+            }
+        }
+        Ok(AppAction::Continue)
+    }
+
+    fn cmd_plan_toggle(&mut self) -> Result<AppAction> {
+        self.plan_mode = !self.plan_mode;
+        if self.plan_mode {
+            self.push_system_message("[plan mode on]".to_string());
+        } else {
+            self.push_system_message("[plan mode off]".to_string());
+        }
+        Ok(AppAction::Continue)
+    }
+
+    fn cmd_plan_with_message(&mut self, message: &str) -> Result<AppAction> {
+        self.plan_mode = true;
+        if message.is_empty() {
+            self.push_system_message("[plan mode on]".to_string());
+            return Ok(AppAction::Continue);
+        }
+        self.handle_submit(message)
+    }
+
+    fn cmd_memory_cleanup(&mut self) -> Result<AppAction> {
+        match borg_core::memory::list_memory_files() {
+            Ok(files) => {
+                if files.is_empty() {
+                    self.push_system_message("No memory files found.".to_string());
+                } else {
+                    let mut text = String::from("Memory files (oldest first):\n");
+                    for f in &files {
+                        let modified = f
+                            .modified_at
+                            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        text.push_str(&format!(
+                            "  {} ({} bytes, modified: {modified})\n",
+                            f.filename, f.size_bytes
+                        ));
+                    }
+                    text.push_str("\nTo delete a memory file, ask the agent to use write_memory.");
+                    self.push_system_message(text.trim_end().to_string());
+                }
+            }
+            Err(e) => {
+                self.push_system_message(format!("Error listing memory files: {e}"));
+            }
+        }
+        Ok(AppAction::Continue)
+    }
+
+    fn cmd_load_session(&mut self, id_str: &str) -> Result<AppAction> {
+        let id = id_str.to_string();
+        if id.is_empty() {
+            self.push_system_message("Usage: /load <session_id>".to_string());
+            return Ok(AppAction::Continue);
+        }
+        self.cells.clear();
+        self.session_prompt_tokens = 0;
+        self.session_completion_tokens = 0;
+        Ok(AppAction::LoadSession { id })
+    }
+
+    fn cmd_settings_set(&mut self, rest: &str) -> Result<AppAction> {
+        let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+        if parts.len() == 2 {
+            let key = parts[0].to_string();
+            let value = parts[1].to_string();
+            match self.config.apply_setting(&key, &value) {
+                Ok(confirmation) => {
+                    self.push_system_message(format!("Updated: {confirmation}"));
+                    if let Err(e) = self.config.save() {
+                        self.push_system_message(format!("Warning: failed to save config: {e}"));
+                    }
+                    Ok(AppAction::UpdateSetting { key, value })
+                }
+                Err(e) => {
+                    self.push_system_message(format!("Error: {e}"));
+                    Ok(AppAction::Continue)
+                }
+            }
+        } else {
+            self.push_system_message(
+                "Usage: /settings <key> <value>\nUse /settings to see current values.".to_string(),
+            );
+            Ok(AppAction::Continue)
+        }
+    }
+
+    fn cmd_uninstall(&mut self) -> Result<AppAction> {
+        self.push_system_message(
+            "⚠ WARNING: This will permanently delete all Borg data (~/.borg/)\n\
+             including config, memory, tools, skills, channels, database,\n\
+             and remove the binary.\n\n\
+             Proceed with uninstall? (y/N)"
+                .to_string(),
+        );
+        self.state = AppState::ConfirmingUninstall;
+        Ok(AppAction::Continue)
+    }
+}

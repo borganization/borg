@@ -153,7 +153,9 @@ async fn generate_openai(
         .post("https://api.openai.com/v1/images/generations")
         .header("Authorization", format!("Bearer {}", provider.api_key))
         .json(&body)
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(
+            crate::constants::IMAGE_GEN_TIMEOUT_SECS,
+        ))
         .send()
         .await?;
 
