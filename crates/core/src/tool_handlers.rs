@@ -210,11 +210,13 @@ async fn stream_child_output(
                 }, if !stdout_done => {
                     match line {
                         Ok(Some(l)) => {
-                            let _ = event_tx.try_send(AgentEvent::ToolOutputDelta {
+                            if event_tx.try_send(AgentEvent::ToolOutputDelta {
                                 name: tool_name.to_string(),
                                 delta: l.clone(),
                                 is_stderr: false,
-                            });
+                            }).is_err() {
+                                tracing::debug!("shell: event channel full or closed, dropping stdout delta");
+                            }
                             stdout_buf.push_str(&l);
                             stdout_buf.push('\n');
                         }
@@ -229,11 +231,13 @@ async fn stream_child_output(
                 }, if !stderr_done => {
                     match line {
                         Ok(Some(l)) => {
-                            let _ = event_tx.try_send(AgentEvent::ToolOutputDelta {
+                            if event_tx.try_send(AgentEvent::ToolOutputDelta {
                                 name: tool_name.to_string(),
                                 delta: l.clone(),
                                 is_stderr: true,
-                            });
+                            }).is_err() {
+                                tracing::debug!("shell: event channel full or closed, dropping stderr delta");
+                            }
                             stderr_buf.push_str(&l);
                             stderr_buf.push('\n');
                         }
@@ -273,12 +277,16 @@ pub async fn handle_run_shell(
         crate::policy::PolicyDecision::AutoApprove => {}
         crate::policy::PolicyDecision::Prompt => {
             let (confirm_tx, confirm_rx) = oneshot::channel();
-            let _ = event_tx
+            if event_tx
                 .send(AgentEvent::ShellConfirmation {
                     command: command.to_string(),
                     respond: confirm_tx,
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::debug!("shell: event channel closed, could not send confirmation request");
+            }
             match confirm_rx.await {
                 Ok(true) => {}
                 Ok(false) => {
@@ -608,7 +616,9 @@ fn manage_tasks_run_now(args: &serde_json::Value) -> Result<String> {
             if let Err(e) = db.update_task_next_run(task_id, Some(now)) {
                 return Ok(format!("Error: {e}"));
             }
-            let _ = db.clear_task_retry(task_id);
+            if let Err(e) = db.clear_task_retry(task_id) {
+                tracing::warn!(task_id, "clear_task_retry failed: {e}");
+            }
             Ok(format!("Task {task_id} queued for immediate execution."))
         }
         Ok(None) => Ok(format!("Task {task_id} not found.")),
@@ -715,7 +725,9 @@ pub fn handle_manage_cron(args: &serde_json::Value, _config: &Config) -> Result<
                     if let Err(e) = db.update_task_next_run(job_id, Some(now)) {
                         return Ok(format!("Error: {e}"));
                     }
-                    let _ = db.clear_task_retry(job_id);
+                    if let Err(e) = db.clear_task_retry(job_id) {
+                        tracing::warn!(job_id, "clear_task_retry failed: {e}");
+                    }
                     Ok(format!("Cron job {job_id} queued for immediate execution."))
                 }
                 Ok(Some(_)) => Ok(format!(
@@ -1801,9 +1813,13 @@ pub async fn handle_update_plan(
         ));
     }
 
-    let _ = event_tx
+    if event_tx
         .send(crate::agent::AgentEvent::PlanUpdated { steps })
-        .await;
+        .await
+        .is_err()
+    {
+        tracing::debug!("plan: event channel closed, could not send plan update");
+    }
 
     Ok(crate::types::ToolOutput::Text("Plan updated.".to_string()))
 }
@@ -1817,12 +1833,16 @@ pub async fn handle_request_user_input(
     let prompt = require_str_param(args, "prompt")?;
 
     let (respond_tx, respond_rx) = tokio::sync::oneshot::channel::<String>();
-    let _ = event_tx
+    if event_tx
         .send(crate::agent::AgentEvent::UserInputRequest {
             prompt: prompt.to_string(),
             respond: respond_tx,
         })
-        .await;
+        .await
+        .is_err()
+    {
+        tracing::debug!("request_user_input: event channel closed");
+    }
 
     // Wait for user response with a 5-minute timeout
     match tokio::time::timeout(std::time::Duration::from_secs(300), respond_rx).await {
@@ -2019,7 +2039,7 @@ mod tests {
         let result = handle_read_file(&json!({"path": "/nonexistent/file.txt"}), &config).unwrap();
         match result {
             ToolOutput::Text(s) => assert!(s.contains("not found")),
-            _ => panic!("expected Text"),
+            other => unreachable!("expected Text, got {other:?}"),
         }
     }
 
@@ -2041,7 +2061,7 @@ mod tests {
                 assert!(s.contains("     2\t"));
                 assert!(s.contains("     3\t"));
             }
-            _ => panic!("expected Text"),
+            other => unreachable!("expected Text, got {other:?}"),
         }
     }
 
@@ -2060,7 +2080,7 @@ mod tests {
                 assert!(s.contains("     3\t"), "should include line 3");
                 assert!(!s.contains("     4\t"), "should stop at limit");
             }
-            _ => panic!("expected Text"),
+            other => unreachable!("expected Text, got {other:?}"),
         }
     }
 
@@ -2074,7 +2094,7 @@ mod tests {
             handle_read_file(&json!({"path": blocked.to_string_lossy()}), &config).unwrap();
         match result {
             ToolOutput::Text(s) => assert!(s.contains("denied") || s.contains("not found")),
-            _ => panic!("expected Text"),
+            other => unreachable!("expected Text, got {other:?}"),
         }
     }
 
@@ -2084,7 +2104,7 @@ mod tests {
         let result = handle_read_file(&json!({"path": "."}), &config).unwrap();
         match result {
             ToolOutput::Text(s) => assert!(s.contains("directory")),
-            _ => panic!("expected Text"),
+            other => unreachable!("expected Text, got {other:?}"),
         }
     }
 
@@ -2445,7 +2465,7 @@ mod tests {
             handle_read_file(&json!({"path": tmp.to_string_lossy().as_ref()}), &config).unwrap();
         match result {
             ToolOutput::Text(s) => assert!(s.contains("empty"), "expected 'empty' in: {s}"),
-            _ => panic!("expected Text"),
+            other => unreachable!("expected Text, got {other:?}"),
         }
         std::fs::remove_file(&tmp).ok();
     }
@@ -2462,7 +2482,7 @@ mod tests {
             ToolOutput::Text(s) => {
                 assert!(s.contains("not found"), "expected 'not found' in: {s}")
             }
-            _ => panic!("expected Text"),
+            other => unreachable!("expected Text, got {other:?}"),
         }
     }
 
@@ -2481,7 +2501,7 @@ mod tests {
             ToolOutput::Text(s) => {
                 assert!(s.contains("truncated"), "expected 'truncated' in: {s}")
             }
-            _ => panic!("expected Text"),
+            other => unreachable!("expected Text, got {other:?}"),
         }
         std::fs::remove_file(&tmp).ok();
     }
@@ -2614,6 +2634,32 @@ mod tests {
     }
 
     #[test]
+    fn handle_manage_tasks_run_now_nonexistent() {
+        let args = json!({
+            "action": "run_now",
+            "task_id": "nonexistent-id-12345"
+        });
+        let result = handle_manage_tasks(&args, &Config::default()).unwrap();
+        assert!(
+            result.contains("not found"),
+            "expected 'not found' in: {result}"
+        );
+    }
+
+    #[test]
+    fn handle_manage_cron_run_now_nonexistent() {
+        let args = json!({
+            "action": "run_now",
+            "job_id": "nonexistent-cron-12345"
+        });
+        let result = handle_manage_cron(&args, &Config::default()).unwrap();
+        assert!(
+            result.contains("not found"),
+            "expected 'not found' in: {result}"
+        );
+    }
+
+    #[test]
     fn core_tool_definitions_includes_request_user_input() {
         let config = Config::default();
         let defs = core_tool_definitions(&config);
@@ -2644,14 +2690,14 @@ mod tests {
                 assert_eq!(prompt, "Which DB?");
                 let _ = respond.send("PostgreSQL".to_string());
             }
-            _ => panic!("expected UserInputRequest"),
+            _ => unreachable!("expected UserInputRequest"),
         }
 
         // Handler should return the response
         let result = handle.await.unwrap().unwrap();
         match result {
             crate::types::ToolOutput::Text(t) => assert_eq!(t, "PostgreSQL"),
-            _ => panic!("expected Text output"),
+            other => unreachable!("expected Text output, got {other:?}"),
         }
     }
 
