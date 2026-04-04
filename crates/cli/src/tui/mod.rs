@@ -12,6 +12,7 @@ pub(crate) mod migrate_popup;
 mod paste_burst;
 mod plan_overlay;
 mod plugins_popup;
+mod popup_utils;
 mod schedule_popup;
 mod settings_popup;
 mod skills_popup;

@@ -1,0 +1,700 @@
+pub mod gateway;
+pub mod llm;
+pub mod media;
+pub mod security;
+
+#[cfg(test)]
+mod tests;
+
+pub use gateway::*;
+pub use llm::*;
+pub use media::*;
+pub use security::*;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use tracing::warn;
+
+use crate::policy::ExecutionPolicy;
+use crate::provider::Provider;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub llm: LlmConfig,
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
+    #[serde(default)]
+    pub skills: SkillsConfig,
+    #[serde(default)]
+    pub conversation: ConversationConfig,
+    #[serde(default)]
+    pub user: UserConfig,
+    #[serde(default)]
+    pub policy: ExecutionPolicy,
+    #[serde(default)]
+    pub debug: DebugConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
+    #[serde(default)]
+    pub web: WebConfig,
+    #[serde(default)]
+    pub tasks: TasksConfig,
+    #[serde(default)]
+    pub budget: BudgetConfig,
+    #[serde(default)]
+    pub gateway: GatewayConfig,
+    #[serde(default, alias = "customizations")]
+    pub plugins: PluginsConfig,
+    #[serde(default)]
+    pub agents: MultiAgentConfig,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+    #[serde(default)]
+    pub browser: BrowserConfig,
+    #[serde(default)]
+    pub audio: AudioConfig,
+    #[serde(default)]
+    pub tts: TtsConfig,
+    #[serde(default)]
+    pub media: MediaConfig,
+    #[serde(default)]
+    pub image_gen: ImageGenConfig,
+    #[serde(default)]
+    pub scripts: ScriptsConfig,
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+    #[serde(default)]
+    pub evolution: EvolutionConfig,
+    #[serde(default)]
+    pub credentials: HashMap<String, CredentialValue>,
+    /// Transient identity override (not serialized). Set by gateway routing.
+    #[serde(skip)]
+    pub identity_override: Option<std::path::PathBuf>,
+}
+
+impl Config {
+    /// Build a config with compaction overrides applied to the LLM section.
+    /// If no compaction overrides are set, returns a clone of self.
+    pub fn with_compaction_overrides(&self) -> Config {
+        if !self.compaction.has_overrides() {
+            return self.clone();
+        }
+        let mut cfg = self.clone();
+        if let Some(ref provider) = self.compaction.provider {
+            cfg.llm.provider = Some(provider.clone());
+        }
+        if let Some(ref model) = self.compaction.model {
+            cfg.llm.model = model.clone();
+        }
+        if let Some(ref api_key_env) = self.compaction.api_key_env {
+            cfg.llm.api_key_env = api_key_env.clone();
+        }
+        if let Some(temp) = self.compaction.temperature {
+            cfg.llm.temperature = temp;
+        }
+        if let Some(max_tok) = self.compaction.max_tokens {
+            cfg.llm.max_tokens = max_tok;
+        }
+        if let Some(timeout) = self.compaction.timeout_ms {
+            cfg.llm.request_timeout_ms = timeout;
+        }
+        cfg
+    }
+}
+
+fn parse_bool(value: &str, key: &str) -> Result<bool> {
+    value
+        .parse()
+        .with_context(|| format!("Invalid bool for {key}"))
+}
+
+fn parse_f32_range(value: &str, key: &str, min: f32, max: f32) -> Result<f32> {
+    let v: f32 = value
+        .parse()
+        .with_context(|| format!("Invalid float for {key}"))?;
+    if !(min..=max).contains(&v) {
+        anyhow::bail!("{key} must be between {min} and {max}");
+    }
+    Ok(v)
+}
+
+fn parse_f64_range(value: &str, key: &str, min: f64, max: f64) -> Result<f64> {
+    let v: f64 = value
+        .parse()
+        .with_context(|| format!("Invalid float for {key}"))?;
+    if !(min..=max).contains(&v) {
+        anyhow::bail!("{key} must be between {min} and {max}");
+    }
+    Ok(v)
+}
+
+fn parse_u32(value: &str, key: &str) -> Result<u32> {
+    value
+        .parse()
+        .with_context(|| format!("Invalid integer for {key}"))
+}
+
+fn parse_nonzero_u32(value: &str, key: &str) -> Result<u32> {
+    let v: u32 = value
+        .parse()
+        .with_context(|| format!("Invalid integer for {key}"))?;
+    if v == 0 {
+        anyhow::bail!("{key} must be greater than 0");
+    }
+    Ok(v)
+}
+
+fn parse_usize(value: &str, key: &str) -> Result<usize> {
+    value
+        .parse()
+        .with_context(|| format!("Invalid integer for {key}"))
+}
+
+fn parse_nonzero_usize(value: &str, key: &str) -> Result<usize> {
+    let v: usize = value
+        .parse()
+        .with_context(|| format!("Invalid integer for {key}"))?;
+    if v == 0 {
+        anyhow::bail!("{key} must be greater than 0");
+    }
+    Ok(v)
+}
+
+fn parse_u64(value: &str, key: &str) -> Result<u64> {
+    value
+        .parse()
+        .with_context(|| format!("Invalid integer for {key}"))
+}
+
+impl Config {
+    pub fn data_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var("BORG_DATA_DIR") {
+            return Ok(PathBuf::from(dir));
+        }
+        Ok(dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+            .join(".borg"))
+    }
+
+    pub fn memory_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("memory"))
+    }
+
+    /// Resolve the user's configured timezone, falling back to UTC.
+    pub fn user_timezone(&self) -> chrono_tz::Tz {
+        self.user
+            .timezone
+            .as_deref()
+            .and_then(|s| {
+                s.parse::<chrono_tz::Tz>()
+                    .inspect_err(|e| {
+                        tracing::warn!("Invalid timezone '{s}': {e}, defaulting to UTC");
+                    })
+                    .ok()
+            })
+            .unwrap_or(chrono_tz::Tz::UTC)
+    }
+
+    pub fn skills_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("skills"))
+    }
+
+    pub fn channels_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("channels"))
+    }
+
+    pub fn scripts_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("scripts"))
+    }
+
+    pub fn logs_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("logs"))
+    }
+
+    pub fn sessions_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("sessions"))
+    }
+
+    pub fn db_path() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("borg.db"))
+    }
+
+    pub fn identity_path() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("IDENTITY.md"))
+    }
+
+    pub fn memory_index_path() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("MEMORY.md"))
+    }
+
+    pub fn load() -> Result<Self> {
+        let config_path = Self::data_dir()?.join("config.toml");
+        Self::load_from(&config_path)
+    }
+
+    pub fn load_from(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config from {}", path.display()))?;
+        let content = Self::dedup_toml_tables(&content);
+        let config: Config =
+            toml::from_str(&content).with_context(|| "Failed to parse config.toml")?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate config values after loading. Returns an error for fatal
+    /// misconfigurations and logs warnings for non-fatal issues.
+    pub fn validate(&self) -> Result<()> {
+        if !(0.0..=2.0).contains(&self.llm.temperature) {
+            anyhow::bail!(
+                "llm.temperature must be between 0.0 and 2.0, got {}",
+                self.llm.temperature
+            );
+        }
+        if self.llm.max_tokens == 0 {
+            anyhow::bail!("llm.max_tokens must be greater than 0");
+        }
+        if self.memory.max_context_tokens == 0 {
+            anyhow::bail!("memory.max_context_tokens must be greater than 0");
+        }
+        self.security.action_limits.validate_thresholds();
+        Ok(())
+    }
+
+    /// Remove duplicate TOML table headers that would cause parse errors.
+    /// Keeps the first occurrence of each `[table]` header and drops subsequent
+    /// duplicates along with their content until the next section header.
+    fn dedup_toml_tables(input: &str) -> String {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        let mut output = String::with_capacity(input.len());
+        let mut skip = false;
+
+        for line in input.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && !trimmed.starts_with("[[") {
+                if seen.contains(trimmed) {
+                    tracing::warn!("Duplicate config table '{trimmed}' found — keeping first occurrence, dropping duplicate");
+                    skip = true;
+                    continue;
+                }
+                seen.insert(trimmed.to_string());
+                skip = false;
+            } else if skip {
+                continue;
+            }
+
+            output.push_str(line);
+            output.push('\n');
+        }
+        output
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let config_path = Self::data_dir()?.join("config.toml");
+        let content = toml::to_string_pretty(self).with_context(|| "Failed to serialize config")?;
+        std::fs::write(&config_path, content)
+            .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+        Ok(())
+    }
+
+    pub fn display_settings(&self) -> String {
+        let provider = self.llm.provider.as_deref().unwrap_or("(auto-detect)");
+        format!(
+            "Settings:\n  \
+             provider       = {provider}\n  \
+             model          = {}\n  \
+             temperature    = {}\n  \
+             max_tokens     = {}\n  \
+             sandbox.enabled = {}\n  \
+             sandbox.mode   = {}\n  \
+             memory.max_context_tokens = {}\n  \
+             skills.enabled = {}\n  \
+             skills.max_context_tokens = {}\n  \
+             conversation.max_iterations = {}\n  \
+             conversation.show_thinking = {}\n  \
+             security.secret_detection = {}\n  \
+             security.host_audit = {}\n  \
+             budget.monthly_token_limit = {}\n  \
+             budget.warning_threshold = {}\n  \
+             browser.enabled = {}\n  \
+             browser.headless = {}",
+            self.llm.model,
+            self.llm.temperature,
+            self.llm.max_tokens,
+            self.sandbox.enabled,
+            self.sandbox.mode,
+            self.memory.max_context_tokens,
+            self.skills.enabled,
+            self.skills.max_context_tokens,
+            self.conversation.max_iterations,
+            self.conversation.show_thinking,
+            self.security.secret_detection,
+            self.security.host_audit,
+            self.budget.monthly_token_limit,
+            self.budget.warning_threshold,
+            self.browser.enabled,
+            self.browser.headless,
+        )
+    }
+
+    pub fn apply_setting(&mut self, key: &str, value: &str) -> Result<String> {
+        match key {
+            "model" => {
+                self.llm.model = value.to_string();
+                Ok(format!("{key} = {value}"))
+            }
+            "temperature" => {
+                self.llm.temperature = parse_f32_range(value, key, 0.0, 2.0)?;
+                Ok(format!("{key} = {}", self.llm.temperature))
+            }
+            "max_tokens" => {
+                self.llm.max_tokens = parse_nonzero_u32(value, key)?;
+                Ok(format!("{key} = {}", self.llm.max_tokens))
+            }
+            "provider" => {
+                self.llm.provider = Some(value.to_string());
+                Ok(format!("{key} = {value}"))
+            }
+            "sandbox.mode" => {
+                match value {
+                    "strict" | "permissive" => {}
+                    other => {
+                        anyhow::bail!("Unknown sandbox mode '{other}'. Valid: strict, permissive")
+                    }
+                }
+                self.sandbox.mode = value.to_string();
+                Ok(format!("{key} = {value}"))
+            }
+            "sandbox.enabled" => {
+                self.sandbox.enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.sandbox.enabled))
+            }
+            "memory.max_context_tokens" => {
+                self.memory.max_context_tokens = parse_nonzero_usize(value, key)?;
+                Ok(format!("{key} = {}", self.memory.max_context_tokens))
+            }
+            "memory.flush_before_compaction" => {
+                self.memory.flush_before_compaction = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.memory.flush_before_compaction))
+            }
+            "memory.flush_min_messages" => {
+                self.memory.flush_min_messages = parse_usize(value, key)?;
+                Ok(format!("{key} = {}", self.memory.flush_min_messages))
+            }
+            "memory.extra_paths" => {
+                let paths: Vec<String> = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                self.memory.extra_paths = paths.clone();
+                Ok(format!("{key} = {}", paths.join(", ")))
+            }
+            "memory.embeddings.mmr_enabled" => {
+                self.memory.embeddings.mmr_enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.memory.embeddings.mmr_enabled))
+            }
+            "memory.embeddings.mmr_lambda" => {
+                self.memory.embeddings.mmr_lambda = parse_f32_range(value, key, 0.0, 1.0)?;
+                Ok(format!("{key} = {}", self.memory.embeddings.mmr_lambda))
+            }
+            "skills.enabled" => {
+                self.skills.enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.skills.enabled))
+            }
+            "skills.max_context_tokens" => {
+                self.skills.max_context_tokens = parse_usize(value, key)?;
+                Ok(format!("{key} = {}", self.skills.max_context_tokens))
+            }
+            key if key.starts_with("skills.entries.") && key.ends_with(".enabled") => {
+                let name = key
+                    .strip_prefix("skills.entries.")
+                    .and_then(|s| s.strip_suffix(".enabled"))
+                    .ok_or_else(|| anyhow::anyhow!("Invalid skill entry key: {key}"))?
+                    .to_string();
+                let enabled = parse_bool(value, key)?;
+                self.skills.entries.entry(name).or_default().enabled = enabled;
+                Ok(format!("{key} = {enabled}"))
+            }
+            "conversation.max_iterations" => {
+                self.conversation.max_iterations = parse_u32(value, key)?;
+                Ok(format!("{key} = {}", self.conversation.max_iterations))
+            }
+            "conversation.show_thinking" => {
+                self.conversation.show_thinking = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.conversation.show_thinking))
+            }
+            "security.secret_detection" => {
+                self.security.secret_detection = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.security.secret_detection))
+            }
+            "security.host_audit" => {
+                self.security.host_audit = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.security.host_audit))
+            }
+            "budget.monthly_token_limit" => {
+                self.budget.monthly_token_limit = parse_u64(value, key)?;
+                Ok(format!("{key} = {}", self.budget.monthly_token_limit))
+            }
+            "budget.warning_threshold" => {
+                self.budget.warning_threshold = parse_f64_range(value, key, 0.0, 1.0)?;
+                Ok(format!("{key} = {}", self.budget.warning_threshold))
+            }
+            "browser.enabled" => {
+                self.browser.enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.browser.enabled))
+            }
+            "browser.headless" => {
+                self.browser.headless = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.browser.headless))
+            }
+            "tts.enabled" => {
+                self.tts.enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.tts.enabled))
+            }
+            "tts.auto_mode" => {
+                self.tts.auto_mode = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.tts.auto_mode))
+            }
+            "tts.default_voice" => {
+                self.tts.default_voice = value.to_string();
+                Ok(format!("{key} = {value}"))
+            }
+            "tts.default_format" => {
+                let allowed = ["mp3", "opus", "aac", "flac", "wav"];
+                if !allowed.contains(&value) {
+                    anyhow::bail!("Invalid format: {value}. Allowed: {}", allowed.join(", "));
+                }
+                self.tts.default_format = value.to_string();
+                Ok(format!("{key} = {value}"))
+            }
+            "conversation.collaboration_mode" => {
+                let mode: CollaborationMode = value.parse()?;
+                self.conversation.collaboration_mode = mode;
+                Ok(format!("{key} = {mode}"))
+            }
+            "evolution.enabled" => {
+                self.evolution.enabled = parse_bool(value, key)?;
+                Ok(format!("{key} = {}", self.evolution.enabled))
+            }
+            _ => anyhow::bail!(
+                "Unknown setting: {key}\nAvailable: {}",
+                crate::settings::ALL_SETTING_KEYS.join(", ")
+            ),
+        }
+    }
+
+    pub fn api_key(&self) -> Result<String> {
+        // Try SecretRef first, then fall back to env var name
+        if let Some(ref secret_ref) = self.llm.api_key {
+            return secret_ref.resolve();
+        }
+        std::env::var(&self.llm.api_key_env).with_context(|| {
+            format!(
+                "API key not found. Set the {} environment variable or configure api_key in config.toml.",
+                self.llm.api_key_env
+            )
+        })
+    }
+
+    /// Resolve the provider and API key from config + environment.
+    /// Resolution priority: api_key (SecretRef) → api_key_env → provider default env var → auto-detect.
+    pub fn resolve_provider(&self) -> Result<(Provider, String)> {
+        if let Some(ref provider_str) = self.llm.provider {
+            let provider = Provider::from_str(provider_str)?;
+
+            // Keyless providers (e.g., Ollama) don't need API key resolution
+            if !provider.requires_api_key() {
+                return Ok((provider, String::new()));
+            }
+
+            // Try SecretRef first
+            if let Some(ref secret_ref) = self.llm.api_key {
+                match secret_ref.resolve() {
+                    Ok(key) if !key.is_empty() => return Ok((provider, key)),
+                    Ok(_) => {
+                        warn!("api_key SecretRef resolved to empty string, falling back to api_key_env");
+                    }
+                    Err(e) => {
+                        warn!(
+                            "api_key SecretRef failed to resolve: {e}, falling back to api_key_env"
+                        );
+                    }
+                }
+            }
+
+            let key = std::env::var(&self.llm.api_key_env)
+                .or_else(|_| std::env::var(provider.default_env_var()))
+                .with_context(|| {
+                    format!(
+                        "API key not found for provider {provider}. Set {} or {} or configure api_key in config.toml.",
+                        self.llm.api_key_env,
+                        provider.default_env_var()
+                    )
+                })?;
+            return Ok((provider, key));
+        }
+
+        // Try SecretRef with auto-detect
+        if let Some(ref secret_ref) = self.llm.api_key {
+            match secret_ref.resolve() {
+                Ok(key) if !key.is_empty() => {
+                    // Infer provider from api_key_env name
+                    let provider = Provider::from_env_var_name(&self.llm.api_key_env)
+                        .unwrap_or_else(|| {
+                            warn!("Could not infer provider from api_key_env '{}', defaulting to OpenRouter", self.llm.api_key_env);
+                            Provider::OpenRouter
+                        });
+                    return Ok((provider, key));
+                }
+                Ok(_) => {
+                    warn!(
+                        "api_key SecretRef resolved to empty string, falling back to env detection"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "api_key SecretRef failed to resolve: {e}, falling back to env detection"
+                    );
+                }
+            }
+        }
+
+        if self.llm.api_key_env != LlmConfig::default().api_key_env {
+            if let Ok(key) = std::env::var(&self.llm.api_key_env) {
+                if !key.is_empty() {
+                    let provider = Provider::from_env_var_name(&self.llm.api_key_env)
+                        .unwrap_or_else(|| {
+                            warn!("Could not infer provider from api_key_env '{}', defaulting to OpenRouter", self.llm.api_key_env);
+                            Provider::OpenRouter
+                        });
+                    return Ok((provider, key));
+                }
+            }
+        }
+
+        Provider::detect_from_env()
+    }
+
+    /// Resolve all available API keys for the configured provider.
+    /// Returns the provider and a list of resolved keys (for multi-key fallback).
+    /// Falls back to a single key from `resolve_provider` if no `api_keys` are configured.
+    pub fn resolve_api_keys(&self) -> Result<(Provider, Vec<String>)> {
+        // Try multi-key resolution first (avoids requiring a default API key env var)
+        if !self.llm.api_keys.is_empty() {
+            let mut keys = Vec::new();
+            for secret_ref in &self.llm.api_keys {
+                if let Ok(key) = secret_ref.resolve() {
+                    if !key.is_empty() {
+                        keys.push(key);
+                    }
+                }
+            }
+            if !keys.is_empty() {
+                let provider = if let Some(ref provider_str) = self.llm.provider {
+                    Provider::from_str(provider_str)?
+                } else {
+                    // Infer provider via resolve_provider; ignore errors since we have keys
+                    self.resolve_provider().map(|(p, _)| p).unwrap_or_else(|_| {
+                        warn!("Could not infer provider from config, defaulting to OpenRouter");
+                        Provider::OpenRouter
+                    })
+                };
+                return Ok((provider, keys));
+            }
+        }
+
+        // Fall back to single key via resolve_provider
+        let (provider, key) = self.resolve_provider()?;
+        Ok((provider, vec![key]))
+    }
+
+    /// Resolve all credentials to their plaintext values.
+    /// Logs warnings for credentials that fail to resolve.
+    pub fn resolve_credentials(&self) -> HashMap<String, String> {
+        self.credentials
+            .iter()
+            .filter_map(|(name, cv)| match cv.resolve() {
+                Ok(v) => Some((name.clone(), v)),
+                Err(e) => {
+                    tracing::warn!("Failed to resolve credential '{name}': {e}");
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Resolve a credential by name: credential store first, then env var fallback.
+    /// Returns `None` if not found or empty.
+    pub fn resolve_credential_or_env(&self, name: &str) -> Option<String> {
+        self.credentials
+            .get(name)
+            .and_then(|cv| cv.resolve().ok())
+            .or_else(|| std::env::var(name).ok())
+            .filter(|t| !t.is_empty())
+    }
+
+    /// Returns true if any native channel credentials are configured.
+    pub fn has_any_native_channel(&self) -> bool {
+        const NATIVE_KEYS: &[&str] = &[
+            "TELEGRAM_BOT_TOKEN",
+            "SLACK_BOT_TOKEN",
+            "DISCORD_BOT_TOKEN",
+            "TWILIO_ACCOUNT_SID",
+            "TEAMS_APP_ID",
+            "GOOGLE_CHAT_SERVICE_TOKEN",
+            "SIGNAL_ACCOUNT",
+        ];
+        NATIVE_KEYS
+            .iter()
+            .any(|k| self.resolve_credential_or_env(k).is_some())
+    }
+
+    /// Returns a list of detected native channels with their names and descriptions.
+    pub fn detected_native_channels(&self) -> Vec<(&'static str, &'static str)> {
+        const NATIVE_CHANNELS: &[(&str, &str, &str)] = &[
+            (
+                "telegram",
+                "Telegram Bot API (native)",
+                "TELEGRAM_BOT_TOKEN",
+            ),
+            ("slack", "Slack Bot API (native)", "SLACK_BOT_TOKEN"),
+            ("discord", "Discord Bot (native)", "DISCORD_BOT_TOKEN"),
+            (
+                "twilio",
+                "Twilio SMS/WhatsApp (native)",
+                "TWILIO_ACCOUNT_SID",
+            ),
+            ("teams", "Microsoft Teams (native)", "TEAMS_APP_ID"),
+            (
+                "google-chat",
+                "Google Chat (native)",
+                "GOOGLE_CHAT_SERVICE_TOKEN",
+            ),
+            (
+                "signal",
+                "Signal Messenger (native via signal-cli)",
+                "SIGNAL_ACCOUNT",
+            ),
+        ];
+        NATIVE_CHANNELS
+            .iter()
+            .filter(|(_, _, key)| self.resolve_credential_or_env(key).is_some())
+            .map(|(name, desc, _)| (*name, *desc))
+            .collect()
+    }
+}
