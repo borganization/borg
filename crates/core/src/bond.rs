@@ -72,12 +72,12 @@ fn verify_event_hmac(key: &[u8], event: &BondEvent, expected_prev_hmac: &str) ->
 /// Maximum events per type per hour during replay.
 pub(crate) fn rate_limit_for(event_type: &str) -> u32 {
     match event_type {
-        "tool_success" => 15,
-        "tool_failure" => 10,
-        "creation" => 5,
-        "correction" => 5,
-        "suggestion_accepted" => 5,
-        "suggestion_rejected" => 5,
+        "tool_success" => 8,
+        "tool_failure" => 5,
+        "creation" => 3,
+        "correction" => 3,
+        "suggestion_accepted" => 3,
+        "suggestion_rejected" => 3,
         _ => 5,
     }
 }
@@ -153,9 +153,9 @@ pub struct BondEvent {
 
 // ── Scoring Constants ──
 
-const BASELINE_SCORE: i32 = 40;
+const BASELINE_SCORE: i32 = 25;
 const DELTA_TOOL_SUCCESS: i32 = 1;
-const DELTA_CREATION_EVENT: i32 = 2;
+const DELTA_CREATION_EVENT: i32 = 1;
 const DELTA_SUGGESTION_ACCEPTED: i32 = 1;
 const DELTA_CORRECTION: i32 = -2;
 const DELTA_TOOL_FAILURE: i32 = -1;
@@ -211,7 +211,7 @@ pub fn replay_events_with_key(key: &[u8], events: &[BondEvent]) -> BondState {
 
     let mut score: i32 = BASELINE_SCORE;
     let mut expected_prev_hmac = "0".to_string();
-    let mut rate_limiter = hmac_chain::HourlyRateLimiter::new(Some(30), Some(15));
+    let mut rate_limiter = hmac_chain::HourlyRateLimiter::new(Some(15), Some(8));
     let mut chain_valid = true;
 
     for event in events {
@@ -662,7 +662,7 @@ mod tests {
             BOND_HMAC_LEGACY,
             &hmac1,
             "creation",
-            2,
+            1,
             "write_memory",
             2000,
         );
@@ -688,7 +688,7 @@ mod tests {
             BondEvent {
                 id: 2,
                 event_type: "creation".to_string(),
-                score_delta: 2,
+                score_delta: 1,
                 reason: "write_memory".to_string(),
                 hmac: hmac2.clone(),
                 prev_hmac: hmac1,
@@ -707,8 +707,8 @@ mod tests {
 
         let state = replay_events(&events);
         assert!(state.chain_valid);
-        // 40 + 1 + 2 - 1 = 42
-        assert_eq!(state.score, 42);
+        // 25 + 1 + 1 - 1 = 26
+        assert_eq!(state.score, 26);
         assert_eq!(state.level, BondLevel::Emerging);
     }
 
@@ -740,7 +740,7 @@ mod tests {
             BOND_HMAC_LEGACY,
             &hmac1,
             "creation",
-            2,
+            1,
             "write_memory",
             2000,
         );
@@ -766,7 +766,7 @@ mod tests {
             BondEvent {
                 id: 2,
                 event_type: "creation".to_string(),
-                score_delta: 99, // Tampered
+                score_delta: 99, // Tampered (was 1)
                 reason: "write_memory".to_string(),
                 hmac: hmac2_real.clone(),
                 prev_hmac: hmac1,
@@ -786,7 +786,7 @@ mod tests {
         let state = replay_events(&events);
         assert!(!state.chain_valid);
         // Event 1 applied (+1), event 2 skipped (tampered), event 3 skipped (broken chain)
-        assert_eq!(state.score, 41);
+        assert_eq!(state.score, 26);
     }
 
     #[test]
@@ -829,9 +829,9 @@ mod tests {
         }
 
         let state = replay_events(&events);
-        // Rate limit for tool_success is 15 per hour
-        // So only 15 events should be applied: 40 + 15 = 55
-        assert_eq!(state.score, 55);
+        // Rate limit for tool_success is 8 per hour
+        // So only 8 events should be applied: 25 + 8 = 33
+        assert_eq!(state.score, 33);
         assert!(state.chain_valid);
     }
 
@@ -865,8 +865,8 @@ mod tests {
 
         let state = replay_events(&events);
         // No rate limiting since each event is in a different hour
-        // 40 + 20 = 60
-        assert_eq!(state.score, 60);
+        // 25 + 20 = 45
+        assert_eq!(state.score, 45);
     }
 
     // ── Replay Clamping ──
@@ -876,20 +876,20 @@ mod tests {
         let mut events = Vec::new();
         let mut prev_hmac = "0".to_string();
 
-        for i in 0..70 {
+        for i in 0..80 {
             let created_at = 3600 * (i as i64 + 1);
             let hmac = compute_event_hmac(
                 BOND_HMAC_LEGACY,
                 &prev_hmac,
                 "creation",
-                2,
+                1,
                 "test",
                 created_at,
             );
             events.push(BondEvent {
                 id: i as i64 + 1,
                 event_type: "creation".to_string(),
-                score_delta: 2,
+                score_delta: 1,
                 reason: "test".to_string(),
                 hmac: hmac.clone(),
                 prev_hmac: prev_hmac.clone(),
@@ -1200,7 +1200,7 @@ mod tests {
         }
         let state = replay_events(&events);
         assert!(state.chain_valid);
-        assert_eq!(state.score, BASELINE_SCORE as u8 + 15);
+        assert_eq!(state.score, BASELINE_SCORE as u8 + 8);
     }
 
     #[test]
@@ -1268,7 +1268,7 @@ mod tests {
         }
         let state = replay_events(&events);
         assert!(state.chain_valid);
-        assert_eq!(state.score, 45); // 40 + 15 - 10
+        assert_eq!(state.score, 28); // 25 + 8 - 5
     }
 
     #[test]
@@ -1333,8 +1333,8 @@ mod tests {
         };
 
         let state = replay_events(&[event1, event2, event3]);
-        // Only event1 applies: baseline 40 + 1 = 41
-        assert_eq!(state.score, 41);
+        // Only event1 applies: baseline 25 + 1 = 26
+        assert_eq!(state.score, 26);
         assert!(!state.chain_valid);
     }
 }
