@@ -1752,6 +1752,7 @@ Rules:
             "web_fetch" => tool_handlers::handle_web_fetch(&args, &self.config).await,
             "web_search" => tool_handlers::handle_web_search(&args, &self.config).await,
             "manage_tasks" => tool_handlers::handle_manage_tasks(&args, &self.config),
+            "manage_cron" => tool_handlers::handle_manage_cron(&args, &self.config),
             "read_pdf" => tool_handlers::handle_read_pdf(&args),
             "read_file" => {
                 return tool_handlers::handle_read_file(&args, &self.config);
@@ -2061,6 +2062,7 @@ mod tests {
         assert!(is_mutating_tool("write_memory"));
         assert!(is_mutating_tool("browser"));
         assert!(is_mutating_tool("manage_tasks"));
+        assert!(is_mutating_tool("manage_cron"));
         assert!(is_mutating_tool("generate_image"));
     }
 

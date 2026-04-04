@@ -71,6 +71,11 @@ Release binaries are built via `.github/workflows/release.yml` on tag push (`v*`
 - `borg tasks runs <id>` — show execution history for a task
 - `borg tasks status <id>` — show detailed task status including retry state and delivery config
 - `borg tasks pause/resume/delete <id>` — manage task lifecycle
+- `borg cron list` — list all cron jobs
+- `borg cron add "*/5 * * * * echo hello"` — add a cron job (combined crontab format)
+- `borg cron add -s "*/5 * * * *" -c "echo hello"` — add a cron job (separate flags)
+- `borg cron remove/pause/resume/run <id>` — manage cron job lifecycle
+- `borg cron runs <id>` — show execution history for a cron job
 - `borg update` — update borg to latest stable release (supports `--dev` for pre-release, `--check` for check-only)
 - `/update` (TUI command) — update borg to latest version (`/update --dev` for pre-release)
 - `/plugins` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
@@ -163,6 +168,7 @@ Plan mode uses an allowlist of non-mutating tools — new tools default to block
 | `list_channels` | List all messaging channels with status and webhook paths |
 | `browser` | Headless Chrome automation (navigate, click, type, screenshot, get_text, evaluate_js, close). Requires `browser.enabled = true` |
 | `manage_tasks` | Manage scheduled tasks. Actions: create, list, get, update, pause, resume, cancel, delete, runs, run_now. Supports delivery config and retry settings |
+| `manage_cron` | Manage cron jobs (shell commands on a schedule). Actions: create, list, get, delete, pause, resume, runs, run_now. Uses 5-field Linux cron format |
 | `security_audit` | Run host security audit (firewall, ports, SSH, permissions, encryption, updates, services). Requires `security.host_audit = true` |
 
 ## User Tools
@@ -514,6 +520,18 @@ SQLite at `~/.borg/borg.db` with versioned migrations:
 - **Retry with backoff**: Transient failures (timeout, rate limit, 5xx, connection errors) are retried up to `max_retries` (default 3) with exponential backoff (30s → 60s → 5m → 15m → 1h). Non-transient errors skip retry.
 - **Result delivery**: Tasks with `delivery_channel` and `delivery_target` send results (or failure notifications) to Telegram, Slack, or Discord after execution.
 - **Missed job catch-up**: On daemon startup, tasks overdue by >7 days are skipped and advanced to next run.
+
+## Cron Jobs
+
+Linux-style cron jobs that execute shell commands directly (no LLM involved). Uses the same `scheduled_tasks` table with `task_type = "command"` to distinguish from prompt tasks (`task_type = "prompt"`).
+
+- **CLI**: `borg cron add "*/5 * * * * echo hello"` or `borg cron add -s "*/5 * * * *" -c "echo hello"`
+- **Agent tool**: `manage_cron` with actions: create, list, get, delete, pause, resume, runs, run_now
+- **Schedule format**: 5-field Linux cron (`min hour dom month dow`), auto-converted to 7-field internally
+- **Execution**: Direct `sh -c <command>` via `tokio::process::Command` — no LLM client needed
+- **Output**: stdout/stderr captured and stored in `task_runs.result`; non-zero exit stored in `task_runs.error`
+- **No retry on non-zero exit**: Unlike prompt tasks, script failures are not retried (they're user errors, not transient)
+- **Daemon**: Same daemon loop picks up both prompt and command tasks; branches on `task_type`
 
 ## Heartbeat
 

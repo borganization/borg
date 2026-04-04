@@ -460,6 +460,7 @@ fn manage_tasks_create(args: &serde_json::Value) -> Result<String> {
             delivery_channel: args["delivery_channel"].as_str(),
             delivery_target: args["delivery_target"].as_str(),
             allowed_tools: args["allowed_tools"].as_str(),
+            task_type: "prompt",
         }) {
             Ok(()) => Ok(format!(
                 "Scheduled task created: {task_name} (id: {})",
@@ -575,6 +576,186 @@ fn manage_tasks_run_now(args: &serde_json::Value) -> Result<String> {
             Ok(format!("Task {task_id} queued for immediate execution."))
         }
         Ok(None) => Ok(format!("Task {task_id} not found.")),
+        Err(e) => Ok(format!("Error: {e}")),
+    })
+}
+
+// ── Cron job management ──
+
+pub fn handle_manage_cron(args: &serde_json::Value, _config: &Config) -> Result<String> {
+    let action = require_str_param(args, "action")?;
+    match action {
+        "create" => manage_cron_create(args),
+        "list" => manage_cron_list(),
+        "get" => {
+            let job_id = require_str_param(args, "job_id")?;
+            with_db(|db| match db.get_task_by_id(job_id) {
+                Ok(Some(task)) if task.task_type == "command" => Ok(tasks::format_task(&task)),
+                Ok(Some(_)) => Ok(format!(
+                    "Job {job_id} is not a cron job (it's a prompt task)."
+                )),
+                Ok(None) => Ok(format!("Cron job {job_id} not found.")),
+                Err(e) => Ok(format!("Error: {e}")),
+            })
+        }
+        "delete" => {
+            let job_id = require_str_param(args, "job_id")?;
+            with_db(|db| match db.get_task_by_id(job_id) {
+                Ok(Some(task)) if task.task_type == "command" => match db.delete_task(job_id) {
+                    Ok(true) => Ok(format!("Cron job {job_id} deleted.")),
+                    Ok(false) => Ok(format!("Cron job {job_id} not found.")),
+                    Err(e) => Ok(format!("Error: {e}")),
+                },
+                Ok(Some(_)) => Ok(format!(
+                    "Job {job_id} is a prompt task, not a cron job. Use manage_tasks to manage it."
+                )),
+                Ok(None) => Ok(format!("Cron job {job_id} not found.")),
+                Err(e) => Ok(format!("Error: {e}")),
+            })
+        }
+        "pause" => {
+            let job_id = require_str_param(args, "job_id")?;
+            with_db(|db| match db.get_task_by_id(job_id) {
+                Ok(Some(task)) if task.task_type == "command" => {
+                    update_task_status(job_id, tasks::TASK_STATUS_PAUSED, "paused")
+                }
+                Ok(Some(_)) => Ok(format!(
+                    "Job {job_id} is a prompt task, not a cron job. Use manage_tasks to manage it."
+                )),
+                Ok(None) => Ok(format!("Cron job {job_id} not found.")),
+                Err(e) => Ok(format!("Error: {e}")),
+            })
+        }
+        "resume" => {
+            let job_id = require_str_param(args, "job_id")?;
+            with_db(|db| match db.get_task_by_id(job_id) {
+                Ok(Some(task)) if task.task_type == "command" => {
+                    update_task_status(job_id, tasks::TASK_STATUS_ACTIVE, "resumed")
+                }
+                Ok(Some(_)) => Ok(format!(
+                    "Job {job_id} is a prompt task, not a cron job. Use manage_tasks to manage it."
+                )),
+                Ok(None) => Ok(format!("Cron job {job_id} not found.")),
+                Err(e) => Ok(format!("Error: {e}")),
+            })
+        }
+        "runs" => {
+            let job_id = require_str_param(args, "job_id")?;
+            let limit = args["limit"].as_u64().unwrap_or(5) as usize;
+            with_db(|db| match db.task_run_history(job_id, limit) {
+                Ok(runs) if runs.is_empty() => {
+                    Ok(format!("No runs recorded for cron job {job_id}."))
+                }
+                Ok(runs) => {
+                    let mut out = format!("Last {} runs for cron job {}:\n", runs.len(), job_id);
+                    for run in &runs {
+                        let when = chrono::DateTime::from_timestamp(run.started_at, 0)
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                            .unwrap_or_else(|| "?".to_string());
+                        let status = tasks::format_run_status(&run.status);
+                        let details = run
+                            .error
+                            .as_deref()
+                            .or(run.result.as_deref())
+                            .unwrap_or("")
+                            .chars()
+                            .take(80)
+                            .collect::<String>();
+                        out.push_str(&format!(
+                            "  [{status}] {when} ({}ms) {details}\n",
+                            run.duration_ms
+                        ));
+                    }
+                    Ok(out)
+                }
+                Err(e) => Ok(format!("Error: {e}")),
+            })
+        }
+        "run_now" => {
+            let job_id = require_str_param(args, "job_id")?;
+            with_db(|db| match db.get_task_by_id(job_id) {
+                Ok(Some(task)) if task.task_type == "command" => {
+                    let now = chrono::Utc::now().timestamp();
+                    if let Err(e) = db.update_task_next_run(job_id, Some(now)) {
+                        return Ok(format!("Error: {e}"));
+                    }
+                    let _ = db.clear_task_retry(job_id);
+                    Ok(format!("Cron job {job_id} queued for immediate execution."))
+                }
+                Ok(Some(_)) => Ok(format!(
+                    "Job {job_id} is a prompt task, not a cron job. Use manage_tasks to manage it."
+                )),
+                Ok(None) => Ok(format!("Cron job {job_id} not found.")),
+                Err(e) => Ok(format!("Error: {e}")),
+            })
+        }
+        other => Ok(format!(
+            "Unknown action: {other}. Use: create, list, get, delete, pause, resume, runs, run_now."
+        )),
+    }
+}
+
+fn manage_cron_create(args: &serde_json::Value) -> Result<String> {
+    let schedule = require_str_param(args, "schedule")?;
+    let command = require_str_param(args, "command")?;
+    let name = args["name"]
+        .as_str()
+        .map(std::string::ToString::to_string)
+        .unwrap_or_else(|| {
+            let short: String = command.chars().take(30).collect();
+            format!("cron: {short}")
+        });
+
+    let cron_7 = tasks::convert_5_to_7_field(schedule);
+    if let Err(e) = tasks::validate_schedule("cron", &cron_7) {
+        return Ok(format!("Error: Invalid schedule: {e}"));
+    }
+
+    let next_run = match tasks::calculate_next_run("cron", &cron_7) {
+        Ok(nr) => nr,
+        Err(e) => return Ok(format!("Error: Invalid schedule: {e}")),
+    };
+
+    let id = uuid::Uuid::new_v4().to_string();
+    with_db(|db| {
+        match db.create_task(&crate::db::NewTask {
+            id: &id,
+            name: &name,
+            prompt: command,
+            schedule_type: "cron",
+            schedule_expr: &cron_7,
+            timezone: "local",
+            next_run,
+            max_retries: Some(0),
+            timeout_ms: args["timeout_ms"].as_i64(),
+            delivery_channel: args["delivery_channel"].as_str(),
+            delivery_target: args["delivery_target"].as_str(),
+            allowed_tools: None,
+            task_type: "command",
+        }) {
+            Ok(()) => Ok(format!(
+                "Cron job created: {name} (id: {})\n  Schedule: {schedule}\n  Command: {command}",
+                &id[..8]
+            )),
+            Err(e) => Ok(format!("Error creating cron job: {e}")),
+        }
+    })
+}
+
+fn manage_cron_list() -> Result<String> {
+    with_db(|db| match db.list_tasks() {
+        Ok(tasks) => {
+            let cron_jobs: Vec<_> = tasks.iter().filter(|t| t.task_type == "command").collect();
+            if cron_jobs.is_empty() {
+                return Ok("No cron jobs configured.".to_string());
+            }
+            let mut out = format!("Cron jobs ({}):\n", cron_jobs.len());
+            for job in &cron_jobs {
+                out.push_str(&tasks::format_task(job));
+                out.push('\n');
+            }
+            Ok(out)
+        }
         Err(e) => Ok(format!("Error: {e}")),
     })
 }
@@ -1352,6 +1533,8 @@ pub fn core_tool_definitions(config: &Config) -> Vec<ToolDefinition> {
     }
 
     defs.push(ToolDefinition::new("manage_tasks", "Manage scheduled tasks. Actions: create, list, get, update, pause, resume, cancel, delete, runs, run_now.", serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["create","list","get","update","pause","resume","cancel","delete","runs","run_now"],"description":"Action to perform"},"task_id":{"type":"string","description":"Task ID (required for get/update/pause/resume/cancel/delete/runs/run_now)"},"name":{"type":"string","description":"Task name (required for create, optional for update)"},"prompt":{"type":"string","description":"Prompt to execute (required for create, optional for update)"},"schedule_type":{"type":"string","enum":["cron","interval","once"],"description":"Schedule type (required for create, optional for update)"},"schedule_expr":{"type":"string","description":"Cron expression or interval (required for create, optional for update)"},"timezone":{"type":"string","description":"Timezone (default: local)"},"max_retries":{"type":"integer","description":"Max retry attempts for transient failures (default: 3)"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds (default: 300000)"},"delivery_channel":{"type":"string","description":"Channel to deliver results to (telegram, slack, discord)"},"delivery_target":{"type":"string","description":"Target chat/channel ID for delivery"},"limit":{"type":"integer","description":"Number of runs to return (for runs action, default: 5)"}},"required":["action"]})));
+
+    defs.push(ToolDefinition::new("manage_cron", "Manage cron jobs that execute shell commands on a schedule (like Linux cron). Actions: create, list, get, delete, pause, resume, runs, run_now.", serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["create","list","get","delete","pause","resume","runs","run_now"],"description":"Action to perform"},"job_id":{"type":"string","description":"Job ID (required for get/delete/pause/resume/runs/run_now)"},"schedule":{"type":"string","description":"5-field Linux cron expression (e.g. '*/5 * * * *'). Required for create."},"command":{"type":"string","description":"Shell command to execute (e.g. 'python3 /opt/backup.py'). Required for create."},"name":{"type":"string","description":"Optional human-readable name for the job"},"timeout_ms":{"type":"integer","description":"Timeout in milliseconds (default: 300000)"},"delivery_channel":{"type":"string","description":"Channel to deliver output to (telegram, slack, discord)"},"delivery_target":{"type":"string","description":"Target chat/channel ID for delivery"},"limit":{"type":"integer","description":"Number of runs to return (for runs action, default: 5)"}},"required":["action"]})));
 
     if config.browser.enabled {
         defs.push(ToolDefinition::new(
@@ -2183,18 +2366,18 @@ mod tests {
     fn core_tool_definitions_count_reduced() {
         // With all defaults enabled (web, browser, security_audit, scripts):
         // write_memory, read_memory, memory_search, list, apply_patch, run_shell, read_pdf,
-        // read_file, list_dir, web_fetch, web_search, manage_tasks, browser, security_audit,
-        // manage_scripts, run_script, update_plan, request_user_input = 18
+        // read_file, list_dir, web_fetch, web_search, manage_tasks, manage_cron, browser,
+        // security_audit, manage_scripts, run_script, update_plan, request_user_input = 19
         let config = Config::default();
         let defs = core_tool_definitions(&config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         assert_eq!(
             names.len(),
-            18,
-            "expected 18 core tools (all enabled), got: {names:?}"
+            19,
+            "expected 19 core tools (all enabled), got: {names:?}"
         );
 
-        // With everything disabled: 9 base tools + list_dir + update_plan + request_user_input
+        // With everything disabled: 9 base tools + list_dir + manage_cron + update_plan + request_user_input
         let mut minimal_config = Config::default();
         minimal_config.web.enabled = false;
         minimal_config.browser.enabled = false;
@@ -2202,7 +2385,7 @@ mod tests {
         minimal_config.scripts.enabled = false;
         let defs = core_tool_definitions(&minimal_config);
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert_eq!(names.len(), 12, "expected 12 base tools, got: {names:?}");
+        assert_eq!(names.len(), 13, "expected 13 base tools, got: {names:?}");
     }
 
     #[test]

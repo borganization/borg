@@ -46,6 +46,8 @@ pub struct ScheduledTaskRow {
     pub delivery_target: Option<String>,
     /// Comma-separated list of allowed tools for this task. None = all tools allowed.
     pub allowed_tools: Option<String>,
+    /// Task type: "prompt" (LLM task) or "command" (shell cron job).
+    pub task_type: String,
 }
 
 impl ScheduledTaskRow {
@@ -248,6 +250,8 @@ pub struct NewTask<'a> {
     pub delivery_target: Option<&'a str>,
     /// Comma-separated tool allowlist. None = all tools allowed.
     pub allowed_tools: Option<&'a str>,
+    /// Task type: "prompt" (LLM task) or "command" (shell cron job). Defaults to "prompt".
+    pub task_type: &'a str,
 }
 
 /// Parameters for enqueuing a delivery.
@@ -436,7 +440,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 27;
+    const CURRENT_VERSION: u32 = 28;
 
     /// Check if a column exists on a table via `PRAGMA table_info`.
     /// Safer than catching ALTER TABLE errors by string matching.
@@ -504,6 +508,7 @@ impl Database {
             Database::migrate_v25,
             Database::migrate_v26,
             Database::migrate_v27,
+            Database::migrate_v28,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.
@@ -1294,6 +1299,16 @@ impl Database {
     /// V27: Seed daily summary default task
     fn migrate_v27(&self) -> Result<()> {
         self.seed_default_tasks()?;
+        Ok(())
+    }
+
+    /// V28: Add task_type column for cron job support
+    fn migrate_v28(&self) -> Result<()> {
+        if !Self::has_column(&self.conn, "scheduled_tasks", "task_type") {
+            self.conn.execute_batch(
+                "ALTER TABLE scheduled_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'prompt';",
+            )?;
+        }
         Ok(())
     }
 
@@ -3109,9 +3124,9 @@ impl Database {
         let max_retries = task.max_retries.unwrap_or(3);
         let timeout_ms = task.timeout_ms.unwrap_or(300_000);
         self.conn.execute(
-            "INSERT INTO scheduled_tasks (id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at, max_retries, timeout_ms, delivery_channel, delivery_target, allowed_tools)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![task.id, task.name, task.prompt, task.schedule_type, task.schedule_expr, task.timezone, task.next_run, now, max_retries, timeout_ms, task.delivery_channel, task.delivery_target, task.allowed_tools],
+            "INSERT INTO scheduled_tasks (id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at, max_retries, timeout_ms, delivery_channel, delivery_target, allowed_tools, task_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![task.id, task.name, task.prompt, task.schedule_type, task.schedule_expr, task.timezone, task.next_run, now, max_retries, timeout_ms, task.delivery_channel, task.delivery_target, task.allowed_tools, task.task_type],
         )?;
         Ok(())
     }
@@ -3119,7 +3134,7 @@ impl Database {
     pub fn list_tasks(&self) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
-                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools, task_type
              FROM scheduled_tasks ORDER BY created_at DESC",
         )?;
         let rows = stmt
@@ -3131,7 +3146,7 @@ impl Database {
     pub fn get_due_tasks(&self, now: i64) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
-                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools, task_type
              FROM scheduled_tasks
              WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?1
                AND retry_after IS NULL
@@ -3204,7 +3219,7 @@ impl Database {
     pub fn get_task_by_id(&self, id: &str) -> Result<Option<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
-                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools, task_type
              FROM scheduled_tasks WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], Self::map_task_row)?;
@@ -3233,6 +3248,7 @@ impl Database {
             delivery_channel: row.get(14)?,
             delivery_target: row.get(15)?,
             allowed_tools: row.get(16)?,
+            task_type: row.get(17)?,
         })
     }
 
@@ -3261,7 +3277,7 @@ impl Database {
     pub fn get_tasks_pending_retry(&self, now: i64) -> Result<Vec<ScheduledTaskRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
-                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools, task_type
              FROM scheduled_tasks
              WHERE status = 'active' AND retry_after IS NOT NULL AND retry_after <= ?1
              ORDER BY retry_after ASC",
@@ -3289,7 +3305,7 @@ impl Database {
     fn claim_due_tasks_inner(&self, now: i64) -> Result<Vec<ClaimedTask>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, prompt, schedule_type, schedule_expr, timezone, status, next_run, created_at,
-                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools
+                    max_retries, retry_count, retry_after, last_error, timeout_ms, delivery_channel, delivery_target, allowed_tools, task_type
              FROM scheduled_tasks
              WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?1
                AND retry_after IS NULL
@@ -3782,6 +3798,7 @@ mod tests {
             delivery_channel: None,
             delivery_target: None,
             allowed_tools: None,
+            task_type: "prompt",
         }
     }
 
@@ -3808,8 +3825,8 @@ mod tests {
         .expect("create task 2");
 
         let tasks = db.list_tasks().expect("list");
-        // +1 for the seeded Monthly Security Audit task
-        assert_eq!(tasks.len(), 3);
+        // +2 for seeded Monthly Security Audit + Daily Summary tasks
+        assert_eq!(tasks.len(), 4);
     }
 
     #[test]
@@ -5322,6 +5339,7 @@ mod tests {
             delivery_channel: Some("telegram"),
             delivery_target: Some("12345"),
             allowed_tools: None,
+            task_type: "prompt",
         })
         .expect("create");
         let task = db.get_task_by_id("t1").expect("get").expect("some");
@@ -5347,6 +5365,7 @@ mod tests {
             delivery_channel: None,
             delivery_target: None,
             allowed_tools: Some("run_shell,read_file"),
+            task_type: "prompt",
         })
         .expect("create");
         let task = db.get_task_by_id("t-tools").expect("get").expect("some");
@@ -5385,6 +5404,7 @@ mod tests {
             delivery_channel: None,
             delivery_target: None,
             allowed_tools: Some("read_memory,write_memory"),
+            task_type: "prompt",
         })
         .expect("create");
         let tasks = db.list_tasks().expect("list");
@@ -5393,6 +5413,50 @@ mod tests {
             task.allowed_tools.as_deref(),
             Some("read_memory,write_memory")
         );
+    }
+
+    #[test]
+    fn create_command_type_task_roundtrips() {
+        let db = test_db();
+        db.create_task(&NewTask {
+            id: "t-cmd",
+            name: "backup",
+            prompt: "python3 /opt/backup.py",
+            schedule_type: "cron",
+            schedule_expr: "0 0 3 * * * *",
+            timezone: "local",
+            next_run: Some(100),
+            max_retries: Some(0),
+            timeout_ms: None,
+            delivery_channel: None,
+            delivery_target: None,
+            allowed_tools: None,
+            task_type: "command",
+        })
+        .expect("create");
+
+        let task = db.get_task_by_id("t-cmd").expect("get").expect("some");
+        assert_eq!(task.task_type, "command");
+        assert_eq!(task.prompt, "python3 /opt/backup.py");
+        assert_eq!(task.name, "backup");
+
+        // Verify it shows up in list_tasks
+        let tasks = db.list_tasks().expect("list");
+        let found = tasks.iter().find(|t| t.id == "t-cmd").expect("find");
+        assert_eq!(found.task_type, "command");
+
+        // Verify default tasks get task_type = "prompt"
+        db.create_task(&simple_task(
+            "t-prompt",
+            "ai task",
+            "do stuff",
+            "interval",
+            "1h",
+            Some(200),
+        ))
+        .expect("create prompt");
+        let prompt_task = db.get_task_by_id("t-prompt").expect("get").expect("some");
+        assert_eq!(prompt_task.task_type, "prompt");
     }
 
     #[test]
