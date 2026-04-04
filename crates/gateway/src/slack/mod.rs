@@ -1,4 +1,5 @@
 pub mod api;
+pub mod channel;
 pub mod dedup;
 pub mod echo;
 pub mod format;

@@ -1,0 +1,225 @@
+//! `NativeChannel` implementation for Slack.
+
+use std::sync::Arc;
+
+use anyhow::Result;
+use async_trait::async_trait;
+use axum::http::{HeaderMap, StatusCode};
+use tokio::sync::{Mutex, RwLock};
+
+use crate::channel_trait::{NativeChannel, TypingHandle, WebhookContext, WebhookOutcome};
+use crate::health::ChannelHealthRegistry;
+
+use super::api::SlackClient;
+use super::dedup::EventDeduplicator;
+use super::SlackWebhookResult;
+
+/// Slack-specific response context stored in the delivery queue.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SlackResponseContext {
+    channel_id: String,
+    thread_ts: Option<String>,
+    message_ts: Option<String>,
+}
+
+/// Slack native channel implementation.
+pub struct SlackChannel {
+    pub client: Arc<SlackClient>,
+    pub signing_secret: Option<String>,
+    pub dedup: Arc<Mutex<EventDeduplicator>>,
+    pub bot_user_id: Option<String>,
+}
+
+#[async_trait]
+impl NativeChannel for SlackChannel {
+    fn names(&self) -> Vec<&str> {
+        vec!["slack"]
+    }
+
+    async fn handle_webhook(
+        &self,
+        headers: &HeaderMap,
+        body: &str,
+        _ctx: &WebhookContext<'_>,
+    ) -> Result<WebhookOutcome> {
+        let webhook_result = super::handle_slack_webhook(
+            headers,
+            body,
+            self.signing_secret.as_deref(),
+            Some(&self.dedup),
+            self.client.bot_user_id(),
+            Some(self.client.echo_cache()),
+        )
+        .await?;
+
+        let mut inbound = match webhook_result {
+            SlackWebhookResult::Challenge(challenge) => {
+                return Ok(WebhookOutcome::ProtocolResponse((
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({ "challenge": challenge })),
+                )));
+            }
+            SlackWebhookResult::Skip => return Ok(WebhookOutcome::Skip),
+            SlackWebhookResult::Message(inbound) => *inbound,
+        };
+
+        // Ack reaction — immediate visual feedback
+        if let (Some(ref ch), Some(ref ts)) = (&inbound.channel_id, &inbound.message_id) {
+            self.client.add_reaction(ch, ts, "eyes").await;
+        }
+
+        // Download file attachments (placeholder URLs → base64 data)
+        let mut resolved_attachments = Vec::new();
+        for att in &inbound.attachments {
+            if att.data.starts_with("https://") {
+                match self.client.download_file(&att.data).await {
+                    Ok((bytes, content_type)) => {
+                        use base64::Engine;
+                        resolved_attachments.push(crate::handler::InboundAttachment {
+                            mime_type: content_type,
+                            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                            filename: att.filename.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to download Slack file {}: {e}",
+                            att.filename.as_deref().unwrap_or("unknown")
+                        );
+                    }
+                }
+            } else {
+                resolved_attachments.push(att.clone());
+            }
+        }
+        inbound.attachments = resolved_attachments;
+
+        // Channel history context for @mentions
+        if inbound.text.contains("<@") && inbound.thread_ts.is_none() {
+            if let Some(ref channel) = inbound.channel_id {
+                match self.client.conversations_history(channel, 10).await {
+                    Ok(history) if !history.is_empty() => {
+                        const MAX_CONTEXT_CHARS: usize = 8000;
+                        let mut context = String::new();
+                        for m in history.iter().rev() {
+                            let line = format!("<@{}>: {}\n", m.user, m.text);
+                            if context.len() + line.len() > MAX_CONTEXT_CHARS {
+                                break;
+                            }
+                            context.push_str(&line);
+                        }
+                        if !context.is_empty() {
+                            inbound.text = format!(
+                                "[Channel context]\n{context}[Current message]\n{}",
+                                inbound.text
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch channel history for context: {e}");
+                    }
+                }
+            }
+        }
+
+        let session_key = inbound.session_key("slack", inbound.thread_id.as_deref().unwrap_or(""));
+
+        let response_context = serde_json::to_value(SlackResponseContext {
+            channel_id: inbound.channel_id.clone().unwrap_or_default(),
+            thread_ts: inbound.thread_ts.clone(),
+            message_ts: inbound.message_id.clone(),
+        })?;
+
+        Ok(WebhookOutcome::Message {
+            inbound,
+            session_key,
+            response_context,
+        })
+    }
+
+    async fn send_response(
+        &self,
+        response_text: &str,
+        response_context: &serde_json::Value,
+        health: &Arc<RwLock<ChannelHealthRegistry>>,
+    ) -> Result<()> {
+        let ctx: SlackResponseContext = serde_json::from_value(response_context.clone())?;
+
+        let formatted = super::format::markdown_to_mrkdwn(response_text);
+
+        if let Err(e) = self
+            .client
+            .post_message(&ctx.channel_id, &formatted, ctx.thread_ts.as_deref())
+            .await
+        {
+            health.write().await.record_error("slack", &e.to_string());
+            return Err(e);
+        }
+
+        health.write().await.record_outbound("slack");
+
+        // Replace ack reaction with done reaction
+        if let Some(ref ts) = ctx.message_ts {
+            self.client
+                .remove_reaction(&ctx.channel_id, ts, "eyes")
+                .await;
+            self.client
+                .add_reaction(&ctx.channel_id, ts, "white_check_mark")
+                .await;
+        }
+
+        Ok(())
+    }
+
+    fn bot_mention(&self) -> Option<String> {
+        self.bot_user_id.as_ref().map(|id| format!("<@{id}>"))
+    }
+
+    fn start_typing(&self, response_context: &serde_json::Value) -> Option<TypingHandle> {
+        let ctx: SlackResponseContext = serde_json::from_value(response_context.clone()).ok()?;
+        let client = self.client.clone();
+
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let join = tokio::spawn(async move {
+            let config = crate::typing_keepalive::TypingKeepaliveConfig {
+                keepalive_interval: std::time::Duration::from_secs(3),
+                label: "slack",
+            };
+            let channel_id = ctx.channel_id.clone();
+            let thread_ts = ctx.thread_ts.clone();
+            crate::typing_keepalive::run_keepalive(config, stop_rx, || {
+                let client = client.clone();
+                let ch = channel_id.clone();
+                let ts = thread_ts.clone();
+                async move {
+                    client
+                        .set_thread_status(&ch, ts.as_deref(), "is typing...")
+                        .await
+                }
+            })
+            .await;
+        });
+
+        Some(TypingHandle::new(stop_tx, join))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_context_roundtrip() {
+        let ctx = SlackResponseContext {
+            channel_id: "C123".to_string(),
+            thread_ts: Some("1234567890.123456".to_string()),
+            message_ts: Some("1234567890.654321".to_string()),
+        };
+        let json = serde_json::to_value(&ctx).unwrap();
+        let back: SlackResponseContext = serde_json::from_value(json).unwrap();
+        assert_eq!(back.channel_id, "C123");
+        assert_eq!(back.thread_ts.as_deref(), Some("1234567890.123456"));
+        assert_eq!(back.message_ts.as_deref(), Some("1234567890.654321"));
+    }
+}

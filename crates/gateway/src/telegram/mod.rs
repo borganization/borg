@@ -1,4 +1,5 @@
 pub mod api;
+pub mod channel;
 pub mod chat_queue;
 pub mod circuit_breaker;
 pub mod dedup;

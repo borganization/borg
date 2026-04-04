@@ -17,6 +17,7 @@ use borg_core::config::Config;
 use borg_core::db::Database;
 use borg_core::telemetry::BorgMetrics;
 
+use crate::channel_trait::{self, NativeChannelRegistry};
 use crate::discord::api::DiscordClient;
 use crate::google_chat::api::GoogleChatClient;
 use crate::handler;
@@ -39,6 +40,7 @@ use borg_core::constants;
 
 const MAX_BODY_SIZE: usize = constants::GATEWAY_MAX_BODY_SIZE;
 
+#[allow(dead_code)]
 struct AppState {
     config: Config,
     registry: ChannelRegistry,
@@ -72,6 +74,8 @@ struct AppState {
     auto_reply_state: crate::auto_reply::SharedAutoReplyState,
     /// TTS synthesizer for auto voice replies.
     tts_synthesizer: Option<Arc<borg_core::tts::TtsSynthesizer>>,
+    /// Registry of native channel implementations for unified dispatch.
+    native_channels: NativeChannelRegistry,
 }
 
 pub struct GatewayServer {
@@ -328,6 +332,60 @@ impl GatewayServer {
             None => None,
         };
 
+        // Build native channel registry for unified webhook dispatch.
+        let mut native_channels = NativeChannelRegistry::new();
+        let slack_dedup = Arc::new(Mutex::new(EventDeduplicator::new()));
+
+        if let Some(ref tg) = telegram_client {
+            native_channels.register(Arc::new(crate::telegram::channel::TelegramChannel {
+                client: tg.clone(),
+                dedup: telegram_dedup.clone(),
+                secret: telegram_secret.clone(),
+                bot_username: telegram_bot_username.clone(),
+                config: self.config.clone(),
+                tts_synthesizer: if self.config.tts.enabled && self.config.tts.auto_mode {
+                    borg_core::tts::TtsSynthesizer::from_config(&self.config).map(Arc::new)
+                } else {
+                    None
+                },
+            }));
+        }
+        if let Some(ref sc) = slack_client {
+            native_channels.register(Arc::new(crate::slack::channel::SlackChannel {
+                client: sc.clone(),
+                signing_secret: slack_signing_secret.clone(),
+                dedup: slack_dedup.clone(),
+                bot_user_id: slack_bot_user_id.clone(),
+            }));
+        }
+        if let Some(ref dc) = discord_client {
+            native_channels.register(Arc::new(crate::discord::channel::DiscordChannel {
+                client: dc.clone(),
+                public_key: discord_public_key.clone(),
+            }));
+        }
+        if let Some(ref tc) = twilio_client {
+            native_channels.register(Arc::new(crate::twilio::channel::TwilioChannel {
+                client: tc.clone(),
+                auth_token: twilio_auth_token.clone(),
+                phone_number: twilio_phone_number.clone(),
+                whatsapp_number: twilio_whatsapp_number.clone(),
+                config: self.config.clone(),
+            }));
+        }
+        if let Some(ref tc) = teams_client {
+            native_channels.register(Arc::new(crate::teams::channel::TeamsChannel {
+                client: tc.clone(),
+                app_secret: teams_app_secret.clone(),
+            }));
+        }
+        if let Some(ref gc) = google_chat_client {
+            native_channels.register(Arc::new(crate::google_chat::channel::GoogleChatChannel {
+                client: gc.clone(),
+                token: google_chat_token.clone(),
+            }));
+        }
+
         let state = Arc::new(AppState {
             config: self.config.clone(),
             registry,
@@ -341,7 +399,7 @@ impl GatewayServer {
             telegram_secret,
             slack_client,
             slack_signing_secret,
-            slack_dedup: Arc::new(Mutex::new(EventDeduplicator::new())),
+            slack_dedup,
             twilio_client,
             twilio_auth_token,
             twilio_phone_number,
@@ -363,6 +421,7 @@ impl GatewayServer {
             } else {
                 None
             },
+            native_channels,
         });
 
         let app = Router::new()
@@ -989,38 +1048,23 @@ async fn webhook_handler(
         }
     }
 
-    // Native channel handling — messages are enqueued to the SessionQueue for
-    // per-session sequential processing with global concurrency control.
-    if name == "telegram" {
-        if let Some(ref tg_client) = state.telegram_client {
-            return handle_telegram_webhook(&state, tg_client, &headers, &body).await;
-        }
-    }
-
-    if name == "slack" {
-        if let Some(ref slack_client) = state.slack_client {
-            return handle_slack_webhook(&state, slack_client, &headers, &body).await;
-        }
-    }
-
-    if name == "twilio" || name == "whatsapp" || name == "sms" {
-        if let Some(ref twilio_client) = state.twilio_client {
-            return handle_twilio_webhook(&state, twilio_client, &headers, &body).await;
-        }
-    }
-
-    if name == "discord" {
-        if let Some(ref discord_client) = state.discord_client {
-            return handle_discord_webhook_route(&state, discord_client, &headers, &body).await;
-        }
-    }
-
-    if name == "teams" && state.teams_client.is_some() {
-        return handle_teams_webhook_route(&state, &headers, &body).await;
-    }
-
-    if name == "google-chat" || name == "google_chat" || name == "googlechat" {
-        return handle_google_chat_webhook_route(&state, &body).await;
+    // Native channel handling via unified trait dispatch — messages are enqueued
+    // to the SessionQueue for per-session sequential processing with global
+    // concurrency control.
+    if let Some(native) = state.native_channels.get(&name) {
+        let ctx = channel_trait::WebhookContext {
+            config: &state.config,
+            health: &state.health,
+        };
+        return channel_trait::dispatch_webhook(
+            native,
+            &headers,
+            &body,
+            &ctx,
+            &state.session_queue,
+            state.request_timeout,
+        )
+        .await;
     }
 
     // Convert headers to JSON
@@ -1035,10 +1079,9 @@ async fn webhook_handler(
     }
     let headers_json = serde_json::Value::Object(headers_map);
 
-    // Script-based channels need the response in the HTTP body, so we use a
-    // oneshot to wait for the result while still routing through the session queue.
+    // Script-based channels: return 200 immediately and process asynchronously.
+    // Response is delivered via the outbound script and persisted in the delivery queue.
     let session_key = format!("script:{}:{}", name, "default");
-    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
 
     let channel = channel.clone();
     let config = state.config.clone();
@@ -1056,12 +1099,21 @@ async fn webhook_handler(
                 )
                 .await;
 
-                let response = match result {
-                    Ok(Ok(r)) => Ok(r),
-                    Ok(Err(e)) => Err(format!("{e:#}")),
-                    Err(_) => Err("Request timed out".to_string()),
-                };
-                let _ = tx.send(response);
+                match result {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        warn!(
+                            "Script webhook handler error for '{}': {e:#}",
+                            channel.manifest.name
+                        );
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Script webhook handler timed out for '{}'",
+                            channel.manifest.name
+                        );
+                    }
+                }
             }),
         )
         .await;
@@ -1070,23 +1122,8 @@ async fn webhook_handler(
         return service_unavailable_response();
     }
 
-    match rx.await {
-        Ok(Ok(response)) => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({ "ok": true, "response": response })),
-        ),
-        Ok(Err(e)) => {
-            warn!("Webhook handler error for '{name}': {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": "Internal server error" })),
-            )
-        }
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({ "error": "Internal server error" })),
-        ),
-    }
+    // Return 200 immediately — response is delivered via outbound script asynchronously
+    ok_response()
 }
 
 type WebhookResponse = (StatusCode, axum::Json<serde_json::Value>);
@@ -1105,6 +1142,8 @@ fn service_unavailable_response() -> WebhookResponse {
     )
 }
 
+// Legacy handler — retained for reference until polling paths are migrated.
+#[allow(dead_code)]
 async fn handle_telegram_webhook(
     state: &Arc<AppState>,
     tg_client: &Arc<TelegramClient>,
@@ -1250,6 +1289,7 @@ async fn handle_telegram_webhook(
     ok_response()
 }
 
+#[allow(dead_code)]
 async fn handle_slack_webhook(
     state: &Arc<AppState>,
     slack_client: &Arc<SlackClient>,
@@ -1554,6 +1594,7 @@ async fn slack_command_handler(
     ok_response()
 }
 
+#[allow(dead_code)]
 async fn handle_twilio_webhook(
     state: &Arc<AppState>,
     twilio_client: &Arc<TwilioClient>,
@@ -1734,6 +1775,7 @@ async fn send_telegram_response(
     }
 }
 
+#[allow(dead_code)]
 async fn handle_discord_webhook_route(
     state: &Arc<AppState>,
     discord_client: &Arc<DiscordClient>,
@@ -1866,6 +1908,7 @@ async fn handle_discord_webhook_route(
     }
 }
 
+#[allow(dead_code)]
 async fn handle_teams_webhook_route(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -1969,6 +2012,7 @@ async fn handle_teams_webhook_route(
     ok_response()
 }
 
+#[allow(dead_code)]
 async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> WebhookResponse {
     let inbound = match crate::google_chat::handle_google_chat_webhook(
         body,
@@ -2208,6 +2252,43 @@ async fn drain_pending_deliveries(
     );
 
     for delivery in deliveries {
+        // Try native channel first (Telegram, Slack, Discord, etc.)
+        if let Some(native) = state.native_channels.get(&delivery.channel_name) {
+            match serde_json::from_str::<serde_json::Value>(&delivery.payload_json) {
+                Ok(payload) => {
+                    let text = payload["text"].as_str().unwrap_or("");
+                    let response_context = &payload["response_context"];
+                    match native.send_response(text, response_context, health).await {
+                        Ok(()) => {
+                            if let Err(e) = db.mark_delivered(&delivery.id) {
+                                warn!(delivery_id = %delivery.id, "Failed to persist delivery success: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            let next_retry = chrono::Utc::now().timestamp() + 60;
+                            if let Err(db_err) =
+                                db.mark_failed(&delivery.id, &e.to_string(), Some(next_retry))
+                            {
+                                warn!(delivery_id = %delivery.id, "Failed to persist delivery failure: {db_err}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Drain loop: invalid payload JSON for '{}': {e}",
+                        delivery.channel_name
+                    );
+                    if let Err(db_err) = db.mark_failed(&delivery.id, "invalid payload JSON", None)
+                    {
+                        warn!(delivery_id = %delivery.id, "Failed to persist failure: {db_err}");
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Fall back to script-based channel delivery
         let channel = match state.registry.get(&delivery.channel_name) {
             Some(c) => c,
             None => {
