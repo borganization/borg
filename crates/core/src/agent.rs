@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -259,6 +261,7 @@ fn should_nudge_for_response(
 }
 
 pub struct Agent {
+    /// Primary config. Must be kept in sync with `config_arc` — update both in `reload_config`.
     config: Config,
     history: Vec<Message>,
     session: Session,
@@ -285,6 +288,12 @@ pub struct Agent {
     git_repo_root: Option<std::path::PathBuf>,
     /// Cached project doc contents (AGENTS.md / CLAUDE.md), loaded once.
     cached_project_docs: Option<Option<String>>,
+    /// Cached identity string, invalidated on write_memory targeting IDENTITY.md.
+    cached_identity: Option<String>,
+    /// Cached resolved credentials, invalidated on config reload.
+    cached_credentials: Option<HashMap<String, String>>,
+    /// Arc-wrapped config for cheap cloning into background tasks.
+    config_arc: Arc<Config>,
     /// Channel for receiving user steer messages mid-turn (injected at tool boundaries).
     steer_rx: Option<mpsc::UnboundedReceiver<String>>,
 }
@@ -340,6 +349,17 @@ impl Agent {
         }
     }
 
+    /// Ensure credential cache is populated, resolving on first call or after config reload.
+    /// Returns a clone suitable for passing to functions that also borrow `&self`.
+    fn resolve_credentials_cached(&mut self) -> HashMap<String, String> {
+        if let Some(ref cached) = self.cached_credentials {
+            return cached.clone();
+        }
+        let resolved = self.config.resolve_credentials();
+        self.cached_credentials = Some(resolved.clone());
+        resolved
+    }
+
     pub fn new(config: Config, metrics: BorgMetrics) -> Result<Self> {
         let common = build_common(&config)?;
         let agent_control = if config.agents.enabled {
@@ -354,6 +374,7 @@ impl Agent {
         let git_repo_root = std::env::current_dir()
             .ok()
             .and_then(|cwd| crate::git::find_repo_root(&cwd));
+        let config_arc = Arc::new(config.clone());
         Ok(Self {
             config,
             history: Vec::new(),
@@ -375,6 +396,9 @@ impl Agent {
             ghost_commit: None,
             git_repo_root,
             cached_project_docs: None,
+            cached_identity: None,
+            cached_credentials: None,
+            config_arc,
             steer_rx: None,
         })
     }
@@ -396,8 +420,10 @@ impl Agent {
             .update_limits(new_config.security.action_limits.clone());
         self.cached_skills_context = None; // invalidate on config change
         let resolved_creds = new_config.resolve_credentials();
+        self.cached_credentials = Some(resolved_creds.clone());
         self.skill_env_allowlist =
             crate::skills::collect_required_env_vars(&resolved_creds, &new_config.skills);
+        self.config_arc = Arc::new(new_config.clone());
         self.config = new_config;
     }
 
@@ -422,6 +448,7 @@ impl Agent {
         let git_repo_root = std::env::current_dir()
             .ok()
             .and_then(|cwd| crate::git::find_repo_root(&cwd));
+        let config_arc = Arc::new(config.clone());
         Ok(Self {
             config,
             history: Vec::new(),
@@ -443,6 +470,9 @@ impl Agent {
             ghost_commit: None,
             git_repo_root,
             cached_project_docs: None,
+            cached_identity: None,
+            cached_credentials: None,
+            config_arc,
             steer_rx: None,
         })
     }
@@ -637,12 +667,23 @@ impl Agent {
     }
 
     #[instrument(skip_all)]
-    async fn build_system_prompt(&self) -> Result<String> {
-        let identity = load_identity()?;
+    async fn build_system_prompt(&mut self) -> Result<String> {
+        // Use cached identity or load + cache it
+        let identity = match &self.cached_identity {
+            Some(cached) => cached.clone(),
+            None => {
+                let id = load_identity()?;
+                self.cached_identity = Some(id.clone());
+                id
+            }
+        };
         let memory = self.load_memory_with_ranking().await?;
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
 
-        let mut system = format!("<system_instructions>\n{identity}\n</system_instructions>\n\n");
+        let mut system = String::with_capacity(16_384);
+        system.push_str("<system_instructions>\n");
+        system.push_str(&identity);
+        system.push_str("\n</system_instructions>\n\n");
 
         // Environment section with rich git context
         system.push_str("<environment>\n");
@@ -688,7 +729,7 @@ impl Agent {
             let skills = match &self.cached_skills_context {
                 Some(cached) => cached.clone(),
                 None => {
-                    let resolved_creds = self.config.resolve_credentials();
+                    let resolved_creds = self.resolve_credentials_cached();
                     load_skills_context(
                         self.config.skills.max_context_tokens,
                         &resolved_creds,
@@ -739,15 +780,15 @@ impl Agent {
             let setup_path = data_dir.join("SETUP.md");
             // Atomically rename to prevent duplicate injection from concurrent sessions
             let consumed = setup_path.with_extension("md.consumed");
-            if std::fs::rename(&setup_path, &consumed).is_ok() {
-                if let Ok(setup) = std::fs::read_to_string(&consumed) {
+            if tokio::fs::rename(&setup_path, &consumed).await.is_ok() {
+                if let Ok(setup) = tokio::fs::read_to_string(&consumed).await {
                     system.push_str(
                         &SETUP_TEMPLATE
                             .render([("setup", setup.as_str())])
                             .context("setup template render failed")?,
                     );
                 }
-                let _ = std::fs::remove_file(&consumed);
+                let _ = tokio::fs::remove_file(&consumed).await;
             }
         }
 
@@ -788,11 +829,23 @@ impl Agent {
 
         let recency_weight = self.config.memory.embeddings.recency_weight;
 
-        let global_rankings = match crate::embeddings::rank_embeddings_by_similarity(
-            &query_embedding,
-            "global",
-            recency_weight,
-        ) {
+        // Run global and local ranking in parallel on blocking threads
+        let qe_global = query_embedding.clone();
+        let qe_local = query_embedding;
+        let rw = recency_weight;
+
+        let (global_result, local_result) = tokio::join!(
+            tokio::task::spawn_blocking(move || {
+                crate::embeddings::rank_embeddings_by_similarity(&qe_global, "global", rw)
+            }),
+            tokio::task::spawn_blocking(move || {
+                crate::embeddings::rank_embeddings_by_similarity(&qe_local, "local", rw)
+            }),
+        );
+
+        let global_rankings = match global_result
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking panicked: {e}")))
+        {
             Ok(r) if !r.is_empty() => r,
             Ok(_) => return load_memory_context(max_tokens),
             Err(e) => {
@@ -801,12 +854,12 @@ impl Agent {
             }
         };
 
-        let local_rankings: Vec<(String, f32)> = crate::embeddings::rank_embeddings_by_similarity(
-            &query_embedding,
-            "local",
-            recency_weight,
-        )
-        .unwrap_or_default();
+        let local_rankings: Vec<(String, f32)> = local_result
+            .unwrap_or_else(|e| {
+                tracing::debug!("Local ranking task failed: {e}");
+                Ok(Vec::new())
+            })
+            .unwrap_or_default();
 
         load_memory_context_ranked(max_tokens, &global_rankings, &local_rankings)
     }
@@ -911,7 +964,7 @@ Rules:
                         tracing::warn!("Failed to write pre-compaction flush: {e}");
                     } else if self.config.memory.embeddings.enabled {
                         // Index the daily log so it's immediately searchable
-                        let config = self.config.clone();
+                        let config = Arc::clone(&self.config_arc);
                         let fname = filename.clone();
                         match crate::memory::read_memory(&fname) {
                             Ok(full_content) => {
@@ -1035,14 +1088,14 @@ Rules:
         // Background: index extra paths and pending sessions on first run
         if self.config.memory.embeddings.enabled {
             if !self.config.memory.extra_paths.is_empty() {
-                let config = self.config.clone();
+                let config = Arc::clone(&self.config_arc);
                 spawn_logged("embed_extra_paths", async move {
                     let files = crate::memory::scan_extra_paths(
                         &config.memory.extra_paths,
                         &config.security.blocked_paths,
                     );
                     for (filename, path) in files {
-                        if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(content) = tokio::fs::read_to_string(&path).await {
                             let _ = crate::embeddings::embed_memory_file_chunked(
                                 &config, &filename, &content, "extra",
                             )
@@ -1056,7 +1109,7 @@ Rules:
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                let config = self.config.clone();
+                let config = Arc::clone(&self.config_arc);
                 spawn_logged("index_sessions", async move {
                     struct IndexGuard;
                     impl Drop for IndexGuard {
@@ -1219,7 +1272,7 @@ Rules:
 
             // Warm skills cache on first iteration (avoids re-parsing every turn)
             if self.cached_skills_context.is_none() && self.config.skills.enabled {
-                let resolved_creds = self.config.resolve_credentials();
+                let resolved_creds = self.resolve_credentials_cached();
                 match load_skills_context(
                     self.config.skills.max_context_tokens,
                     &resolved_creds,
@@ -1502,22 +1555,17 @@ Rules:
                 return Ok(());
             }
 
-            let assistant_msg = if text_content.is_empty() {
-                Message {
-                    role: crate::types::Role::Assistant,
-                    content: None,
-                    tool_calls: Some(tc.clone()),
-                    tool_call_id: None,
-                    timestamp: Some(chrono::Local::now().to_rfc3339()),
-                }
-            } else {
-                Message {
-                    role: crate::types::Role::Assistant,
-                    content: Some(crate::types::MessageContent::Text(text_content.clone())),
-                    tool_calls: Some(tc.clone()),
-                    tool_call_id: None,
-                    timestamp: Some(chrono::Local::now().to_rfc3339()),
-                }
+            let tc_for_msg = tc.clone();
+            let assistant_msg = Message {
+                role: crate::types::Role::Assistant,
+                content: if text_content.is_empty() {
+                    None
+                } else {
+                    Some(crate::types::MessageContent::Text(text_content.clone()))
+                },
+                tool_calls: Some(tc_for_msg),
+                tool_call_id: None,
+                timestamp: Some(chrono::Local::now().to_rfc3339()),
             };
             self.log_and_persist(assistant_msg);
 
@@ -1687,8 +1735,15 @@ Rules:
         let text_result: Result<String> = match name {
             "write_memory" => {
                 let result = tool_handlers::handle_write_memory(&args);
+                // Invalidate identity cache if IDENTITY.md was written
+                if result.is_ok() {
+                    let target = args["filename"].as_str().unwrap_or_default();
+                    if target == "IDENTITY.md" {
+                        self.cached_identity = None;
+                    }
+                }
                 if result.is_ok() && self.config.memory.embeddings.enabled {
-                    let config = self.config.clone();
+                    let config = Arc::clone(&self.config_arc);
                     let filename = args["filename"].as_str().unwrap_or_default().to_string();
                     let scope = args["scope"].as_str().unwrap_or("global").to_string();
                     let full_content = match crate::memory::read_memory(&filename) {
