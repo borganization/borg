@@ -38,7 +38,7 @@ which = { workspace = true }
 uuid = { workspace = true }
 iana-time-zone = "0.1"
 reqwest = { workspace = true }
-tokio-util = "0.7"
+tokio-util = { workspace = true }
 tracing-appender = { workspace = true }
 tempfile = { workspace = true }
 throbber-widgets-tui = { workspace = true }
@@ -46,7 +46,7 @@ ignore = { workspace = true }
 libc = "0.2"
 arboard = { workspace = true }
 image = { workspace = true }
-base64 = "0.22"
+base64 = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 tracing-opentelemetry = { workspace = true }

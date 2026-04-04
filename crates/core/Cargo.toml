@@ -27,8 +27,8 @@ uuid = { workspace = true }
 serde_yaml = { workspace = true }
 which = { workspace = true }
 tiktoken-rs = { workspace = true }
-tokio-util = "0.7"
-rand = "0.9"
+tokio-util = { workspace = true }
+rand = { workspace = true }
 rusqlite = { workspace = true }
 scraper = { workspace = true }
 cron = { workspace = true }
@@ -37,7 +37,7 @@ pdf-extract = { workspace = true }
 shellexpand = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
-base64 = "0.22"
+base64 = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
@@ -47,7 +47,7 @@ chromiumoxide = { workspace = true }
 unicode-normalization = { workspace = true }
 notify = { workspace = true }
 image = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

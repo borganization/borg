@@ -5,6 +5,8 @@
 
 /// Auto-reply state management for channel conversations.
 pub mod auto_reply;
+/// Exponential backoff with jitter for polling/SSE reconnection.
+pub mod backoff;
 /// Channel client initialization helpers.
 mod channel_init;
 /// Trait abstraction for native channel implementations.

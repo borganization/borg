@@ -145,13 +145,13 @@ fn extract_chat_id(update: &Update) -> Option<i64> {
 }
 
 fn calculate_backoff(consecutive_errors: u32) -> Duration {
-    let base = MIN_BACKOFF.as_secs_f64()
-        * BACKOFF_FACTOR.powi(consecutive_errors.saturating_sub(1) as i32);
-    let capped = base.min(MAX_BACKOFF.as_secs_f64());
-
-    // Add jitter
-    let jitter = capped * JITTER_FRACTION * rand::random::<f64>();
-    Duration::from_secs_f64(capped + jitter)
+    crate::backoff::calculate_backoff(
+        consecutive_errors,
+        MIN_BACKOFF,
+        MAX_BACKOFF,
+        BACKOFF_FACTOR,
+        JITTER_FRACTION,
+    )
 }
 
 #[cfg(test)]
