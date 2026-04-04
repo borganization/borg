@@ -12,12 +12,43 @@ use borg_core::tasks::parse_interval;
 /// Minimum allowed heartbeat interval (60 seconds) to prevent API waste.
 const MIN_INTERVAL_SECS: u64 = borg_core::constants::MIN_HEARTBEAT_INTERVAL_SECS;
 
+/// Outcome of a heartbeat agent turn.
+#[derive(Debug, Clone)]
+pub enum HeartbeatResult {
+    /// Agent produced a message to display.
+    Ran { message: String, duration_ms: u64 },
+    /// Heartbeat was skipped.
+    Skipped { reason: SkipReason },
+    /// Heartbeat failed.
+    Failed { error: String },
+}
+
+/// Why a heartbeat was skipped.
+#[derive(Debug, Clone)]
+pub enum SkipReason {
+    QuietHours,
+    EmptyResponse,
+    DuplicateResponse,
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QuietHours => write!(f, "quiet hours"),
+            Self::EmptyResponse => write!(f, "empty response"),
+            Self::DuplicateResponse => write!(f, "duplicate response"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum HeartbeatEvent {
     /// Timer fired — consumer should run a heartbeat agent turn.
     Fire,
-    /// Heartbeat result to display (sent by consumer after agent turn completes).
-    Message(String),
+    /// Scheduler started successfully — for TUI to show confirmation.
+    SchedulerStarted { mode: String },
+    /// Result of a heartbeat turn (sent by consumer after agent turn completes).
+    Result(HeartbeatResult),
 }
 
 /// Pure timer that emits `Fire` events on schedule. Does not call LLM directly —
@@ -115,6 +146,15 @@ impl HeartbeatScheduler {
         }
 
         info!("Heartbeat scheduler started (interval: {interval:?})");
+        if let Some((start, end)) = self.quiet_hours {
+            info!(
+                "Heartbeat quiet hours: {} - {} (timezone: {})",
+                start, end, self.timezone
+            );
+        }
+
+        let mode = format!("interval: {}", self.config.interval);
+        let _ = tx.try_send(HeartbeatEvent::SchedulerStarted { mode });
 
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await; // Skip immediate first tick
@@ -134,6 +174,9 @@ impl HeartbeatScheduler {
                 _ = ticker.tick() => {
                     if self.is_quiet_hours() {
                         debug!("Heartbeat: in quiet hours, skipping");
+                        let _ = tx.try_send(HeartbeatEvent::Result(HeartbeatResult::Skipped {
+                            reason: SkipReason::QuietHours,
+                        }));
                         continue;
                     }
                     if !Self::try_fire(&tx) { return; }
@@ -173,6 +216,15 @@ impl HeartbeatScheduler {
         }
 
         info!("Heartbeat scheduler started (cron: {cron_expr})");
+        if let Some((start, end)) = self.quiet_hours {
+            info!(
+                "Heartbeat quiet hours: {} - {} (timezone: {})",
+                start, end, self.timezone
+            );
+        }
+
+        let mode = format!("cron: {cron_expr}");
+        let _ = tx.try_send(HeartbeatEvent::SchedulerStarted { mode });
 
         loop {
             let now = chrono::Local::now();
@@ -202,6 +254,9 @@ impl HeartbeatScheduler {
                 _ = tokio::time::sleep(wait) => {
                     if self.is_quiet_hours() {
                         debug!("Heartbeat: in quiet hours, skipping");
+                        let _ = tx.try_send(HeartbeatEvent::Result(HeartbeatResult::Skipped {
+                            reason: SkipReason::QuietHours,
+                        }));
                         continue;
                     }
                     if !Self::try_fire(&tx) { return; }
@@ -238,6 +293,18 @@ mod tests {
             wake_rx: Some(rx),
             quiet_hours,
         }
+    }
+
+    /// Drain the initial SchedulerStarted event from the channel.
+    async fn drain_started(rx: &mut mpsc::Receiver<HeartbeatEvent>) {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for SchedulerStarted")
+            .expect("channel closed");
+        assert!(
+            matches!(event, HeartbeatEvent::SchedulerStarted { .. }),
+            "expected SchedulerStarted, got: {event:?}"
+        );
     }
 
     #[test]
@@ -373,6 +440,9 @@ mod tests {
             scheduler.run(fire_tx, cancel_clone).await;
         });
 
+        // Drain SchedulerStarted
+        drain_started(&mut fire_rx).await;
+
         // Send wake signal
         wake_tx.send(()).await.unwrap();
 
@@ -465,6 +535,9 @@ mod tests {
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
+        // Drain SchedulerStarted
+        drain_started(&mut fire_rx).await;
+
         // Should still respond to wake (interval gets clamped, not rejected)
         wake_tx.send(()).await.unwrap();
         let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
@@ -494,6 +567,9 @@ mod tests {
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
+        // Drain SchedulerStarted
+        drain_started(&mut fire_rx).await;
+
         // Wake should still work
         wake_tx.send(()).await.unwrap();
         let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
@@ -522,6 +598,9 @@ mod tests {
         let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // Drain SchedulerStarted (from the interval fallback)
+        drain_started(&mut fire_rx).await;
 
         // Should fall back to interval mode and respond to wake
         wake_tx.send(()).await.unwrap();
@@ -554,6 +633,12 @@ mod tests {
 
         // Let the spawned task start and consume the first immediate tick
         tokio::task::yield_now().await;
+
+        // Drain SchedulerStarted
+        match fire_rx.try_recv() {
+            Ok(HeartbeatEvent::SchedulerStarted { .. }) => {}
+            other => panic!("expected SchedulerStarted, got: {other:?}"),
+        }
 
         // Advance past one interval (60s) + buffer.
         // With start_paused, time only advances when we explicitly advance or sleep.
@@ -608,5 +693,98 @@ mod tests {
         }
         assert!(count >= 1, "should receive at least one Fire event");
         cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn scheduler_emits_started_event() {
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "30m".to_string(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (_wake_tx, wake_rx) = mpsc::channel(8);
+        let (fire_tx, mut fire_rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // First event should be SchedulerStarted
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
+            .await
+            .expect("timed out waiting for SchedulerStarted")
+            .expect("channel closed");
+
+        match event {
+            HeartbeatEvent::SchedulerStarted { mode } => {
+                assert!(
+                    mode.contains("interval"),
+                    "expected mode to contain 'interval', got: {mode}"
+                );
+            }
+            other => panic!("expected SchedulerStarted, got: {other:?}"),
+        }
+
+        cancel.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_hours_emits_skip_event() {
+        // Set quiet hours to cover the full day so they always apply
+        let config = HeartbeatConfig {
+            enabled: true,
+            interval: "60s".to_string(),
+            quiet_hours_start: Some("00:00".to_string()),
+            quiet_hours_end: Some("23:59".to_string()),
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (_wake_tx, wake_rx) = mpsc::channel(1);
+        let (fire_tx, mut fire_rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // Yield to let scheduler start
+        tokio::task::yield_now().await;
+
+        // First event is SchedulerStarted
+        let event = fire_rx.try_recv().expect("expected SchedulerStarted");
+        assert!(matches!(event, HeartbeatEvent::SchedulerStarted { .. }));
+
+        // Advance past interval to trigger a tick during quiet hours
+        tokio::time::advance(std::time::Duration::from_secs(62)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Should receive a Skipped { QuietHours } result
+        match fire_rx.try_recv() {
+            Ok(HeartbeatEvent::Result(HeartbeatResult::Skipped {
+                reason: SkipReason::QuietHours,
+            })) => {} // expected
+            Ok(other) => panic!("expected Skipped(QuietHours), got: {other:?}"),
+            Err(_) => panic!("expected Skipped(QuietHours) event but channel was empty"),
+        }
+
+        cancel.cancel();
+    }
+
+    #[test]
+    fn skip_reason_display() {
+        assert_eq!(SkipReason::QuietHours.to_string(), "quiet hours");
+        assert_eq!(SkipReason::EmptyResponse.to_string(), "empty response");
+        assert_eq!(
+            SkipReason::DuplicateResponse.to_string(),
+            "duplicate response"
+        );
     }
 }

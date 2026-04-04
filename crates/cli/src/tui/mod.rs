@@ -98,7 +98,7 @@ use tokio_util::sync::CancellationToken;
 use borg_core::agent::{Agent, AgentEvent};
 use borg_core::config::Config;
 use borg_core::telemetry::BorgMetrics;
-use borg_heartbeat::scheduler::{HeartbeatEvent, HeartbeatScheduler};
+use borg_heartbeat::scheduler::{HeartbeatEvent, HeartbeatResult, HeartbeatScheduler};
 
 use app::{App, AppAction};
 use history::HistoryCell;
@@ -343,7 +343,7 @@ pub async fn run() -> Result<()> {
 }
 
 /// Delegate to the shared heartbeat turn implementation.
-async fn run_heartbeat_turn(config: &Config) -> Option<String> {
+async fn run_heartbeat_turn(config: &Config) -> HeartbeatResult {
     crate::service::execute_heartbeat_turn(config).await
 }
 
@@ -419,10 +419,9 @@ async fn run_event_loop(
                         let hb_config = app.config.clone();
                         let hb_tx_clone = app.heartbeat_event_tx.clone();
                         tokio::spawn(async move {
-                            if let Some(msg) = run_heartbeat_turn(&hb_config).await {
-                                if let Some(tx) = hb_tx_clone {
-                                    let _ = tx.send(HeartbeatEvent::Message(msg)).await;
-                                }
+                            let result = run_heartbeat_turn(&hb_config).await;
+                            if let Some(tx) = hb_tx_clone {
+                                let _ = tx.send(HeartbeatEvent::Result(result)).await;
                             }
                         });
                     }
