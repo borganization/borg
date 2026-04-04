@@ -178,3 +178,131 @@ impl Default for HeartbeatConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ThinkingLevel ──
+
+    #[test]
+    fn thinking_level_default_is_off() {
+        assert_eq!(ThinkingLevel::default(), ThinkingLevel::Off);
+    }
+
+    #[test]
+    fn thinking_level_budget_tokens() {
+        assert_eq!(ThinkingLevel::Off.budget_tokens(), None);
+        assert_eq!(ThinkingLevel::Low.budget_tokens(), Some(1024));
+        assert_eq!(ThinkingLevel::Medium.budget_tokens(), Some(4096));
+        assert_eq!(ThinkingLevel::High.budget_tokens(), Some(16384));
+        assert_eq!(ThinkingLevel::Xhigh.budget_tokens(), Some(32768));
+    }
+
+    #[test]
+    fn thinking_level_openai_reasoning_effort() {
+        assert_eq!(ThinkingLevel::Off.openai_reasoning_effort(), None);
+        assert_eq!(ThinkingLevel::Low.openai_reasoning_effort(), Some("low"));
+        assert_eq!(
+            ThinkingLevel::Medium.openai_reasoning_effort(),
+            Some("medium")
+        );
+        assert_eq!(ThinkingLevel::High.openai_reasoning_effort(), Some("high"));
+        assert_eq!(ThinkingLevel::Xhigh.openai_reasoning_effort(), Some("high"));
+    }
+
+    #[test]
+    fn thinking_level_is_enabled() {
+        assert!(!ThinkingLevel::Off.is_enabled());
+        assert!(ThinkingLevel::Low.is_enabled());
+        assert!(ThinkingLevel::Medium.is_enabled());
+        assert!(ThinkingLevel::High.is_enabled());
+        assert!(ThinkingLevel::Xhigh.is_enabled());
+    }
+
+    // ── LlmConfig defaults ──
+
+    #[test]
+    fn llm_config_defaults() {
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.provider, None);
+        assert_eq!(cfg.api_key_env, "OPENROUTER_API_KEY");
+        assert_eq!(cfg.model, "anthropic/claude-sonnet-4");
+        assert!((cfg.temperature - 0.7).abs() < f32::EPSILON);
+        assert_eq!(cfg.max_tokens, 4096);
+        assert_eq!(cfg.max_retries, 3);
+        assert_eq!(cfg.initial_retry_delay_ms, 200);
+        assert_eq!(cfg.request_timeout_ms, 60000);
+        assert_eq!(cfg.stream_chunk_timeout_secs, 30);
+        assert!(cfg.base_url.is_none());
+        assert!(cfg.fallback.is_empty());
+        assert_eq!(cfg.thinking, ThinkingLevel::Off);
+    }
+
+    // ── LlmConfig deserialization ──
+
+    #[test]
+    fn llm_config_from_toml_minimal() {
+        let toml_str = r#"
+            model = "gpt-4"
+            api_key_env = "OPENAI_API_KEY"
+        "#;
+        let cfg: LlmConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.model, "gpt-4");
+        assert_eq!(cfg.api_key_env, "OPENAI_API_KEY");
+        // defaults apply for unset fields
+        assert_eq!(cfg.max_tokens, 4096);
+    }
+
+    #[test]
+    fn llm_config_from_toml_with_thinking() {
+        let toml_str = r#"
+            model = "claude-sonnet-4"
+            api_key_env = "ANTHROPIC_API_KEY"
+            thinking = "high"
+        "#;
+        let cfg: LlmConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.thinking, ThinkingLevel::High);
+    }
+
+    // ── CompactionConfig ──
+
+    #[test]
+    fn compaction_config_no_overrides_by_default() {
+        let cfg = CompactionConfig::default();
+        assert!(!cfg.has_overrides());
+    }
+
+    #[test]
+    fn compaction_config_detects_overrides() {
+        let mut cfg = CompactionConfig::default();
+        cfg.model = Some("anthropic/claude-haiku-4-5".into());
+        assert!(cfg.has_overrides());
+    }
+
+    // ── HeartbeatConfig defaults ──
+
+    #[test]
+    fn heartbeat_config_defaults() {
+        let cfg = HeartbeatConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.interval, "30m");
+        assert_eq!(cfg.quiet_hours_start.as_deref(), Some("00:00"));
+        assert_eq!(cfg.quiet_hours_end.as_deref(), Some("06:00"));
+        assert!(cfg.cron.is_none());
+        assert!(cfg.channels.is_empty());
+    }
+
+    #[test]
+    fn heartbeat_config_from_toml() {
+        let toml_str = r#"
+            enabled = true
+            interval = "1h"
+            channels = ["telegram", "slack"]
+        "#;
+        let cfg: HeartbeatConfig = toml::from_str(toml_str).expect("parse");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.interval, "1h");
+        assert_eq!(cfg.channels, vec!["telegram", "slack"]);
+    }
+}

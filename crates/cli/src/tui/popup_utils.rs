@@ -64,3 +64,66 @@ pub fn render_status_message(
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_area_centered_in_large_terminal() {
+        let area = Rect::new(0, 0, 200, 50);
+        let popup = popup_area(area);
+        // 60% of 200 = 120, 80% of 50 = 40
+        assert_eq!(popup.width, 120);
+        assert_eq!(popup.height, 40);
+        // centered
+        assert_eq!(popup.x, (200 - 120) / 2);
+        assert_eq!(popup.y, (50 - 40) / 2);
+    }
+
+    #[test]
+    fn popup_area_minimum_width_enforced() {
+        let area = Rect::new(0, 0, 50, 30);
+        let popup = popup_area(area);
+        // 60% of 50 = 30, but min is 44; clamped to 50-4=46
+        assert_eq!(popup.width, 44);
+    }
+
+    #[test]
+    fn popup_area_minimum_height_enforced() {
+        let area = Rect::new(0, 0, 100, 14);
+        let popup = popup_area(area);
+        // 80% of 14 = 11.2 → 11, but min is 12; clamped to 14-2=12
+        assert_eq!(popup.height, 12);
+    }
+
+    #[test]
+    fn popup_area_clamped_to_available_space() {
+        // Very small terminal where min exceeds available
+        let area = Rect::new(0, 0, 46, 13);
+        let popup = popup_area(area);
+        // 60% of 46 = 27, max(27, 44) = 44, min(44, 46-4=42) = 42
+        assert_eq!(popup.width, 42);
+        // 80% of 13 = 10, max(10, 12) = 12, min(12, 13-2=11) = 11
+        assert_eq!(popup.height, 11);
+    }
+
+    #[test]
+    fn popup_area_tiny_terminal() {
+        let area = Rect::new(0, 0, 10, 5);
+        let popup = popup_area(area);
+        // width: 60% of 10 = 6, max(6, 44) = 44, min(44, 10-4=6) = 6
+        assert_eq!(popup.width, 6);
+        // height: 80% of 5 = 4, max(4, 12) = 12, min(12, 5-2=3) = 3
+        assert_eq!(popup.height, 3);
+    }
+
+    #[test]
+    fn popup_area_centering_with_odd_dimensions() {
+        let area = Rect::new(0, 0, 101, 51);
+        let popup = popup_area(area);
+        // Should not panic and should be approximately centered
+        assert!(popup.x + popup.width <= area.width);
+        assert!(popup.y + popup.height <= area.height);
+    }
+}

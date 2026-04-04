@@ -1,40 +1,68 @@
+//! Patch DSL parser — converts patch text into structured operations.
+
 use thiserror::Error;
 
+/// Errors that can occur during patch parsing.
 #[derive(Debug, Error, PartialEq, Clone)]
 pub enum ParseError {
+    /// The overall patch structure is malformed.
     #[error("Invalid patch format: {0}")]
     InvalidFormat(String),
+    /// A specific hunk within the patch is invalid.
     #[error("Invalid hunk at line {line_number}: {message}")]
-    InvalidHunk { message: String, line_number: usize },
+    InvalidHunk {
+        /// Description of what went wrong.
+        message: String,
+        /// Line number in the patch text where the error occurred.
+        line_number: usize,
+    },
 }
 
+/// A single operation within a patch.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatchOperation {
+    /// Create a new file with the given content.
     AddFile {
+        /// Relative path for the new file.
         path: String,
+        /// File content (lines joined with newlines).
         content: String,
     },
+    /// Modify an existing file by applying hunks.
     UpdateFile {
+        /// Relative path of the file to update.
         path: String,
+        /// Optional new path to move the file to after patching.
         move_to: Option<String>,
+        /// Ordered list of search-and-replace hunks.
         hunks: Vec<Hunk>,
     },
+    /// Remove a file from the filesystem.
     DeleteFile {
+        /// Relative path of the file to delete.
         path: String,
     },
 }
 
+/// A single search-and-replace block within an `UpdateFile` operation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hunk {
+    /// Optional `@@` context hint (e.g., function name) for fuzzy matching.
     pub context_hint: Option<String>,
+    /// Text to search for in the file.
     pub search: String,
+    /// Replacement text.
     pub replace: String,
+    /// Whether this hunk targets the end of the file.
     pub is_end_of_file: bool,
+    /// Line number in the patch text where this hunk starts.
     pub source_line: usize,
 }
 
+/// A parsed patch containing one or more file operations.
 #[derive(Debug, PartialEq)]
 pub struct Patch {
+    /// Ordered list of operations to apply.
     pub operations: Vec<PatchOperation>,
 }
 

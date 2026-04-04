@@ -1,3 +1,5 @@
+//! Filesystem applicator — takes parsed patches and applies them to disk.
+
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -12,10 +14,14 @@ const MAX_PATCH_FILE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 /// Categorized list of files affected by a patch application.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AffectedPaths {
+    /// Files that were newly created.
     pub added: Vec<String>,
+    /// Files that were updated in place.
     pub modified: Vec<String>,
+    /// Files that were removed.
     pub deleted: Vec<String>,
-    pub moved: Vec<(String, String)>, // (from, to)
+    /// Files that were moved (from, to).
+    pub moved: Vec<(String, String)>,
 }
 
 impl AffectedPaths {
@@ -92,6 +98,7 @@ enum FileSnapshot {
     DidNotExist,
 }
 
+/// Apply a parsed patch to the filesystem under `base_dir`.
 pub fn apply_patch(patch: &Patch, base_dir: &Path) -> Result<AffectedPaths> {
     // Validate all paths up front before making any changes
     for op in &patch.operations {

@@ -16,18 +16,32 @@ const MIN_INTERVAL_SECS: u64 = borg_core::constants::MIN_HEARTBEAT_INTERVAL_SECS
 #[derive(Debug, Clone)]
 pub enum HeartbeatResult {
     /// Agent produced a message to display.
-    Ran { message: String, duration_ms: u64 },
+    Ran {
+        /// The agent's response text.
+        message: String,
+        /// How long the agent turn took in milliseconds.
+        duration_ms: u64,
+    },
     /// Heartbeat was skipped.
-    Skipped { reason: SkipReason },
+    Skipped {
+        /// Why the heartbeat was skipped.
+        reason: SkipReason,
+    },
     /// Heartbeat failed.
-    Failed { error: String },
+    Failed {
+        /// Error description.
+        error: String,
+    },
 }
 
 /// Why a heartbeat was skipped.
 #[derive(Debug, Clone)]
 pub enum SkipReason {
+    /// Currently in quiet hours window.
     QuietHours,
+    /// Agent produced no output.
     EmptyResponse,
+    /// Agent response was identical to the previous heartbeat.
     DuplicateResponse,
 }
 
@@ -41,12 +55,16 @@ impl std::fmt::Display for SkipReason {
     }
 }
 
+/// Events emitted by the heartbeat scheduler.
 #[derive(Debug, Clone)]
 pub enum HeartbeatEvent {
     /// Timer fired — consumer should run a heartbeat agent turn.
     Fire,
     /// Scheduler started successfully — for TUI to show confirmation.
-    SchedulerStarted { mode: String },
+    SchedulerStarted {
+        /// Scheduling mode description (e.g., "cron: */30 * * * *" or "interval: 30m").
+        mode: String,
+    },
     /// Result of a heartbeat turn (sent by consumer after agent turn completes).
     Result(HeartbeatResult),
 }
@@ -62,6 +80,7 @@ pub struct HeartbeatScheduler {
 }
 
 impl HeartbeatScheduler {
+    /// Create a new scheduler with the given config, timezone, and wake signal receiver.
     pub fn new(config: HeartbeatConfig, timezone: Tz, wake_rx: mpsc::Receiver<()>) -> Self {
         let quiet_hours = Self::parse_quiet_hours(&config);
         Self {
@@ -92,6 +111,7 @@ impl HeartbeatScheduler {
         Some((start, end))
     }
 
+    /// Start the scheduler loop, emitting `Fire` events until cancellation.
     #[instrument(skip_all)]
     pub async fn run(mut self, tx: mpsc::Sender<HeartbeatEvent>, cancel: CancellationToken) {
         if let Some(ref cron_expr) = self.config.cron {

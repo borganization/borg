@@ -9,19 +9,29 @@ use crate::policy::SandboxPolicy;
 /// Output from a script execution.
 #[derive(Debug)]
 pub struct ScriptOutput {
+    /// Captured standard output.
     pub stdout: String,
+    /// Captured standard error.
     pub stderr: String,
+    /// Process exit code (`None` if terminated by signal).
     pub exit_code: Option<i32>,
 }
 
 /// Shared subprocess runner for tools and channel scripts.
 pub struct ScriptRunner<'a> {
+    /// Script runtime (e.g., "python", "node", "bash").
     pub runtime: &'a str,
+    /// Path to the script file to execute.
     pub script_path: &'a Path,
+    /// Working directory for the subprocess.
     pub work_dir: &'a Path,
+    /// Sandbox policy applied to the subprocess.
     pub sandbox_policy: SandboxPolicy,
+    /// Maximum execution time in milliseconds.
     pub timeout_ms: u64,
+    /// Additional environment variables injected into the subprocess.
     pub extra_env: &'a [(String, String)],
+    /// Human-readable name for logging.
     pub name: &'a str,
 }
 
@@ -85,6 +95,7 @@ impl<'a> ScriptRunner<'a> {
         }
     }
 
+    /// Execute the script with the given JSON input and return captured output.
     #[instrument(skip_all, fields(sandbox.name = %self.name))]
     pub async fn run(&self, input_json: &str) -> Result<ScriptOutput> {
         let (mut child, timeout) = self.spawn_child("")?;
@@ -201,10 +212,12 @@ impl<'a> ScriptRunner<'a> {
 }
 
 impl ScriptOutput {
+    /// Returns `true` if the process exited with code 0.
     pub fn success(&self) -> bool {
         self.exit_code == Some(0)
     }
 
+    /// Consume the output and return `(success, text)` for tool/channel responses.
     pub fn into_result_string(self) -> (bool, String) {
         if self.success() {
             (true, self.stdout)
