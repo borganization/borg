@@ -34,6 +34,11 @@ check:
 run *args="":
     cargo run -- {{args}}
 
+# Clean cargo target dirs (main + worktrees)
+clean:
+    cargo clean
+    rm -rf .claude/worktrees/*/target
+
 # Wipe all config/data so you can re-run onboarding from scratch
 reset:
     rm -rf ~/.borg
