@@ -69,6 +69,15 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
         );
     }
 
+    // Prune activity log entries older than 30 days
+    match db.prune_activity_before(chrono::Utc::now().timestamp() - 30 * 86400) {
+        Ok(count) if count > 0 => {
+            tracing::debug!("Pruned {count} old activity log entries");
+        }
+        Err(e) => tracing::debug!("Failed to prune activity log: {e}"),
+        _ => {}
+    }
+
     // Recover any stale 'running' task_runs from a previous crashed daemon
     match db.recover_stale_runs("Daemon crashed during execution") {
         Ok(count) if count > 0 => {
@@ -77,6 +86,8 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
         Err(e) => tracing::warn!("Failed to recover stale runs: {e}"),
         _ => {}
     }
+
+    borg_core::activity_log::log_activity(&db, "info", "system", "Daemon started");
 
     // Validate that LLM client can be constructed
     let _ = borg_core::llm::LlmClient::new(&config)?;
@@ -285,6 +296,14 @@ async fn spawn_task_execution(
             String::new()
         };
         tracing::info!("Executing scheduled task: {task_name} ({task_id}){attempt_label}");
+        if let Ok(adb) = borg_core::db::Database::open() {
+            borg_core::activity_log::log_activity(
+                &adb,
+                "info",
+                "task",
+                &format!("Task '{task_name}' started{attempt_label}"),
+            );
+        }
         let started_at = chrono::Utc::now().timestamp();
 
         let exec_ctx = TaskExecContext {
@@ -363,6 +382,12 @@ async fn execute_command_task(ctx: &TaskExecContext) {
                 if let Ok(db) = borg_core::db::Database::open() {
                     let _ = db.complete_task_run(*run_id, duration_ms, Some(&combined), None);
                     let _ = db.clear_task_retry(task_id);
+                    borg_core::activity_log::log_activity(
+                        &db,
+                        "info",
+                        "task",
+                        &format!("Task '{task_name}' completed"),
+                    );
                 }
                 tracing::info!(
                     "Cron job '{}' completed (exit 0): {}",
@@ -384,6 +409,14 @@ async fn execute_command_task(ctx: &TaskExecContext) {
                     );
                 }
                 tracing::warn!("Cron job '{task_name}' failed ({error_msg})");
+                if let Ok(db) = borg_core::db::Database::open() {
+                    borg_core::activity_log::log_activity(
+                        &db,
+                        "warn",
+                        "task",
+                        &format!("Task '{task_name}' failed: {error_msg}"),
+                    );
+                }
                 // Non-zero exit is not retried (it's a user script error, not transient)
                 if let (Some(ch), Some(tgt)) = (delivery_channel, delivery_target) {
                     deliver_task_result(
@@ -486,6 +519,12 @@ async fn execute_prompt_task(ctx: &TaskExecContext) {
                 if let Err(e) = db.clear_task_retry(task_id) {
                     tracing::warn!("Failed to clear retry state for '{task_name}': {e}");
                 }
+                borg_core::activity_log::log_activity(
+                    &db,
+                    "info",
+                    "task",
+                    &format!("Task '{task_name}' completed"),
+                );
             }
             tracing::info!(
                 "Task '{}' completed: {}",
@@ -589,6 +628,15 @@ async fn handle_task_failure(ctx: &TaskFailureContext<'_>, error: &str) {
     }
 
     tracing::warn!("Task '{task_name}' failed: {error}");
+    if let Ok(adb) = borg_core::db::Database::open() {
+        borg_core::activity_log::log_activity_detail(
+            &adb,
+            "warn",
+            "task",
+            &format!("Task '{task_name}' failed"),
+            error,
+        );
+    }
 
     if let (Some(ch), Some(tgt)) = (delivery_channel, delivery_target) {
         let msg = format!("Error: {error}");
@@ -701,6 +749,14 @@ pub async fn execute_heartbeat_turn(config: &Config) -> Option<String> {
     let prev = LAST_HASH.swap(hash, Ordering::Relaxed);
     if prev == hash {
         tracing::debug!("Heartbeat: duplicate response, suppressing");
+        if let Ok(adb) = borg_core::db::Database::open() {
+            borg_core::activity_log::log_activity(
+                &adb,
+                "debug",
+                "heartbeat",
+                "Duplicate response suppressed",
+            );
+        }
         return None;
     }
 
@@ -711,6 +767,9 @@ pub async fn execute_heartbeat_turn(config: &Config) -> Option<String> {
 async fn daemon_heartbeat_turn(config: Config) {
     if let Some(text) = execute_heartbeat_turn(&config).await {
         tracing::info!("Heartbeat: {}", &text[..text.len().min(100)]);
+        if let Ok(adb) = borg_core::db::Database::open() {
+            borg_core::activity_log::log_activity(&adb, "info", "heartbeat", "Heartbeat fired");
+        }
         deliver_heartbeat_to_channels(&config, &text).await;
     }
 }
@@ -748,6 +807,14 @@ async fn deliver_to_channel(config: &Config, channel_name: &str, text: &str) -> 
                 .map_err(|_| anyhow::anyhow!("Invalid Telegram chat_id: {sender_id}"))?;
             client.send_message(chat_id, text, None, None, None).await?;
             tracing::info!("Heartbeat delivered to telegram:{sender_id}");
+            if let Ok(adb) = borg_core::db::Database::open() {
+                borg_core::activity_log::log_activity(
+                    &adb,
+                    "info",
+                    "heartbeat",
+                    &format!("Heartbeat delivered to telegram:{sender_id}"),
+                );
+            }
         }
         "slack" => {
             let token = config
@@ -756,6 +823,14 @@ async fn deliver_to_channel(config: &Config, channel_name: &str, text: &str) -> 
             let client = borg_gateway::slack::api::SlackClient::new(&token)?;
             client.post_message(sender_id, text, None).await?;
             tracing::info!("Heartbeat delivered to slack:{sender_id}");
+            if let Ok(adb) = borg_core::db::Database::open() {
+                borg_core::activity_log::log_activity(
+                    &adb,
+                    "info",
+                    "heartbeat",
+                    &format!("Heartbeat delivered to slack:{sender_id}"),
+                );
+            }
         }
         other => {
             tracing::debug!("Heartbeat: channel '{other}' not supported for native delivery");

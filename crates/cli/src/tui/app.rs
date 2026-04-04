@@ -920,6 +920,98 @@ impl<'a> App<'a> {
         }
     }
 
+    fn handle_logs_command(&mut self, arg: Option<&str>) -> Result<AppAction> {
+        // /logs raw — old behavior: tail tui.log
+        if arg == Some("raw") {
+            let log_path = match borg_core::config::Config::logs_dir() {
+                Ok(d) => d.join("tui.log"),
+                Err(e) => {
+                    self.push_system_message(format!("Error resolving log directory: {e}"));
+                    return Ok(AppAction::Continue);
+                }
+            };
+            let text = if log_path.exists() {
+                use std::io::{Read, Seek, SeekFrom};
+                const TAIL_BYTES: u64 = 32_768;
+                match std::fs::File::open(&log_path) {
+                    Ok(mut f) => {
+                        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                        if len > TAIL_BYTES {
+                            let _ = f.seek(SeekFrom::End(-(TAIL_BYTES as i64)));
+                        }
+                        let mut buf = String::new();
+                        let _ = f.read_to_string(&mut buf);
+                        let lines: Vec<&str> = buf.lines().collect();
+                        let start = if len > TAIL_BYTES {
+                            1
+                        } else {
+                            lines.len().saturating_sub(50)
+                        };
+                        let tail: Vec<&str> = lines[start..].to_vec();
+                        let tail = &tail[tail.len().saturating_sub(50)..];
+                        tail.join("\n")
+                    }
+                    Err(e) => format!("Error reading log file: {e}"),
+                }
+            } else {
+                "No log file found.".to_string()
+            };
+            let clipboard_note = if !text.is_empty() {
+                match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone())) {
+                    Ok(_) => "\n\n(copied to clipboard)",
+                    Err(_) => "",
+                }
+            } else {
+                ""
+            };
+            self.push_system_message(if text.is_empty() {
+                "Log file is empty.".to_string()
+            } else {
+                format!("{text}{clipboard_note}")
+            });
+            return Ok(AppAction::Continue);
+        }
+
+        // Structured activity log
+        let level_filter = match arg {
+            None | Some("info") => Some("info"),
+            Some("error") => Some("error"),
+            Some("warn") => Some("warn"),
+            Some("debug") | Some("all") => Some("debug"),
+            Some(other) => {
+                self.push_system_message(format!(
+                    "Unknown level '{other}'. Usage: /logs [error|warn|info|debug|all|raw]"
+                ));
+                return Ok(AppAction::Continue);
+            }
+        };
+
+        let text = match borg_core::db::Database::open() {
+            Ok(db) => match db.query_activity(50, level_filter, None) {
+                Ok(entries) if entries.is_empty() => "No activity log entries.".to_string(),
+                Ok(entries) => entries
+                    .iter()
+                    .rev()
+                    .map(borg_core::activity_log::format_activity_entry)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Err(e) => format!("Error querying activity log: {e}"),
+            },
+            Err(e) => format!("Error opening database: {e}"),
+        };
+
+        let clipboard_note = if !text.is_empty() {
+            match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone())) {
+                Ok(_) => "\n\n(copied to clipboard)",
+                Err(_) => "",
+            }
+        } else {
+            ""
+        };
+        self.push_system_message(format!("{text}{clipboard_note}"));
+        Ok(AppAction::Continue)
+    }
+
     fn handle_submit(&mut self, input: &str) -> Result<AppAction> {
         let trimmed = input.trim();
 
@@ -942,7 +1034,7 @@ impl<'a> App<'a> {
                      /memory    - Show memory\n  \
                      /skills    - List skills\n  \
                      /history   - Show conversation history\n  \
-                     /logs      - Show TUI log file\n  \
+                     /logs      - Show activity log (error|warn|info|debug|all|raw)\n  \
                      /doctor    - Run diagnostics\n  \
                      /status    - Show agent vitals\n  \
                      /pairing   - Show channel pairing info\n  \
@@ -996,53 +1088,7 @@ impl<'a> App<'a> {
                 return Ok(AppAction::Continue);
             }
             "/logs" => {
-                let log_path = match borg_core::config::Config::logs_dir() {
-                    Ok(d) => d.join("tui.log"),
-                    Err(e) => {
-                        self.push_system_message(format!("Error resolving log directory: {e}"));
-                        return Ok(AppAction::Continue);
-                    }
-                };
-                let text = if log_path.exists() {
-                    use std::io::{Read, Seek, SeekFrom};
-                    const TAIL_BYTES: u64 = 32_768;
-                    match std::fs::File::open(&log_path) {
-                        Ok(mut f) => {
-                            let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-                            if len > TAIL_BYTES {
-                                let _ = f.seek(SeekFrom::End(-(TAIL_BYTES as i64)));
-                            }
-                            let mut buf = String::new();
-                            let _ = f.read_to_string(&mut buf);
-                            let lines: Vec<&str> = buf.lines().collect();
-                            let start = if len > TAIL_BYTES {
-                                1 // skip partial first line after seek
-                            } else {
-                                lines.len().saturating_sub(50)
-                            };
-                            let tail: Vec<&str> = lines[start..].to_vec();
-                            let tail = &tail[tail.len().saturating_sub(50)..];
-                            tail.join("\n")
-                        }
-                        Err(e) => format!("Error reading log file: {e}"),
-                    }
-                } else {
-                    "No log file found.".to_string()
-                };
-                let clipboard_note = if !text.is_empty() {
-                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone())) {
-                        Ok(_) => "\n\n(copied to clipboard)",
-                        Err(_) => "",
-                    }
-                } else {
-                    ""
-                };
-                self.push_system_message(if text.is_empty() {
-                    "Log file is empty.".to_string()
-                } else {
-                    format!("{text}{clipboard_note}")
-                });
-                return Ok(AppAction::Continue);
+                return self.handle_logs_command(None);
             }
             "/status" => {
                 self.status_popup.show(&self.config);
@@ -1155,6 +1201,12 @@ impl<'a> App<'a> {
                 return Ok(AppAction::NewSession);
             }
             _ => {}
+        }
+
+        // /logs <level> — show activity log with level filter
+        if let Some(rest) = trimmed.strip_prefix("/logs ") {
+            let arg = rest.trim();
+            return self.handle_logs_command(Some(arg));
         }
 
         // /mode — switch collaboration mode

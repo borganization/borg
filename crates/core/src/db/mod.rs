@@ -1,3 +1,4 @@
+mod activity;
 mod delivery;
 mod memory;
 mod meta;
@@ -151,7 +152,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding new migrations.
-    const CURRENT_VERSION: u32 = 28;
+    const CURRENT_VERSION: u32 = 29;
 
     /// Check if a column exists on a table via `PRAGMA table_info`.
     /// Safer than catching ALTER TABLE errors by string matching.
@@ -220,6 +221,7 @@ impl Database {
             Database::migrate_v26,
             Database::migrate_v27,
             Database::migrate_v28,
+            Database::migrate_v29,
         ];
         // Compile-time guard: adding a migration without updating CURRENT_VERSION (or vice versa)
         // will fail the build.

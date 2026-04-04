@@ -97,7 +97,7 @@ enum Commands {
         #[command(subcommand)]
         action: Option<SettingsAction>,
     },
-    /// Show recent conversation history
+    /// Show recent conversation history or activity log
     Logs {
         /// Number of log entries to show
         #[arg(long, short, default_value_t = 50)]
@@ -105,6 +105,15 @@ enum Commands {
         /// Show full untruncated content
         #[arg(long, short)]
         verbose: bool,
+        /// Show structured activity log instead of conversation history
+        #[arg(long, short)]
+        activity: bool,
+        /// Minimum level filter for activity log (error, warn, info, debug)
+        #[arg(long, default_value = "info")]
+        level: String,
+        /// Filter activity log by category
+        #[arg(long)]
+        category: Option<String>,
     },
     /// Manage scheduled tasks
     Tasks {
@@ -509,7 +518,19 @@ async fn main() -> Result<()> {
             Some(SettingsAction::Unset { key }) => run_settings_unset(&key)?,
             None => run_settings_show()?,
         },
-        Some(Commands::Logs { count, verbose }) => run_logs(count, verbose)?,
+        Some(Commands::Logs {
+            count,
+            verbose,
+            activity,
+            level,
+            category,
+        }) => {
+            if activity {
+                run_activity_logs(count, &level, category.as_deref())?;
+            } else {
+                run_logs(count, verbose)?;
+            }
+        }
         Some(Commands::Tasks { action }) => match action {
             Some(TasksAction::List) | None => run_tasks_list()?,
             Some(TasksAction::Create {
@@ -1119,6 +1140,19 @@ fn run_logs(count: usize, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+fn run_activity_logs(count: usize, level: &str, category: Option<&str>) -> Result<()> {
+    let db = borg_core::db::Database::open()?;
+    let entries = db.query_activity(count, Some(level), category)?;
+    if entries.is_empty() {
+        println!("No activity log entries.");
+    } else {
+        for entry in entries.iter().rev() {
+            println!("{}", borg_core::activity_log::format_activity_entry(entry));
+        }
+    }
+    Ok(())
+}
+
 fn run_tasks_list() -> Result<()> {
     let db = borg_core::db::Database::open()?;
     let tasks = db.list_tasks()?;
@@ -1632,9 +1666,15 @@ mod tests {
     fn test_parse_logs_default() {
         let cli = Cli::try_parse_from(["borg", "logs"]).unwrap();
         match cli.command {
-            Some(Commands::Logs { count, verbose }) => {
+            Some(Commands::Logs {
+                count,
+                verbose,
+                activity,
+                ..
+            }) => {
                 assert_eq!(count, 50);
                 assert!(!verbose);
+                assert!(!activity);
             }
             _ => panic!("Expected Logs"),
         }
@@ -1653,7 +1693,7 @@ mod tests {
     fn test_parse_logs_verbose() {
         let cli = Cli::try_parse_from(["borg", "logs", "--verbose"]).unwrap();
         match cli.command {
-            Some(Commands::Logs { count, verbose }) => {
+            Some(Commands::Logs { count, verbose, .. }) => {
                 assert_eq!(count, 50);
                 assert!(verbose);
             }
@@ -1674,9 +1714,27 @@ mod tests {
     fn test_parse_logs_verbose_with_count() {
         let cli = Cli::try_parse_from(["borg", "logs", "-v", "-c", "20"]).unwrap();
         match cli.command {
-            Some(Commands::Logs { count, verbose }) => {
+            Some(Commands::Logs { count, verbose, .. }) => {
                 assert!(verbose);
                 assert_eq!(count, 20);
+            }
+            _ => panic!("Expected Logs"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logs_activity() {
+        let cli = Cli::try_parse_from(["borg", "logs", "--activity", "--level", "warn"]).unwrap();
+        match cli.command {
+            Some(Commands::Logs {
+                activity,
+                level,
+                category,
+                ..
+            }) => {
+                assert!(activity);
+                assert_eq!(level, "warn");
+                assert!(category.is_none());
             }
             _ => panic!("Expected Logs"),
         }
