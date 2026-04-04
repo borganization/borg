@@ -38,7 +38,7 @@ Events are classified into broad categories. New tools and integrations automati
 | **Success** | Any tool completes without error | stability +1, focus +1, happiness +1 |
 | **Failure** | Any tool errors | stability -2, focus -1, growth -1 |
 | **Correction** | User corrects the agent ("that's wrong", "try again", etc.) | stability -3, focus -2, sync -1, happiness -1 |
-| **Creation** | write_memory, create_tool, apply_patch, apply_skill_patch, create_channel | stability +2, focus +1, sync +1, growth +3, happiness +3 |
+| **Creation** | write_memory, apply_patch, apply_skill_patch, create_channel | stability +2, focus +1, sync +1, growth +3, happiness +3 |
 
 ## Inactivity Decay
 

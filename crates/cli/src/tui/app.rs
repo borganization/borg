@@ -939,7 +939,6 @@ impl<'a> App<'a> {
                      /clear     - Clear conversation\n  \
                      /undo      - Undo last agent turn\n\
                      \n  \
-                     /tools     - List tools\n  \
                      /memory    - Show memory\n  \
                      /skills    - List skills\n  \
                      /history   - Show conversation history\n  \
@@ -963,42 +962,6 @@ impl<'a> App<'a> {
                      quit/exit  - Exit"
                         .to_string(),
                 );
-                return Ok(AppAction::Continue);
-            }
-            "/tools" => {
-                let mut text = String::from("Built-in tools:\n");
-                let builtins = [
-                    ("write_memory", "Write/append to memory files"),
-                    ("read_memory", "Read a memory file"),
-                    ("apply_patch", "Create/update/delete files via patch DSL"),
-                    ("run_shell", "Execute a shell command"),
-                    ("list_skills", "List skills with status"),
-                    (
-                        "apply_skill_patch",
-                        "Create/modify skill files via patch DSL",
-                    ),
-                    ("read_file", "Read file contents with line numbers"),
-                    ("list_dir", "List directory contents"),
-                    ("read_pdf", "Extract text from a PDF file"),
-                    ("create_channel", "Create/modify channel integrations"),
-                    ("list_channels", "List messaging channels"),
-                    ("manage_tasks", "Manage scheduled tasks"),
-                ];
-                for (name, desc) in &builtins {
-                    text.push_str(&format!("  {name:<20} {desc}\n"));
-                }
-                if self.config.web.enabled {
-                    text.push_str(&format!("  {:<20} Fetch a URL\n", "web_fetch"));
-                    text.push_str(&format!("  {:<20} Search the web\n", "web_search"));
-                }
-                if self.config.security.host_audit {
-                    text.push_str(&format!(
-                        "  {:<20} Run host security audit\n",
-                        "security_audit"
-                    ));
-                }
-
-                self.push_system_message(text.trim_end().to_string());
                 return Ok(AppAction::Continue);
             }
             "/memory" => {
@@ -2685,64 +2648,6 @@ mod tests {
             HistoryCell::System { text } => Some(text.clone()),
             _ => None,
         })
-    }
-
-    #[test]
-    fn tools_command_shows_builtin_tools() {
-        let mut app = make_app();
-        let action = app.handle_submit("/tools").unwrap();
-        assert!(matches!(action, AppAction::Continue));
-
-        let text = last_system_text(&app).expect("should have system message");
-        assert!(text.contains("Built-in tools:"));
-        assert!(text.contains("write_memory"));
-        assert!(text.contains("read_memory"));
-        assert!(text.contains("run_shell"));
-        assert!(text.contains("apply_patch"));
-        assert!(text.contains("read_pdf"));
-        assert!(text.contains("manage_tasks"));
-    }
-
-    #[test]
-    fn tools_command_hides_web_tools_when_disabled() {
-        let mut app = make_app();
-        app.config.web.enabled = false;
-        app.handle_submit("/tools").unwrap();
-
-        let text = last_system_text(&app).expect("should have system message");
-        assert!(!text.contains("web_fetch"));
-        assert!(!text.contains("web_search"));
-    }
-
-    #[test]
-    fn tools_command_shows_web_tools_when_enabled() {
-        let mut app = make_app();
-        app.config.web.enabled = true;
-        app.handle_submit("/tools").unwrap();
-
-        let text = last_system_text(&app).expect("should have system message");
-        assert!(text.contains("web_fetch"));
-        assert!(text.contains("web_search"));
-    }
-
-    #[test]
-    fn tools_command_hides_security_audit_when_disabled() {
-        let mut app = make_app();
-        app.config.security.host_audit = false;
-        app.handle_submit("/tools").unwrap();
-
-        let text = last_system_text(&app).expect("should have system message");
-        assert!(!text.contains("security_audit"));
-    }
-
-    #[test]
-    fn tools_command_shows_security_audit_when_enabled() {
-        let mut app = make_app();
-        app.config.security.host_audit = true;
-        app.handle_submit("/tools").unwrap();
-
-        let text = last_system_text(&app).expect("should have system message");
-        assert!(text.contains("security_audit"));
     }
 
     #[test]

@@ -84,7 +84,7 @@ Archetypes are internal categories that classify how you use Borg. The LLM uses 
 | Archetype | Domain | Example signals |
 |-----------|--------|-----------------|
 | **Ops** | DevOps, SRE, infra, CI/CD | Docker, Kubernetes, deploy scripts, monitoring, shell-heavy workflows |
-| **Builder** | Tool creation, automation, coding | `create_tool`, `apply_patch`, `apply_skill_patch`, multi-step automations |
+| **Builder** | Automation, coding, creation | `apply_patch`, `apply_skill_patch`, multi-step automations |
 | **Analyst** | Research, data, metrics, reporting | Browser research, data queries, database tools, comparison workflows |
 | **Communicator** | Outreach, messaging, email, DMs | Telegram, Slack, Discord, Gmail, LinkedIn, email campaigns |
 | **Guardian** | Security, compliance, monitoring | `security_audit`, blocked path checks, host audit, vulnerability scanning |
@@ -108,7 +108,7 @@ This lets current behavior steer specialization. A user who pivots from DevOps t
 
 Actions are classified to archetypes using a combination of:
 
-1. **Deterministic rules** — tool names, skill names, and integration types map directly (e.g., `docker` skill → Ops, `create_tool` → Builder)
+1. **Deterministic rules** — tool names, skill names, and integration types map directly (e.g., `docker` skill → Ops, `apply_patch` → Builder)
 2. **Keyword matching** — shell command content and task prompts are matched against archetype keyword sets
 3. **LLM classification** — for ambiguous custom workflows (e.g., a user-created "amazon-cart-optimizer" tool), the LLM classifies on first use and caches the result
 
@@ -117,7 +117,7 @@ Actions are classified to archetypes using a combination of:
 | Tools / Skills | Archetype |
 |---------------|-----------|
 | `docker`, `git`, `database`, shell commands with deploy/k8s/terraform keywords | Ops |
-| `create_tool`, `apply_patch`, `apply_skill_patch`, `create_channel` | Builder |
+| `apply_patch`, `apply_skill_patch`, `create_channel` | Builder |
 | `browser` (research), `search`, database queries, `read_pdf` | Analyst |
 | `telegram`, `slack`, `discord`, `gmail`, `outlook`, messaging channels | Communicator |
 | `security_audit`, `1password`, shell commands with security/firewall keywords | Guardian |

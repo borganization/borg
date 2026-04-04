@@ -789,7 +789,7 @@ impl Database {
                 "coder",
                 "Code writing and modification. Use this role for tasks that require creating or modifying code files.",
                 0.2,
-                r#"["run_shell","apply_patch","create_tool","read_memory"]"#,
+                r#"["run_shell","apply_patch","read_memory"]"#,
             ),
             (
                 "writer",
@@ -6510,7 +6510,7 @@ mod tests {
     fn record_and_replay_vitals_event() {
         let db = test_db();
         let deltas = crate::vitals::deltas_for(crate::vitals::EventCategory::Creation);
-        db.record_vitals_event("creation", "create_tool", &deltas, None)
+        db.record_vitals_event("creation", "apply_patch", &deltas, None)
             .unwrap();
         let state = db.get_vitals_state().unwrap();
         assert_eq!(state.stability, 41); // 40 + 1

@@ -20,14 +20,13 @@ crates/
   cli/              Binary: REPL, clap args, heartbeat display, onboarding TUI
   core/             Library: agent loop, multi-provider LLM client, memory, identity, config
   heartbeat/        Library: proactive scheduler with quiet hours + dedup
-  tools/            Library: tool manifest parsing, registry, subprocess executor
-  sandbox/          Library: macOS Seatbelt + Linux Bubblewrap policies
+  sandbox/          Library: macOS Seatbelt + Linux Bubblewrap policies, script runner
   apply-patch/      Library: patch DSL parser + filesystem applicator
   gateway/          Library: webhook gateway for messaging channel integrations
   plugins/          Library: marketplace catalog, plugin installer, TUI integration
 ```
 
-**Data directory:** `~/.borg/` — config, personality, memory, user-created tools, logs.
+**Data directory:** `~/.borg/` — config, personality, memory, scripts, logs.
 
 ## Build & Test
 
@@ -109,7 +108,7 @@ The TUI uses a custom `EnableScrollMouseCapture` (in `tui/mod.rs`) that only ena
 
 ## Plugins
 
-Plugin marketplace for one-click installation of channel and tool integrations. Categories: Messaging (Telegram, Slack, Discord, Teams, Google Chat, WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). Native integrations (Telegram, Slack, Discord, Teams, Google Chat) are marked `is_native: true` in the catalog and require only credentials. Non-native plugins use embedded template files installed to `~/.borg/channels/` or `~/.borg/tools/`.
+Plugin marketplace for one-click installation of channel and tool integrations. Categories: Messaging (Telegram, Slack, Discord, Teams, Google Chat, WhatsApp, iMessage, SMS), Email (Gmail, Outlook), Productivity (Google Calendar, Notion, Linear). Native integrations (Telegram, Slack, Discord, Teams, Google Chat) are marked `is_native: true` in the catalog and require only credentials. Non-native plugins use embedded template files installed to `~/.borg/channels/`.
 
 ## Agent Loop
 
@@ -154,9 +153,7 @@ Plan mode uses an allowlist of non-mutating tools — new tools default to block
 |------|---------|
 | `write_memory` | Write/append to memory files (IDENTITY.md, MEMORY.md, or topic files). Supports `scope` param (`global`/`local`) |
 | `read_memory` | Read a memory file |
-| `list_tools` | List user-created tools |
 | `apply_patch` | Create/update/delete files in the current working directory via patch DSL |
-| `create_tool` | Create/modify files in `~/.borg/tools/` via patch DSL |
 | `run_shell` | Execute a shell command |
 | `list_skills` | List all skills with status and source |
 | `apply_skill_patch` | Create/modify files in `~/.borg/skills/` via patch DSL |
@@ -170,52 +167,21 @@ Plan mode uses an allowlist of non-mutating tools — new tools default to block
 | `manage_cron` | Manage cron jobs (shell commands on a schedule). Actions: create, list, get, delete, pause, resume, runs, run_now. Uses 5-field Linux cron format |
 | `security_audit` | Run host security audit (firewall, ports, SSH, permissions, encryption, updates, services). Requires `security.host_audit = true` |
 
-## User Tools
-
-Located at `~/.borg/tools/<name>/tool.toml` + entrypoint script. The agent creates these via `apply_patch`. Registry auto-reloads after patching.
-
-**tool.toml format:**
-```toml
-name = "example"
-description = "What it does"
-runtime = "python"        # python | node | deno | bash
-entrypoint = "main.py"
-timeout_ms = 30000
-
-[sandbox]
-network = false
-fs_read = []
-fs_write = []
-
-[parameters]
-type = "object"
-[parameters.properties.arg_name]
-type = "string"
-description = "Argument description"
-[parameters.required]
-values = ["arg_name"]
-```
-
-Tool receives JSON args on stdin, returns result on stdout.
-
 ## Patch DSL
 
 Used by `apply_patch` to create/modify/delete files. Follows the codex apply-patch format where **every content line must have a prefix** (`+` for added content, ` ` for context, `-` for removed lines). This prevents ambiguity when file content contains `***` markers.
 
 ```
 *** Begin Patch
-*** Add File: tool-name/tool.toml
-+name = "example"
-+description = "What it does"
-*** Add File: tool-name/main.py
+*** Add File: path/to/file.py
 +import sys
 +print("hello")
-*** Update File: tool-name/main.py
+*** Update File: path/to/file.py
 @@
  context
 -old line
 +new line
-*** Delete File: tool-name/old.py
+*** Delete File: path/to/old.py
 *** End Patch
 ```
 
@@ -547,12 +513,12 @@ Proactive check-in system. The `HeartbeatScheduler` (pure timer) emits `Fire` ev
 
 ## Sandboxing
 
-User tools run sandboxed:
+Scripts and channel integrations run sandboxed:
 - **macOS**: `sandbox-exec` with generated Seatbelt profile (deny-all default, explicit allows)
 - **Linux**: `bwrap` with namespace isolation (read-only mounts, network unshare)
-- **Filesystem blocklist**: Paths in `[security] blocked_paths` (defaults: `.ssh`, `.aws`, `.gnupg`, etc.) are filtered from tool `fs_read`/`fs_write` before sandbox profile generation
+- **Filesystem blocklist**: Paths in `[security] blocked_paths` (defaults: `.ssh`, `.aws`, `.gnupg`, etc.) are filtered from `fs_read`/`fs_write` before sandbox profile generation
 
-Policy derived from each tool's `[sandbox]` section in `tool.toml`.
+Policy derived from each script/channel's `[sandbox]` section.
 
 ## Prompt Injection Defense
 
@@ -600,9 +566,7 @@ Five-layer defense against prompt injection attacks:
 | `crates/core/src/db.rs` | SQLite database with versioned migrations |
 | `crates/core/src/types.rs` | Message (with timestamps), ToolCall, ToolDefinition |
 | `crates/heartbeat/src/scheduler.rs` | Pure timer: interval/cron scheduling, quiet hours (timezone-aware), wake signal |
-| `crates/tools/src/manifest.rs` | tool.toml parsing |
-| `crates/tools/src/registry.rs` | Scan + register user tools |
-| `crates/tools/src/executor.rs` | Runtime resolution + subprocess |
+| `crates/sandbox/src/runner.rs` | Script runner: sandboxed subprocess execution |
 | `crates/sandbox/src/policy.rs` | SandboxPolicy + command wrapping |
 | `crates/sandbox/src/seatbelt.rs` | macOS profile generation |
 | `crates/sandbox/src/bubblewrap.rs` | Linux bwrap arg building |

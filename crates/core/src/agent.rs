@@ -2055,7 +2055,6 @@ mod tests {
     fn mutating_tools_are_blocked_in_plan_mode() {
         // These should be considered mutating
         assert!(is_mutating_tool("apply_patch"));
-        assert!(is_mutating_tool("create_tool"));
         assert!(is_mutating_tool("apply_skill_patch"));
         assert!(is_mutating_tool("create_channel"));
         assert!(is_mutating_tool("run_shell"));
@@ -2273,7 +2272,6 @@ fn is_mutating_tool(name: &str) -> bool {
         "read_file"
             | "list_dir"
             | "list"
-            | "list_tools"
             | "list_skills"
             | "list_channels"
             | "list_agents"

@@ -1,8 +1,88 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tracing::{debug, warn};
 
 use crate::manifest::ChannelManifest;
-use borg_tools::{ManifestItem, ManifestRegistry, RegisteredItem};
+
+// --- Generic ManifestRegistry ---
+
+/// Trait for manifest types that can be used with `ManifestRegistry`.
+pub trait ManifestItem: Sized {
+    fn load(path: &Path) -> Result<Self>;
+    fn item_name(&self) -> &str;
+    const MANIFEST_FILENAME: &'static str;
+    const SUBDIR: &'static str;
+    const ITEM_TYPE: &'static str;
+}
+
+#[derive(Clone)]
+pub struct RegisteredItem<M: Clone> {
+    pub manifest: M,
+    pub dir: PathBuf,
+}
+
+pub struct ManifestRegistry<M: Clone> {
+    items: HashMap<String, RegisteredItem<M>>,
+    base_dir: PathBuf,
+}
+
+impl<M: ManifestItem + Clone> ManifestRegistry<M> {
+    pub fn new() -> Result<Self> {
+        let base_dir = std::env::var("BORG_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|_| {
+                dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))
+                    .map(|h| h.join(".borg"))
+            })?
+            .join(M::SUBDIR);
+
+        let mut registry = Self {
+            items: HashMap::new(),
+            base_dir,
+        };
+
+        registry.scan()?;
+        Ok(registry)
+    }
+
+    pub fn with_dir(dir: PathBuf) -> Result<Self> {
+        let mut registry = Self {
+            items: HashMap::new(),
+            base_dir: dir,
+        };
+
+        registry.scan()?;
+        Ok(registry)
+    }
+
+    pub fn scan(&mut self) -> Result<()> {
+        self.items.clear();
+
+        let scanned = scan_manifest_dir(
+            &self.base_dir,
+            M::MANIFEST_FILENAME,
+            M::load,
+            |m| m.item_name().to_string(),
+            M::ITEM_TYPE,
+        )?;
+
+        for (name, (manifest, dir)) in scanned {
+            self.items.insert(name, RegisteredItem { manifest, dir });
+        }
+
+        Ok(())
+    }
+
+    pub fn get(&self, name: &str) -> Option<&RegisteredItem<M>> {
+        self.items.get(name)
+    }
+
+    pub fn items(&self) -> impl Iterator<Item = &RegisteredItem<M>> {
+        self.items.values()
+    }
+}
 
 // --- ManifestItem impl for ChannelManifest ---
 
@@ -63,6 +143,67 @@ impl ChannelRegistry {
     pub fn all_channels(&self) -> impl Iterator<Item = &RegisteredChannel> {
         self.inner.items()
     }
+}
+
+/// Generic directory scanner for manifest-based registries.
+fn scan_manifest_dir<M, F, N>(
+    dir: &Path,
+    manifest_filename: &str,
+    load_fn: F,
+    name_fn: N,
+    item_type: &str,
+) -> Result<HashMap<String, (M, PathBuf)>>
+where
+    F: Fn(&Path) -> Result<M>,
+    N: Fn(&M) -> String,
+{
+    let mut items = HashMap::new();
+
+    if !dir.exists() {
+        debug!("{item_type} directory does not exist: {}", dir.display());
+        return Ok(items);
+    }
+
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Skip symlinks to prevent registering items from unexpected locations
+        if path.is_symlink() {
+            warn!(
+                "Skipping symlinked {item_type} directory: {}",
+                path.display()
+            );
+            continue;
+        }
+
+        if !path.is_dir() {
+            continue;
+        }
+
+        let manifest_path = path.join(manifest_filename);
+        if !manifest_path.exists() {
+            continue;
+        }
+
+        match load_fn(&manifest_path) {
+            Ok(manifest) => {
+                let name = name_fn(&manifest);
+                debug!("Registered {item_type}: {name} from {}", path.display());
+                items.insert(name, (manifest, path));
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load {item_type} manifest {}: {e}",
+                    manifest_path.display()
+                );
+            }
+        }
+    }
+
+    debug!("Loaded {} {item_type}(s)", items.len());
+    Ok(items)
 }
 
 #[cfg(test)]

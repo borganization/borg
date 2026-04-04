@@ -89,7 +89,7 @@ pub fn classify_tool(name: &str, args_json: &str) -> ToolDisplayCategory {
             let command = args["command"].as_str().unwrap_or("?").to_string();
             ToolDisplayCategory::Ran { command }
         }
-        "apply_patch" | "apply_skill_patch" | "create_tool" | "create_channel" => {
+        "apply_patch" | "apply_skill_patch" | "create_channel" => {
             let patch = args["patch"].as_str().unwrap_or("");
             let files = extract_patch_filenames(patch);
             let count = files.len();
@@ -116,9 +116,6 @@ pub fn classify_tool(name: &str, args_json: &str) -> ToolDisplayCategory {
             let action = args["action"].as_str().unwrap_or("?").to_string();
             ToolDisplayCategory::Tasks { action }
         }
-        "list_tools" => ToolDisplayCategory::Listed {
-            what: "tools".to_string(),
-        },
         "list_skills" => ToolDisplayCategory::Listed {
             what: "skills".to_string(),
         },
@@ -475,17 +472,6 @@ mod tests {
             cat,
             ToolDisplayCategory::Tasks {
                 action: "list".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn classify_list_tools() {
-        let cat = classify_tool("list_tools", r#"{}"#);
-        assert_eq!(
-            cat,
-            ToolDisplayCategory::Listed {
-                what: "tools".to_string()
             }
         );
     }

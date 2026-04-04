@@ -9,7 +9,6 @@ repository.workspace = true
 [dependencies]
 borg-apply-patch = { path = "../apply-patch" }
 borg-sandbox = { path = "../sandbox" }
-borg-tools = { path = "../tools" }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 eventsource-stream = { workspace = true }

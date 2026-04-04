@@ -123,15 +123,10 @@ borg/
 │   │   └── src/
 │   │       ├── scheduler.rs    # interval/cron scheduling, quiet hours, wake signal
 │   │       └── lib.rs
-│   ├── tools/              # user tool management
-│   │   └── src/
-│   │       ├── manifest.rs  # tool.toml parsing
-│   │       ├── registry.rs  # tool discovery + registration
-│   │       ├── executor.rs  # runtime resolution + subprocess
-│   │       └── lib.rs
-│   ├── sandbox/            # platform sandboxing
+│   ├── sandbox/            # platform sandboxing + script runner
 │   │   └── src/
 │   │       ├── policy.rs    # SandboxPolicy + command wrapping
+│   │       ├── runner.rs    # sandboxed script execution
 │   │       ├── seatbelt.rs  # macOS profile generation
 │   │       ├── bubblewrap.rs # Linux bwrap args
 │   │       └── lib.rs

@@ -75,7 +75,7 @@ This creates `~/.borg/` with your customized config, personality, and memory fil
 ├── IDENTITY.md       # Personality prompt
 ├── MEMORY.md         # Memory index
 ├── memory/           # Topic-specific memories
-├── tools/            # User-created tools
+├── scripts/          # Agent-created scripts (HMAC-verified)
 ├── skills/           # Bundled + user-created skills
 ├── logs/             # Daily JSONL debug logs
 ├── cache/

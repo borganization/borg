@@ -4,7 +4,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::debug;
 
-use borg_sandbox::policy::SandboxPolicy;
+use crate::policy::SandboxPolicy;
 
 /// Output from a script execution.
 #[derive(Debug)]
@@ -220,7 +220,7 @@ impl ScriptOutput {
 
 /// Run a script in a sandbox, returning (success, output_text).
 ///
-/// Shared core logic used by both `ToolExecutor` and `ChannelExecutor`.
+/// Shared core logic used by both tool executors and channel executors.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_sandboxed_script(
     runtime: &str,
