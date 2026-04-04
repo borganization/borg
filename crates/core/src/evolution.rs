@@ -582,7 +582,13 @@ pub fn check_stage2_gates(
 
 /// Compute how many consecutive days the dominant archetype has been stable.
 pub fn compute_archetype_stable_days(db: &Database) -> u32 {
-    let events = db.load_all_evolution_events().unwrap_or_default();
+    let events = match db.load_all_evolution_events() {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::warn!("evolution: failed to load events: {e}");
+            return 0;
+        }
+    };
     if events.is_empty() {
         return 0;
     }
@@ -889,7 +895,13 @@ impl EvolutionHook {
         }
 
         // Get bond state for gate checks (use derived key for HMAC verification)
-        let bond_events = db.get_all_bond_events().unwrap_or_default();
+        let bond_events = match db.get_all_bond_events() {
+            Ok(events) => events,
+            Err(e) => {
+                tracing::warn!("evolution: failed to load bond events: {e}");
+                return;
+            }
+        };
         let bond_key = db.derive_hmac_key(crate::bond::BOND_HMAC_DOMAIN);
         let bond_state = crate::bond::replay_events_with_key(&bond_key, &bond_events);
 
@@ -1842,5 +1854,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Error path coverage ──
+
+    fn test_db() -> Database {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        Database::from_connection(conn).expect("init test db")
+    }
+
+    #[test]
+    fn compute_archetype_stable_days_empty_db_returns_zero() {
+        let db = test_db();
+        assert_eq!(compute_archetype_stable_days(&db), 0);
     }
 }

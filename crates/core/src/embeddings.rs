@@ -297,7 +297,13 @@ pub async fn generate_embedding_cached(
     text: &str,
 ) -> Result<Vec<f32>> {
     let hash = content_hash(text);
-    let db = Database::open().ok();
+    let db = match Database::open() {
+        Ok(db) => Some(db),
+        Err(e) => {
+            tracing::debug!("embeddings: cache unavailable, skipping: {e}");
+            None
+        }
+    };
 
     // Check cache
     if let Some(ref db) = db {

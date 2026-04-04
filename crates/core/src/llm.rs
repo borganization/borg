@@ -348,11 +348,16 @@ impl LlmClient {
             Ok(d) => d.join("logs").join("debug"),
             Err(_) => return,
         };
-        let _ = std::fs::create_dir_all(&dir);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::debug!("llm: failed to create debug log dir: {e}");
+            return;
+        }
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         let path = dir.join(format!("{timestamp}_{label}.json"));
         let redacted = crate::secrets::redact_secrets(content);
-        let _ = std::fs::write(&path, redacted);
+        if let Err(e) = std::fs::write(&path, redacted) {
+            tracing::debug!("llm: failed to write debug log: {e}");
+        }
     }
 
     #[instrument(skip_all, fields(llm.provider = %self.provider, llm.model = %self.llm_config.model))]
@@ -418,7 +423,9 @@ impl LlmClient {
 
             for attempt in 0..=max_retries {
                 if cancel.is_cancelled() {
-                    let _ = tx.send(StreamEvent::Done).await;
+                    if tx.send(StreamEvent::Done).await.is_err() {
+                        tracing::debug!("llm: stream receiver closed");
+                    }
                     return Ok(());
                 }
 
@@ -458,7 +465,9 @@ impl LlmClient {
                             }
                             // No more providers — propagate error
                             let msg = format!("{e}");
-                            let _ = tx.send(StreamEvent::Error(msg.clone())).await;
+                            if tx.send(StreamEvent::Error(msg.clone())).await.is_err() {
+                                tracing::debug!("llm: stream receiver closed while sending error");
+                            }
                             bail!("{msg}");
                         }
 
@@ -481,7 +490,9 @@ impl LlmClient {
 
                         tokio::select! {
                             _ = cancel.cancelled() => {
-                                let _ = tx.send(StreamEvent::Done).await;
+                                if tx.send(StreamEvent::Done).await.is_err() {
+                                    tracing::debug!("llm: stream receiver closed");
+                                }
                                 return Ok(());
                             }
                             _ = tokio::time::sleep(delay) => {}
@@ -619,7 +630,9 @@ impl LlmClient {
         loop {
             let chunk = tokio::select! {
                 _ = cancel.cancelled() => {
-                    let _ = tx.send(StreamEvent::Done).await;
+                    if tx.send(StreamEvent::Done).await.is_err() {
+                        tracing::debug!("llm: stream receiver closed");
+                    }
                     return Ok(());
                 }
                 maybe_chunk = async {
@@ -642,7 +655,9 @@ impl LlmClient {
                             });
                         }
                         Ok(None) => {
-                            let _ = tx.send(StreamEvent::Done).await;
+                            if tx.send(StreamEvent::Done).await.is_err() {
+                                tracing::debug!("llm: stream receiver closed");
+                            }
                             return Ok(());
                         }
                         Err(_) => {
@@ -678,7 +693,9 @@ impl LlmClient {
 
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data.trim() == "[DONE]" {
-                        let _ = tx.send(StreamEvent::Done).await;
+                        if tx.send(StreamEvent::Done).await.is_err() {
+                            tracing::debug!("llm: stream receiver closed");
+                        }
                         return Ok(());
                     }
 
@@ -740,7 +757,9 @@ impl LlmClient {
                                         }
                                     }
                                     if choice.finish_reason.is_some() {
-                                        let _ = tx.send(StreamEvent::Done).await;
+                                        if tx.send(StreamEvent::Done).await.is_err() {
+                                            tracing::debug!("llm: stream receiver closed");
+                                        }
                                         return Ok(());
                                     }
                                 }
@@ -909,7 +928,9 @@ impl LlmClient {
         loop {
             let chunk = tokio::select! {
                 _ = cancel.cancelled() => {
-                    let _ = tx.send(StreamEvent::Done).await;
+                    if tx.send(StreamEvent::Done).await.is_err() {
+                        tracing::debug!("llm: stream receiver closed");
+                    }
                     return Ok(());
                 }
                 maybe_chunk = async {
@@ -932,7 +953,9 @@ impl LlmClient {
                             });
                         }
                         Ok(None) => {
-                            let _ = tx.send(StreamEvent::Done).await;
+                            if tx.send(StreamEvent::Done).await.is_err() {
+                                tracing::debug!("llm: stream receiver closed");
+                            }
                             return Ok(());
                         }
                         Err(_) => {
@@ -1073,7 +1096,9 @@ impl LlmClient {
                                 }
                             }
                             "message_stop" => {
-                                let _ = tx.send(StreamEvent::Done).await;
+                                if tx.send(StreamEvent::Done).await.is_err() {
+                                    tracing::debug!("llm: stream receiver closed");
+                                }
                                 return Ok(());
                             }
                             "message_delta" => {
@@ -1104,7 +1129,9 @@ impl LlmClient {
                                 }
                                 // message_delta with stop_reason indicates end
                                 if event["delta"]["stop_reason"].as_str().is_some() {
-                                    let _ = tx.send(StreamEvent::Done).await;
+                                    if tx.send(StreamEvent::Done).await.is_err() {
+                                        tracing::debug!("llm: stream receiver closed");
+                                    }
                                     return Ok(());
                                 }
                             }

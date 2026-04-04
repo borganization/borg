@@ -591,7 +591,7 @@ mod tests {
                 assert_eq!(parts.len(), 1);
                 assert!(matches!(&parts[0], ContentPart::Text(t) if t == "hi"));
             }
-            _ => panic!("expected Parts"),
+            other => unreachable!("expected Parts, got {other:?}"),
         }
     }
 
@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(msg.text_content(), Some("Describe this"));
         match &msg.content {
             Some(MessageContent::Parts(p)) => assert_eq!(p.len(), 2),
-            _ => panic!("expected Parts"),
+            other => unreachable!("expected Parts, got {other:?}"),
         }
     }
 
@@ -639,7 +639,7 @@ mod tests {
         let output: ToolOutput = "hello".to_string().into();
         match output {
             ToolOutput::Text(s) => assert_eq!(s, "hello"),
-            ToolOutput::Multimodal { .. } => panic!("expected Text"),
+            other @ ToolOutput::Multimodal { .. } => unreachable!("expected Text, got {other:?}"),
         }
     }
 
@@ -663,7 +663,7 @@ mod tests {
                 assert_eq!(text, "screenshot taken");
                 assert_eq!(parts.len(), 2);
             }
-            ToolOutput::Text(_) => panic!("expected Multimodal"),
+            other @ ToolOutput::Text(_) => unreachable!("expected Multimodal, got {other:?}"),
         }
     }
 
@@ -684,7 +684,7 @@ mod tests {
         assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
         match &msg.content {
             Some(MessageContent::Parts(p)) => assert_eq!(p.len(), 2),
-            _ => panic!("expected Parts"),
+            other => unreachable!("expected Parts, got {other:?}"),
         }
     }
 

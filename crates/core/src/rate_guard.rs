@@ -231,7 +231,7 @@ mod tests {
         }
         match guard.record(ActionType::ToolCall) {
             RateDecision::Warn(_) => {}
-            other => panic!("Expected Warn, got {other:?}"),
+            other => unreachable!("expected Warn, got {other:?}"),
         }
     }
 
@@ -247,7 +247,7 @@ mod tests {
         guard.record(ActionType::ToolCall);
         match guard.record(ActionType::ToolCall) {
             RateDecision::Block(_) => {}
-            other => panic!("Expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -291,7 +291,7 @@ mod tests {
         }
         match guard.record(ActionType::ToolCall) {
             RateDecision::Warn(_) => {}
-            other => panic!("Expected Warn, got {other:?}"),
+            other => unreachable!("expected Warn, got {other:?}"),
         }
     }
 
@@ -313,7 +313,7 @@ mod tests {
         // 3rd FileWrite should hit warn threshold
         match guard.record(ActionType::FileWrite) {
             RateDecision::Warn(_) => {}
-            other => panic!("Expected Warn for FileWrite, got {other:?}"),
+            other => unreachable!("expected Warn for FileWrite, got {other:?}"),
         }
 
         // MemoryWrite should still be at 1 (under warn of 3)
@@ -344,7 +344,7 @@ mod tests {
 
         match guard.record(ActionType::ToolCall) {
             RateDecision::Warn(_) => {}
-            other => panic!("Expected Warn after limit update, got {other:?}"),
+            other => unreachable!("expected Warn after limit update, got {other:?}"),
         }
     }
 
@@ -359,17 +359,17 @@ mod tests {
         assert_eq!(guard.record(ActionType::WebRequest), RateDecision::Allow);
         match guard.record(ActionType::WebRequest) {
             RateDecision::Warn(_) => {}
-            other => panic!("Expected Warn, got {other:?}"),
+            other => unreachable!("expected Warn, got {other:?}"),
         }
         // 3rd is still warn
         match guard.record(ActionType::WebRequest) {
             RateDecision::Warn(_) => {}
-            other => panic!("Expected Warn, got {other:?}"),
+            other => unreachable!("expected Warn, got {other:?}"),
         }
         // 4th hits block
         match guard.record(ActionType::WebRequest) {
             RateDecision::Block(_) => {}
-            other => panic!("Expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -387,7 +387,7 @@ mod tests {
                 assert!(msg.contains("ToolCall"));
                 assert!(msg.contains("2")); // count
             }
-            other => panic!("Expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -470,12 +470,12 @@ tool_calls_block = 10
         // Next should warn at MAX-1
         match guard.record(ActionType::ToolCall) {
             RateDecision::Warn(_) => {}
-            other => panic!("Expected Warn, got {other:?}"),
+            other => unreachable!("expected Warn, got {other:?}"),
         }
         // Next should block at MAX
         match guard.record(ActionType::ToolCall) {
             RateDecision::Block(_) => {}
-            other => panic!("Expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -505,7 +505,7 @@ tool_calls_block = 10
         ] {
             match guard.record(action) {
                 RateDecision::Warn(_) => {}
-                other => panic!("Expected Warn for {action:?}, got {other:?}"),
+                other => unreachable!("expected Warn for {action:?}, got {other:?}"),
             }
         }
     }

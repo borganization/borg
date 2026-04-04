@@ -187,14 +187,16 @@ impl AgentControl {
 
         // Record in DB
         if let Ok(db) = crate::db::Database::open() {
-            let _ = db.insert_sub_agent_run(
+            if let Err(e) = db.insert_sub_agent_run(
                 agent_id,
                 nickname,
                 role_name,
                 &self.parent_session_id,
                 session_id,
                 child_depth,
-            );
+            ) {
+                tracing::warn!(agent_id, "failed to insert sub-agent run record: {e}");
+            }
         }
 
         info
@@ -288,7 +290,7 @@ impl AgentControl {
             let _permit = match semaphore.acquire().await {
                 Ok(p) => p,
                 Err(_) => {
-                    let _ = completion_tx
+                    if completion_tx
                         .send(SubAgentCompletion {
                             agent_id: agent_id_clone,
                             nickname: nickname_clone,
@@ -297,7 +299,11 @@ impl AgentControl {
                             },
                             final_response: None,
                         })
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!("sub-agent completion receiver dropped");
+                    }
                     return;
                 }
             };
@@ -334,7 +340,7 @@ impl AgentControl {
 
             // Update DB
             if let Ok(db) = crate::db::Database::open() {
-                let _ = db.update_sub_agent_status(
+                if let Err(e) = db.update_sub_agent_status(
                     &agent_id_clone,
                     status.as_str(),
                     final_response.as_deref(),
@@ -342,17 +348,23 @@ impl AgentControl {
                         SubAgentStatus::Errored { error } => Some(error.as_str()),
                         _ => None,
                     },
-                );
+                ) {
+                    tracing::warn!(%agent_id_clone, "failed to update sub-agent status: {e}");
+                }
             }
 
-            let _ = completion_tx
+            if completion_tx
                 .send(SubAgentCompletion {
                     agent_id: agent_id_clone,
                     nickname: nickname_clone,
                     status,
                     final_response,
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                tracing::debug!("sub-agent completion receiver dropped");
+            }
         });
 
         // Store handle
@@ -466,7 +478,9 @@ impl AgentControl {
 
         // Update DB
         if let Ok(db) = crate::db::Database::open() {
-            let _ = db.update_sub_agent_status(agent_id, "shutdown", None, None);
+            if let Err(e) = db.update_sub_agent_status(agent_id, "shutdown", None, None) {
+                tracing::warn!(agent_id, "failed to update sub-agent shutdown status: {e}");
+            }
         }
 
         Ok(())
@@ -586,7 +600,9 @@ fn run_sub_agent(
 
         // Update DB status to running
         if let Ok(db) = crate::db::Database::open() {
-            let _ = db.update_sub_agent_status(&agent_id, "running", None, None);
+            if let Err(e) = db.update_sub_agent_status(&agent_id, "running", None, None) {
+                tracing::warn!(%agent_id, "failed to update sub-agent running status: {e}");
+            }
         }
 
         let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(256);
@@ -619,7 +635,9 @@ fn run_sub_agent(
                             break;
                         }
                         Some(AgentEvent::ShellConfirmation { respond, .. }) => {
-                            let _ = respond.send(true);
+                            if respond.send(true).is_err() {
+                                tracing::debug!("sub-agent shell confirmation receiver dropped");
+                            }
                         }
                         _ => {}
                     }
@@ -635,7 +653,9 @@ fn run_sub_agent(
             }
         }
 
-        let _ = send_handle.await;
+        if let Err(e) = send_handle.await {
+            tracing::warn!("sub-agent send_message task panicked: {e}");
+        }
 
         if final_text.is_empty() {
             Ok("(sub-agent completed with no text output)".to_string())
