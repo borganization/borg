@@ -94,37 +94,25 @@ pub async fn collect_git_context(cwd: &Path) -> GitContext {
     let repo_root = find_repo_root(cwd);
     let work_dir = repo_root.as_deref().unwrap_or(cwd);
 
-    let branch = run_git(&["branch", "--show-current"], work_dir)
-        .await
-        .ok()
-        .filter(|s| !s.is_empty());
-
-    let commit_hash = run_git(&["rev-parse", "--short", "HEAD"], work_dir)
-        .await
-        .ok();
-
-    let recent_commits = run_git(&["log", "--oneline", "-5", "--no-decorate"], work_dir)
-        .await
-        .ok()
-        .map(|s| s.lines().map(String::from).collect())
-        .unwrap_or_default();
-
-    let has_uncommitted_changes = run_git(&["status", "--porcelain"], work_dir)
-        .await
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-
-    let remote_url = run_git(&["remote", "get-url", "origin"], work_dir)
-        .await
-        .ok();
+    // Run all git commands in parallel — they're independent read-only operations.
+    let (branch, commit_hash, recent_commits_raw, status, remote_url) = tokio::join!(
+        run_git(&["branch", "--show-current"], work_dir),
+        run_git(&["rev-parse", "--short", "HEAD"], work_dir),
+        run_git(&["log", "--oneline", "-5", "--no-decorate"], work_dir),
+        run_git(&["status", "--porcelain"], work_dir),
+        run_git(&["remote", "get-url", "origin"], work_dir),
+    );
 
     GitContext {
         repo_root,
-        branch,
-        commit_hash,
-        recent_commits,
-        has_uncommitted_changes,
-        remote_url,
+        branch: branch.ok().filter(|s| !s.is_empty()),
+        commit_hash: commit_hash.ok(),
+        recent_commits: recent_commits_raw
+            .ok()
+            .map(|s| s.lines().map(String::from).collect())
+            .unwrap_or_default(),
+        has_uncommitted_changes: status.map(|s| !s.is_empty()).unwrap_or(false),
+        remote_url: remote_url.ok(),
     }
 }
 
