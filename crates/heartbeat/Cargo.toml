@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 borg-core = { path = "../core" }
 tokio = { workspace = true }
-tokio-util = "0.7"
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }

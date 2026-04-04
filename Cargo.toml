@@ -69,6 +69,10 @@ image = "0.25"
 arboard = "3"
 strsim = "0.11"
 libc = "0.2"
+tokio-util = "0.7"
+base64 = "0.22"
+async-trait = "0.1"
+rand = "0.9"
 
 [workspace.lints.clippy]
 identity_op = "deny"
