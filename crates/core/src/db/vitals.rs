@@ -142,6 +142,10 @@ impl Database {
         deltas: &crate::vitals::StatDeltas,
         metadata: Option<&str>,
     ) -> Result<()> {
+        // Validate category and deltas to prevent gaming via inflated stat changes
+        crate::vitals::validate_deltas(category, *deltas)
+            .map_err(|e| anyhow::anyhow!("vitals delta validation failed: {e}"))?;
+
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
         let result = (|| -> Result<()> {
@@ -279,7 +283,8 @@ impl Database {
             .unwrap_or_else(|_| "0".to_string()))
     }
 
-    /// Append a bond event with pre-computed HMAC (for testing).
+    /// Append a bond event with pre-computed HMAC (for testing only).
+    #[cfg(test)]
     pub fn record_bond_event(
         &self,
         event_type: &str,
@@ -555,6 +560,23 @@ impl Database {
         source: &str,
         metadata: Option<&str>,
     ) -> Result<()> {
+        // Validate event_type and xp_delta to prevent gaming via inflated XP
+        if !crate::evolution::VALID_EVOLUTION_EVENT_TYPES.contains(&event_type) {
+            return Err(anyhow::anyhow!(
+                "invalid evolution event_type: {event_type}"
+            ));
+        }
+        let max_delta = if event_type == "xp_gain" {
+            crate::evolution::MAX_XP_DELTA
+        } else {
+            0
+        };
+        if xp_delta < 0 || xp_delta > max_delta {
+            return Err(anyhow::anyhow!(
+                "invalid xp_delta {xp_delta} for evolution event_type {event_type}, expected 0..={max_delta}"
+            ));
+        }
+
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
 
         let result = (|| -> Result<()> {
@@ -568,6 +590,26 @@ impl Database {
                 |row| row.get(0),
             )?;
             if count >= crate::evolution::rate_limit_for(event_type) as i64 {
+                return Ok(()); // silently drop — at capacity
+            }
+
+            // Total events per hour cap
+            let total_this_hour: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM evolution_events WHERE created_at >= ?1",
+                params![hour_start],
+                |row| row.get(0),
+            )?;
+            if total_this_hour >= crate::evolution::TOTAL_EVENTS_PER_HOUR {
+                return Ok(()); // silently drop — at capacity
+            }
+
+            // Per-source rate limiting at write time
+            let source_this_hour: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM evolution_events WHERE source = ?1 AND created_at >= ?2",
+                params![source, hour_start],
+                |row| row.get(0),
+            )?;
+            if source_this_hour >= crate::evolution::WRITE_SOURCE_RATE_LIMIT {
                 return Ok(()); // silently drop — at capacity
             }
 
@@ -587,6 +629,7 @@ impl Database {
                 xp_delta,
                 archetype.unwrap_or(""),
                 source,
+                metadata.unwrap_or(""),
                 now,
             );
 
