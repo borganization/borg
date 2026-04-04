@@ -166,6 +166,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_preserves_message_order() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let order_clone = order.clone();
+
+        let handler: MessageHandler = Arc::new(move |msg: QueuedMessage| {
+            let o = order_clone.clone();
+            Box::pin(async move {
+                o.lock().await.push(msg.inbound.text.clone());
+            })
+        });
+
+        let queue = ChatQueue::new(handler);
+
+        for i in 0..10 {
+            queue
+                .enqueue(QueuedMessage {
+                    chat_id: 1,
+                    inbound: make_inbound(&format!("msg-{i}")),
+                    thread_id: None,
+                    message_id: None,
+                })
+                .await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let recorded = order.lock().await;
+        let expected: Vec<String> = (0..10).map(|i| format!("msg-{i}")).collect();
+        assert_eq!(*recorded, expected, "messages must be processed in order");
+    }
+
+    #[tokio::test]
+    async fn concurrent_chats_isolated() {
+        let chat1_done = Arc::new(tokio::sync::Notify::new());
+        let chat2_done = Arc::new(tokio::sync::Notify::new());
+        let chat1_done_c = chat1_done.clone();
+        let chat2_done_c = chat2_done.clone();
+
+        let handler: MessageHandler = Arc::new(move |msg: QueuedMessage| {
+            let c1 = chat1_done_c.clone();
+            let c2 = chat2_done_c.clone();
+            Box::pin(async move {
+                if msg.chat_id == 1 {
+                    // Slow handler
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    c1.notify_one();
+                } else {
+                    // Fast handler
+                    c2.notify_one();
+                }
+            })
+        });
+
+        let queue = ChatQueue::new(handler);
+
+        queue
+            .enqueue(QueuedMessage {
+                chat_id: 1,
+                inbound: make_inbound("slow"),
+                thread_id: None,
+                message_id: None,
+            })
+            .await;
+        queue
+            .enqueue(QueuedMessage {
+                chat_id: 2,
+                inbound: make_inbound("fast"),
+                thread_id: None,
+                message_id: None,
+            })
+            .await;
+
+        // Chat 2 should complete before chat 1
+        tokio::time::timeout(Duration::from_millis(100), chat2_done.notified())
+            .await
+            .expect("fast chat should complete quickly");
+    }
+
+    #[tokio::test]
+    async fn re_enqueue_to_active_sender() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        let handler: MessageHandler = Arc::new(move |_msg: QueuedMessage| {
+            let c = counter_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+
+        let queue = ChatQueue::new(handler);
+
+        // First message — spawns a consumer
+        queue
+            .enqueue(QueuedMessage {
+                chat_id: 99,
+                inbound: make_inbound("first"),
+                thread_id: None,
+                message_id: None,
+            })
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        // Wait for idle timeout so the consumer exits and sender becomes stale.
+        // IDLE_TIMEOUT is SESSION_IDLE_TIMEOUT_SECS (30s by default), but we can't
+        // wait that long. Instead, test that re-enqueue after a short wait still works
+        // (the fast path with active sender).
+        queue
+            .enqueue(QueuedMessage {
+                chat_id: 99,
+                inbound: make_inbound("second"),
+                thread_id: None,
+                message_id: None,
+            })
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "second message should be processed via existing or respawned consumer"
+        );
+    }
+
+    #[tokio::test]
     async fn different_chats_get_separate_queues() {
         let counter = Arc::new(AtomicU32::new(0));
         let counter_clone = counter.clone();

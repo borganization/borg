@@ -537,6 +537,70 @@ mod tests {
         assert!(!expanded.network);
     }
 
+    #[test]
+    fn deeply_nested_blocked_path() {
+        let blocked = vec![".ssh".into()];
+        assert!(is_path_blocked("/home/user/.ssh/keys/id_rsa", &blocked));
+        assert!(is_path_blocked("/home/user/.ssh", &blocked));
+        assert!(!is_path_blocked("/home/user/ssh_config", &blocked));
+    }
+
+    #[test]
+    fn special_chars_in_path_not_falsely_blocked() {
+        let blocked = vec![".ssh".into(), ".env".into()];
+        // Paths with spaces and unicode should not be falsely matched
+        assert!(!is_path_blocked("/home/user/my project/data", &blocked));
+        assert!(!is_path_blocked("/home/user/données/fichier", &blocked));
+        assert!(!is_path_blocked("/home/user/.env_backup", &blocked));
+        // But actual blocked paths still match
+        assert!(is_path_blocked("/home/user/.ssh/id_rsa", &blocked));
+        assert!(is_path_blocked("/home/user/.env", &blocked));
+    }
+
+    #[test]
+    fn configured_chain_integration() {
+        let home = dirs::home_dir().expect("home dir must exist for test");
+        let home_str = home.to_string_lossy();
+
+        let policy = SandboxPolicy {
+            network: true,
+            fs_read: vec!["~/data".into(), "/home/user/.ssh/keys".into()],
+            fs_write: vec!["~/output".into()],
+            deny_read: vec!["~/secrets".into()],
+            deny_write: vec![],
+            allowed_domains: vec![],
+        };
+
+        let blocked = vec![".ssh".into()];
+        let result = policy.configured(&blocked);
+
+        // Borg dir should be in deny_write
+        assert!(
+            result.deny_write.iter().any(|p| p.ends_with("/.borg")),
+            "borg dir should be protected"
+        );
+        // Tildes should be expanded
+        assert!(
+            result.fs_read.iter().any(|p| p.starts_with(&*home_str)),
+            "tildes should be expanded"
+        );
+        // TLS paths should be added (network=true)
+        assert!(
+            result.fs_read.contains(&"/etc/ssl".to_string()),
+            "TLS paths should be added for network"
+        );
+        // Blocked path (.ssh) should be filtered out
+        assert!(
+            !result.fs_read.iter().any(|p| p.contains(".ssh")),
+            ".ssh paths should be filtered"
+        );
+        // deny_read tildes should be expanded
+        assert!(
+            result.deny_read.iter().any(|p| p.starts_with(&*home_str)),
+            "deny_read tildes should be expanded"
+        );
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_falls_through_to_unsandboxed() {

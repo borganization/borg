@@ -194,6 +194,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_streaming_collects_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("stream.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/bash\necho 'line1'\necho 'line2'\necho 'line3'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let manifest = bash_manifest("stream-tool", "stream.sh");
+        let executor = ToolExecutor::new(&manifest, dir.path());
+
+        let chunks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let chunks_clone = chunks.clone();
+
+        let result = executor
+            .execute_streaming("{}", &[], &[], move |chunk: &str, _is_stderr: bool| {
+                chunks_clone.lock().unwrap().push(chunk.to_string());
+            })
+            .await
+            .unwrap();
+
+        assert!(result.contains("line1"));
+        assert!(result.contains("line3"));
+        let collected = chunks.lock().unwrap();
+        assert!(
+            !collected.is_empty(),
+            "streaming callback should be invoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_with_empty_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("cat.sh");
+        std::fs::write(&script, "#!/bin/bash\ncat\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let manifest = bash_manifest("cat-tool", "cat.sh");
+        let executor = ToolExecutor::new(&manifest, dir.path());
+        let result = executor.execute("").await.unwrap();
+        assert!(result.is_empty() || result.trim().is_empty());
+    }
+
+    #[tokio::test]
     async fn execute_bash_tool_nonzero_exit() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fail.sh");

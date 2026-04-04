@@ -406,6 +406,68 @@ mod tests {
     }
 
     #[test]
+    fn rescan_picks_up_new_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tool_toml(dir.path(), "tool-a", "First tool");
+        let mut registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(registry.list_tools().len(), 1);
+
+        // Add a second tool and rescan
+        write_tool_toml(dir.path(), "tool-b", "Second tool");
+        registry.scan().unwrap();
+        assert_eq!(registry.list_tools().len(), 2);
+    }
+
+    #[test]
+    fn rescan_removes_deleted_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tool_toml(dir.path(), "keep", "Keep this");
+        write_tool_toml(dir.path(), "remove", "Remove this");
+        let mut registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(registry.list_tools().len(), 2);
+
+        // Delete one tool and rescan
+        std::fs::remove_dir_all(dir.path().join("remove")).unwrap();
+        registry.scan().unwrap();
+        assert_eq!(registry.list_tools().len(), 1);
+        assert!(registry.list_tools()[0].contains("keep"));
+    }
+
+    #[test]
+    fn tool_credentials_for_existing_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("cred-tool");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("tool.toml"),
+            "name = \"cred-tool\"\ndescription = \"Has creds\"\nruntime = \"bash\"\nentrypoint = \"run.sh\"\ncredentials = [\"API_KEY\", \"SECRET\"]\n",
+        )
+        .unwrap();
+
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        let creds = registry.tool_credentials("cred-tool");
+        assert_eq!(creds, vec!["API_KEY".to_string(), "SECRET".to_string()]);
+    }
+
+    #[test]
+    fn special_chars_in_tool_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("my-tool_v2.0");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("tool.toml"),
+            "name = \"my-tool_v2.0\"\ndescription = \"Special chars\"\nruntime = \"bash\"\nentrypoint = \"run.sh\"\n",
+        )
+        .unwrap();
+
+        let registry = ToolRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        assert!(registry.inner.get("my-tool_v2.0").is_some());
+        let fuzzy = registry.fuzzy_find("my-tool_v2.0");
+        assert!(fuzzy.is_some());
+        assert_eq!(fuzzy.unwrap().manifest.name, "my-tool_v2.0");
+    }
+
+    #[test]
     fn fuzzy_best_match_empty_query() {
         let items = vec![("alpha", &1)];
         let result = fuzzy_best_match("", items.into_iter());

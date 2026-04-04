@@ -73,3 +73,208 @@ pub async fn run_keepalive<F, Fut>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    fn test_config(interval_ms: u64) -> TypingKeepaliveConfig {
+        TypingKeepaliveConfig {
+            keepalive_interval: Duration::from_millis(interval_ms),
+            label: "test",
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stop_signal_terminates() {
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let config = test_config(5000);
+
+        let handle = tokio::spawn(async move {
+            run_keepalive(config, stop_rx, || async { Ok(()) }).await;
+        });
+
+        // Send stop immediately
+        stop_tx.send(()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("keepalive did not stop in time")
+            .expect("task panicked");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_ttl_expiration_stops_loop() {
+        let (_stop_tx, stop_rx) = oneshot::channel();
+        let config = test_config(5000);
+
+        let handle = tokio::spawn(async move {
+            run_keepalive(config, stop_rx, || async { Ok(()) }).await;
+        });
+
+        // Let spawned task start
+        tokio::task::yield_now().await;
+
+        // Advance past TTL (TYPING_MAX_TTL_SECS = 60)
+        tokio::time::advance(Duration::from_secs(65)).await;
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+
+        // The handle should complete since TTL was exceeded
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("keepalive did not stop after TTL")
+            .expect("task panicked");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_consecutive_failures_exit() {
+        let (_stop_tx, stop_rx) = oneshot::channel();
+        let config = test_config(1000);
+
+        let handle = tokio::spawn(async move {
+            run_keepalive(config, stop_rx, || async {
+                Err(anyhow::anyhow!("send failed"))
+            })
+            .await;
+        });
+
+        // Let spawned task start (initial send)
+        tokio::task::yield_now().await;
+
+        // Advance past enough ticks for TYPING_MAX_CONSECUTIVE_FAILURES (2)
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_millis(1100)).await;
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("keepalive did not stop after consecutive failures")
+            .expect("task panicked");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_success_resets_failure_counter() {
+        let (_stop_tx, stop_rx) = oneshot::channel();
+        let config = test_config(1000);
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        // Pattern: fail, succeed (reset), fail, fail (hits 2 consecutive)
+        let handle = tokio::spawn(async move {
+            run_keepalive(config, stop_rx, move || {
+                let n = call_count_clone.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    // Call 0 = initial (fails, no count)
+                    // Call 1 = tick 1 (fail, consecutive=1)
+                    // Call 2 = tick 2 (succeed, reset to 0)
+                    // Call 3 = tick 3 (fail, consecutive=1)
+                    // Call 4 = tick 4 (fail, consecutive=2 => exit)
+                    match n {
+                        0 | 1 | 3 | 4 => Err(anyhow::anyhow!("fail")),
+                        _ => Ok(()),
+                    }
+                }
+            })
+            .await;
+        });
+
+        tokio::task::yield_now().await;
+
+        // Advance enough for 5+ ticks
+        for _ in 0..8 {
+            tokio::time::advance(Duration::from_millis(1100)).await;
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("keepalive did not exit")
+            .expect("task panicked");
+
+        // With start_paused, execution is deterministic:
+        // Call 0=initial(fail), 1=tick(fail,cons=1), 2=tick(succeed,reset),
+        // 3=tick(fail,cons=1), 4=tick(fail,cons=2=>exit) = exactly 5 calls
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            5,
+            "expected exactly 5 calls (proving reset extended the loop)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_initial_send_failure_continues() {
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let config = test_config(1000);
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        let handle = tokio::spawn(async move {
+            run_keepalive(config, stop_rx, move || {
+                let n = call_count_clone.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n == 0 {
+                        Err(anyhow::anyhow!("initial failure"))
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+        });
+
+        tokio::task::yield_now().await;
+
+        // Advance past a few intervals so subsequent sends happen
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_millis(1100)).await;
+            tokio::task::yield_now().await;
+        }
+
+        // Loop should still be running — verify we got more calls
+        assert!(
+            call_count.load(Ordering::SeqCst) >= 2,
+            "loop should continue after initial failure"
+        );
+
+        stop_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("keepalive did not stop")
+            .expect("task panicked");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_keepalive_sends_periodically() {
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let config = test_config(1000);
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        tokio::spawn(async move {
+            run_keepalive(config, stop_rx, move || {
+                call_count_clone.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            })
+            .await;
+        });
+
+        tokio::task::yield_now().await;
+
+        // Advance 5 intervals
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_millis(1100)).await;
+            tokio::task::yield_now().await;
+        }
+
+        // 1 initial + ~5 interval ticks
+        let count = call_count.load(Ordering::SeqCst);
+        assert!(count >= 3, "expected at least 3 sends, got {count}");
+
+        stop_tx.send(()).unwrap();
+    }
+}

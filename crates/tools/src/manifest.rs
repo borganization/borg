@@ -406,6 +406,70 @@ description = "No params"
     }
 
     #[test]
+    fn timeout_ms_zero_parses() {
+        let toml_str = r#"
+name = "fast"
+description = "Zero timeout"
+timeout_ms = 0
+"#;
+        let manifest: ToolManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.timeout_ms, 0);
+    }
+
+    #[test]
+    fn unknown_runtime_parses() {
+        let toml_str = r#"
+name = "exotic"
+description = "Unknown runtime"
+runtime = "nonexistent_runtime"
+"#;
+        let manifest: ToolManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.runtime, "nonexistent_runtime");
+    }
+
+    #[test]
+    fn missing_name_fails() {
+        let toml_str = r#"
+description = "No name field"
+"#;
+        let result: Result<ToolManifest, _> = toml::from_str(toml_str);
+        assert!(result.is_err(), "missing name should fail to parse");
+    }
+
+    #[test]
+    fn extra_unknown_fields_ignored() {
+        let toml_str = r#"
+name = "flexible"
+description = "Has extra fields"
+foobar = 123
+baz = "hello"
+"#;
+        // serde default: unknown fields are ignored (no deny_unknown_fields)
+        let manifest: ToolManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.name, "flexible");
+    }
+
+    #[test]
+    fn duplicate_required_values_preserved() {
+        let toml_str = r#"
+name = "dupes"
+description = "Duplicate required"
+
+[parameters]
+type = "object"
+[parameters.properties.city]
+type = "string"
+description = "City"
+[parameters.required]
+values = ["city", "city"]
+"#;
+        let manifest: ToolManifest = toml::from_str(toml_str).unwrap();
+        let schema = manifest.parameters_json_schema();
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 2, "duplicate required values are preserved");
+    }
+
+    #[test]
     fn parameters_json_schema_with_enum() {
         let toml_str = r#"
 name = "color-tool"
