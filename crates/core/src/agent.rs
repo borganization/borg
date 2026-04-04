@@ -978,6 +978,16 @@ Rules:
                 match crate::git::create_ghost_commit(root).await {
                     Ok(gc) => {
                         tracing::info!(commit_id = %gc.commit_id, "Created ghost commit for session");
+                        if let Ok(guard) = self.db.lock() {
+                            if let Some(ref db) = *guard {
+                                crate::activity_log::log_activity(
+                                    db,
+                                    "info",
+                                    "session",
+                                    &format!("Ghost commit created: {}", gc.commit_id),
+                                );
+                            }
+                        }
                         self.ghost_commit = Some(gc);
                     }
                     Err(e) => tracing::debug!("Skipping ghost commit: {e}"),
@@ -1153,6 +1163,7 @@ Rules:
             }
             // Only run LLM-based compaction when history still exceeds the token budget
             if history_tokens(&self.history) > max_hist {
+                let pre_compaction_len = self.history.len();
                 // Pre-compaction memory flush: save important info before messages are dropped
                 if self.config.memory.flush_before_compaction {
                     if let Some(keep_from) =
@@ -1178,6 +1189,19 @@ Rules:
                 let compaction_config = self.config.with_compaction_overrides();
                 let compaction_llm = LlmClient::new(&compaction_config)?;
                 compact_history(&mut self.history, max_hist, &compaction_llm).await;
+                let dropped_count = pre_compaction_len.saturating_sub(self.history.len());
+                if dropped_count > 0 {
+                    if let Ok(guard) = self.db.lock() {
+                        if let Some(ref db) = *guard {
+                            crate::activity_log::log_activity(
+                                db,
+                                "info",
+                                "agent",
+                                &format!("Compaction: dropped {dropped_count} messages"),
+                            );
+                        }
+                    }
+                }
             }
 
             // Warm skills cache on first iteration (avoids re-parsing every turn)

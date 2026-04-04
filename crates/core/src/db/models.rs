@@ -1,3 +1,14 @@
+/// Activity log entry from SQLite.
+#[derive(Debug, Clone)]
+pub struct ActivityEntry {
+    pub id: i64,
+    pub level: String,
+    pub category: String,
+    pub message: String,
+    pub detail: Option<String>,
+    pub created_at: i64,
+}
+
 /// Session metadata row from SQLite.
 #[derive(Debug, Clone)]
 pub struct SessionRow {

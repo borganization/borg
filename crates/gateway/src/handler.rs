@@ -257,6 +257,15 @@ pub async fn invoke_agent_with_auto_reply(
     bot_identifier: Option<&str>,
     auto_reply_state: Option<&crate::auto_reply::SharedAutoReplyState>,
 ) -> Result<(String, String)> {
+    if let Ok(adb) = Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS) {
+        borg_core::activity_log::log_activity(
+            &adb,
+            "info",
+            "gateway",
+            &format!("Webhook from {channel_name}: {}", inbound.sender_id),
+        );
+    }
+
     // Resolve gateway routing (per-channel/sender config overrides)
     let route = crate::routing::resolve_route(
         config,
@@ -315,6 +324,14 @@ pub async fn invoke_agent_with_auto_reply(
                 "Pairing challenge issued for sender '{}' on channel '{}'",
                 inbound.sender_id, channel_name
             );
+            if let Ok(adb) = Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS) {
+                borg_core::activity_log::log_activity(
+                    &adb,
+                    "info",
+                    "gateway",
+                    &format!("Pairing challenge issued for {}", inbound.sender_id),
+                );
+            }
             return Ok((message, String::new()));
         }
         borg_core::pairing::AccessCheckResult::Denied { reason } => {
@@ -322,6 +339,14 @@ pub async fn invoke_agent_with_auto_reply(
                 "Access denied for sender '{}' on channel '{}': {}",
                 inbound.sender_id, channel_name, reason
             );
+            if let Ok(adb) = Database::open_with_timeout(Database::GATEWAY_BUSY_TIMEOUT_MS) {
+                borg_core::activity_log::log_activity(
+                    &adb,
+                    "warn",
+                    "gateway",
+                    &format!("Access denied for {} on {channel_name}", inbound.sender_id),
+                );
+            }
             return Ok((String::new(), String::new()));
         }
     }

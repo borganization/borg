@@ -219,6 +219,11 @@ pub async fn run() -> Result<()> {
         agent.hook_registry_mut().register(Box::new(vitals_hook));
     }
 
+    // Register activity log hook for structured event logging
+    if let Ok(activity_hook) = borg_core::activity_log::ActivityHook::new() {
+        agent.hook_registry_mut().register(Box::new(activity_hook));
+    }
+
     // Register bond hook for trust tracking (after vitals so events are available)
     if let Ok(bond_hook) = borg_core::bond::BondHook::new() {
         agent.hook_registry_mut().register(Box::new(bond_hook));

@@ -61,7 +61,7 @@ const COMMANDS: &[SlashCommandDef] = &[
     },
     SlashCommandDef {
         name: "/logs",
-        description: "Show TUI log file",
+        description: "Show activity log (error|warn|info|debug|all|raw)",
     },
     // Diagnostics
     SlashCommandDef {
