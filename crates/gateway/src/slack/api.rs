@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{error, warn};
 
 use super::echo::EchoCache;
 use super::types::{AuthTestResponse, PostMessageRequest};
@@ -13,6 +13,43 @@ use crate::constants::{DEFAULT_MESSAGE_CHUNK_SIZE, GATEWAY_HTTP_TIMEOUT};
 use crate::http_retry::{send_with_rate_limit_retry, RateLimitPolicy};
 
 const SLACK_API_BASE: &str = crate::constants::SLACK_API_BASE;
+
+/// Slack API error codes that will never succeed on retry — the caller must
+/// intervene (fix credentials, invite the bot, unarchive the channel, etc.).
+/// These are surfaced with a `FATAL` marker in error messages and logged at
+/// `error!` level so operators notice them in production logs.
+const FATAL_SLACK_ERRORS: &[&str] = &[
+    "invalid_auth",
+    "not_authed",
+    "account_inactive",
+    "token_revoked",
+    "token_expired",
+    "missing_scope",
+    "no_permission",
+    "channel_not_found",
+    "not_in_channel",
+    "is_archived",
+    "user_not_found",
+    "team_added_to_org",
+];
+
+/// Returns `true` if the given Slack API error code is non-recoverable.
+pub(crate) fn is_fatal_slack_error(error: &str) -> bool {
+    FATAL_SLACK_ERRORS.contains(&error)
+}
+
+/// Format a human-readable hint for a Slack API error code.
+fn slack_error_hint(error: &str) -> &'static str {
+    match error {
+        "channel_not_found" => " — bot may not be added to this channel",
+        "not_in_channel" => " — invite the bot to the channel first",
+        "invalid_auth" | "not_authed" => " — check SLACK_BOT_TOKEN",
+        "account_inactive" | "token_revoked" | "token_expired" => " — bot token has been revoked",
+        "missing_scope" | "no_permission" => " — bot token is missing required OAuth scopes",
+        "is_archived" => " — channel is archived",
+        _ => "",
+    }
+}
 
 /// Circuit breaker thresholds for Slack typing indicators.
 /// Trips after N consecutive failures (matching OpenClaw's maxConsecutiveFailures).
@@ -74,10 +111,14 @@ impl SlackClient {
             .context("Failed to parse auth.test response")?;
 
         if !resp.ok {
-            bail!(
-                "auth.test failed: {}",
-                resp.error.as_deref().unwrap_or("unknown error")
-            );
+            let err = resp.error.as_deref().unwrap_or("unknown error");
+            if is_fatal_slack_error(err) {
+                error!(
+                    "Slack auth.test FATAL error: {err}{} — bot cannot start until this is fixed",
+                    slack_error_hint(err)
+                );
+            }
+            bail!("auth.test failed: {err}{}", slack_error_hint(err));
         }
 
         self.bot_user_id = resp.user_id.clone();
@@ -153,15 +194,20 @@ impl SlackClient {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown error");
 
-        let hint = match error {
-            "channel_not_found" => " — bot may not be added to this channel",
-            "not_in_channel" => " — invite the bot to the channel first",
-            "invalid_auth" => " — check SLACK_BOT_TOKEN",
-            "account_inactive" => " — bot token has been revoked",
-            "token_revoked" => " — bot token has been revoked",
-            "missing_scope" => " — bot token is missing required OAuth scopes",
-            _ => "",
-        };
+        let hint = slack_error_hint(error);
+
+        if is_fatal_slack_error(error) {
+            // Log at error level so operators notice credential/permission issues.
+            // Prefix with FATAL so log scanners can alert on it.
+            error!(
+                "Slack chat.postMessage FATAL error ({}): {error}{hint} — this will not be retried",
+                status.as_u16()
+            );
+            bail!(
+                "chat.postMessage FATAL ({}): {error}{hint}",
+                status.as_u16()
+            );
+        }
 
         bail!(
             "chat.postMessage failed ({}): {error}{hint}",
@@ -519,5 +565,49 @@ mod tests {
             format!("{SLACK_API_BASE}/files.upload"),
             "https://slack.com/api/files.upload"
         );
+    }
+
+    #[test]
+    fn is_fatal_slack_error_classifies_auth_errors() {
+        assert!(is_fatal_slack_error("invalid_auth"));
+        assert!(is_fatal_slack_error("token_revoked"));
+        assert!(is_fatal_slack_error("account_inactive"));
+        assert!(is_fatal_slack_error("not_authed"));
+        assert!(is_fatal_slack_error("token_expired"));
+    }
+
+    #[test]
+    fn is_fatal_slack_error_classifies_permission_errors() {
+        assert!(is_fatal_slack_error("missing_scope"));
+        assert!(is_fatal_slack_error("no_permission"));
+        assert!(is_fatal_slack_error("channel_not_found"));
+        assert!(is_fatal_slack_error("not_in_channel"));
+        assert!(is_fatal_slack_error("is_archived"));
+    }
+
+    #[test]
+    fn is_fatal_slack_error_excludes_transient_errors() {
+        // These should NOT be fatal — they can succeed on retry.
+        assert!(!is_fatal_slack_error("ratelimited"));
+        assert!(!is_fatal_slack_error("server_error"));
+        assert!(!is_fatal_slack_error("service_unavailable"));
+        assert!(!is_fatal_slack_error("timeout"));
+        assert!(!is_fatal_slack_error("unknown_error"));
+        assert!(!is_fatal_slack_error(""));
+    }
+
+    #[test]
+    fn slack_error_hint_present_for_known_errors() {
+        assert!(slack_error_hint("invalid_auth").contains("SLACK_BOT_TOKEN"));
+        assert!(slack_error_hint("not_in_channel").contains("invite"));
+        assert!(slack_error_hint("channel_not_found").contains("channel"));
+        assert!(slack_error_hint("missing_scope").contains("scope"));
+        assert!(slack_error_hint("is_archived").contains("archived"));
+    }
+
+    #[test]
+    fn slack_error_hint_empty_for_unknown() {
+        assert_eq!(slack_error_hint("ratelimited"), "");
+        assert_eq!(slack_error_hint(""), "");
     }
 }

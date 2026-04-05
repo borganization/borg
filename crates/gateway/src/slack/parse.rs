@@ -5,6 +5,55 @@ use super::types::EventCallback;
 use crate::constants::{PEER_KIND_DIRECT, PEER_KIND_GROUP};
 use crate::handler::{InboundAttachment, InboundMessage};
 
+/// Remove bot @mention tokens from Slack message text.
+///
+/// Slack encodes user mentions as `<@U0BOT>` or `<@U0BOT|display-name>`. When the
+/// bot is mentioned in a channel, the raw token arrives in the inbound text and
+/// pollutes the agent's prompt. This strips every occurrence of the bot's own
+/// mention (including the optional `|name` display form) and trims surrounding
+/// whitespace. Mentions of other users are left intact.
+pub(super) fn strip_bot_mention(text: &str, bot_user_id: &str) -> String {
+    if bot_user_id.is_empty() || text.is_empty() {
+        return text.trim().to_string();
+    }
+
+    let prefix = format!("<@{bot_user_id}");
+    let mut out = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(idx) = remaining.find(&prefix) {
+        out.push_str(&remaining[..idx]);
+        let after_prefix = &remaining[idx + prefix.len()..];
+        // The character after `<@BOTID` must be either `>` or `|` for this to be
+        // the bot mention (and not a longer user id that happens to share a prefix).
+        match after_prefix.chars().next() {
+            Some('>') => {
+                remaining = &after_prefix[1..];
+            }
+            Some('|') => {
+                // Skip through the closing `>`
+                if let Some(end) = after_prefix.find('>') {
+                    remaining = &after_prefix[end + 1..];
+                } else {
+                    // Malformed — no closing `>`. Keep the rest verbatim and stop.
+                    out.push_str(&remaining[idx..]);
+                    return out.trim().to_string();
+                }
+            }
+            _ => {
+                // Not our mention (e.g. `<@U0BOTX>` where X makes it a different user).
+                // Emit one char of the match and continue scanning after it.
+                out.push_str(&remaining[idx..idx + 1]);
+                remaining = &remaining[idx + 1..];
+            }
+        }
+    }
+    out.push_str(remaining);
+    // Collapse any runs of whitespace created by the removal, then trim.
+    let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed
+}
+
 /// Parse a Slack `EventCallback` into an `InboundMessage`.
 ///
 /// Returns `None` for:
@@ -38,24 +87,15 @@ pub async fn parse_event(
         return None;
     }
 
-    // Skip non-standard message subtypes
+    // Skip non-standard message subtypes.
+    // NOTE: `file_share` is intentionally NOT filtered — it's the subtype Slack uses
+    // when a user uploads a file (with or without a caption), and dropping it would
+    // silently lose all user file uploads.
     if let Some(ref subtype) = event.subtype {
         match subtype.as_str() {
             "bot_message" | "message_changed" | "message_deleted" | "channel_join"
-            | "channel_leave" | "file_share" => return None,
+            | "channel_leave" => return None,
             _ => {}
-        }
-    }
-
-    let text = event.text.as_deref()?;
-    if text.is_empty() {
-        return None;
-    }
-
-    // Check echo cache — skip if this text matches a recently sent outbound message
-    if let Some(cache) = echo_cache {
-        if cache.lock().await.is_echo(text) {
-            return None;
         }
     }
 
@@ -76,9 +116,35 @@ pub async fn parse_event(
                     data: f.url_private.clone().unwrap_or_default(),
                     filename: f.name.clone(),
                 })
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+
+    // Normalize text: strip bot @mention tokens (e.g. `<@U0BOT>` or `<@U0BOT|name>`)
+    // so they don't pollute the agent's prompt. An @mention-only message with no
+    // remaining content is still valid if attachments are present.
+    let raw_text = event.text.as_deref().unwrap_or("");
+    let text = match bot_user_id {
+        Some(bot_id) => strip_bot_mention(raw_text, bot_id),
+        None => raw_text.to_string(),
+    };
+
+    // A message is valid if it has either non-empty text OR at least one attachment.
+    // This allows pure file uploads (file_share with empty text) to flow through
+    // and allows bot-mention-only messages when files are attached.
+    if text.is_empty() && attachments.is_empty() {
+        return None;
+    }
+
+    // Check echo cache — skip if this text matches a recently sent outbound message.
+    // Only meaningful for non-empty text; attachment-only messages bypass the cache.
+    if !text.is_empty() {
+        if let Some(cache) = echo_cache {
+            if cache.lock().await.is_echo(&text) {
+                return None;
+            }
+        }
+    }
 
     let peer_kind = match event.channel_type.as_deref() {
         Some("im") => Some(PEER_KIND_DIRECT.to_string()),
@@ -88,7 +154,7 @@ pub async fn parse_event(
 
     Some(InboundMessage {
         sender_id: sender_id.to_string(),
-        text: text.to_string(),
+        text,
         channel_id: event.channel.clone(),
         thread_id: None,
         message_id: event.ts.clone(),
@@ -305,5 +371,141 @@ mod tests {
         assert_eq!(msg.attachments.len(), 1);
         assert_eq!(msg.attachments[0].mime_type, "application/pdf");
         assert_eq!(msg.attachments[0].filename.as_deref(), Some("test.pdf"));
+    }
+
+    // --- file_share subtype regression tests ---
+
+    fn slack_file(name: &str, mime: &str) -> super::super::types::SlackFile {
+        super::super::types::SlackFile {
+            id: "F123".to_string(),
+            name: Some(name.to_string()),
+            mimetype: Some(mime.to_string()),
+            url_private: Some(format!(
+                "https://files.slack.com/files-pri/T123-F123/{name}"
+            )),
+            size: Some(1024),
+            filetype: Some("bin".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_share_subtype_with_caption_parses() {
+        let mut event = make_slack_event("message");
+        event.subtype = Some("file_share".to_string());
+        event.text = Some("check this out".to_string());
+        event.files = Some(vec![slack_file("report.pdf", "application/pdf")]);
+        let cb = make_event(event);
+        let msg = parse_event(&cb, None, None).await.unwrap();
+        assert_eq!(msg.text, "check this out");
+        assert_eq!(msg.attachments.len(), 1);
+        assert_eq!(msg.attachments[0].filename.as_deref(), Some("report.pdf"));
+    }
+
+    #[tokio::test]
+    async fn file_share_subtype_with_empty_text_still_parses() {
+        let mut event = make_slack_event("message");
+        event.subtype = Some("file_share".to_string());
+        event.text = Some(String::new());
+        event.files = Some(vec![slack_file("pic.png", "image/png")]);
+        let cb = make_event(event);
+        let msg = parse_event(&cb, None, None).await.unwrap();
+        assert!(msg.text.is_empty());
+        assert_eq!(msg.attachments.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn file_share_subtype_with_no_files_and_no_text_returns_none() {
+        let mut event = make_slack_event("message");
+        event.subtype = Some("file_share".to_string());
+        event.text = Some(String::new());
+        event.files = None;
+        let cb = make_event(event);
+        assert!(parse_event(&cb, None, None).await.is_none());
+    }
+
+    // --- bot mention stripping tests ---
+
+    #[test]
+    fn strip_bot_mention_no_mention() {
+        assert_eq!(strip_bot_mention("hello world", "U0BOT"), "hello world");
+    }
+
+    #[test]
+    fn strip_bot_mention_simple() {
+        assert_eq!(strip_bot_mention("<@U0BOT> hello", "U0BOT"), "hello");
+    }
+
+    #[test]
+    fn strip_bot_mention_display_form() {
+        assert_eq!(strip_bot_mention("<@U0BOT|borg> hello", "U0BOT"), "hello");
+    }
+
+    #[test]
+    fn strip_bot_mention_at_end() {
+        assert_eq!(strip_bot_mention("hey <@U0BOT>", "U0BOT"), "hey");
+    }
+
+    #[test]
+    fn strip_bot_mention_multiple() {
+        assert_eq!(
+            strip_bot_mention("<@U0BOT> and <@U0BOT>!", "U0BOT"),
+            "and !"
+        );
+    }
+
+    #[test]
+    fn strip_bot_mention_mention_only() {
+        assert_eq!(strip_bot_mention("<@U0BOT>", "U0BOT"), "");
+    }
+
+    #[test]
+    fn strip_bot_mention_leaves_other_users_intact() {
+        assert_eq!(
+            strip_bot_mention("<@U0BOT> ping <@U0OTHER>", "U0BOT"),
+            "ping <@U0OTHER>"
+        );
+    }
+
+    #[test]
+    fn strip_bot_mention_no_false_match_on_prefix_collision() {
+        // `<@U0BOTX>` must NOT be stripped when the bot id is `U0BOT`.
+        assert_eq!(
+            strip_bot_mention("hello <@U0BOTX>", "U0BOT"),
+            "hello <@U0BOTX>"
+        );
+    }
+
+    #[test]
+    fn strip_bot_mention_empty_bot_id_noop() {
+        assert_eq!(strip_bot_mention("  hello  ", ""), "hello");
+    }
+
+    #[tokio::test]
+    async fn parse_strips_bot_mention_when_bot_user_id_set() {
+        let mut event = make_slack_event("app_mention");
+        event.text = Some("<@U0BOT> summarize this".to_string());
+        let cb = make_event(event);
+        let msg = parse_event(&cb, Some("U0BOT"), None).await.unwrap();
+        assert_eq!(msg.text, "summarize this");
+    }
+
+    #[tokio::test]
+    async fn parse_mention_only_with_attachment_still_parses() {
+        let mut event = make_slack_event("message");
+        event.subtype = Some("file_share".to_string());
+        event.text = Some("<@U0BOT>".to_string());
+        event.files = Some(vec![slack_file("screenshot.png", "image/png")]);
+        let cb = make_event(event);
+        let msg = parse_event(&cb, Some("U0BOT"), None).await.unwrap();
+        assert!(msg.text.is_empty());
+        assert_eq!(msg.attachments.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn parse_mention_only_no_attachment_returns_none() {
+        let mut event = make_slack_event("message");
+        event.text = Some("<@U0BOT>".to_string());
+        let cb = make_event(event);
+        assert!(parse_event(&cb, Some("U0BOT"), None).await.is_none());
     }
 }
