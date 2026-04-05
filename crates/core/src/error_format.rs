@@ -42,6 +42,100 @@ impl fmt::Display for ErrorCategory {
     }
 }
 
+/// Context-overflow substrings, shared between the pattern table and the
+/// rate-limit disambiguation logic. Defined once to prevent drift.
+const CONTEXT_OVERFLOW_PATTERNS: &[&str] = &[
+    "context window",
+    "context length",
+    "context_length",
+    "maximum context",
+    "request too large",
+    "prompt too long",
+    "prompt is too long",
+    "maximum token",
+    "exceeds the model",
+    "input too long",
+];
+
+/// Pattern table mapping error substrings to categories (checked in order).
+const ERROR_PATTERNS: &[(&[&str], ErrorCategory)] = &[
+    (
+        &[
+            "429",
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "throttl",
+        ],
+        ErrorCategory::RateLimit,
+    ),
+    (
+        &[
+            "402",
+            "billing",
+            "payment required",
+            "insufficient_quota",
+            "quota exceeded",
+            "out of credits",
+            "no credits",
+            "exceeded your current quota",
+        ],
+        ErrorCategory::Billing,
+    ),
+    (
+        &[
+            "401",
+            "403",
+            "unauthorized",
+            "forbidden",
+            "invalid api key",
+            "invalid_api_key",
+            "auth error",
+            "authentication failed",
+        ],
+        ErrorCategory::Auth,
+    ),
+    (CONTEXT_OVERFLOW_PATTERNS, ErrorCategory::ContextOverflow),
+    (
+        &[
+            "500",
+            "502",
+            "503",
+            "504",
+            "overloaded",
+            "server error",
+            "service unavailable",
+            "bad gateway",
+            "internal server error",
+        ],
+        ErrorCategory::Overloaded,
+    ),
+    (
+        &[
+            "connection refused",
+            "connection reset",
+            "dns",
+            "network unreachable",
+            "no route to host",
+            "broken pipe",
+            "connect timeout",
+            "tls",
+            "ssl",
+            "certificate",
+        ],
+        ErrorCategory::Transport,
+    ),
+    (
+        &[
+            "timed out",
+            "timeout",
+            "request timed out",
+            "deadline exceeded",
+        ],
+        ErrorCategory::Timeout,
+    ),
+];
+
 /// Classify a raw error string into an `ErrorCategory`.
 ///
 /// Uses pattern matching on common provider error patterns, HTTP status codes,
@@ -49,104 +143,21 @@ impl fmt::Display for ErrorCategory {
 pub fn classify_error(raw: &str) -> ErrorCategory {
     let lower = raw.to_lowercase();
 
-    // Rate limit patterns
-    if lower.contains("429")
-        || lower.contains("rate limit")
-        || lower.contains("rate_limit")
-        || lower.contains("too many requests")
-        || lower.contains("throttl")
-    {
-        // Distinguish TPM (tokens per minute) rate limits from context overflow
-        if is_context_overflow(&lower) && !lower.contains("tokens per minute") {
-            return ErrorCategory::ContextOverflow;
+    for &(patterns, category) in ERROR_PATTERNS {
+        if patterns.iter().any(|p| lower.contains(p)) {
+            // Disambiguate: rate-limit + context-overflow signals →
+            // prefer ContextOverflow unless it's a TPM rate limit.
+            if category == ErrorCategory::RateLimit
+                && CONTEXT_OVERFLOW_PATTERNS.iter().any(|p| lower.contains(p))
+                && !lower.contains("tokens per minute")
+            {
+                return ErrorCategory::ContextOverflow;
+            }
+            return category;
         }
-        return ErrorCategory::RateLimit;
-    }
-
-    // Billing patterns
-    if lower.contains("402")
-        || lower.contains("billing")
-        || lower.contains("payment required")
-        || lower.contains("insufficient_quota")
-        || lower.contains("quota exceeded")
-        || lower.contains("out of credits")
-        || lower.contains("no credits")
-        || lower.contains("exceeded your current quota")
-    {
-        return ErrorCategory::Billing;
-    }
-
-    // Auth patterns
-    if lower.contains("401")
-        || lower.contains("403")
-        || lower.contains("unauthorized")
-        || lower.contains("forbidden")
-        || lower.contains("invalid api key")
-        || lower.contains("invalid_api_key")
-        || lower.contains("auth error")
-        || lower.contains("authentication failed")
-    {
-        return ErrorCategory::Auth;
-    }
-
-    // Context overflow patterns (check before overloaded since 400 can overlap)
-    if is_context_overflow(&lower) {
-        return ErrorCategory::ContextOverflow;
-    }
-
-    // Server overloaded patterns
-    if lower.contains("500")
-        || lower.contains("502")
-        || lower.contains("503")
-        || lower.contains("504")
-        || lower.contains("overloaded")
-        || lower.contains("server error")
-        || lower.contains("service unavailable")
-        || lower.contains("bad gateway")
-        || lower.contains("internal server error")
-    {
-        return ErrorCategory::Overloaded;
-    }
-
-    // Transport / network patterns
-    if lower.contains("connection refused")
-        || lower.contains("connection reset")
-        || lower.contains("dns")
-        || lower.contains("network unreachable")
-        || lower.contains("no route to host")
-        || lower.contains("broken pipe")
-        || lower.contains("connect timeout")
-        || lower.contains("tls")
-        || lower.contains("ssl")
-        || lower.contains("certificate")
-    {
-        return ErrorCategory::Transport;
-    }
-
-    // Timeout patterns
-    if lower.contains("timed out")
-        || lower.contains("timeout")
-        || lower.contains("request timed out")
-        || lower.contains("deadline exceeded")
-    {
-        return ErrorCategory::Timeout;
     }
 
     ErrorCategory::Unknown
-}
-
-/// Check if an error message indicates a context window overflow.
-fn is_context_overflow(lower: &str) -> bool {
-    lower.contains("context window")
-        || lower.contains("context length")
-        || lower.contains("context_length")
-        || lower.contains("maximum context")
-        || lower.contains("request too large")
-        || lower.contains("prompt too long")
-        || lower.contains("prompt is too long")
-        || lower.contains("maximum token")
-        || lower.contains("exceeds the model")
-        || lower.contains("input too long")
 }
 
 /// Strip HTML content from error messages (e.g., Cloudflare error pages).

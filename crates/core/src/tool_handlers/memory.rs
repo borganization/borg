@@ -7,17 +7,20 @@ use crate::embeddings;
 use crate::memory::{read_memory, write_memory_scoped, WriteMode};
 use crate::mmr;
 
-use super::require_str_param;
+use super::{
+    optional_bool_param, optional_f64_param, optional_str_param, optional_u64_param,
+    require_str_param,
+};
 
 pub fn handle_write_memory(args: &serde_json::Value) -> Result<String> {
     let filename = require_str_param(args, "filename")?;
     let content = require_str_param(args, "content")?;
-    let mode = if args["append"].as_bool().unwrap_or(false) {
+    let mode = if optional_bool_param(args, "append", false) {
         WriteMode::Append
     } else {
         WriteMode::Overwrite
     };
-    let scope = args["scope"].as_str().unwrap_or("global");
+    let scope = optional_str_param(args, "scope").unwrap_or("global");
     write_memory_scoped(filename, content, mode, scope)
 }
 
@@ -138,8 +141,8 @@ fn search_scope(
 #[instrument(skip_all, fields(tool.name = "memory_search"))]
 pub async fn handle_memory_search(args: &serde_json::Value, config: &Config) -> Result<String> {
     let query = require_str_param(args, "query")?;
-    let max_results = args["max_results"].as_u64().unwrap_or(5) as usize;
-    let min_score = args["min_score"].as_f64().unwrap_or(0.2) as f32;
+    let max_results = optional_u64_param(args, "max_results", 5) as usize;
+    let min_score = optional_f64_param(args, "min_score", 0.2) as f32;
     let vector_weight = config.memory.embeddings.vector_weight;
     let bm25_weight = config.memory.embeddings.bm25_weight;
     let db = Database::open()?;

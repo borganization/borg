@@ -4,7 +4,7 @@ use tracing::instrument;
 use crate::config::Config;
 use crate::db::Database;
 
-use super::require_str_param;
+use super::{optional_bool_param, optional_str_param, require_str_param};
 
 pub fn handle_manage_scripts(args: &serde_json::Value, config: &Config) -> Result<String> {
     if !config.scripts.enabled {
@@ -17,13 +17,12 @@ pub fn handle_manage_scripts(args: &serde_json::Value, config: &Config) -> Resul
         "create" => {
             let name = require_str_param(args, "name")?;
             let patch = require_str_param(args, "patch")?;
-            let description = args["description"].as_str().unwrap_or("");
-            let runtime = args["runtime"].as_str().unwrap_or("python");
-            let entrypoint = args["entrypoint"].as_str().unwrap_or("main.py");
-            let sandbox_profile = args["sandbox_profile"]
-                .as_str()
+            let description = optional_str_param(args, "description").unwrap_or("");
+            let runtime = optional_str_param(args, "runtime").unwrap_or("python");
+            let entrypoint = optional_str_param(args, "entrypoint").unwrap_or("main.py");
+            let sandbox_profile = optional_str_param(args, "sandbox_profile")
                 .unwrap_or(&config.scripts.default_sandbox_profile);
-            let network_access = args["network_access"].as_bool().unwrap_or(false);
+            let network_access = optional_bool_param(args, "network_access", false);
             let fs_read: Vec<String> = args["fs_read"]
                 .as_array()
                 .map(|a| {
@@ -40,7 +39,7 @@ pub fn handle_manage_scripts(args: &serde_json::Value, config: &Config) -> Resul
                         .collect()
                 })
                 .unwrap_or_default();
-            let ephemeral = args["ephemeral"].as_bool().unwrap_or(false);
+            let ephemeral = optional_bool_param(args, "ephemeral", false);
 
             crate::scripts::create_script(
                 &db,

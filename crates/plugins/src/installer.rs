@@ -38,7 +38,7 @@ pub async fn install(
     }
 
     // 3. Store credentials in keychain
-    let service = format!("borg-{}", def.id.replace('/', "-"));
+    let service = def.service_name();
     for (key, value) in credentials {
         send_event(
             progress_tx,
@@ -115,7 +115,7 @@ pub fn uninstall(def: &PluginDef, data_dir: &std::path::Path) -> Result<()> {
     }
 
     // Remove keychain entries
-    let service = format!("borg-{}", def.id.replace('/', "-"));
+    let service = def.service_name();
     for cred in def.required_credentials {
         remove_credential(&service, cred.key);
     }
@@ -136,7 +136,7 @@ pub fn is_installed(def: &PluginDef, _data_dir: &std::path::Path) -> bool {
             let has_env = std::env::var(cred.key)
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
-            let service = format!("borg-{}", def.id.replace('/', "-"));
+            let service = def.service_name();
             let account = credential_account(cred.key);
             has_env || crate::keychain::check(&service, &account)
         });

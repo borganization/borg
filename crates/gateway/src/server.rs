@@ -17,8 +17,9 @@ use borg_core::config::Config;
 use borg_core::db::Database;
 use borg_core::telemetry::BorgMetrics;
 
-use crate::discord::api::DiscordClient;
-use crate::google_chat::api::GoogleChatClient;
+use crate::channel_trait::{self, NativeChannelRegistry, WebhookContext};
+use crate::discord::channel::DiscordChannel;
+use crate::google_chat::channel::GoogleChatChannel;
 use crate::handler;
 use crate::handler::InboundMessage;
 use crate::health::ChannelHealthRegistry;
@@ -28,11 +29,13 @@ use crate::registry::ChannelRegistry;
 use crate::retry::RetryPolicy;
 use crate::session_queue::SessionQueue;
 use crate::slack::api::SlackClient;
+use crate::slack::channel::SlackChannel;
 use crate::slack::dedup::EventDeduplicator;
-use crate::teams::api::TeamsClient;
+use crate::teams::channel::TeamsChannel;
 use crate::telegram::api::TelegramClient;
+use crate::telegram::channel::TelegramChannel;
 use crate::telegram::dedup::UpdateDeduplicator;
-use crate::twilio::api::TwilioClient;
+use crate::twilio::channel::TwilioChannel;
 
 use borg_core::constants;
 
@@ -41,36 +44,20 @@ const MAX_BODY_SIZE: usize = constants::GATEWAY_MAX_BODY_SIZE;
 struct AppState {
     config: Config,
     registry: ChannelRegistry,
+    native_channels: NativeChannelRegistry,
     session_queue: SessionQueue,
     request_timeout: Duration,
     health: Arc<RwLock<ChannelHealthRegistry>>,
     rate_limiter: Option<Arc<Mutex<SlidingWindowLimiter>>>,
     metrics: BorgMetrics,
-    telegram_client: Option<Arc<TelegramClient>>,
-    telegram_dedup: Arc<Mutex<UpdateDeduplicator>>,
-    telegram_secret: Option<String>,
+    // Slack fields (still used by slack_command_handler)
     slack_client: Option<Arc<SlackClient>>,
     slack_signing_secret: Option<String>,
-    slack_dedup: Arc<Mutex<EventDeduplicator>>,
-    twilio_client: Option<Arc<TwilioClient>>,
-    twilio_auth_token: Option<String>,
-    twilio_phone_number: Option<String>,
-    twilio_whatsapp_number: Option<String>,
-    discord_client: Option<Arc<DiscordClient>>,
-    discord_public_key: Option<String>,
-    teams_client: Option<Arc<TeamsClient>>,
-    teams_app_secret: Option<String>,
-    google_chat_client: Option<Arc<GoogleChatClient>>,
-    google_chat_token: Option<String>,
-    poke_tx: Option<mpsc::Sender<()>>,
-    /// Telegram bot @username for group mention activation.
-    telegram_bot_username: Option<String>,
     /// Slack bot user ID for group mention activation (e.g. "U123ABC").
     slack_bot_user_id: Option<String>,
+    poke_tx: Option<mpsc::Sender<()>>,
     /// Auto-reply state (shared across handlers).
     auto_reply_state: crate::auto_reply::SharedAutoReplyState,
-    /// TTS synthesizer for auto voice replies.
-    tts_synthesizer: Option<Arc<borg_core::tts::TtsSynthesizer>>,
 }
 
 /// HTTP webhook server for messaging channel integrations.
@@ -144,41 +131,81 @@ impl GatewayServer {
 
         let signal_client = crate::channel_init::init_signal(&self.config).await;
 
+        // TTS synthesizer (shared between webhook and polling paths)
+        let tts_synth: Option<Arc<borg_core::tts::TtsSynthesizer>> =
+            if self.config.tts.enabled && self.config.tts.auto_mode {
+                borg_core::tts::TtsSynthesizer::from_config(&self.config).map(Arc::new)
+            } else {
+                None
+            };
+
+        // Build native channel registry for unified webhook dispatch
+        let native_channels = {
+            let mut reg = NativeChannelRegistry::new();
+            if let Some(ref client) = telegram_client {
+                reg.register(Arc::new(TelegramChannel {
+                    client: client.clone(),
+                    dedup: telegram_dedup.clone(),
+                    secret: telegram_secret.clone(),
+                    bot_username: telegram_bot_username.clone(),
+                    config: self.config.clone(),
+                    tts_synthesizer: tts_synth.clone(),
+                }));
+            }
+            if let Some(ref client) = slack_client {
+                reg.register(Arc::new(SlackChannel {
+                    client: client.clone(),
+                    signing_secret: slack_signing_secret.clone(),
+                    dedup: Arc::new(Mutex::new(EventDeduplicator::new())),
+                    bot_user_id: slack_bot_user_id.clone(),
+                }));
+            }
+            if let Some(ref client) = twilio_client {
+                reg.register(Arc::new(TwilioChannel {
+                    client: client.clone(),
+                    auth_token: twilio_auth_token.clone(),
+                    phone_number: twilio_phone_number.clone(),
+                    whatsapp_number: twilio_whatsapp_number.clone(),
+                    config: self.config.clone(),
+                }));
+            }
+            if let Some(ref client) = discord_client {
+                reg.register(Arc::new(DiscordChannel {
+                    client: client.clone(),
+                    public_key: discord_public_key.clone(),
+                }));
+            }
+            if let Some(ref client) = teams_client {
+                reg.register(Arc::new(TeamsChannel {
+                    client: client.clone(),
+                    app_secret: teams_app_secret.clone(),
+                }));
+            }
+            if let Some(ref client) = google_chat_client {
+                reg.register(Arc::new(GoogleChatChannel {
+                    client: client.clone(),
+                    token: google_chat_token.clone(),
+                }));
+            }
+            reg
+        };
+
         let state = Arc::new(AppState {
             config: self.config.clone(),
             registry,
+            native_channels,
             session_queue: SessionQueue::new(gateway_config.max_concurrent),
             request_timeout: Duration::from_millis(gateway_config.request_timeout_ms),
             health: health.clone(),
             rate_limiter,
             metrics: self.metrics.clone(),
-            telegram_client: telegram_client.clone(),
-            telegram_dedup: telegram_dedup.clone(),
-            telegram_secret,
             slack_client,
             slack_signing_secret,
-            slack_dedup: Arc::new(Mutex::new(EventDeduplicator::new())),
-            twilio_client,
-            twilio_auth_token,
-            twilio_phone_number,
-            twilio_whatsapp_number,
-            discord_client,
-            discord_public_key,
-            teams_client,
-            teams_app_secret,
-            google_chat_client,
-            google_chat_token,
-            poke_tx: self.poke_tx,
-            telegram_bot_username: telegram_bot_username.clone(),
             slack_bot_user_id,
+            poke_tx: self.poke_tx,
             auto_reply_state: std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::auto_reply::AutoReplyState::default(),
             )),
-            tts_synthesizer: if self.config.tts.enabled && self.config.tts.auto_mode {
-                borg_core::tts::TtsSynthesizer::from_config(&self.config).map(Arc::new)
-            } else {
-                None
-            },
         });
 
         let app = Router::new()
@@ -272,7 +299,7 @@ impl GatewayServer {
                 let poll_config = self.config.clone();
                 let poll_health = health.clone();
                 let poll_bot_username = telegram_bot_username.clone();
-                let poll_tts = state.tts_synthesizer.clone();
+                let poll_tts = tts_synth.clone();
 
                 let callback: crate::telegram::polling::PollCallback =
                     Arc::new(move |inbound, chat_id| {
@@ -814,38 +841,22 @@ async fn webhook_handler(
         }
     }
 
-    // Native channel handling — messages are enqueued to the SessionQueue for
-    // per-session sequential processing with global concurrency control.
-    if name == "telegram" {
-        if let Some(ref tg_client) = state.telegram_client {
-            return handle_telegram_webhook(&state, tg_client, &headers, &body).await;
-        }
-    }
-
-    if name == "slack" {
-        if let Some(ref slack_client) = state.slack_client {
-            return handle_slack_webhook(&state, slack_client, &headers, &body).await;
-        }
-    }
-
-    if name == "twilio" || name == "whatsapp" || name == "sms" {
-        if let Some(ref twilio_client) = state.twilio_client {
-            return handle_twilio_webhook(&state, twilio_client, &headers, &body).await;
-        }
-    }
-
-    if name == "discord" {
-        if let Some(ref discord_client) = state.discord_client {
-            return handle_discord_webhook_route(&state, discord_client, &headers, &body).await;
-        }
-    }
-
-    if name == "teams" && state.teams_client.is_some() {
-        return handle_teams_webhook_route(&state, &headers, &body).await;
-    }
-
-    if name == "google-chat" || name == "google_chat" || name == "googlechat" {
-        return handle_google_chat_webhook_route(&state, &body).await;
+    // Native channel handling via unified dispatch — messages are enqueued to the
+    // SessionQueue for per-session sequential processing with global concurrency control.
+    if let Some(channel) = state.native_channels.get(&name) {
+        let ctx = WebhookContext {
+            config: &state.config,
+            health: &state.health,
+        };
+        return channel_trait::dispatch_webhook(
+            channel,
+            &headers,
+            &body,
+            &ctx,
+            &state.session_queue,
+            state.request_timeout,
+        )
+        .await;
     }
 
     // Convert headers to JSON
@@ -930,339 +941,10 @@ fn service_unavailable_response() -> WebhookResponse {
     )
 }
 
-#[instrument(skip_all, fields(channel = "telegram"))]
-async fn handle_telegram_webhook(
-    state: &Arc<AppState>,
-    tg_client: &Arc<TelegramClient>,
-    headers: &HeaderMap,
-    body: &str,
-) -> WebhookResponse {
-    // Verify and parse synchronously — must happen before returning 200
-    let parsed = match crate::telegram::handle_telegram_webhook(
-        headers,
-        body,
-        state.telegram_secret.as_deref(),
-        &state.telegram_dedup,
-    )
-    .await
-    {
-        Ok(Some(pair)) => pair,
-        Ok(None) => {
-            return ok_response();
-        }
-        Err(e) => {
-            warn!("Telegram webhook error: {e:#}");
-            return ok_response();
-        }
-    };
+// Old per-channel webhook handler functions removed — native channels now use
+// NativeChannelRegistry + dispatch_webhook from channel_trait.rs.
 
-    let (mut inbound, audio_ref) = parsed;
-
-    // Audio transcription must happen before enqueuing (needs the file data)
-    if let Some(ref audio) = audio_ref {
-        if let Some(transcriber) =
-            borg_core::media_understanding::AudioTranscriber::from_config(&state.config)
-        {
-            match async {
-                let file_info = tg_client.get_file(&audio.file_id).await?;
-                let file_path = file_info
-                    .file_path
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("No file_path in getFile response"))?;
-                let bytes = tg_client.download_file(file_path).await?;
-                let filename = file_path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("audio.ogg")
-                    .to_string();
-                let lang = state.config.audio.language.as_deref();
-                transcriber
-                    .transcribe(&bytes, &audio.mime_type, &filename, lang)
-                    .await
-            }
-            .await
-            {
-                Ok((transcript, _attempts)) => {
-                    inbound.text = format!("[Voice transcript]: {transcript}");
-                    if state.config.audio.echo_transcript {
-                        let echo_chat_id: i64 = inbound
-                            .channel_id
-                            .as_deref()
-                            .and_then(|id| id.parse().ok())
-                            .unwrap_or(0);
-                        if echo_chat_id != 0 {
-                            let _ = tg_client
-                                .send_message(echo_chat_id, &transcript, None, None, None)
-                                .await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Audio transcription failed: {e}");
-                }
-            }
-        }
-    }
-
-    let chat_id: i64 = match inbound.channel_id.as_deref().and_then(|id| id.parse().ok()) {
-        Some(id) => id,
-        None => {
-            warn!("Missing or invalid chat_id in Telegram update");
-            return ok_response();
-        }
-    };
-
-    let thread_id: Option<i64> = inbound.thread_id.as_deref().and_then(|id| id.parse().ok());
-    let reply_to: Option<i64> = inbound.message_id.as_deref().and_then(|id| id.parse().ok());
-
-    // Start typing indicator with keepalive
-    let typing = crate::telegram::typing::TypingIndicator::start(tg_client.clone(), chat_id);
-
-    // Compute session key and enqueue work for sequential processing
-    let session_key = inbound.session_key("telegram", inbound.thread_id.as_deref().unwrap_or(""));
-
-    let state = state.clone();
-    let tg_client = tg_client.clone();
-    let work_state = state.clone();
-    let enqueued = state
-        .session_queue
-        .enqueue(
-            session_key,
-            Box::pin(async move {
-                let state = work_state;
-                let result = tokio::time::timeout(state.request_timeout, async {
-                    let tg_bot_mention = state
-                        .telegram_bot_username
-                        .as_deref()
-                        .map(|u| format!("@{u}"));
-                    let (response_text, _session_id) = handler::invoke_agent(
-                        "telegram",
-                        &inbound,
-                        &state.config,
-                        Some(&state.health),
-                        tg_bot_mention.as_deref(),
-                    )
-                    .await?;
-
-                    // Stop typing indicator before sending response
-                    typing.stop().await;
-
-                    send_telegram_response(
-                        &tg_client,
-                        chat_id,
-                        &response_text,
-                        thread_id,
-                        reply_to,
-                        &state.health,
-                        state.tts_synthesizer.as_deref(),
-                    )
-                    .await;
-
-                    Ok::<_, anyhow::Error>(())
-                })
-                .await;
-
-                if let Err(e) = result {
-                    warn!("Telegram queued work error: {e:?}");
-                }
-            }),
-        )
-        .await;
-
-    if !enqueued {
-        return service_unavailable_response();
-    }
-    // Return 200 immediately — response is sent via Telegram API asynchronously
-    ok_response()
-}
-
-#[instrument(skip_all, fields(channel = "slack"))]
-async fn handle_slack_webhook(
-    state: &Arc<AppState>,
-    slack_client: &Arc<SlackClient>,
-    headers: &HeaderMap,
-    body: &str,
-) -> WebhookResponse {
-    let webhook_result = match crate::slack::handle_slack_webhook(
-        headers,
-        body,
-        state.slack_signing_secret.as_deref(),
-        Some(&state.slack_dedup),
-        slack_client.bot_user_id(),
-        Some(slack_client.echo_cache()),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Slack webhook verification/parse error: {e:#}");
-            return (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(serde_json::json!({ "error": "Unauthorized" })),
-            );
-        }
-    };
-
-    let mut inbound = match webhook_result {
-        crate::slack::SlackWebhookResult::Challenge(challenge) => {
-            return (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "challenge": challenge })),
-            );
-        }
-        crate::slack::SlackWebhookResult::Skip => {
-            return ok_response();
-        }
-        crate::slack::SlackWebhookResult::Message(inbound) => *inbound,
-    };
-
-    // Ack reaction — immediate visual feedback (fire-and-forget)
-    if let (Some(ref ch), Some(ref ts)) = (&inbound.channel_id, &inbound.message_id) {
-        slack_client.add_reaction(ch, ts, "eyes").await;
-    }
-
-    // Download file attachments (placeholder URLs → base64 data)
-    let mut resolved_attachments = Vec::new();
-    for att in &inbound.attachments {
-        if att.data.starts_with("https://") {
-            match slack_client.download_file(&att.data).await {
-                Ok((bytes, content_type)) => {
-                    use base64::Engine;
-                    resolved_attachments.push(handler::InboundAttachment {
-                        mime_type: content_type,
-                        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                        filename: att.filename.clone(),
-                    });
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to download Slack file {}: {e}",
-                        att.filename.as_deref().unwrap_or("unknown")
-                    );
-                }
-            }
-        } else {
-            resolved_attachments.push(att.clone());
-        }
-    }
-    inbound.attachments = resolved_attachments;
-
-    // Channel history context for @mentions
-    if inbound.text.contains("<@") && inbound.thread_ts.is_none() {
-        if let Some(ref channel) = inbound.channel_id {
-            match slack_client.conversations_history(channel, 10).await {
-                Ok(history) if !history.is_empty() => {
-                    // Build context, capped at ~8000 chars to avoid prompt bloat
-                    const MAX_CONTEXT_CHARS: usize = 8000;
-                    let mut context = String::new();
-                    for m in history.iter().rev() {
-                        let line = format!("<@{}>: {}\n", m.user, m.text);
-                        if context.len() + line.len() > MAX_CONTEXT_CHARS {
-                            break;
-                        }
-                        context.push_str(&line);
-                    }
-                    if !context.is_empty() {
-                        inbound.text = format!(
-                            "[Channel context]\n{context}[Current message]\n{}",
-                            inbound.text
-                        );
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("Failed to fetch channel history for context: {e}");
-                }
-            }
-        }
-    }
-
-    let session_key = inbound.session_key("slack", inbound.thread_id.as_deref().unwrap_or(""));
-
-    let state = state.clone();
-    let slack_client = slack_client.clone();
-    let work_state = state.clone();
-    let enqueued = state
-        .session_queue
-        .enqueue(
-            session_key,
-            Box::pin(async move {
-                let state = work_state;
-                let result = tokio::time::timeout(state.request_timeout, async {
-                    let channel_id = inbound.channel_id.clone().unwrap_or_default();
-                    let thread_ts = inbound.thread_ts.clone();
-                    let message_ts = inbound.message_id.clone();
-
-                    let typing = crate::slack::typing::TypingIndicator::start(
-                        slack_client.clone(),
-                        channel_id.clone(),
-                        thread_ts.clone(),
-                        inbound.message_id.clone(),
-                    );
-
-                    let slack_mention = state
-                        .slack_bot_user_id
-                        .as_deref()
-                        .map(|id| format!("<@{id}>"));
-                    let (response_text, _session_id) = handler::invoke_agent(
-                        "slack",
-                        &inbound,
-                        &state.config,
-                        Some(&state.health),
-                        slack_mention.as_deref(),
-                    )
-                    .await?;
-
-                    typing.stop().await;
-
-                    if response_text.trim().is_empty() {
-                        return Ok::<_, anyhow::Error>(());
-                    }
-
-                    // Convert markdown to Slack mrkdwn
-                    let formatted = crate::slack::format::markdown_to_mrkdwn(&response_text);
-
-                    if let Err(e) = slack_client
-                        .post_message(&channel_id, &formatted, thread_ts.as_deref())
-                        .await
-                    {
-                        warn!("Failed to send Slack response: {e}");
-                        state
-                            .health
-                            .write()
-                            .await
-                            .record_error("slack", &e.to_string());
-                    } else {
-                        state.health.write().await.record_outbound("slack");
-
-                        // Replace ack reaction with done reaction
-                        if let Some(ref ts) = message_ts {
-                            slack_client.remove_reaction(&channel_id, ts, "eyes").await;
-                            slack_client
-                                .add_reaction(&channel_id, ts, "white_check_mark")
-                                .await;
-                        }
-                    }
-
-                    Ok::<_, anyhow::Error>(())
-                })
-                .await;
-
-                if let Err(e) = result {
-                    warn!("Slack queued work error: {e:?}");
-                }
-            }),
-        )
-        .await;
-
-    if !enqueued {
-        return service_unavailable_response();
-    }
-    ok_response()
-}
-
-/// Handle Slack slash commands (e.g. `/borg help`).
-/// Slack sends these as `application/x-www-form-urlencoded` POST.
+/// Slack slash-command handler (separate route from webhook_handler).
 async fn slack_command_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1381,131 +1063,8 @@ async fn slack_command_handler(
     ok_response()
 }
 
-#[instrument(skip_all, fields(channel = "twilio"))]
-async fn handle_twilio_webhook(
-    state: &Arc<AppState>,
-    twilio_client: &Arc<TwilioClient>,
-    headers: &HeaderMap,
-    body: &str,
-) -> WebhookResponse {
-    use crate::twilio::types::TwilioChannelType;
-
-    // Verify signature if auth token is available
-    if let Some(ref auth_token) = state.twilio_auth_token {
-        if let Some(ref public_url) = state.config.gateway.public_url {
-            let webhook_url = format!("{public_url}/webhook/twilio");
-            if let Err(e) = crate::twilio::verify::verify_twilio_signature(
-                headers,
-                &webhook_url,
-                body,
-                auth_token,
-            ) {
-                warn!("Twilio signature verification failed: {e}");
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    axum::Json(serde_json::json!({ "error": "Unauthorized" })),
-                );
-            }
-        } else {
-            // Without public_url, we cannot verify Twilio signatures since
-            // the full URL is part of the HMAC input. Reject the request.
-            warn!("Twilio webhook rejected: gateway.public_url not configured, cannot verify signature");
-            return (
-                StatusCode::FORBIDDEN,
-                axum::Json(serde_json::json!({
-                    "error": "Twilio signature verification unavailable: gateway.public_url not configured"
-                })),
-            );
-        }
-    }
-
-    // Parse inbound message
-    let parsed = match crate::twilio::parse::parse_webhook(body) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Failed to parse Twilio webhook: {e}");
-            // Twilio expects 200 even on parse errors to avoid retries
-            return ok_response();
-        }
-    };
-
-    let channel_type = parsed.channel_type;
-    let sender = parsed.message.sender_id.clone();
-
-    let session_key = format!("{}:{}", channel_type.as_str(), sender);
-
-    let state = state.clone();
-    let twilio_client = twilio_client.clone();
-    let work_state = state.clone();
-    let enqueued = state
-        .session_queue
-        .enqueue(
-            session_key,
-            Box::pin(async move {
-                let state = work_state;
-                let result = tokio::time::timeout(state.request_timeout, async {
-                    let (response_text, _session_id) = handler::invoke_agent(
-                        channel_type.as_str(),
-                        &parsed.message,
-                        &state.config,
-                        Some(&state.health),
-                        None,
-                    )
-                    .await?;
-
-                    let from_number = match channel_type {
-                        TwilioChannelType::WhatsApp => state.twilio_whatsapp_number.as_deref(),
-                        TwilioChannelType::Sms => state.twilio_phone_number.as_deref(),
-                    };
-
-                    if let Some(from) = from_number {
-                        let send_result = match channel_type {
-                            TwilioChannelType::WhatsApp => {
-                                twilio_client
-                                    .send_whatsapp(from, &sender, &response_text)
-                                    .await
-                            }
-                            TwilioChannelType::Sms => {
-                                twilio_client.send_sms(from, &sender, &response_text).await
-                            }
-                        };
-
-                        if let Err(e) = send_result {
-                            warn!("Failed to send Twilio {channel_type} response: {e}");
-                            state
-                                .health
-                                .write()
-                                .await
-                                .record_error(channel_type.as_str(), &e.to_string());
-                        } else {
-                            state
-                                .health
-                                .write()
-                                .await
-                                .record_outbound(channel_type.as_str());
-                        }
-                    } else {
-                        warn!("No outbound phone number configured for {channel_type}");
-                    }
-
-                    Ok::<_, anyhow::Error>(())
-                })
-                .await;
-
-                if let Err(e) = result {
-                    warn!("Twilio queued work error: {e:?}");
-                }
-            }),
-        )
-        .await;
-
-    if !enqueued {
-        return service_unavailable_response();
-    }
-    ok_response()
-}
-
-/// Send a Telegram response with HTML formatting and plain-text fallback.
+/// Send a Telegram response with HTML formatting, TTS, and fallback.
+/// Used by the Telegram long-polling code path (not webhooks).
 async fn send_telegram_response(
     client: &TelegramClient,
     chat_id: i64,
@@ -1558,372 +1117,6 @@ async fn send_telegram_response(
                 }
             }
             Err(e) => warn!("TTS synthesis failed: {e}"),
-        }
-    }
-}
-
-#[instrument(skip_all, fields(channel = "discord"))]
-async fn handle_discord_webhook_route(
-    state: &Arc<AppState>,
-    discord_client: &Arc<DiscordClient>,
-    headers: &HeaderMap,
-    body: &str,
-) -> WebhookResponse {
-    use crate::discord::DiscordWebhookResult;
-
-    let webhook_result = match crate::discord::handle_discord_webhook(
-        headers,
-        body,
-        state.discord_public_key.as_deref(),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Discord webhook verification/parse error: {e:#}");
-            return (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(serde_json::json!({ "error": "Unauthorized" })),
-            );
-        }
-    };
-
-    match webhook_result {
-        DiscordWebhookResult::Pong(response) => (
-            StatusCode::OK,
-            axum::Json(serde_json::to_value(response).unwrap_or_default()),
-        ),
-        DiscordWebhookResult::Skip => ok_response(),
-        DiscordWebhookResult::Message(inbound, interaction) => {
-            // Send deferred response so Discord doesn't time out
-            if let Err(e) = discord_client
-                .create_interaction_response(
-                    &interaction.id,
-                    &interaction.token,
-                    &crate::discord::types::InteractionResponse::deferred(),
-                )
-                .await
-            {
-                warn!("Failed to send Discord deferred response: {e}");
-            }
-
-            let session_key =
-                inbound.session_key("discord", inbound.channel_id.as_deref().unwrap_or(""));
-
-            let state = state.clone();
-            let discord_client = discord_client.clone();
-            let work_state = state.clone();
-            let enqueued = state
-                .session_queue
-                .enqueue(
-                    session_key,
-                    Box::pin(async move {
-                        let state = work_state;
-                        let channel_id = inbound.channel_id.clone().unwrap_or_default();
-                        // Start typing indicator for the channel
-                        let typing = crate::discord::typing::TypingIndicator::start(
-                            discord_client.clone(),
-                            channel_id.clone(),
-                        );
-                        let result = tokio::time::timeout(state.request_timeout, async {
-                            let (response_text, _session_id) = handler::invoke_agent(
-                                "discord",
-                                &inbound,
-                                &state.config,
-                                Some(&state.health),
-                                None,
-                            )
-                            .await?;
-
-                            // Stop typing before sending response
-                            typing.stop().await;
-
-                            if let Some(app_id) = &interaction.application_id {
-                                if let Err(e) = discord_client
-                                    .edit_original_response(
-                                        app_id,
-                                        &interaction.token,
-                                        &response_text,
-                                    )
-                                    .await
-                                {
-                                    warn!("Failed to edit Discord interaction response: {e}");
-                                    if let Err(e2) = discord_client
-                                        .send_message(&channel_id, &response_text)
-                                        .await
-                                    {
-                                        warn!("Failed to send Discord channel message: {e2}");
-                                        state
-                                            .health
-                                            .write()
-                                            .await
-                                            .record_error("discord", &e2.to_string());
-                                    } else {
-                                        state.health.write().await.record_outbound("discord");
-                                    }
-                                } else {
-                                    state.health.write().await.record_outbound("discord");
-                                }
-                            } else if let Err(e) = discord_client
-                                .send_message(&channel_id, &response_text)
-                                .await
-                            {
-                                warn!("Failed to send Discord message: {e}");
-                                state
-                                    .health
-                                    .write()
-                                    .await
-                                    .record_error("discord", &e.to_string());
-                            } else {
-                                state.health.write().await.record_outbound("discord");
-                            }
-
-                            Ok::<_, anyhow::Error>(())
-                        })
-                        .await;
-
-                        if let Err(e) = result {
-                            warn!("Discord queued work error: {e:?}");
-                        }
-                    }),
-                )
-                .await;
-
-            if !enqueued {
-                return service_unavailable_response();
-            }
-            ok_response()
-        }
-    }
-}
-
-#[instrument(skip_all, fields(channel = "teams"))]
-async fn handle_teams_webhook_route(
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    body: &str,
-) -> WebhookResponse {
-    let parsed = match crate::teams::handle_teams_webhook(
-        headers,
-        body,
-        state.teams_app_secret.as_deref(),
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Teams webhook verification/parse error: {e:#}");
-            return (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(serde_json::json!({ "error": "Unauthorized" })),
-            );
-        }
-    };
-
-    let (inbound, activity) = match parsed {
-        Some(pair) => pair,
-        None => {
-            return ok_response();
-        }
-    };
-
-    let teams_client = match &state.teams_client {
-        Some(c) => c.clone(),
-        None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": "Teams client not configured" })),
-            );
-        }
-    };
-
-    let session_key = inbound.session_key("teams", inbound.channel_id.as_deref().unwrap_or(""));
-
-    let state = state.clone();
-    let work_state = state.clone();
-    let enqueued = state
-        .session_queue
-        .enqueue(
-            session_key,
-            Box::pin(async move {
-                let state = work_state;
-                let result = tokio::time::timeout(state.request_timeout, async {
-                    let (response_text, _session_id) = handler::invoke_agent(
-                        "teams",
-                        &inbound,
-                        &state.config,
-                        Some(&state.health),
-                        None,
-                    )
-                    .await?;
-
-                    let service_url = activity
-                        .service_url
-                        .as_deref()
-                        .ok_or_else(|| anyhow::anyhow!("Missing service_url in Teams activity"))?;
-                    let conversation_id = activity
-                        .conversation
-                        .as_ref()
-                        .map(|c| c.id.as_str())
-                        .ok_or_else(|| anyhow::anyhow!("Missing conversation in Teams activity"))?;
-
-                    if let Err(e) = teams_client
-                        .reply_to_activity(
-                            service_url,
-                            conversation_id,
-                            &activity.id,
-                            &response_text,
-                        )
-                        .await
-                    {
-                        warn!("Failed to send Teams reply: {e}");
-                        state
-                            .health
-                            .write()
-                            .await
-                            .record_error("teams", &e.to_string());
-                    } else {
-                        state.health.write().await.record_outbound("teams");
-                    }
-
-                    Ok::<_, anyhow::Error>(())
-                })
-                .await;
-
-                if let Err(e) = result {
-                    warn!("Teams queued work error: {e:?}");
-                }
-            }),
-        )
-        .await;
-
-    if !enqueued {
-        return service_unavailable_response();
-    }
-    ok_response()
-}
-
-#[instrument(skip_all, fields(channel = "google_chat"))]
-async fn handle_google_chat_webhook_route(state: &Arc<AppState>, body: &str) -> WebhookResponse {
-    let inbound = match crate::google_chat::handle_google_chat_webhook(
-        body,
-        state.google_chat_token.as_deref(),
-    ) {
-        Ok(Some(msg)) => msg,
-        Ok(None) => {
-            return ok_response();
-        }
-        Err(e) => {
-            warn!("Google Chat webhook error: {e:#}");
-            // Return 200 to avoid retries from Google
-            return ok_response();
-        }
-    };
-
-    let space_name = inbound.channel_id.clone().unwrap_or_default();
-    let thread_name = inbound.thread_id.clone();
-
-    // If we have a REST API client, enqueue for async processing
-    if let Some(ref gc_client) = state.google_chat_client {
-        let session_key = inbound.session_key("google-chat", &space_name);
-
-        let gc_client = gc_client.clone();
-        let state = state.clone();
-        let work_state = state.clone();
-        let enqueued = state
-            .session_queue
-            .enqueue(
-                session_key,
-                Box::pin(async move {
-                    let state = work_state;
-                    let result = tokio::time::timeout(state.request_timeout, async {
-                        let (response_text, _session_id) = handler::invoke_agent(
-                            "google-chat",
-                            &inbound,
-                            &state.config,
-                            Some(&state.health),
-                            None,
-                        )
-                        .await?;
-
-                        if let Err(e) = gc_client
-                            .send_message(&space_name, &response_text, thread_name.as_deref())
-                            .await
-                        {
-                            warn!("Failed to send Google Chat response: {e}");
-                            state
-                                .health
-                                .write()
-                                .await
-                                .record_error("google-chat", &e.to_string());
-                        } else {
-                            state.health.write().await.record_outbound("google-chat");
-                        }
-
-                        Ok::<_, anyhow::Error>(())
-                    })
-                    .await;
-
-                    if let Err(e) = result {
-                        warn!("Google Chat queued work error: {e:?}");
-                    }
-                }),
-            )
-            .await;
-
-        if !enqueued {
-            return service_unavailable_response();
-        }
-        ok_response()
-    } else {
-        // No async client — invoke agent and return synchronous response
-        // This path must be synchronous since Google Chat expects the response in the HTTP body
-        let session_key = inbound.session_key("google-chat", &space_name);
-        let state = state.clone();
-
-        // For sync Google Chat, we still queue but wait for the result
-        let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
-        let work_state = state.clone();
-        let enqueued = state
-            .session_queue
-            .enqueue(
-                session_key,
-                Box::pin(async move {
-                    let state = work_state;
-                    let result = tokio::time::timeout(state.request_timeout, async {
-                        let (response_text, _session_id) = handler::invoke_agent(
-                            "google-chat",
-                            &inbound,
-                            &state.config,
-                            Some(&state.health),
-                            None,
-                        )
-                        .await?;
-                        state.health.write().await.record_outbound("google-chat");
-                        Ok::<_, anyhow::Error>(response_text)
-                    })
-                    .await;
-
-                    let text = match result {
-                        Ok(Ok(t)) => Some(t),
-                        _ => None,
-                    };
-                    let _ = tx.send(text);
-                }),
-            )
-            .await;
-
-        if !enqueued {
-            return service_unavailable_response();
-        }
-
-        match rx.await {
-            Ok(Some(text)) => (
-                StatusCode::OK,
-                axum::Json(serde_json::json!({ "text": text })),
-            ),
-            _ => (
-                StatusCode::OK,
-                axum::Json(
-                    serde_json::json!({ "text": "Sorry, I encountered an error processing your message." }),
-                ),
-            ),
         }
     }
 }

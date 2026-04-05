@@ -25,6 +25,13 @@ pub struct PluginDef {
     pub is_native: bool,
 }
 
+impl PluginDef {
+    /// Keychain/credential-store service name derived from the plugin ID.
+    pub fn service_name(&self) -> String {
+        format!("borg-{}", self.id.replace('/', "-"))
+    }
+}
+
 // ── Embedded templates via include_str! ──
 
 // WhatsApp
