@@ -38,6 +38,9 @@ pub const TELEGRAM_DEDUP_CAPACITY: usize = 1000;
 /// Capacity of the Slack event deduplicator.
 pub const SLACK_DEDUP_CAPACITY: usize = 5000;
 
+/// Capacity of the Discord interaction deduplicator.
+pub const DISCORD_DEDUP_CAPACITY: usize = 5000;
+
 /// Capacity of the Slack echo cache (recently sent message hashes).
 pub const SLACK_ECHO_CACHE_CAPACITY: usize = 100;
 
@@ -404,6 +407,7 @@ mod tests {
     fn dedup_capacities_positive() {
         assert!(TELEGRAM_DEDUP_CAPACITY > 0);
         assert!(SLACK_DEDUP_CAPACITY > 0);
+        assert!(DISCORD_DEDUP_CAPACITY > 0);
         assert!(SLACK_ECHO_CACHE_CAPACITY > 0);
         assert!(SELF_CHAT_CACHE_MAX_ENTRIES > 0);
     }

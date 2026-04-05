@@ -170,10 +170,11 @@ impl GatewayServer {
                 }));
             }
             if let Some(ref client) = discord_client {
-                reg.register(Arc::new(DiscordChannel {
-                    client: client.clone(),
-                    public_key: discord_public_key.clone(),
-                }));
+                reg.register(Arc::new(DiscordChannel::new(
+                    client.clone(),
+                    discord_public_key.clone(),
+                    self.config.gateway.discord_guild_allowlist.clone(),
+                )));
             }
             if let Some(ref client) = teams_client {
                 reg.register(Arc::new(TeamsChannel {
