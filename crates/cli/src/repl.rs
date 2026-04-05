@@ -6,8 +6,8 @@ use borg_core::agent::{Agent, AgentEvent};
 use borg_core::config::Config;
 use borg_core::telemetry::BorgMetrics;
 
-pub async fn run() -> Result<()> {
-    crate::tui::run().await
+pub async fn run(resume: Option<String>) -> Result<Option<crate::tui::ResumeHint>> {
+    crate::tui::run(resume).await
 }
 
 pub async fn one_shot(

@@ -204,7 +204,15 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub async fn run() -> Result<()> {
+/// Information needed to print a "resume this session" hint after the TUI exits.
+pub struct ResumeHint {
+    /// Short (8-char) session ID for compact display.
+    pub short_id: String,
+    /// Session title for display.
+    pub title: String,
+}
+
+pub async fn run(resume: Option<String>) -> Result<Option<ResumeHint>> {
     let config = Config::load()?;
     let metrics = BorgMetrics::from_config(&config);
     let mut agent = Agent::new(config.clone(), metrics.clone())?;
@@ -245,9 +253,26 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Try to resume the last session
+    // Resume logic: explicit --resume <id> picks a specific session; otherwise
+    // auto-resume the most recently updated non-empty session (existing behavior).
     let mut resumed_info: Option<(String, usize)> = None;
-    if let Ok(Some(session)) = borg_core::session::load_last_session() {
+    if let Some(prefix) = resume.as_deref() {
+        match borg_core::session::resolve_session_id(prefix) {
+            Ok(meta) => {
+                let title = meta.title.clone();
+                let count = meta.message_count;
+                if let Err(e) = agent.load_session(&meta.id) {
+                    eprintln!("borg: failed to load session '{}': {e}", meta.id);
+                    return Ok(None);
+                }
+                resumed_info = Some((title, count));
+            }
+            Err(e) => {
+                eprintln!("borg: {e}");
+                return Ok(None);
+            }
+        }
+    } else if let Ok(Some(session)) = borg_core::session::load_last_session() {
         if !session.messages.is_empty() {
             let title = session.meta.title.clone();
             let count = session.meta.message_count;
@@ -394,7 +419,7 @@ async fn run_event_loop(
     event_stream: &mut EventStream,
     tick_rate: Duration,
     gateway_shutdown: &Arc<Mutex<CancellationToken>>,
-) -> Result<()> {
+) -> Result<Option<ResumeHint>> {
     let mut tick_interval = tokio::time::interval(tick_rate);
 
     loop {
@@ -495,8 +520,21 @@ async fn run_event_loop(
 
         match action {
             AppAction::Quit => {
-                agent.lock().await.close_browser().await;
-                return Ok(());
+                let hint = {
+                    let mut a = agent.lock().await;
+                    a.close_browser().await;
+                    let s = a.session();
+                    if s.meta.message_count > 0 {
+                        let short = s.meta.id.chars().take(8).collect::<String>();
+                        Some(ResumeHint {
+                            short_id: short,
+                            title: s.meta.title.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                };
+                return Ok(hint);
             }
             AppAction::SendMessage {
                 input,
@@ -653,29 +691,22 @@ async fn run_event_loop(
                 app.push_system_message("New session started.".to_string());
             }
             AppAction::LoadSession { id } => {
-                // Support partial ID matching (prefix)
-                let full_id = match borg_core::session::list_sessions() {
-                    Ok(sessions) => {
-                        let matches: Vec<_> =
-                            sessions.iter().filter(|s| s.id.starts_with(&id)).collect();
-                        match matches.len() {
-                            0 => None,
-                            1 => Some(matches[0].id.clone()),
-                            _ => {
-                                app.push_system_message(format!(
-                                    "Ambiguous session ID '{id}' — matches {} sessions. Be more specific.",
-                                    matches.len()
-                                ));
-                                continue;
-                            }
-                        }
+                // Support partial ID matching (prefix) via shared resolver.
+                let load_id = match borg_core::session::resolve_session_id(&id) {
+                    Ok(meta) => meta.id,
+                    Err(borg_core::session::ResolveSessionError::Ambiguous { count, .. }) => {
+                        app.push_system_message(format!(
+                            "Ambiguous session ID '{id}' — matches {count} sessions. Be more specific."
+                        ));
+                        continue;
                     }
-                    Err(_) => None,
+                    // NotFound / Empty: fall through to agent.load_session which will
+                    // produce a clean "Session '<id>' not found" error below.
+                    Err(_) => id.clone(),
                 };
-                let load_id = full_id.as_deref().unwrap_or(&id);
 
                 let mut agent = agent.lock().await;
-                match agent.load_session(load_id) {
+                match agent.load_session(&load_id) {
                     Ok(()) => {
                         let session = agent.session();
                         let title = session.meta.title.clone();
@@ -1158,7 +1189,8 @@ async fn run_event_loop(
                 // Fullscreen ASCII art goodbye
                 goodbye::render(terminal)?;
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                return Ok(());
+                // Binary is being removed — no point offering a resume hint.
+                return Ok(None);
             }
             AppAction::Poke => {
                 let config = app.config.clone();
