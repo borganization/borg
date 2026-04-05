@@ -2742,9 +2742,10 @@ fn vitals_event_ledger_appends() {
     }
     let events = db.vitals_events_since(0).unwrap();
     assert_eq!(events.len(), 5);
-    // State replayed from events: stability 40 + 5*1 = 45
+    // State replayed from events with source decay (all same source "run_shell"):
+    // counts 1-2: full (+1 each), count 3+: floor(1*0.5)=0, so only 2 count
     let state = db.get_vitals_state().unwrap();
-    assert_eq!(state.stability, 45);
+    assert_eq!(state.stability, 42);
 }
 
 #[test]

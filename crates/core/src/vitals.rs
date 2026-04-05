@@ -326,6 +326,20 @@ fn clamp_add(val: u8, delta: i8) -> u8 {
     result.clamp(0, 100) as u8
 }
 
+/// Apply a decay multiplier to a stat delta. Positive deltas use floor (less reward),
+/// negative deltas use ceil (less penalty) so repeated failures also attenuate.
+fn apply_decay_to_delta(delta: i8, multiplier: f64) -> i8 {
+    if multiplier >= 1.0 {
+        return delta;
+    }
+    let scaled = delta as f64 * multiplier;
+    if delta >= 0 {
+        scaled.floor() as i8
+    } else {
+        scaled.ceil() as i8
+    }
+}
+
 // ── Event Replay (Event Sourcing) ──
 
 /// Replay verified events from baseline to compute current state.
@@ -358,13 +372,31 @@ pub fn replay_events_with_key(key: &[u8], events: &[VitalsEvent]) -> VitalsState
             continue;
         }
 
-        // Apply deltas
-        let deltas = StatDeltas {
+        // Diminishing returns: repeated same-source calls yield reduced deltas
+        let source_multiplier =
+            rate_limiter.source_decay_multiplier(event.created_at, &event.source);
+        if source_multiplier == 0.0 {
+            continue;
+        }
+
+        // Apply deltas with source decay
+        let raw_deltas = StatDeltas {
             stability: event.stability_delta as i8,
             focus: event.focus_delta as i8,
             sync: event.sync_delta as i8,
             growth: event.growth_delta as i8,
             happiness: event.happiness_delta as i8,
+        };
+        let deltas = if source_multiplier < 1.0 {
+            StatDeltas {
+                stability: apply_decay_to_delta(raw_deltas.stability, source_multiplier),
+                focus: apply_decay_to_delta(raw_deltas.focus, source_multiplier),
+                sync: apply_decay_to_delta(raw_deltas.sync, source_multiplier),
+                growth: apply_decay_to_delta(raw_deltas.growth, source_multiplier),
+                happiness: apply_decay_to_delta(raw_deltas.happiness, source_multiplier),
+            }
+        } else {
+            raw_deltas
         };
         apply_deltas(&mut state, &deltas);
 
@@ -1130,9 +1162,139 @@ mod tests {
         }
 
         let state = replay_events(&events);
-        // Only 3 creation events should apply (cap), each +1 stability
-        assert_eq!(state.stability, 40 + 3 * 1); // 43, not 40 + 20*1
-        assert_eq!(state.growth, 40 + 3 * 1); // 43, not 40 + 20*1
+        // Category cap is 3, but source decay also applies (all same source "test"):
+        // count 1: 1.0 (full), count 2: 1.0 (full), count 3: 0.5 → floor(1*0.5)=0
+        // So only 2 creation events contribute their +1 stability/growth
+        assert_eq!(state.stability, 40 + 2 * 1); // 42
+        assert_eq!(state.growth, 40 + 2 * 1); // 42
+    }
+
+    #[test]
+    fn test_source_decay_skips_repeated_success() {
+        // 4 success events from same source "run_shell" in same hour
+        // Success delta: stability +1
+        // Decay: count 1-2 full, count 3 floor(1*0.5)=0, count 4 floor(1*0.25)=0
+        let deltas = deltas_for(EventCategory::Success);
+        let hour_base: i64 = 3600;
+        let mut events = Vec::new();
+        let mut prev = "0".to_string();
+        for i in 0..4 {
+            let ts = hour_base + i;
+            let hmac = compute_event_hmac(
+                VITALS_HMAC_LEGACY,
+                &prev,
+                "success",
+                "run_shell",
+                deltas,
+                ts,
+            );
+            events.push(VitalsEvent {
+                id: i + 1,
+                category: "success".to_string(),
+                source: "run_shell".to_string(),
+                stability_delta: deltas.stability as i32,
+                focus_delta: deltas.focus as i32,
+                sync_delta: deltas.sync as i32,
+                growth_delta: deltas.growth as i32,
+                happiness_delta: deltas.happiness as i32,
+                metadata_json: None,
+                created_at: ts,
+                hmac: hmac.clone(),
+                prev_hmac: prev,
+            });
+            prev = hmac;
+        }
+        let state = replay_events(&events);
+        assert_eq!(state.stability, 42); // 40 + 2, not 40 + 4
+    }
+
+    #[test]
+    fn test_diverse_sources_full_credit() {
+        // 4 success events from different sources = full credit for each
+        let deltas = deltas_for(EventCategory::Success);
+        let hour_base: i64 = 3600;
+        let sources = ["run_shell", "browser", "apply_patch", "read_file"];
+        let mut events = Vec::new();
+        let mut prev = "0".to_string();
+        for (i, source) in sources.iter().enumerate() {
+            let ts = hour_base + i as i64;
+            let hmac = compute_event_hmac(VITALS_HMAC_LEGACY, &prev, "success", source, deltas, ts);
+            events.push(VitalsEvent {
+                id: i as i64 + 1,
+                category: "success".to_string(),
+                source: source.to_string(),
+                stability_delta: deltas.stability as i32,
+                focus_delta: deltas.focus as i32,
+                sync_delta: deltas.sync as i32,
+                growth_delta: deltas.growth as i32,
+                happiness_delta: deltas.happiness as i32,
+                metadata_json: None,
+                created_at: ts,
+                hmac: hmac.clone(),
+                prev_hmac: prev,
+            });
+            prev = hmac;
+        }
+        let state = replay_events(&events);
+        assert_eq!(state.stability, 44); // 40 + 4, all full credit
+    }
+
+    #[test]
+    fn test_decay_attenuates_negative_deltas() {
+        // Failure deltas: stability -1. Repeated same-source failures should also decay.
+        let deltas = deltas_for(EventCategory::Failure);
+        let hour_base: i64 = 3600;
+        let mut events = Vec::new();
+        let mut prev = "0".to_string();
+        for i in 0..4 {
+            let ts = hour_base + i;
+            let hmac = compute_event_hmac(
+                VITALS_HMAC_LEGACY,
+                &prev,
+                "failure",
+                "run_shell",
+                deltas,
+                ts,
+            );
+            events.push(VitalsEvent {
+                id: i + 1,
+                category: "failure".to_string(),
+                source: "run_shell".to_string(),
+                stability_delta: deltas.stability as i32,
+                focus_delta: deltas.focus as i32,
+                sync_delta: deltas.sync as i32,
+                growth_delta: deltas.growth as i32,
+                happiness_delta: deltas.happiness as i32,
+                metadata_json: None,
+                created_at: ts,
+                hmac: hmac.clone(),
+                prev_hmac: prev,
+            });
+            prev = hmac;
+        }
+        let state = replay_events(&events);
+        // Failure stability: -1. Decay: count 1-2 full (-1 each), count 3 ceil(-1*0.5)=0, count 4: 0
+        assert_eq!(state.stability, 38); // 40 - 2, not 40 - 4
+    }
+
+    #[test]
+    fn test_apply_decay_to_delta_helper() {
+        // Positive deltas: floor
+        assert_eq!(apply_decay_to_delta(1, 1.0), 1);
+        assert_eq!(apply_decay_to_delta(1, 0.5), 0);
+        assert_eq!(apply_decay_to_delta(2, 0.5), 1);
+        assert_eq!(apply_decay_to_delta(3, 0.5), 1);
+        assert_eq!(apply_decay_to_delta(1, 0.25), 0);
+        assert_eq!(apply_decay_to_delta(1, 0.0), 0);
+        // Negative deltas: ceil (attenuate penalty)
+        assert_eq!(apply_decay_to_delta(-1, 1.0), -1);
+        assert_eq!(apply_decay_to_delta(-1, 0.5), 0);
+        assert_eq!(apply_decay_to_delta(-2, 0.5), -1);
+        assert_eq!(apply_decay_to_delta(-3, 0.5), -1);
+        assert_eq!(apply_decay_to_delta(-1, 0.25), 0);
+        assert_eq!(apply_decay_to_delta(-1, 0.0), 0);
+        // Zero
+        assert_eq!(apply_decay_to_delta(0, 0.5), 0);
     }
 
     #[test]
