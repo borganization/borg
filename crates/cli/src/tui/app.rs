@@ -192,6 +192,7 @@ impl<'a> App<'a> {
         heartbeat_event_tx: Option<mpsc::Sender<HeartbeatEvent>>,
         poke_tx: Option<mpsc::Sender<()>>,
     ) -> Self {
+        let blocked_paths = config.security.blocked_paths.clone();
         Self {
             cells: Vec::new(),
             state: AppState::Idle,
@@ -219,7 +220,10 @@ impl<'a> App<'a> {
             schedule_popup: SchedulePopup::new(),
             skills_popup: SkillsPopup::new(),
             migrate_popup: MigratePopup::new(),
-            file_popup: FileSearchPopup::new(),
+            file_popup: FileSearchPopup::with_config(
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                blocked_paths,
+            ),
             throbber_state: ThrobberState::default(),
             transcript_area: Rect::default(),
             steer_tx: None,
@@ -765,8 +769,22 @@ impl<'a> App<'a> {
                             if let Some(file) = self.file_popup.selected_file() {
                                 let display = file.display.clone();
                                 let path = file.full_path.clone();
-                                self.composer.add_file_ref(display, path);
-                                self.file_popup.dismiss();
+                                let is_dir = file.is_dir;
+                                if is_dir {
+                                    // Directory: rewrite the in-progress mention to
+                                    // `@<path>/` (no trailing space, no FileRef) and
+                                    // re-run the popup so the user can drill further.
+                                    self.composer.set_partial_mention(display);
+                                    let text = self.composer.text();
+                                    if let Some(q) = extract_at_query(&text) {
+                                        self.file_popup.update_query(&q);
+                                    } else {
+                                        self.file_popup.dismiss();
+                                    }
+                                } else {
+                                    self.composer.add_file_ref(display, path);
+                                    self.file_popup.dismiss();
+                                }
                             }
                             return Ok(AppAction::Continue);
                         }

@@ -285,6 +285,19 @@ impl<'a> Composer<'a> {
         self.set_text(&new_text);
     }
 
+    /// Rewrite the in-progress `@query` to `@<display>` without pushing a
+    /// `FileRef` or appending a trailing space. Used when the user selects a
+    /// directory in the file popup so they can continue drilling into it.
+    pub fn set_partial_mention(&mut self, display: String) {
+        let current = self.text();
+        let new_text = if let Some(at_pos) = current.rfind('@') {
+            format!("{}@{display}", &current[..at_pos])
+        } else {
+            format!("{current}@{display}")
+        };
+        self.set_text(&new_text);
+    }
+
     pub fn take_file_refs(&mut self) -> Vec<FileRef> {
         std::mem::take(&mut self.file_refs)
     }
