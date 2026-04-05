@@ -84,6 +84,10 @@ pub struct LlmConfig {
     /// Enables native thinking for supported providers (Anthropic, OpenAI o-series).
     #[serde(default)]
     pub thinking: ThinkingLevel,
+    /// Path to the `claude` CLI binary (auto-detected if omitted).
+    /// Only used when provider is `claude-cli`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_cli_path: Option<String>,
 }
 
 impl Default for LlmConfig {
@@ -103,6 +107,7 @@ impl Default for LlmConfig {
             base_url: None,
             fallback: Vec::new(),
             thinking: ThinkingLevel::Off,
+            claude_cli_path: None,
         }
     }
 }

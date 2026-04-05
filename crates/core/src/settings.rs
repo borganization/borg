@@ -67,6 +67,7 @@ pub const ALL_SETTING_KEYS: &[&str] = &[
     "tts.default_format",
     "conversation.collaboration_mode",
     "evolution.enabled",
+    "llm.claude_cli_path",
 ];
 
 /// Merges settings from three layers: DB overrides → config.toml → compiled defaults.
@@ -231,6 +232,12 @@ fn config_value_for_key(config: &Config, key: &str) -> Option<String> {
             format!("{}", config.conversation.collaboration_mode)
         }
         "evolution.enabled" => format!("{}", config.evolution.enabled),
+        "llm.claude_cli_path" => config
+            .llm
+            .claude_cli_path
+            .as_deref()
+            .unwrap_or("(auto-detect)")
+            .to_string(),
         _ => return None,
     })
 }

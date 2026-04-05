@@ -307,7 +307,32 @@ fn check_config(checks: &mut Vec<DiagnosticCheck>) {
 fn check_provider(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
     match config.resolve_provider() {
         Ok((provider, _key)) => {
-            if provider.requires_api_key() {
+            if provider == Provider::ClaudeCli {
+                if let Some(path) = crate::claude_cli::detect_cli_path() {
+                    checks.push(DiagnosticCheck::pass(
+                        "Provider",
+                        format!("Claude CLI found at {}", path.display()),
+                    ));
+                } else {
+                    checks.push(DiagnosticCheck::fail(
+                        "Provider",
+                        "Claude CLI binary",
+                        "not found — install Claude Code or set CLAUDE_CLI_PATH",
+                    ));
+                }
+                if crate::claude_cli::has_valid_auth() {
+                    checks.push(DiagnosticCheck::pass(
+                        "Provider",
+                        "Claude CLI authenticated",
+                    ));
+                } else {
+                    checks.push(DiagnosticCheck::warn(
+                        "Provider",
+                        "Claude CLI auth",
+                        "not authenticated or expired — run `claude login`",
+                    ));
+                }
+            } else if provider.requires_api_key() {
                 checks.push(DiagnosticCheck::pass("Provider", "API key set"));
             } else if Provider::ollama_available() {
                 checks.push(DiagnosticCheck::pass("Provider", "Ollama server reachable"));
@@ -330,6 +355,21 @@ fn check_provider(config: &Config, checks: &mut Vec<DiagnosticCheck>) {
                 format!("{e}"),
             ));
         }
+    }
+
+    // Also report Claude CLI availability even if not the active provider
+    if config
+        .llm
+        .provider
+        .as_deref()
+        .is_none_or(|p| p != "claude-cli")
+        && crate::claude_cli::detect_cli_path().is_some()
+        && crate::claude_cli::has_valid_auth()
+    {
+        checks.push(DiagnosticCheck::pass(
+            "Provider",
+            "Claude CLI available (alternative provider)",
+        ));
     }
 
     checks.push(DiagnosticCheck::warn(

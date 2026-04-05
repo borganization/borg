@@ -37,7 +37,7 @@ cargo fmt --check
 cargo clippy -- -D warnings
 ```
 
-Binary name is `borg`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, or a running Ollama instance at runtime (see `.env.example`).
+Binary name is `borg`. Requires one of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, a running Ollama instance, or Claude Code CLI with valid subscription at runtime (see `.env.example`).
 
 All integrations are compiled unconditionally into a single binary. iMessage is macOS-only via `#[cfg(target_os = "macos")]`.
 
@@ -201,7 +201,7 @@ Used by `apply_patch` to create/modify/delete files. Follows the codex apply-pat
 
 ```toml
 [llm]
-provider = "openrouter"             # openrouter | openai | anthropic | gemini | deepseek | groq | ollama (auto-detected if omitted)
+provider = "openrouter"             # openrouter | openai | anthropic | gemini | deepseek | groq | ollama | claude-cli (auto-detected if omitted)
 api_key_env = "OPENROUTER_API_KEY"
 model = "anthropic/claude-sonnet-4"
 temperature = 0.7
@@ -567,6 +567,7 @@ Five-layer defense against prompt injection attacks:
 | `crates/core/src/vitals.rs` | Vitals system: stats, events, decay, drift, VitalsHook |
 | `crates/core/src/doctor.rs` | Diagnostic checks and report formatting |
 | `crates/core/src/browser.rs` | Chrome detection, CDP session management, browser automation |
+| `crates/core/src/claude_cli.rs` | Claude Code CLI subprocess backend: detection, OAuth validation, JSONL streaming |
 | `crates/core/src/host_audit.rs` | Host security audit checks (firewall, ports, SSH, permissions, encryption, updates, services) |
 | `crates/core/src/git.rs` | Git utilities: ghost commits, git context, turn diff tracking |
 | `crates/core/src/project_doc.rs` | Project doc discovery (AGENTS.md / CLAUDE.md) for system prompt |

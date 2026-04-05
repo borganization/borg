@@ -16,6 +16,8 @@ pub enum Provider {
     DeepSeek,
     Groq,
     Ollama,
+    /// Claude Code CLI — uses the user's Claude subscription via subprocess.
+    ClaudeCli,
 }
 
 /// Priority order for cloud API key auto-detection.
@@ -42,6 +44,7 @@ impl Provider {
             Provider::DeepSeek => "https://api.deepseek.com/v1/chat/completions",
             Provider::Groq => "https://api.groq.com/openai/v1/chat/completions",
             Provider::Ollama => "http://localhost:11434/v1/chat/completions",
+            Provider::ClaudeCli => "", // Not used — communicates via subprocess
         }
     }
 
@@ -55,17 +58,18 @@ impl Provider {
             Provider::DeepSeek => "DEEPSEEK_API_KEY",
             Provider::Groq => "GROQ_API_KEY",
             Provider::Ollama => "OLLAMA_HOST",
+            Provider::ClaudeCli => "CLAUDE_CLI_PATH", // Optional override for claude binary path
         }
     }
 
     /// Whether this provider requires an API key.
     pub fn requires_api_key(&self) -> bool {
-        !matches!(self, Provider::Ollama)
+        !matches!(self, Provider::Ollama | Provider::ClaudeCli)
     }
 
     /// Whether this provider uses the OpenAI-compatible chat completions format.
     pub fn is_openai_compatible(&self) -> bool {
-        !matches!(self, Provider::Anthropic)
+        !matches!(self, Provider::Anthropic | Provider::ClaudeCli)
     }
 
     /// Build provider-specific HTTP headers.
@@ -74,8 +78,8 @@ impl Provider {
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
 
         match self {
-            Provider::Ollama => {
-                // No authentication needed for local Ollama
+            Provider::Ollama | Provider::ClaudeCli => {
+                // No authentication needed for local providers
             }
             Provider::OpenRouter => {
                 let bearer = format!("Bearer {api_key}");
@@ -116,13 +120,18 @@ impl Provider {
             }
         }
 
+        // Check for Claude CLI with valid OAuth auth
+        if crate::claude_cli::has_valid_auth() {
+            return Ok((Provider::ClaudeCli, String::new()));
+        }
+
         // Fall back to Ollama if running locally
         if Provider::ollama_available() {
             return Ok((Provider::Ollama, String::new()));
         }
 
         bail!(
-            "No API key found. Set one of: {}, or run `ollama serve` for local inference",
+            "No API key found. Set one of: {}, or run `ollama serve` for local inference, or install Claude Code for subscription access",
             DETECT_ORDER
                 .iter()
                 .map(Provider::default_env_var)
@@ -144,6 +153,10 @@ impl Provider {
             Provider::DeepSeek => model.strip_prefix("deepseek/").unwrap_or(model).to_string(),
             Provider::Groq => model.strip_prefix("groq/").unwrap_or(model).to_string(),
             Provider::Ollama => model.to_string(),
+            Provider::ClaudeCli => model
+                .strip_prefix("claude-cli/")
+                .unwrap_or(model)
+                .to_string(),
         }
     }
 
@@ -179,6 +192,8 @@ impl Provider {
             Provider::Ollama => {
                 m.contains("llava") || m.contains("vision") || m.contains("moondream")
             }
+            // Claude CLI: same as Anthropic — all Claude 3+ models support vision
+            Provider::ClaudeCli => !m.contains("claude-2") && !m.contains("claude-instant"),
         }
     }
 
@@ -192,6 +207,7 @@ impl Provider {
             Provider::DeepSeek => "deepseek",
             Provider::Groq => "groq",
             Provider::Ollama => "ollama",
+            Provider::ClaudeCli => "claude-cli",
         }
     }
 
@@ -206,6 +222,7 @@ impl Provider {
             "DEEPSEEK_API_KEY" => Some(Provider::DeepSeek),
             "GROQ_API_KEY" => Some(Provider::Groq),
             "OLLAMA_HOST" => Some(Provider::Ollama),
+            "CLAUDE_CLI_PATH" => Some(Provider::ClaudeCli),
             _ => None,
         }
     }
@@ -248,8 +265,9 @@ impl FromStr for Provider {
             "deepseek" => Ok(Provider::DeepSeek),
             "groq" => Ok(Provider::Groq),
             "ollama" => Ok(Provider::Ollama),
+            "claude-cli" | "claudecli" | "claude_cli" => Ok(Provider::ClaudeCli),
             _ => {
-                bail!("Unknown provider: {s}. Valid options: openrouter, openai, anthropic, gemini, deepseek, groq, ollama")
+                bail!("Unknown provider: {s}. Valid options: openrouter, openai, anthropic, gemini, deepseek, groq, ollama, claude-cli")
             }
         }
     }
@@ -490,5 +508,83 @@ mod tests {
         assert!(Provider::Ollama.supports_vision("moondream"));
         assert!(!Provider::Ollama.supports_vision("llama3.3"));
         assert!(!Provider::Ollama.supports_vision("mistral"));
+    }
+
+    // ── ClaudeCli tests ──
+
+    #[test]
+    fn claude_cli_from_str() {
+        assert_eq!(
+            Provider::from_str("claude-cli").unwrap(),
+            Provider::ClaudeCli
+        );
+        assert_eq!(
+            Provider::from_str("claudecli").unwrap(),
+            Provider::ClaudeCli
+        );
+        assert_eq!(
+            Provider::from_str("claude_cli").unwrap(),
+            Provider::ClaudeCli
+        );
+        assert_eq!(
+            Provider::from_str("Claude-CLI").unwrap(),
+            Provider::ClaudeCli
+        );
+    }
+
+    #[test]
+    fn claude_cli_round_trip() {
+        let s = Provider::ClaudeCli.as_str();
+        assert_eq!(s, "claude-cli");
+        assert_eq!(Provider::from_str(s).unwrap(), Provider::ClaudeCli);
+    }
+
+    #[test]
+    fn claude_cli_no_api_key_required() {
+        assert!(!Provider::ClaudeCli.requires_api_key());
+    }
+
+    #[test]
+    fn claude_cli_not_openai_compatible() {
+        assert!(!Provider::ClaudeCli.is_openai_compatible());
+    }
+
+    #[test]
+    fn claude_cli_normalize_model() {
+        assert_eq!(
+            Provider::ClaudeCli.normalize_model("claude-cli/claude-sonnet-4-6"),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            Provider::ClaudeCli.normalize_model("claude-sonnet-4-6"),
+            "claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn claude_cli_supports_vision() {
+        assert!(Provider::ClaudeCli.supports_vision("claude-sonnet-4-6"));
+        assert!(Provider::ClaudeCli.supports_vision("claude-opus-4-6"));
+        assert!(!Provider::ClaudeCli.supports_vision("claude-2"));
+    }
+
+    #[test]
+    fn claude_cli_base_url_is_empty() {
+        assert!(Provider::ClaudeCli.base_url().is_empty());
+    }
+
+    #[test]
+    fn claude_cli_build_headers_no_auth() {
+        let headers = Provider::ClaudeCli.build_headers("").unwrap();
+        assert!(headers.get("Authorization").is_none());
+        assert!(headers.get("x-api-key").is_none());
+    }
+
+    #[test]
+    fn claude_cli_from_env_var_name() {
+        assert_eq!(
+            Provider::from_env_var_name("CLAUDE_CLI_PATH"),
+            Some(Provider::ClaudeCli)
+        );
     }
 }

@@ -42,11 +42,12 @@ Recommended baseline:
 enum Tab {
     Welcome,
     Security,
+    Provider,
     ApiKey,
 }
 
 impl Tab {
-    const ALL: [Tab; 3] = [Tab::Welcome, Tab::Security, Tab::ApiKey];
+    const ALL: [Tab; 4] = [Tab::Welcome, Tab::Security, Tab::Provider, Tab::ApiKey];
 
     fn index(self) -> usize {
         Self::ALL.iter().position(|&t| t == self).unwrap_or(0)
@@ -56,6 +57,7 @@ impl Tab {
         match self {
             Tab::Welcome => "Welcome",
             Tab::Security => "Disclaimer",
+            Tab::Provider => "Provider",
             Tab::ApiKey => "API Key",
         }
     }
@@ -89,6 +91,10 @@ struct OnboardingState {
     // Security
     security_accepted: bool,
 
+    // Provider
+    provider_index: usize,
+    claude_cli_detected: bool,
+
     // API Key
     api_key_input: String,
     api_key_existing: bool,
@@ -103,9 +109,21 @@ struct OnboardingState {
 
 impl OnboardingState {
     fn new() -> Self {
+        let claude_cli_detected = borg_core::claude_cli::has_valid_auth();
+
         let api_key_existing = PROVIDERS
             .iter()
-            .any(|(id, _, _)| Self::check_existing_api_key(id));
+            .any(|(id, _, _)| Self::check_existing_api_key_cached(id, claude_cli_detected));
+
+        // Auto-select Claude CLI if detected, otherwise default to first provider
+        let provider_index = if claude_cli_detected {
+            PROVIDERS
+                .iter()
+                .position(|(id, _, _)| *id == "claude-cli")
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
         Self {
             tab: Tab::Welcome,
@@ -114,6 +132,8 @@ impl OnboardingState {
             agent_name: "Borg".to_string(),
             welcome_focus: WelcomeFocus::UserName,
             security_accepted: false,
+            provider_index,
+            claude_cli_detected,
             api_key_input: String::new(),
             api_key_existing,
             api_key_required_hint: false,
@@ -122,7 +142,11 @@ impl OnboardingState {
         }
     }
 
-    fn check_existing_api_key(provider_id: &str) -> bool {
+    fn check_existing_api_key_cached(provider_id: &str, claude_cli_detected: bool) -> bool {
+        // Claude CLI: use cached detection result
+        if provider_id == "claude-cli" {
+            return claude_cli_detected;
+        }
         let Ok(provider) = Provider::from_str(provider_id) else {
             return false;
         };
@@ -149,6 +173,7 @@ impl OnboardingState {
             .is_some_and(|k| !k.is_empty())
     }
 
+    #[cfg(test)]
     fn detect_provider_from_key(key: &str) -> &'static str {
         let trimmed = key.trim();
         if trimmed.starts_with("sk-or-") {
@@ -164,8 +189,15 @@ impl OnboardingState {
         }
     }
 
+    #[cfg(test)]
     fn detect_provider_from_env(&self) -> &'static str {
         for (id, _, _) in PROVIDERS {
+            if *id == "claude-cli" {
+                if borg_core::claude_cli::has_valid_auth() {
+                    return id;
+                }
+                continue;
+            }
             if let Ok(p) = Provider::from_str(id) {
                 if !p.requires_api_key() {
                     // Keyless providers: detect by checking if server is reachable
@@ -189,21 +221,27 @@ impl OnboardingState {
         match tab {
             Tab::Welcome => !self.user_name.is_empty(),
             Tab::Security => self.security_accepted,
+            Tab::Provider => true, // Always has a selection
             Tab::ApiKey => false,
         }
     }
 
+    /// Whether the selected provider needs an API key.
+    fn selected_provider_needs_key(&self) -> bool {
+        let (id, _, _) = PROVIDERS[self.provider_index];
+        id != "claude-cli" && id != "ollama"
+    }
+
     fn build_result(&self) -> OnboardingResult {
-        let api_key = if self.api_key_input.trim().is_empty() || self.api_key_existing {
+        let (provider_id, _, _) = PROVIDERS[self.provider_index];
+
+        let api_key = if !self.selected_provider_needs_key()
+            || self.api_key_input.trim().is_empty()
+            || self.api_key_existing
+        {
             None
         } else {
             Some(self.api_key_input.trim().to_string())
-        };
-
-        let provider_id = if let Some(ref key) = api_key {
-            Self::detect_provider_from_key(key)
-        } else {
-            self.detect_provider_from_env()
         };
 
         let models = models_for_provider(provider_id);
@@ -228,6 +266,11 @@ impl OnboardingState {
             match self.tab {
                 Tab::Welcome if self.user_name.trim().is_empty() => return,
                 Tab::Security if !self.security_accepted => return,
+                Tab::Provider if !self.selected_provider_needs_key() => {
+                    // Skip API Key tab for keyless providers — go straight to done
+                    self.done = true;
+                    return;
+                }
                 _ => {}
             }
             self.tab = Tab::ALL[idx + 1];
@@ -247,6 +290,7 @@ impl OnboardingState {
         self.input_mode = match self.tab {
             Tab::Welcome => InputMode::TextInput,
             Tab::ApiKey if !self.api_key_existing => InputMode::TextInput,
+            Tab::Provider | Tab::Security => InputMode::Normal,
             _ => InputMode::Normal,
         };
     }
@@ -260,6 +304,7 @@ impl OnboardingState {
         match self.tab {
             Tab::Welcome => self.handle_welcome_key(key),
             Tab::Security => self.handle_security_key(key),
+            Tab::Provider => self.handle_provider_key(key),
             Tab::ApiKey => self.handle_api_key_key(key),
         }
     }
@@ -319,6 +364,30 @@ impl OnboardingState {
                     self.prev_tab();
                 } else {
                     self.security_accepted = true;
+                    self.next_tab();
+                }
+            }
+            KeyCode::Left => self.prev_tab(),
+            _ => {}
+        }
+    }
+
+    fn handle_provider_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => {
+                if self.provider_index > 0 {
+                    self.provider_index -= 1;
+                } else {
+                    self.provider_index = PROVIDERS.len() - 1;
+                }
+            }
+            KeyCode::Down => {
+                self.provider_index = (self.provider_index + 1) % PROVIDERS.len();
+            }
+            KeyCode::Enter | KeyCode::Tab | KeyCode::Right => {
+                if is_shift_tab(&key) {
+                    self.prev_tab();
+                } else {
                     self.next_tab();
                 }
             }
@@ -480,6 +549,7 @@ fn render_tab_content(frame: &mut ratatui::Frame, area: Rect, state: &Onboarding
     match state.tab {
         Tab::Welcome => render_welcome(frame, content_area, state),
         Tab::Security => render_security(frame, content_area, state),
+        Tab::Provider => render_provider(frame, content_area, state),
         Tab::ApiKey => render_api_key(frame, content_area, state),
     }
 }
@@ -605,6 +675,65 @@ fn render_security(frame: &mut ratatui::Frame, area: Rect, _state: &OnboardingSt
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+fn render_provider(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        "Choose your LLM provider",
+        Style::default().fg(theme::CYAN),
+    )));
+    lines.push(Line::default());
+
+    for (i, (id, label, desc)) in PROVIDERS.iter().enumerate() {
+        let is_selected = i == state.provider_index;
+        let indicator = if is_selected { "● " } else { "○ " };
+        let style = if is_selected {
+            Style::default()
+                .fg(theme::CYAN)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme::dim()
+        };
+
+        // Show availability hint for keyless providers
+        let availability = if *id == "claude-cli" {
+            if state.claude_cli_detected {
+                " ✓"
+            } else {
+                " (not detected)"
+            }
+        } else if *id == "ollama" {
+            if Provider::ollama_available() {
+                " ✓"
+            } else {
+                " (not running)"
+            }
+        } else {
+            ""
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {indicator}{label}"), style),
+            Span::styled(
+                format!("  {desc}{availability}"),
+                if is_selected {
+                    Style::default().fg(theme::DIM_WHITE)
+                } else {
+                    theme::dim()
+                },
+            ),
+        ]));
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "  ↑/↓: select  Enter: continue",
+        theme::dim(),
+    )));
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 fn render_api_key(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -657,6 +786,7 @@ fn render_api_key(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingStat
 fn render_footer(frame: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let hint = match state.tab {
         Tab::Welcome => " Tab: next field  Enter: next  Esc: cancel",
+        Tab::Provider => " ↑/↓: select  Enter/Tab: next  Shift+Tab: back  Esc: cancel",
         _ if state.input_mode == InputMode::TextInput => " Type to enter  Tab: next  Esc: cancel",
         _ => " Tab/→: next  Shift+Tab/←: back  Esc: cancel",
     };
@@ -715,7 +845,10 @@ mod tests {
 
     #[test]
     fn tab_flow_is_correct() {
-        assert_eq!(Tab::ALL, [Tab::Welcome, Tab::Security, Tab::ApiKey,]);
+        assert_eq!(
+            Tab::ALL,
+            [Tab::Welcome, Tab::Security, Tab::Provider, Tab::ApiKey,]
+        );
     }
 
     #[test]
@@ -723,9 +856,13 @@ mod tests {
         let mut state = OnboardingState::new();
         state.user_name = "Test".to_string();
         state.security_accepted = true;
+        // Select a provider that requires API key so we don't skip to done
+        state.provider_index = 0; // OpenRouter
         assert_eq!(state.tab, Tab::Welcome);
         state.next_tab();
         assert_eq!(state.tab, Tab::Security);
+        state.next_tab();
+        assert_eq!(state.tab, Tab::Provider);
         state.next_tab();
         assert_eq!(state.tab, Tab::ApiKey);
     }
@@ -757,7 +894,7 @@ mod tests {
         state.tab = Tab::Security;
         state.security_accepted = true;
         state.next_tab();
-        assert_eq!(state.tab, Tab::ApiKey);
+        assert_eq!(state.tab, Tab::Provider);
     }
 
     #[test]
@@ -769,10 +906,11 @@ mod tests {
     }
 
     #[test]
-    fn build_result_uses_defaults() {
+    fn build_result_uses_selected_provider() {
         let mut state = OnboardingState::new();
         state.user_name = "Alice".to_string();
         state.agent_name = "Buddy".to_string();
+        state.provider_index = 0; // OpenRouter
 
         let result = state.build_result();
         assert_eq!(result.user_name, "Alice");
@@ -781,9 +919,11 @@ mod tests {
     }
 
     #[test]
-    fn build_result_detects_provider_from_key() {
+    fn build_result_uses_explicit_provider_selection() {
         let mut state = OnboardingState::new();
         state.user_name = "Test".to_string();
+        // Select Anthropic (index 2 in PROVIDERS)
+        state.provider_index = 2;
         state.api_key_input = "sk-ant-test123".to_string();
         let result = state.build_result();
         assert_eq!(result.provider, "anthropic");
@@ -839,5 +979,109 @@ mod tests {
             OnboardingState::detect_provider_from_key("unknown"),
             "openrouter"
         );
+    }
+
+    // ── Provider tab tests ──
+
+    #[test]
+    fn provider_tab_navigation_up_down() {
+        let mut state = OnboardingState::new();
+        state.tab = Tab::Provider;
+        state.provider_index = 0;
+
+        // Down moves forward
+        state.handle_provider_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(state.provider_index, 1);
+
+        // Up moves backward
+        state.handle_provider_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(state.provider_index, 0);
+
+        // Up wraps to last
+        state.handle_provider_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(state.provider_index, PROVIDERS.len() - 1);
+
+        // Down wraps to first
+        state.handle_provider_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(state.provider_index, 0);
+    }
+
+    #[test]
+    fn keyless_provider_skips_api_key_tab() {
+        let mut state = OnboardingState::new();
+        state.user_name = "Test".to_string();
+        state.security_accepted = true;
+        state.tab = Tab::Provider;
+
+        // Find claude-cli index
+        let cli_idx = PROVIDERS
+            .iter()
+            .position(|(id, _, _)| *id == "claude-cli")
+            .unwrap();
+        state.provider_index = cli_idx;
+
+        // next_tab from Provider with keyless provider should set done=true
+        state.next_tab();
+        assert!(state.done);
+    }
+
+    #[test]
+    fn api_key_provider_goes_to_api_key_tab() {
+        let mut state = OnboardingState::new();
+        state.user_name = "Test".to_string();
+        state.security_accepted = true;
+        state.tab = Tab::Provider;
+        state.provider_index = 0; // OpenRouter needs API key
+
+        state.next_tab();
+        assert_eq!(state.tab, Tab::ApiKey);
+        assert!(!state.done);
+    }
+
+    #[test]
+    fn build_result_claude_cli_no_api_key() {
+        let mut state = OnboardingState::new();
+        state.user_name = "Test".to_string();
+        let cli_idx = PROVIDERS
+            .iter()
+            .position(|(id, _, _)| *id == "claude-cli")
+            .unwrap();
+        state.provider_index = cli_idx;
+        state.api_key_input = "should-be-ignored".to_string();
+
+        let result = state.build_result();
+        assert_eq!(result.provider, "claude-cli");
+        assert!(result.api_key.is_none()); // No API key for keyless provider
+    }
+
+    #[test]
+    fn selected_provider_needs_key_logic() {
+        let mut state = OnboardingState::new();
+
+        // OpenRouter needs key
+        state.provider_index = 0;
+        assert!(state.selected_provider_needs_key());
+
+        // Claude CLI doesn't need key
+        let cli_idx = PROVIDERS
+            .iter()
+            .position(|(id, _, _)| *id == "claude-cli")
+            .unwrap();
+        state.provider_index = cli_idx;
+        assert!(!state.selected_provider_needs_key());
+
+        // Ollama doesn't need key
+        let ollama_idx = PROVIDERS
+            .iter()
+            .position(|(id, _, _)| *id == "ollama")
+            .unwrap();
+        state.provider_index = ollama_idx;
+        assert!(!state.selected_provider_needs_key());
+    }
+
+    #[test]
+    fn provider_tab_completed_always_true() {
+        let state = OnboardingState::new();
+        assert!(state.tab_completed(Tab::Provider));
     }
 }
