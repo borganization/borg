@@ -429,7 +429,10 @@ impl LlmClient {
                     return Ok(());
                 }
 
-                let result = if self.provider.is_openai_compatible() {
+                let result = if matches!(self.provider, Provider::ClaudeCli) {
+                    self.stream_chat_claude_cli_inner(messages, tools, &tx, &cancel)
+                        .await
+                } else if self.provider.is_openai_compatible() {
                     self.stream_chat_openai_inner(messages, tools, &tx, &cancel)
                         .await
                 } else {
@@ -584,6 +587,43 @@ impl LlmClient {
         }
 
         Ok(response)
+    }
+
+    #[instrument(skip_all, fields(llm.provider = "claude-cli"))]
+    async fn stream_chat_claude_cli_inner(
+        &self,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        tx: &mpsc::Sender<StreamEvent>,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<(), LlmError> {
+        use crate::claude_cli;
+
+        let cli_path = self
+            .llm_config
+            .claude_cli_path
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .or_else(claude_cli::detect_cli_path)
+            .ok_or_else(|| LlmError::Fatal {
+                source: anyhow::anyhow!(
+                    "Claude CLI binary not found. Install Claude Code or set CLAUDE_CLI_PATH."
+                ),
+                reason: FailoverReason::Unknown,
+            })?;
+
+        let model = self.provider.normalize_model(&self.llm_config.model);
+
+        claude_cli::stream_claude_cli(
+            &cli_path,
+            messages,
+            tools,
+            &model,
+            self.llm_config.temperature,
+            tx,
+            cancel,
+        )
+        .await
     }
 
     #[instrument(skip_all, fields(llm.provider = "openai"))]

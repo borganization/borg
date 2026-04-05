@@ -537,6 +537,14 @@ impl Config {
                 self.evolution.enabled = parse_bool(value, key)?;
                 Ok(format!("{key} = {}", self.evolution.enabled))
             }
+            "llm.claude_cli_path" => {
+                self.llm.claude_cli_path = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                };
+                Ok(format!("{key} = {value}"))
+            }
             _ => anyhow::bail!(
                 "Unknown setting: {key}\nAvailable: {}",
                 crate::settings::ALL_SETTING_KEYS.join(", ")

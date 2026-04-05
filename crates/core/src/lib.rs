@@ -13,6 +13,8 @@ pub mod bond;
 pub mod browser;
 /// Markdown-aware content chunking with code fence preservation.
 pub mod chunker;
+/// Claude Code CLI subprocess backend for subscription-based access.
+pub mod claude_cli;
 /// Configuration parsing, defaults, and runtime overrides.
 pub mod config;
 /// File watcher for live config reloading.
