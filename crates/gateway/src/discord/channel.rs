@@ -5,12 +5,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::http::{HeaderMap, StatusCode};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::channel_trait::{NativeChannel, TypingHandle, WebhookContext, WebhookOutcome};
 use crate::health::ChannelHealthRegistry;
 
 use super::api::DiscordClient;
+use super::dedup::InteractionDeduplicator;
 use super::DiscordWebhookResult;
 
 /// Discord-specific response context stored in the delivery queue.
@@ -26,6 +27,28 @@ struct DiscordResponseContext {
 pub struct DiscordChannel {
     pub client: Arc<DiscordClient>,
     pub public_key: Option<String>,
+    /// Optional guild allowlist. Empty or `None` means "allow all guilds".
+    pub guild_allowlist: Option<Vec<String>>,
+    /// Deduplicator for Discord interaction IDs. Discord retries interaction
+    /// webhooks on non-2xx responses and transient network conditions; without
+    /// this the agent can be invoked twice for the same interaction.
+    pub dedup: Arc<Mutex<InteractionDeduplicator>>,
+}
+
+impl DiscordChannel {
+    /// Create a new Discord native channel.
+    pub fn new(
+        client: Arc<DiscordClient>,
+        public_key: Option<String>,
+        guild_allowlist: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            client,
+            public_key,
+            guild_allowlist,
+            dedup: Arc::new(Mutex::new(InteractionDeduplicator::new())),
+        }
+    }
 }
 
 #[async_trait]
@@ -40,16 +63,49 @@ impl NativeChannel for DiscordChannel {
         body: &str,
         _ctx: &WebhookContext<'_>,
     ) -> Result<WebhookOutcome> {
-        let webhook_result =
-            super::handle_discord_webhook(headers, body, self.public_key.as_deref())?;
+        let webhook_result = super::handle_discord_webhook(
+            headers,
+            body,
+            self.public_key.as_deref(),
+            self.guild_allowlist.as_deref(),
+        )?;
 
         match webhook_result {
             DiscordWebhookResult::Pong(response) => Ok(WebhookOutcome::ProtocolResponse((
                 StatusCode::OK,
-                axum::Json(serde_json::to_value(response).unwrap_or_default()),
+                // InteractionResponse is a plain serde struct of primitives —
+                // serialization is infallible. Fall back to a raw pong if it
+                // ever does fail, which keeps Discord endpoint verification
+                // working while surfacing the anomaly in logs.
+                axum::Json(serde_json::to_value(response).unwrap_or_else(|e| {
+                    tracing::error!("InteractionResponse serialization failed: {e}");
+                    serde_json::json!({ "type": 1 })
+                })),
             ))),
+            DiscordWebhookResult::GuildNotAllowed { guild_id } => {
+                tracing::info!(
+                    discord_guild_id = %guild_id,
+                    "Rejected Discord interaction from non-allowlisted guild"
+                );
+                Ok(WebhookOutcome::Skip)
+            }
             DiscordWebhookResult::Skip => Ok(WebhookOutcome::Skip),
             DiscordWebhookResult::Message(inbound, interaction) => {
+                // Deduplicate on interaction ID. Discord retries webhooks on
+                // non-2xx responses and occasional transient conditions;
+                // without this check the agent can be invoked twice for the
+                // same interaction.
+                {
+                    let mut dedup = self.dedup.lock().await;
+                    if dedup.is_duplicate(&interaction.id) {
+                        tracing::debug!(
+                            interaction_id = %interaction.id,
+                            "Skipping duplicate Discord interaction"
+                        );
+                        return Ok(WebhookOutcome::Skip);
+                    }
+                }
+
                 // Send deferred response immediately so Discord doesn't time out
                 if let Err(e) = self
                     .client

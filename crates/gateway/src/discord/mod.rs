@@ -2,6 +2,8 @@
 pub mod api;
 /// Native channel implementation for Discord.
 pub mod channel;
+/// Bounded deduplicator for Discord interaction IDs.
+pub mod dedup;
 /// Discord interaction parsing into inbound messages.
 pub mod parse;
 /// Discord API type definitions.
@@ -23,6 +25,11 @@ pub enum DiscordWebhookResult {
     Pong(InteractionResponse),
     /// A parsed inbound message with the original interaction (needed for responding).
     Message(InboundMessage, Box<Interaction>),
+    /// Interaction came from a guild not in the configured allowlist — reject silently.
+    GuildNotAllowed {
+        /// The guild ID that was rejected (for logging / observability).
+        guild_id: String,
+    },
     /// Interaction was recognized but should be skipped (bot, autocomplete, etc.).
     Skip,
 }
@@ -30,12 +37,19 @@ pub enum DiscordWebhookResult {
 /// Handle a Discord interaction webhook request.
 ///
 /// If `public_key_hex` is provided, the request signature is verified using Ed25519.
+/// If `guild_allowlist` is provided and non-empty, interactions from guilds not in
+/// the list are rejected with `GuildNotAllowed`. DM interactions (no `guild_id`) are
+/// unaffected by the guild allowlist — DM access is gated separately by `dm_policy`
+/// in `handler::invoke_agent`.
+///
 /// Returns `Pong` for ping interactions, `Message` for actionable interactions,
-/// and `Skip` for everything else (bots, autocomplete, unknown types).
+/// `GuildNotAllowed` for rejected guilds, and `Skip` for everything else (bots,
+/// autocomplete, unknown types).
 pub fn handle_discord_webhook(
     headers: &HeaderMap,
     body: &str,
     public_key_hex: Option<&str>,
+    guild_allowlist: Option<&[String]>,
 ) -> Result<DiscordWebhookResult> {
     // Verify signature if public key is configured
     if let Some(key) = public_key_hex {
@@ -45,9 +59,23 @@ pub fn handle_discord_webhook(
     let interaction: Interaction = serde_json::from_str(body)
         .map_err(|e| anyhow::anyhow!("Invalid Discord interaction JSON: {e}"))?;
 
-    // Handle Ping → Pong
+    // Handle Ping → Pong (allowlist does not apply to pings — they come from Discord)
     if interaction.interaction_type == InteractionType::Ping {
         return Ok(DiscordWebhookResult::Pong(InteractionResponse::pong()));
+    }
+
+    // Enforce guild allowlist. An empty/missing list means "allow all". DMs (no
+    // guild_id) bypass this check — DM access control lives in dm_policy.
+    if let Some(allowlist) = guild_allowlist {
+        if !allowlist.is_empty() {
+            if let Some(guild_id) = &interaction.guild_id {
+                if !allowlist.iter().any(|g| g == guild_id) {
+                    return Ok(DiscordWebhookResult::GuildNotAllowed {
+                        guild_id: guild_id.clone(),
+                    });
+                }
+            }
+        }
     }
 
     // Try to parse into an InboundMessage
@@ -88,7 +116,7 @@ mod tests {
         let body = r#"{"id":"1","type":1,"token":"tok"}"#;
         let headers = HeaderMap::new();
 
-        let result = handle_discord_webhook(&headers, body, None).unwrap();
+        let result = handle_discord_webhook(&headers, body, None, None).unwrap();
         match result {
             DiscordWebhookResult::Pong(resp) => {
                 assert_eq!(resp.response_type, 1);
@@ -103,7 +131,7 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&[3u8; 32]);
         let (headers, pub_hex) = make_signed_headers(&signing_key, body);
 
-        let result = handle_discord_webhook(&headers, body, Some(&pub_hex)).unwrap();
+        let result = handle_discord_webhook(&headers, body, Some(&pub_hex), None).unwrap();
         match result {
             DiscordWebhookResult::Pong(resp) => {
                 assert_eq!(resp.response_type, 1);
@@ -124,7 +152,7 @@ mod tests {
         }"#;
         let headers = HeaderMap::new();
 
-        let result = handle_discord_webhook(&headers, body, None).unwrap();
+        let result = handle_discord_webhook(&headers, body, None, None).unwrap();
         match result {
             DiscordWebhookResult::Message(msg, interaction) => {
                 assert_eq!(msg.sender_id, "u1");
@@ -139,7 +167,7 @@ mod tests {
     #[test]
     fn invalid_json_returns_error() {
         let headers = HeaderMap::new();
-        let result = handle_discord_webhook(&headers, "not json", None);
+        let result = handle_discord_webhook(&headers, "not json", None, None);
         assert!(result.is_err());
     }
 
@@ -151,8 +179,88 @@ mod tests {
         let (headers, _) = make_signed_headers(&signing_key, body);
         let wrong_pub_hex = hex::encode(wrong_key.verifying_key().to_bytes());
 
-        let result = handle_discord_webhook(&headers, body, Some(&wrong_pub_hex));
+        let result = handle_discord_webhook(&headers, body, Some(&wrong_pub_hex), None);
         assert!(result.is_err());
+    }
+
+    fn slash_command_body(guild_id: Option<&str>) -> String {
+        let guild_field = match guild_id {
+            Some(id) => format!(r#","guild_id":"{id}""#),
+            None => String::new(),
+        };
+        format!(
+            r#"{{
+                "id": "int42",
+                "type": 2,
+                "token": "tok",
+                "data": {{ "id": "cmd1", "name": "ask", "options": [{{"name":"q","value":"hi"}}] }},
+                "member": {{ "user": {{ "id": "u1", "username": "alice" }} }},
+                "channel_id": "ch1"{guild_field}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn allowlist_none_allows_any_guild() {
+        let body = slash_command_body(Some("guild_a"));
+        let headers = HeaderMap::new();
+        let result = handle_discord_webhook(&headers, &body, None, None).unwrap();
+        assert!(matches!(result, DiscordWebhookResult::Message(_, _)));
+    }
+
+    #[test]
+    fn allowlist_empty_allows_any_guild() {
+        let body = slash_command_body(Some("guild_a"));
+        let headers = HeaderMap::new();
+        let empty: Vec<String> = Vec::new();
+        let result = handle_discord_webhook(&headers, &body, None, Some(&empty)).unwrap();
+        assert!(matches!(result, DiscordWebhookResult::Message(_, _)));
+    }
+
+    #[test]
+    fn allowlist_matching_guild_allowed() {
+        let body = slash_command_body(Some("guild_a"));
+        let headers = HeaderMap::new();
+        let list = vec!["guild_a".to_string(), "guild_b".to_string()];
+        let result = handle_discord_webhook(&headers, &body, None, Some(&list)).unwrap();
+        assert!(matches!(result, DiscordWebhookResult::Message(_, _)));
+    }
+
+    #[test]
+    fn allowlist_non_matching_guild_rejected() {
+        let body = slash_command_body(Some("guild_c"));
+        let headers = HeaderMap::new();
+        let list = vec!["guild_a".to_string(), "guild_b".to_string()];
+        let result = handle_discord_webhook(&headers, &body, None, Some(&list)).unwrap();
+        match result {
+            DiscordWebhookResult::GuildNotAllowed { guild_id } => {
+                assert_eq!(guild_id, "guild_c");
+            }
+            other => panic!(
+                "expected GuildNotAllowed, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn allowlist_does_not_block_dms() {
+        // DMs have no guild_id — allowlist should not apply
+        let body = slash_command_body(None);
+        let headers = HeaderMap::new();
+        let list = vec!["guild_a".to_string()];
+        let result = handle_discord_webhook(&headers, &body, None, Some(&list)).unwrap();
+        assert!(matches!(result, DiscordWebhookResult::Message(_, _)));
+    }
+
+    #[test]
+    fn allowlist_does_not_block_ping() {
+        // Discord's endpoint verification ping must always succeed regardless of allowlist
+        let body = r#"{"id":"1","type":1,"token":"tok"}"#;
+        let headers = HeaderMap::new();
+        let list = vec!["guild_a".to_string()];
+        let result = handle_discord_webhook(&headers, body, None, Some(&list)).unwrap();
+        assert!(matches!(result, DiscordWebhookResult::Pong(_)));
     }
 
     #[test]
@@ -166,7 +274,7 @@ mod tests {
         }"#;
         let headers = HeaderMap::new();
 
-        let result = handle_discord_webhook(&headers, body, None).unwrap();
+        let result = handle_discord_webhook(&headers, body, None, None).unwrap();
         assert!(matches!(result, DiscordWebhookResult::Skip));
     }
 
@@ -181,7 +289,7 @@ mod tests {
         }"#;
         let headers = HeaderMap::new();
 
-        let result = handle_discord_webhook(&headers, body, None).unwrap();
+        let result = handle_discord_webhook(&headers, body, None, None).unwrap();
         assert!(matches!(result, DiscordWebhookResult::Skip));
     }
 
@@ -195,7 +303,7 @@ mod tests {
         }"#;
         let headers = HeaderMap::new();
 
-        let result = handle_discord_webhook(&headers, body, None).unwrap();
+        let result = handle_discord_webhook(&headers, body, None, None).unwrap();
         assert!(matches!(result, DiscordWebhookResult::Skip));
     }
 
@@ -211,7 +319,7 @@ mod tests {
         }"#;
         let headers = HeaderMap::new();
 
-        let result = handle_discord_webhook(&headers, body, None).unwrap();
+        let result = handle_discord_webhook(&headers, body, None, None).unwrap();
         match result {
             DiscordWebhookResult::Message(msg, _) => {
                 assert_eq!(msg.text, "btn_yes");
