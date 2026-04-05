@@ -241,15 +241,21 @@ pub struct Recommendation {
 // ── Scoring ──
 
 /// Baseline vitals for a fresh agent.
+///
+/// Timestamps are initialized to the Unix epoch so replay is deterministic:
+/// two replays of the same event slice produce identical state regardless of
+/// wall-clock time. Consumers that need "now" (e.g. `apply_decay`,
+/// `detect_drift`) take it as an explicit parameter.
 pub fn baseline() -> VitalsState {
+    let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_else(Utc::now);
     VitalsState {
         stability: 40,
         focus: 40,
         sync: 40,
         growth: 40,
         happiness: 40,
-        last_interaction_at: Utc::now(),
-        updated_at: Utc::now(),
+        last_interaction_at: epoch,
+        updated_at: epoch,
         chain_valid: true,
     }
 }
@@ -894,7 +900,10 @@ mod tests {
 
     #[test]
     fn test_no_drift_healthy() {
-        let state = baseline();
+        let mut state = baseline();
+        // baseline() uses epoch for timestamps; for a "healthy" check we need
+        // to simulate that an interaction just happened.
+        state.last_interaction_at = Utc::now();
         let drift = detect_drift(&state, Utc::now());
         assert!(drift.is_empty());
     }
@@ -1497,5 +1506,195 @@ mod tests {
             validate_deltas("hacked", deltas),
             Err("unknown vitals category")
         );
+    }
+
+    // ── Replay Stability (Event Sourcing Invariants) ──
+    //
+    // These tests pin down properties that make event-sourcing a trustworthy
+    // state model: determinism, HMAC tampering detection, rate-limit boundary
+    // correctness, and honest handling of degenerate ledgers.
+
+    /// Build a properly chained vitals event for the given category/source/ts.
+    /// Uses canonical deltas from `deltas_for`, matching what production writes.
+    fn chained_vitals_event(
+        id: i64,
+        category: EventCategory,
+        source: &str,
+        ts: i64,
+        prev_hmac: &str,
+    ) -> VitalsEvent {
+        let deltas = deltas_for(category);
+        let cat_str = category.to_string();
+        let hmac = compute_event_hmac(VITALS_HMAC_LEGACY, prev_hmac, &cat_str, source, deltas, ts);
+        VitalsEvent {
+            id,
+            category: cat_str,
+            source: source.to_string(),
+            stability_delta: deltas.stability as i32,
+            focus_delta: deltas.focus as i32,
+            sync_delta: deltas.sync as i32,
+            growth_delta: deltas.growth as i32,
+            happiness_delta: deltas.happiness as i32,
+            metadata_json: None,
+            created_at: ts,
+            hmac,
+            prev_hmac: prev_hmac.to_string(),
+        }
+    }
+
+    /// Chain a slice of (category, source, ts) into valid VitalsEvents.
+    fn build_chain(specs: &[(EventCategory, &str, i64)]) -> Vec<VitalsEvent> {
+        let mut events = Vec::new();
+        let mut prev = "0".to_string();
+        for (i, (cat, source, ts)) in specs.iter().enumerate() {
+            let ev = chained_vitals_event(i as i64 + 1, *cat, source, *ts, &prev);
+            prev = ev.hmac.clone();
+            events.push(ev);
+        }
+        events
+    }
+
+    #[test]
+    fn replay_determinism_identical_events() {
+        // Guards Issue 1: baseline() must not depend on wall clock, so replays
+        // of the same slice produce identical state.
+        let events = build_chain(&[
+            (EventCategory::Interaction, "session_start", 1_000),
+            (EventCategory::Success, "run_shell", 1_500),
+            (EventCategory::Creation, "apply_patch", 2_000),
+            (EventCategory::Failure, "run_shell", 3_700),
+            (EventCategory::Correction, "user", 3_900),
+            (EventCategory::Success, "read_file", 7_300),
+        ]);
+
+        let s1 = replay_events(&events);
+        let s2 = replay_events(&events);
+
+        assert_eq!(s1.stability, s2.stability);
+        assert_eq!(s1.focus, s2.focus);
+        assert_eq!(s1.sync, s2.sync);
+        assert_eq!(s1.growth, s2.growth);
+        assert_eq!(s1.happiness, s2.happiness);
+        assert_eq!(s1.chain_valid, s2.chain_valid);
+        assert_eq!(s1.last_interaction_at, s2.last_interaction_at);
+        assert_eq!(s1.updated_at, s2.updated_at);
+    }
+
+    #[test]
+    fn replay_empty_returns_deterministic_baseline() {
+        // An empty ledger must return a state whose timestamps are epoch, not
+        // "now". Otherwise downstream decay/drift logic sees wall clock noise.
+        let s = replay_events(&[]);
+        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        assert_eq!(s.last_interaction_at, epoch);
+        assert_eq!(s.updated_at, epoch);
+        assert_eq!(s.stability, 40);
+        assert!(s.chain_valid);
+    }
+
+    #[test]
+    fn replay_only_failures_reports_stale_interaction() {
+        // With baseline timestamps anchored to epoch, a ledger consisting
+        // entirely of failures/corrections never advances last_interaction_at
+        // past epoch. This makes `detect_drift` honestly flag inactivity rather
+        // than silently reporting "now" because baseline seeded it that way.
+        let ts = 86_400 * 10; // arbitrary 10-day point, well past epoch
+        let events = build_chain(&[
+            (EventCategory::Failure, "a", ts),
+            (EventCategory::Failure, "b", ts + 1),
+            (EventCategory::Correction, "user", ts + 2),
+        ]);
+
+        let s = replay_events(&events);
+        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        assert_eq!(
+            s.last_interaction_at, epoch,
+            "failures/corrections must not bump last_interaction_at past epoch"
+        );
+
+        // And drift detection at a realistic "now" must fire InactiveTooLong.
+        let now = DateTime::<Utc>::from_timestamp(ts + 200, 0).unwrap();
+        let drift = detect_drift(&s, now);
+        assert!(drift.contains(&DriftFlag::InactiveTooLong));
+    }
+
+    #[test]
+    fn replay_tampered_middle_event_sets_chain_invalid_and_skips_tail() {
+        // Strengthens `test_mid_chain_corruption_skips_tail`: explicitly assert
+        // that chain_valid flips to false and that no tail event applies even
+        // if the tampered event's byte-flip looks "plausible".
+        let mut events = build_chain(&[
+            (EventCategory::Success, "a", 1_000),
+            (EventCategory::Success, "b", 1_500),
+            (EventCategory::Creation, "apply_patch", 2_000),
+            (EventCategory::Success, "c", 2_500),
+        ]);
+        // Tamper the middle event's hmac (byte-level): flip one hex char.
+        let orig = events[1].hmac.clone();
+        let mut tampered = orig.chars().collect::<Vec<_>>();
+        tampered[0] = if tampered[0] == '0' { 'f' } else { '0' };
+        events[1].hmac = tampered.into_iter().collect::<String>();
+
+        let state = replay_events(&events);
+
+        // Only event 0 (success: stability +1) applied.
+        assert_eq!(state.stability, 41);
+        // growth would be +1 from the creation event, but that event is in the
+        // tampered tail and must be skipped.
+        assert_eq!(state.growth, 40);
+        assert!(!state.chain_valid);
+    }
+
+    #[test]
+    fn replay_rate_limit_exact_boundary_interaction() {
+        // Interaction cap is 5/hr. With distinct sources (to defeat source
+        // decay) the first 5 must apply and the 6th in the same hour must not.
+        // A 7th in a fresh hour must apply again.
+        let hour = 3600_i64;
+        let mut specs: Vec<(EventCategory, &str, i64)> = Vec::new();
+        let names = ["s1", "s2", "s3", "s4", "s5"]; // 5 distinct sources
+        for (i, n) in names.iter().enumerate() {
+            specs.push((EventCategory::Interaction, n, hour + i as i64));
+        }
+        // 6th in same hour bucket:
+        specs.push((EventCategory::Interaction, "s6", hour + 10));
+        // 7th in next hour bucket:
+        specs.push((EventCategory::Interaction, "s7", 2 * hour));
+        let events = build_chain(&specs);
+
+        let state = replay_events(&events);
+        // sync delta per interaction is +1. First 5 apply (+5), 6th dropped,
+        // 7th in next hour applies (+1) → sync = 40 + 6 = 46.
+        assert_eq!(state.sync, 46);
+    }
+
+    #[test]
+    fn replay_hour_bucket_boundary_timestamps() {
+        // ts = 3599 is the last second of hour bucket 0.
+        // ts = 3600 is the first second of hour bucket 1.
+        // Two same-source events straddling that boundary should each get a
+        // full multiplier (source decay counter resets per hour).
+        let events = build_chain(&[
+            (EventCategory::Success, "run_shell", 3_599),
+            (EventCategory::Success, "run_shell", 3_600),
+        ]);
+        let state = replay_events(&events);
+        // Both events full credit → stability 40 + 2 = 42.
+        assert_eq!(state.stability, 42);
+    }
+
+    #[test]
+    fn replay_hmac_key_mismatch_invalidates_all_events() {
+        // Events signed with key A must fail verification when replayed under
+        // a different key, and must contribute no deltas.
+        let events = build_chain(&[
+            (EventCategory::Success, "a", 1_000),
+            (EventCategory::Creation, "b", 2_000),
+        ]);
+        let other_key = b"entirely-different-key-for-vitals";
+        let state = replay_events_with_key(other_key, &events);
+        assert!(!state.chain_valid);
+        assert_eq!(state.stability, 40);
+        assert_eq!(state.growth, 40);
     }
 }

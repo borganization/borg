@@ -494,6 +494,18 @@ pub(crate) const TOTAL_EVENTS_PER_HOUR: i64 = 20;
 /// Per-source events per hour (write-time coarse gate; replay applies graduated decay).
 pub(crate) const WRITE_SOURCE_RATE_LIMIT: i64 = 5;
 
+/// Returns true if an `evolution`-type event carries `gates_verified: true`
+/// in its metadata JSON blob. Evolution events that fail this check are
+/// rejected during replay *before* consuming rate-limit budget.
+fn evolution_gates_verified(event: &EvolutionEvent) -> bool {
+    event
+        .metadata_json
+        .as_deref()
+        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+        .and_then(|v| v.get("gates_verified").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
 // ── Event Replay (Event Sourcing) ──
 
 /// Replay verified events from baseline to compute current evolution state.
@@ -525,7 +537,22 @@ pub fn replay_events_with_key(key: &[u8], events: &[EvolutionEvent]) -> Evolutio
             chain_valid = false;
             continue;
         }
+        // Chain advances for every HMAC-valid row, even if we later reject the
+        // event semantically. This preserves the downstream chain linkage.
         expected_prev_hmac = event.hmac.clone();
+
+        // Pre-filter: semantically-invalid "evolution" events (missing or false
+        // `gates_verified`) must be dropped *before* they consume a rate-limit
+        // slot or get counted as accepted, otherwise a flood of bogus evolution
+        // rows could exhaust the 3/hr evolution budget and starve legitimate
+        // transitions.
+        if event.event_type == "evolution" && !evolution_gates_verified(event) {
+            tracing::warn!(
+                "evolution: rejecting event {} without gates_verified",
+                event.id
+            );
+            continue;
+        }
 
         // Rate limiting: per-type per hour
         let type_cap = rate_limit_for(&event.event_type);
@@ -552,21 +579,8 @@ pub fn replay_events_with_key(key: &[u8], events: &[EvolutionEvent]) -> Evolutio
                 }
             }
             "evolution" => {
-                // Warn if this evolution event wasn't gate-verified
-                let gates_verified = event
-                    .metadata_json
-                    .as_deref()
-                    .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-                    .and_then(|v| v.get("gates_verified").and_then(serde_json::Value::as_bool))
-                    .unwrap_or(false);
-                if !gates_verified {
-                    tracing::warn!(
-                        "evolution: rejecting event {} without gates_verified",
-                        event.id
-                    );
-                    continue;
-                }
-                // Stage transition: reset XP, advance stage
+                // gates_verified was already validated above. Stage transition:
+                // reset XP, advance stage.
                 stage = match stage {
                     Stage::Base => Stage::Evolved,
                     Stage::Evolved => Stage::Final,
@@ -2220,5 +2234,347 @@ mod tests {
             state2.chain_valid,
             "legacy-format events should still pass chain verification"
         );
+    }
+
+    // ── Replay Stability (Event Sourcing Invariants) ──
+    //
+    // These tests pin down properties that make evolution's event-sourced
+    // model trustworthy: determinism, tampering detection, rate-limit
+    // boundaries, v1/v2 HMAC compatibility, and honest handling of
+    // semantically-invalid events (unverified evolution transitions).
+
+    /// Build a verified evolution event with `gates_verified: true` metadata.
+    /// Computes the v2 HMAC over the metadata so the event verifies cleanly.
+    fn make_verified_evolution(
+        id: i64,
+        source: &str,
+        created_at: i64,
+        prev_hmac: &str,
+        name: Option<&str>,
+    ) -> EvolutionEvent {
+        let meta = match name {
+            Some(n) => format!(r#"{{"gates_verified":true,"name":"{n}"}}"#),
+            None => r#"{"gates_verified":true}"#.to_string(),
+        };
+        let hmac = compute_event_hmac(
+            EVOLUTION_HMAC_LEGACY,
+            prev_hmac,
+            "evolution",
+            0,
+            "",
+            source,
+            &meta,
+            created_at,
+        );
+        EvolutionEvent {
+            id,
+            event_type: "evolution".to_string(),
+            xp_delta: 0,
+            archetype: None,
+            source: source.to_string(),
+            metadata_json: Some(meta),
+            created_at,
+            hmac,
+            prev_hmac: prev_hmac.to_string(),
+        }
+    }
+
+    /// Build an `evolution`-type event that lacks `gates_verified`. Computes
+    /// the v2 HMAC over the empty metadata so it verifies chain-wise — replay
+    /// should still reject the *semantic* transition.
+    fn make_unverified_evolution(
+        id: i64,
+        source: &str,
+        created_at: i64,
+        prev_hmac: &str,
+    ) -> EvolutionEvent {
+        // Empty metadata: HMAC v2 signs "" so it verifies via v1 legacy path.
+        let hmac = compute_event_hmac(
+            EVOLUTION_HMAC_LEGACY,
+            prev_hmac,
+            "evolution",
+            0,
+            "",
+            source,
+            "",
+            created_at,
+        );
+        EvolutionEvent {
+            id,
+            event_type: "evolution".to_string(),
+            xp_delta: 0,
+            archetype: None,
+            source: source.to_string(),
+            metadata_json: None,
+            created_at,
+            hmac,
+            prev_hmac: prev_hmac.to_string(),
+        }
+    }
+
+    #[test]
+    fn replay_determinism_identical_events_evolution() {
+        // Determinism: replaying the same slice twice yields identical state.
+        let e1 = make_event(1, "xp_gain", 3, Some("ops"), "run_shell", 1_000, "0");
+        let e2 = make_event(
+            2,
+            "xp_gain",
+            2,
+            Some("builder"),
+            "apply_patch",
+            1_100,
+            &e1.hmac,
+        );
+        let e3 = make_event(3, "xp_gain", 1, Some("analyst"), "browser", 3_700, &e2.hmac);
+        let e4 = make_verified_evolution(4, "gate_check", 3_800, &e3.hmac, Some("Warden"));
+        let e5 = make_event(5, "xp_gain", 1, Some("ops"), "run_shell", 7_300, &e4.hmac);
+
+        let events = vec![e1, e2, e3, e4, e5];
+        let s1 = replay_events(&events);
+        let s2 = replay_events(&events);
+
+        assert_eq!(s1.stage, s2.stage);
+        assert_eq!(s1.level, s2.level);
+        assert_eq!(s1.total_xp, s2.total_xp);
+        assert_eq!(s1.xp_to_next_level, s2.xp_to_next_level);
+        assert_eq!(s1.archetype_scores, s2.archetype_scores);
+        assert_eq!(s1.total_events, s2.total_events);
+        assert_eq!(s1.chain_valid, s2.chain_valid);
+        assert_eq!(s1.evolution_name, s2.evolution_name);
+    }
+
+    #[test]
+    fn replay_unverified_evolution_does_not_consume_rate_limit() {
+        // Regression for Issue 2: 3 unverified evolution events in one hour
+        // used to consume the entire evolution rate-limit budget (3/hr),
+        // starving a legitimate gates_verified transition that followed.
+        // After the fix, unverified events are rejected *before* the rate
+        // limiter, so the real transition still applies.
+        let hour = 3_600_i64;
+
+        // First earn enough XP to reach level 99 at Stage::Base. A single
+        // huge-xp event does the trick.
+        let e1 = make_event(1, "xp_gain", 999_999, Some("ops"), "run_shell", hour, "0");
+
+        // 3 unverified evolution events in the same next-hour bucket.
+        let mut prev = e1.hmac.clone();
+        let mut unverified = Vec::new();
+        for i in 0..3 {
+            let ev = make_unverified_evolution(i + 2, "noise", 2 * hour + i, &prev);
+            prev = ev.hmac.clone();
+            unverified.push(ev);
+        }
+
+        // One verified evolution event, same hour bucket as the 3 unverified.
+        let real = make_verified_evolution(5, "gate_check", 2 * hour + 10, &prev, Some("Warden"));
+
+        let mut events = vec![e1];
+        events.extend(unverified);
+        events.push(real);
+
+        let state = replay_events(&events);
+        assert!(state.chain_valid);
+        assert_eq!(
+            state.stage,
+            Stage::Evolved,
+            "the gates_verified evolution must still transition after 3 bogus rows"
+        );
+        assert_eq!(state.evolution_name.as_deref(), Some("Warden"));
+    }
+
+    #[test]
+    fn replay_unverified_evolution_not_counted_in_total_events() {
+        // Regression for Issue 2: unverified evolution events must not inflate
+        // `total_events` (the accepted-event counter surfaced on EvolutionState).
+        let e1 = make_event(1, "xp_gain", 1, Some("ops"), "run_shell", 1_000, "0");
+        let u1 = make_unverified_evolution(2, "noise", 1_100, &e1.hmac);
+        let u2 = make_unverified_evolution(3, "noise", 1_200, &u1.hmac);
+        let e2 = make_event(4, "xp_gain", 1, Some("ops"), "run_shell", 3_700, &u2.hmac);
+
+        let state = replay_events(&[e1, u1, u2, e2]);
+        assert_eq!(
+            state.total_events, 2,
+            "only the 2 xp_gain events should count toward total_events"
+        );
+        assert_eq!(state.stage, Stage::Base);
+    }
+
+    #[test]
+    fn replay_unverified_evolution_advances_hmac_chain() {
+        // A rejected-but-chain-valid unverified evolution event should still
+        // advance `expected_prev_hmac` so that downstream events chained off
+        // its hmac verify successfully. (Only *HMAC-invalid* events break the
+        // chain for their descendants.)
+        let e1 = make_event(1, "xp_gain", 2, Some("ops"), "run_shell", 1_000, "0");
+        let u1 = make_unverified_evolution(2, "noise", 1_100, &e1.hmac);
+        // e2 chains off u1.hmac:
+        let e2 = make_event(3, "xp_gain", 2, Some("ops"), "run_shell", 3_700, &u1.hmac);
+
+        let state = replay_events(&[e1, u1, e2]);
+        assert!(state.chain_valid, "chain must still be valid");
+        assert_eq!(state.stage, Stage::Base);
+        // Both xp_gains apply fully (distinct hours, no decay): 2 + 2 = 4.
+        assert_eq!(state.total_xp, 4);
+    }
+
+    #[test]
+    fn replay_tampered_middle_xp_gain_skips_tail() {
+        // Flip a byte in a middle event's hmac; that event and all descendants
+        // chained off it must be dropped, and chain_valid must go false.
+        let e1 = make_event(1, "xp_gain", 1, Some("ops"), "run_shell", 1_000, "0");
+        let mut e2 = make_event(2, "xp_gain", 10, Some("ops"), "run_shell", 3_700, &e1.hmac);
+        let mut chars: Vec<char> = e2.hmac.chars().collect();
+        chars[0] = if chars[0] == '0' { 'f' } else { '0' };
+        e2.hmac = chars.into_iter().collect();
+        // e3 chains off the ORIGINAL (now-unreachable) e2 hmac, so it also fails.
+        let e3 = make_event(3, "xp_gain", 100, Some("ops"), "run_shell", 7_300, &e2.hmac);
+
+        let state = replay_events(&[e1, e2, e3]);
+        assert!(!state.chain_valid);
+        assert_eq!(state.total_xp, 1, "only e1 should apply");
+    }
+
+    #[test]
+    fn replay_rate_limit_exact_boundary_xp_gain() {
+        // xp_gain cap is 15 events/hr. With distinct sources (so source decay
+        // doesn't mask the type cap) the first 15 apply and the 16th is
+        // dropped. A 17th event in a fresh hour must apply again.
+        let hour = 3_600_i64;
+        let mut events = Vec::new();
+        let mut prev = "0".to_string();
+        for i in 0..15 {
+            let source = format!("tool_{i}");
+            let e = make_event(
+                i as i64 + 1,
+                "xp_gain",
+                1,
+                Some("ops"),
+                &source,
+                hour + i as i64,
+                &prev,
+            );
+            prev = e.hmac.clone();
+            events.push(e);
+        }
+        // 16th in same hour — over cap, must be dropped.
+        let over = make_event(16, "xp_gain", 1, Some("ops"), "tool_over", hour + 50, &prev);
+        prev = over.hmac.clone();
+        events.push(over);
+        // 17th in next hour — must apply.
+        let next_hour = make_event(17, "xp_gain", 1, Some("ops"), "tool_next", 2 * hour, &prev);
+        events.push(next_hour);
+
+        let state = replay_events(&events);
+        // 15 (cap) + 1 (next hour) = 16, 16th within hour dropped.
+        assert_eq!(state.total_xp, 16);
+        assert_eq!(state.total_events, 16);
+    }
+
+    #[test]
+    fn replay_hmac_v1_v2_mixed_chain() {
+        // A chain where early events use legacy v1 HMAC (no metadata) and
+        // later events use v2 HMAC (with metadata). Both must verify.
+        //
+        // e1: legacy v1 (constructed via compute_event_hmac_legacy)
+        let h1 = compute_event_hmac_legacy(
+            EVOLUTION_HMAC_LEGACY,
+            "0",
+            "xp_gain",
+            2,
+            "ops",
+            "run_shell",
+            1_000,
+        );
+        let e1 = EvolutionEvent {
+            id: 1,
+            event_type: "xp_gain".to_string(),
+            xp_delta: 2,
+            archetype: Some("ops".to_string()),
+            source: "run_shell".to_string(),
+            metadata_json: None,
+            created_at: 1_000,
+            hmac: h1.clone(),
+            prev_hmac: "0".to_string(),
+        };
+
+        // e2: v2 evolution event with metadata, chained off e1
+        let e2 = make_verified_evolution(2, "gate_check", 2_000, &h1, Some("Warden"));
+
+        // e3: v1 again (legacy path), chained off e2
+        let h3 = compute_event_hmac_legacy(
+            EVOLUTION_HMAC_LEGACY,
+            &e2.hmac,
+            "xp_gain",
+            1,
+            "ops",
+            "run_shell",
+            3_700,
+        );
+        let e3 = EvolutionEvent {
+            id: 3,
+            event_type: "xp_gain".to_string(),
+            xp_delta: 1,
+            archetype: Some("ops".to_string()),
+            source: "run_shell".to_string(),
+            metadata_json: None,
+            created_at: 3_700,
+            hmac: h3,
+            prev_hmac: e2.hmac.clone(),
+        };
+
+        let state = replay_events(&[e1, e2, e3]);
+        assert!(
+            state.chain_valid,
+            "mixed v1/v2 chain should verify end-to-end"
+        );
+        assert_eq!(state.stage, Stage::Evolved);
+        assert_eq!(state.evolution_name.as_deref(), Some("Warden"));
+        // Post-evolution xp_gain of 1 should be the only XP in current stage.
+        assert_eq!(state.total_xp, 1);
+    }
+
+    #[test]
+    fn replay_hmac_key_mismatch_invalidates_all_events_evolution() {
+        let e1 = make_event(1, "xp_gain", 3, Some("ops"), "run_shell", 1_000, "0");
+        let e2 = make_event(2, "xp_gain", 3, Some("ops"), "run_shell", 3_700, &e1.hmac);
+        let other = b"not-the-evolution-hmac-key------";
+        let state = replay_events_with_key(other, &[e1, e2]);
+        assert!(!state.chain_valid);
+        assert_eq!(state.total_xp, 0);
+        assert_eq!(state.total_events, 0);
+    }
+
+    #[test]
+    fn replay_level_up_across_multi_hour_ledger() {
+        // Reaching Stage::Base Lvl.1 costs 20 XP. Earn it by spreading events
+        // across many hours with distinct sources to defeat source decay,
+        // confirming XP accumulates cleanly across hour bucket transitions.
+        let mut events = Vec::new();
+        let mut prev = "0".to_string();
+        // 12 hours, 2 xp_gain events per hour with distinct sources → 24 XP.
+        for hour in 0..12 {
+            for slot in 0..2 {
+                let ts = (hour as i64 + 1) * 3_600 + slot;
+                let source = format!("src_{hour}_{slot}");
+                let e = make_event(
+                    events.len() as i64 + 1,
+                    "xp_gain",
+                    1,
+                    Some("ops"),
+                    &source,
+                    ts,
+                    &prev,
+                );
+                prev = e.hmac.clone();
+                events.push(e);
+            }
+        }
+        let state = replay_events(&events);
+        assert!(state.chain_valid);
+        assert_eq!(state.total_xp, 24);
+        // Level 0 costs 20 XP → after 24 XP we should be at level 1 with 4 XP into it.
+        assert_eq!(state.level, 1);
+        // xp_to_next = xp_for_level(stage, level=1) - 4 = (20 + floor(1^1.4)) - 4 = 21 - 4 = 17.
+        assert_eq!(state.xp_to_next_level, 17);
     }
 }
