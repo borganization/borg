@@ -1,15 +1,14 @@
 # Architecture
 
-Borg is a Cargo workspace with eight crates. Each crate has a focused responsibility.
+Borg is a Cargo workspace with seven crates. Each crate has a focused responsibility.
 
 ## Crate overview
 
 ```
 crates/
 ├── cli/          # Binary: TUI, REPL, clap args, heartbeat display, onboarding, daemon/service
-├── core/         # Library: agent loop, multi-provider LLM client, memory, identity, config
+├── core/         # Library: agent loop, multi-provider LLM client, memory, identity, config, tools
 ├── heartbeat/    # Library: proactive scheduler with quiet hours + dedup
-├── tools/        # Library: tool manifest parsing, registry, subprocess executor
 ├── sandbox/      # Library: macOS Seatbelt + Linux Bubblewrap policies
 ├── apply-patch/  # Library: patch DSL parser + filesystem applicator
 ├── gateway/      # Library: webhook gateway for messaging channel integrations
@@ -18,7 +17,7 @@ crates/
 
 ### `cli`
 
-Entry point. Defines commands via clap: `start` (default, TUI with auto-gateway), `ask`, `init`, `daemon`, `gateway`, `doctor`, `wake`, `tasks`, `pairing`, `logs`, `usage`, `away`, `available`, `settings`, `add`, `remove`, `plugins`, `stop`, `restart`, `service`, and `uninstall`. Includes a full ratatui-based TUI with markdown rendering, slash command autocomplete, settings popup, plugins marketplace popup, and session management. Handles daemon mode for background task execution and system service installation (launchd on macOS, systemd on Linux).
+Entry point. Defines commands via clap: `start` (default, TUI with auto-gateway), `ask`, `init`, `daemon`, `gateway`, `doctor`, `poke`, `status`, `tasks`, `cron`, `pairing`, `logs`, `usage`, `away`, `available`, `settings`, `add`, `remove`, `plugins`, `update`, `stop`, `restart`, `service`, and `uninstall`. Includes a full ratatui-based TUI with markdown rendering, slash command autocomplete, settings popup, plugins marketplace popup, and session management. Handles daemon mode for background task execution and system service installation (launchd on macOS, systemd on Linux).
 
 Key files: `main.rs`, `repl.rs`, `onboarding.rs`, `plugins.rs`, `service.rs`, `tui/app.rs`, `tui/settings_popup.rs`, `tui/command_popup.rs`
 
@@ -39,7 +38,7 @@ The heart of the project. Contains:
 - **Tool policy** (`tool_policy.rs`) — composable tool filtering with profiles (minimal/coding/messaging/full), allow/deny lists, and subagent restrictions.
 - **Tool catalog** (`tool_catalog.rs`) — tool group definitions and profile presets.
 - **Session** (`session.rs`) — session persistence with JSON serialization, auto-save, and auto-titling.
-- **Database** (`db.rs`) — SQLite database with versioned migrations (currently V15). Tables: sessions, messages, scheduled_tasks, task_runs, token_usage, channel_sessions, channel_messages, settings, memory_embeddings, memory_chunks, pairing_requests, approved_senders, and more.
+- **Database** (`db/migrations.rs`) — SQLite database with versioned migrations (currently V29). Tables: sessions, messages, scheduled_tasks, task_runs, token_usage, channel_sessions, channel_messages, settings, memory_embeddings, memory_chunks, pairing_requests, approved_senders, vitals_events, bond_events, evolution_events, activity_log, and more.
 - **Settings** (`settings.rs`) — three-tier settings resolver: Database -> config.toml -> compiled defaults. 35+ configurable keys.
 - **Conversation** (`conversation.rs`) — history compaction, token estimation, and conversation normalization.
 - **Policy** (`policy.rs`) — execution policy with auto-approve/deny glob patterns for shell commands.
@@ -195,10 +194,8 @@ cli ──▶ heartbeat
 cli ──▶ gateway
 cli ──▶ plugins
 
-core ──▶ tools
 core ──▶ apply-patch
+core ──▶ sandbox
 
 gateway ──▶ core
-
-tools ──▶ sandbox
 ```

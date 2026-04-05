@@ -33,36 +33,17 @@ signal-cli -a +1234567890 daemon --http
 
 By default, the daemon listens on `localhost:8080`.
 
-## 4. Store Credentials
+## 4. Install via Borg
 
-Add your Signal account to `~/.borg/config.toml`:
-
-```toml
-[credentials]
-SIGNAL_ACCOUNT = "+1234567890"
-```
-
-## 5. Configure the Gateway
-
-```toml
-[gateway]
-host = "127.0.0.1"
-port = 7842
-
-# Optional: override signal-cli daemon location
-# signal_cli_host = "localhost"
-# signal_cli_port = 8080
-```
-
-## 6. Start the Gateway
+Signal is installed through the TUI plugin marketplace. Credentials are stored in your OS keychain (macOS Keychain / Linux `secret-tool`) and wired into `config.toml` automatically.
 
 ```sh
-borg gateway
+borg
 ```
 
-The gateway connects to the signal-cli daemon via SSE to receive incoming messages and uses the HTTP API to send responses.
+Type `/plugins`, find **Signal**, press Space to select, Enter to install, and enter your registered **phone number** (e.g. `+1234567890`) when prompted.
 
-## 7. Verify
+## 5. Verify
 
 Send a message to the registered phone number on Signal. You should get a response from your agent.
 
@@ -83,6 +64,8 @@ signal = "pairing"   # pairing (default) | open | disabled
 ```
 
 ### signal-cli connection
+
+Override the signal-cli daemon location in `~/.borg/config.toml` if it is not running on the default `localhost:8080`:
 
 ```toml
 [gateway]

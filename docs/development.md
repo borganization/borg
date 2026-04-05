@@ -24,7 +24,7 @@ cargo test                            # all tests
 cargo test -p borg-apply-patch        # patch parser + applicator
 cargo test -p borg-core               # config + skills + memory + settings tests
 cargo test -p borg-heartbeat          # heartbeat scheduler tests
-cargo test -p borg-tools              # tool manifest tests
+cargo test -p borg-sandbox            # sandbox policy + runner tests
 cargo test -p borg-gateway            # channel manifest + registry tests
 cargo test -p borg-plugins            # catalog + installer tests
 ```
@@ -40,7 +40,7 @@ cargo clippy -- -D warnings  # lint check (warnings are errors)
 
 ```
 borg/
-├── Cargo.toml              # workspace root (8 crates)
+├── Cargo.toml              # workspace root (7 crates)
 ├── CLAUDE.md               # project instructions
 ├── docs/                   # documentation (you are here)
 ├── crates/
@@ -78,7 +78,7 @@ borg/
 │   │   │   ├── tool_policy.rs      # composable tool filtering (profiles, allow/deny)
 │   │   │   ├── tool_catalog.rs     # tool group definitions and profiles
 │   │   │   ├── session.rs          # session persistence + auto-titling
-│   │   │   ├── db.rs               # SQLite database with versioned migrations (V15)
+│   │   │   ├── db/                 # SQLite database with versioned migrations (V29)
 │   │   │   ├── settings.rs         # three-tier settings resolver (DB -> TOML -> defaults)
 │   │   │   ├── conversation.rs     # history compaction + normalization
 │   │   │   ├── policy.rs           # execution policy (approve/deny)
@@ -186,12 +186,19 @@ cp .env.example .env
 
 ## Database
 
-SQLite at `~/.borg/borg.db` with versioned migrations (currently V15). Key migrations:
+SQLite at `~/.borg/borg.db` with versioned migrations (currently V29). Key migrations:
 
 - **V1**: sessions, scheduled_tasks, task_runs, meta, token_usage
 - **V2**: messages table (crash recovery)
 - **V3**: channel_sessions + channel_messages (gateway)
+- **V9**: settings table (runtime config overrides)
+- **V10/V12/V16**: memory_embeddings, memory_chunks + FTS, embedding_cache (semantic search)
 - **V13**: pairing_requests + approved_senders
 - **V14**: retry, timeout, and delivery columns on scheduled_tasks
+- **V19**: scripts table with HMAC integrity verification
+- **V22/V23/V24**: vitals_events, bond_events, evolution_events (event-sourced ledgers with HMAC chains)
+- **V25**: append-only triggers on event ledgers
+- **V28**: task_type column for cron job support
+- **V29**: structured activity_log table
 
 Schema version is tracked in the `meta` table; migrations run automatically on `Database::open()`.

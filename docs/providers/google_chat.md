@@ -9,30 +9,32 @@ Go to the [Google Cloud Console](https://console.cloud.google.com/):
 3. Under **Configuration**, set up the Chat app:
    - **App name** and **description**
    - **Connection settings**: select **HTTP endpoint URL**
-   - Set the URL to your gateway's webhook endpoint
+   - Set the URL to your gateway's webhook endpoint (see step 3 below)
+4. Copy the **Verification Token** from the configuration page
 
-## 2. Store Credentials
+## 2. Install via Borg
 
-Add the webhook verification token to `~/.borg/config.toml`:
+Credentials are stored in your OS keychain (macOS Keychain / Linux `secret-tool`) and wired into `config.toml` automatically. No manual file editing required.
 
-```toml
-[credentials]
-# Option A: environment variable
-GOOGLE_CHAT_WEBHOOK_TOKEN = "GOOGLE_CHAT_WEBHOOK_TOKEN"
+### TUI (recommended)
 
-# Option B: macOS Keychain
-GOOGLE_CHAT_WEBHOOK_TOKEN = { source = "exec", command = "security", args = ["find-generic-password", "-s", "gchat-token", "-w"] }
+```sh
+borg
 ```
 
-## 3. Enable the Gateway
+Type `/plugins`, find **Google Chat**, press Space to select, Enter to install, and paste the verification token when prompted.
 
-```toml
-[gateway]
-host = "127.0.0.1"
-port = 7842
+### CLI
+
+```sh
+borg add google-chat
 ```
 
-## 4. Set the Webhook URL
+You will be prompted for:
+
+- **Verification Token** — from Google Cloud Console > Chat API configuration
+
+## 3. Set the Webhook URL
 
 Expose a public URL (e.g. via ngrok):
 
@@ -41,21 +43,14 @@ ngrok http 7842
 ```
 
 In the Google Chat API configuration, set the HTTP endpoint URL to:
+
 ```
 https://your-domain.ngrok-free.app/webhook/google-chat
 ```
 
 The gateway also accepts `/webhook/google_chat` and `/webhook/googlechat` as aliases.
 
-## 5. Start the Gateway
-
-```sh
-borg gateway
-```
-
-The gateway also runs automatically as part of the daemon.
-
-## 6. Verify
+## 4. Verify
 
 Add the bot to a Google Chat space or send it a direct message. You should get a response from your agent.
 

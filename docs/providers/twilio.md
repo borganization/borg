@@ -11,31 +11,31 @@ Sign up at [twilio.com](https://www.twilio.com/) and note your **Account SID** a
 - **SMS**: Purchase a phone number in the Twilio console
 - **WhatsApp**: Set up a WhatsApp sender in the Twilio console (or use the sandbox for testing)
 
-## 3. Store Credentials
+## 3. Install via Borg
 
-Add credentials to `~/.borg/config.toml`:
+Credentials are stored in your OS keychain (macOS Keychain / Linux `secret-tool`) and wired into `config.toml` automatically. No manual file editing required.
 
-```toml
-[credentials]
-# Option A: environment variables
-TWILIO_ACCOUNT_SID = "TWILIO_ACCOUNT_SID"
-TWILIO_AUTH_TOKEN = "TWILIO_AUTH_TOKEN"
-TWILIO_PHONE_NUMBER = "TWILIO_PHONE_NUMBER"           # for SMS
-TWILIO_WHATSAPP_NUMBER = "TWILIO_WHATSAPP_NUMBER"     # for WhatsApp
+### TUI (recommended)
 
-# Option B: macOS Keychain
-TWILIO_AUTH_TOKEN = { source = "exec", command = "security", args = ["find-generic-password", "-s", "twilio-auth", "-w"] }
+```sh
+borg
 ```
 
-## 4. Enable the Gateway
+Type `/plugins`, find **SMS** and/or **WhatsApp**, press Space to select, Enter to install, and paste each credential when prompted. Both use the same Twilio credentials under the hood.
 
-```toml
-[gateway]
-host = "127.0.0.1"
-port = 7842
+### CLI
+
+```sh
+borg add twilio
 ```
 
-## 5. Set the Webhook URL
+You will be prompted for:
+
+- **Account SID** — from Twilio Console
+- **Auth Token** — from Twilio Console
+- **Phone Number** — your Twilio phone number (e.g. `+1234567890`)
+
+## 4. Set the Webhook URL
 
 Expose a public URL (e.g. via ngrok):
 
@@ -56,15 +56,7 @@ In the Twilio console:
 
 The gateway also accepts `/webhook/twilio` as a generic endpoint for both.
 
-## 6. Start the Gateway
-
-```sh
-borg gateway
-```
-
-The gateway also runs automatically as part of the daemon.
-
-## 7. Verify
+## 5. Verify
 
 Send an SMS to your Twilio number or a WhatsApp message to your WhatsApp-enabled number. You should get a response from your agent.
 

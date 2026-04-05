@@ -459,6 +459,8 @@ A key-value map for credential resolution. Values can be bare strings (env var n
 - `{ source = "file", path = "~/.config/secret" }` — read from file
 - `{ source = "exec", command = "cmd", args = [...] }` — execute command (e.g., macOS Keychain)
 
+**You normally do not edit this section by hand.** For messaging channels, email, and productivity plugins, run `borg add <name>` (or use the `/plugins` TUI marketplace) — Borg will prompt for each secret, store it in the OS keychain (macOS Keychain / Linux `secret-tool`), and wire up the `[credentials]` entry automatically. Hand-editing is only necessary for custom third-party integrations that the plugin catalog does not cover.
+
 ## Defaults
 
 If `~/.borg/config.toml` does not exist, all defaults apply. You can also specify partial configs — any omitted field falls back to its default.

@@ -4,76 +4,52 @@
 
 Open Telegram, message [@BotFather](https://t.me/BotFather), and run `/newbot`. Copy the bot token it gives you.
 
-## 2. Store the Token
+## 2. Install via Borg
 
-Add the token to `~/.borg/config.toml` under `[credentials]`:
+Credentials are stored in your OS keychain (macOS Keychain / Linux `secret-tool`) and wired into `config.toml` automatically. No manual file editing required.
 
-```toml
-# Option A: environment variable
-TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
+### TUI (recommended)
 
-# Option B: macOS Keychain
-TELEGRAM_BOT_TOKEN = { source = "exec", command = "security", args = ["find-generic-password", "-s", "telegram-bot", "-w"] }
-
-# Option C: file
-TELEGRAM_BOT_TOKEN = { source = "file", path = "~/.config/telegram/token" }
-
-# Option D: explicit env var
-TELEGRAM_BOT_TOKEN = { source = "env", var = "TELEGRAM_BOT_TOKEN" }
+```sh
+borg
 ```
 
-## 3. Enable the Gateway
+Type `/plugins`, find **Telegram**, press Space to select, Enter to install, and paste your bot token when prompted.
 
-```toml
-[gateway]
-enabled = true
-host = "127.0.0.1"
-port = 7842
+### CLI
+
+```sh
+borg add telegram
 ```
 
-## 4. Choose a Mode
+You will be prompted for:
 
-### Webhook Mode (recommended for production)
+- **Bot Token** — from @BotFather
 
-Expose a public URL (e.g. via ngrok) and set it in config:
+## 3. Choose a Mode
+
+### Webhook mode (recommended for production)
+
+Expose the gateway publicly (e.g. via ngrok):
+
+```sh
+ngrok http 7842
+```
+
+Set `gateway.public_url` in `~/.borg/config.toml`:
 
 ```toml
 [gateway]
 public_url = "https://your-domain.ngrok-free.app"
 ```
 
-The gateway will automatically register `https://your-domain.ngrok-free.app/webhook/telegram` with Telegram.
+Borg will automatically register `https://your-domain.ngrok-free.app/webhook/telegram` with Telegram on startup.
 
-Quick start with ngrok:
-
-```sh
-ngrok http 7842
-```
-
-### Polling Mode (no public URL needed)
+### Polling mode (no public URL needed)
 
 If `public_url` is not set, the gateway automatically uses long-polling via `getUpdates`. No port forwarding or public server required.
 
-## 5. Webhook Secret (Optional)
-
-For webhook mode, add a secret to verify incoming requests:
-
-```toml
-[credentials]
-TELEGRAM_WEBHOOK_SECRET = "your-random-secret-string"
-```
-
-The secret is passed to Telegram during webhook registration and verified on each incoming request via the `X-Telegram-Bot-Api-Secret-Token` header.
-
-## 6. Start the Gateway
-
-```sh
-borg gateway
-```
-
-The gateway also runs automatically as part of the daemon.
-
-## 7. Verify
+## 4. Verify
 
 Open your bot in Telegram and send `/start`. You should get a response from your agent.
 
@@ -92,6 +68,16 @@ Open your bot in Telegram and send `/start`. You should get a response from your
 
 ## Additional configuration
 
+### Webhook secret (optional)
+
+For webhook mode you can verify incoming requests with a shared secret. Export it before running Borg and the gateway will use it when registering the webhook:
+
+```sh
+export TELEGRAM_WEBHOOK_SECRET="your-random-secret-string"
+```
+
+The secret is verified on each incoming request via the `X-Telegram-Bot-Api-Secret-Token` header.
+
 ### Group activation mode
 
 Control how the bot responds in group chats:
@@ -105,8 +91,6 @@ group_activation = "mention"   # mention (default) | always
 - `always` — responds to all messages in groups the bot is in
 
 ### Access control
-
-Configure sender pairing policy for Telegram:
 
 ```toml
 [gateway.channel_policies]

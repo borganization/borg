@@ -8,33 +8,30 @@ Go to the [Azure Portal](https://portal.azure.com/) and create a new **Bot Chann
 2. Note the **Application (client) ID** and create a **Client Secret**
 3. Under **Channels**, add the **Microsoft Teams** channel
 
-## 2. Store Credentials
+## 2. Install via Borg
 
-Add credentials to `~/.borg/config.toml`:
+Credentials are stored in your OS keychain (macOS Keychain / Linux `secret-tool`) and wired into `config.toml` automatically. No manual file editing required.
 
-```toml
-[credentials]
-# Option A: environment variable
-TEAMS_APP_ID = "TEAMS_APP_ID"
-TEAMS_APP_SECRET = "TEAMS_APP_SECRET"
+### TUI (recommended)
 
-# Option B: macOS Keychain
-TEAMS_APP_ID = { source = "exec", command = "security", args = ["find-generic-password", "-s", "teams-app-id", "-w"] }
-TEAMS_APP_SECRET = { source = "exec", command = "security", args = ["find-generic-password", "-s", "teams-app-secret", "-w"] }
-
-# Option C: file
-TEAMS_APP_SECRET = { source = "file", path = "~/.config/teams/secret" }
+```sh
+borg
 ```
 
-## 3. Enable the Gateway
+Type `/plugins`, find **Teams**, press Space to select, Enter to install, and paste each credential when prompted.
 
-```toml
-[gateway]
-host = "127.0.0.1"
-port = 7842
+### CLI
+
+```sh
+borg add teams
 ```
 
-## 4. Set the Messaging Endpoint
+You will be prompted for:
+
+- **App ID** — from Azure Portal > Bot registration
+- **App Secret** — from Azure Portal > Bot registration > Certificates & secrets
+
+## 3. Set the Messaging Endpoint
 
 Expose a public URL (e.g. via ngrok):
 
@@ -43,19 +40,12 @@ ngrok http 7842
 ```
 
 In the Azure Bot Configuration, set the **Messaging endpoint** to:
+
 ```
 https://your-domain.ngrok-free.app/webhook/teams
 ```
 
-## 5. Start the Gateway
-
-```sh
-borg gateway
-```
-
-The gateway also runs automatically as part of the daemon.
-
-## 6. Verify
+## 4. Verify
 
 Message the bot in Microsoft Teams. You should get a response from your agent.
 
