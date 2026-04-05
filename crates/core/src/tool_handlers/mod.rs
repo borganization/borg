@@ -18,6 +18,26 @@ pub fn require_str_param<'a>(args: &'a serde_json::Value, name: &str) -> Result<
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter '{name}'."))
 }
 
+pub fn optional_str_param<'a>(args: &'a serde_json::Value, name: &str) -> Option<&'a str> {
+    args[name].as_str()
+}
+
+pub fn optional_u64_param(args: &serde_json::Value, name: &str, default: u64) -> u64 {
+    args[name].as_u64().unwrap_or(default)
+}
+
+pub fn optional_bool_param(args: &serde_json::Value, name: &str, default: bool) -> bool {
+    args[name].as_bool().unwrap_or(default)
+}
+
+pub fn optional_i64_param(args: &serde_json::Value, name: &str) -> Option<i64> {
+    args[name].as_i64()
+}
+
+pub fn optional_f64_param(args: &serde_json::Value, name: &str, default: f64) -> f64 {
+    args[name].as_f64().unwrap_or(default)
+}
+
 // ── Re-exports ──
 
 // Memory

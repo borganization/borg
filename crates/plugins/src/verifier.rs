@@ -81,7 +81,7 @@ pub fn verify_all(installed_ids: &[String], data_dir: &std::path::Path) -> Vec<V
 }
 
 fn check_keychain_credential(def: &PluginDef, key: &str) -> bool {
-    let service = format!("borg-{}", def.id.replace('/', "-"));
+    let service = def.service_name();
     let account = format!("borg-{key}");
     crate::keychain::check(&service, &account)
 }

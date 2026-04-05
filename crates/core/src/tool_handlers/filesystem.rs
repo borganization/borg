@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::constants;
 use crate::types::{ContentPart, MediaData, ToolOutput};
 
-use super::require_str_param;
+use super::{optional_bool_param, optional_str_param, optional_u64_param, require_str_param};
 
 /// Apply a patch to a directory, returning a formatted result message.
 fn apply_patch_to(
@@ -34,7 +34,7 @@ pub fn handle_apply_skill_patch(args: &serde_json::Value) -> Result<String> {
 pub fn handle_apply_patch_unified(args: &serde_json::Value) -> Result<String> {
     // Validate patch param exists before dispatching
     let _patch = require_str_param(args, "patch")?;
-    let target = args["target"].as_str().unwrap_or("cwd");
+    let target = optional_str_param(args, "target").unwrap_or("cwd");
 
     match target {
         "cwd" => handle_apply_patch(args),
@@ -64,9 +64,9 @@ pub fn handle_create_channel(args: &serde_json::Value) -> Result<String> {
 }
 
 pub fn handle_list_dir(args: &serde_json::Value, config: &Config) -> Result<String> {
-    let path_str = args["path"].as_str().unwrap_or(".");
-    let depth = args["depth"].as_u64().unwrap_or(1).min(3) as usize;
-    let include_hidden = args["include_hidden"].as_bool().unwrap_or(false);
+    let path_str = optional_str_param(args, "path").unwrap_or(".");
+    let depth = optional_u64_param(args, "depth", 1).min(3) as usize;
+    let include_hidden = optional_bool_param(args, "include_hidden", false);
 
     let base = if path_str.starts_with('/') || path_str.starts_with('~') {
         std::path::PathBuf::from(shellexpand::tilde(path_str).as_ref())
@@ -218,11 +218,10 @@ pub fn is_blocked_path(path: &std::path::Path, blocked: &[String]) -> bool {
 #[instrument(skip_all, fields(tool.name = "read_file"))]
 pub fn handle_read_file(args: &serde_json::Value, config: &Config) -> Result<ToolOutput> {
     let raw_path = require_str_param(args, "path")?;
-    let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
-    let limit = args["limit"].as_u64().unwrap_or(0) as usize;
-    let max_chars = args["max_chars"]
-        .as_u64()
-        .unwrap_or(constants::DEFAULT_READ_MAX_CHARS as u64) as usize;
+    let offset = optional_u64_param(args, "offset", 1).max(1) as usize;
+    let limit = optional_u64_param(args, "limit", 0) as usize;
+    let max_chars =
+        optional_u64_param(args, "max_chars", constants::DEFAULT_READ_MAX_CHARS as u64) as usize;
 
     // Resolve path: expand ~ and resolve relative paths
     let expanded = shellexpand::tilde(raw_path).to_string();

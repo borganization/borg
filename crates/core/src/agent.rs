@@ -600,6 +600,41 @@ impl Agent {
         (self.history.len(), history_tokens(&self.history))
     }
 
+    /// Build the `<environment>` section with time, CWD, git context, and OS info.
+    async fn build_environment_section(&self) -> String {
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+        let mut s = String::new();
+        s.push_str("<environment>\n");
+        s.push_str(&format!("Current Time: {now}\n"));
+        if let Ok(cwd) = std::env::current_dir() {
+            s.push_str(&format!("Working directory: {}\n", cwd.display()));
+        }
+        if let Some(ref root) = self.git_repo_root {
+            let git_ctx = crate::git::collect_git_context(root).await;
+            let formatted = crate::git::format_git_context(&git_ctx);
+            if !formatted.is_empty() {
+                s.push_str(&formatted);
+            }
+        }
+        s.push_str(&format!(
+            "OS: {} {}\n",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
+        s.push_str("</environment>\n");
+        s
+    }
+
+    /// Build the `<collaboration_mode>` section from the current config.
+    fn build_collaboration_section(&self) -> String {
+        let mode_template = match self.config.conversation.collaboration_mode {
+            crate::config::CollaborationMode::Default => COLLAB_MODE_DEFAULT,
+            crate::config::CollaborationMode::Execute => COLLAB_MODE_EXECUTE,
+            crate::config::CollaborationMode::Plan => COLLAB_MODE_PLAN,
+        };
+        format!("\n<collaboration_mode>\n{mode_template}\n</collaboration_mode>\n")
+    }
+
     #[instrument(skip_all)]
     async fn build_system_prompt(&mut self) -> Result<String> {
         // Use cached identity or load + cache it
@@ -612,42 +647,13 @@ impl Agent {
             }
         };
         let memory = self.load_memory_with_ranking().await?;
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-
         let mut system = String::with_capacity(16_384);
         system.push_str("<system_instructions>\n");
         system.push_str(&identity);
         system.push_str("\n</system_instructions>\n\n");
 
-        // Environment section with rich git context
-        system.push_str("<environment>\n");
-        system.push_str(&format!("Current Time: {now}\n"));
-        if let Ok(cwd) = std::env::current_dir() {
-            system.push_str(&format!("Working directory: {}\n", cwd.display()));
-        }
-        if let Some(ref root) = self.git_repo_root {
-            let git_ctx = crate::git::collect_git_context(root).await;
-            let formatted = crate::git::format_git_context(&git_ctx);
-            if !formatted.is_empty() {
-                system.push_str(&formatted);
-            }
-        }
-        system.push_str(&format!(
-            "OS: {} {}\n",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ));
-        system.push_str("</environment>\n");
-
-        // Collaboration mode
-        let mode_template = match self.config.conversation.collaboration_mode {
-            crate::config::CollaborationMode::Default => COLLAB_MODE_DEFAULT,
-            crate::config::CollaborationMode::Execute => COLLAB_MODE_EXECUTE,
-            crate::config::CollaborationMode::Plan => COLLAB_MODE_PLAN,
-        };
-        system.push_str(&format!(
-            "\n<collaboration_mode>\n{mode_template}\n</collaboration_mode>\n"
-        ));
+        system.push_str(&self.build_environment_section().await);
+        system.push_str(&self.build_collaboration_section());
 
         if !memory.is_empty() {
             system.push_str(
@@ -1469,47 +1475,7 @@ Rules:
                 return Ok(());
             }
 
-            let tc: Vec<ToolCall> = tool_calls
-                .iter()
-                .take(constants::MAX_TOOL_CALLS_PER_RESPONSE)
-                .filter(|ptc| {
-                    if ptc.name.is_empty() || ptc.id.is_empty() {
-                        warn!("Dropping incomplete tool call (missing name or id)");
-                        return false;
-                    }
-                    if ptc.name.len() > constants::MAX_TOOL_NAME_LEN {
-                        warn!(
-                            "Dropping tool call with oversized name ({} bytes)",
-                            ptc.name.len()
-                        );
-                        return false;
-                    }
-                    if ptc.arguments.len() > constants::MAX_TOOL_ARGS_LEN {
-                        warn!(
-                            "Dropping tool call '{}' with oversized arguments ({} bytes)",
-                            ptc.name,
-                            ptc.arguments.len()
-                        );
-                        return false;
-                    }
-                    if serde_json::from_str::<serde_json::Value>(&ptc.arguments).is_err() {
-                        warn!(
-                            "Dropping tool call '{}' with incomplete JSON arguments",
-                            ptc.name
-                        );
-                        return false;
-                    }
-                    true
-                })
-                .map(|ptc| ToolCall {
-                    id: ptc.id.clone(),
-                    call_type: "function".to_string(),
-                    function: FunctionCall {
-                        name: ptc.name.clone(),
-                        arguments: ptc.arguments.clone(),
-                    },
-                })
-                .collect();
+            let tc = validate_tool_calls(&tool_calls);
 
             if tc.is_empty() {
                 let content = if text_content.is_empty() {
@@ -1892,6 +1858,52 @@ Rules:
             let _ = session.close().await;
         }
     }
+}
+
+/// Validate and convert partial tool calls from the LLM stream into well-formed `ToolCall`s.
+/// Drops incomplete, oversized, or malformed entries.
+fn validate_tool_calls(tool_calls: &[PartialToolCall]) -> Vec<ToolCall> {
+    tool_calls
+        .iter()
+        .take(constants::MAX_TOOL_CALLS_PER_RESPONSE)
+        .filter(|ptc| {
+            if ptc.name.is_empty() || ptc.id.is_empty() {
+                warn!("Dropping incomplete tool call (missing name or id)");
+                return false;
+            }
+            if ptc.name.len() > constants::MAX_TOOL_NAME_LEN {
+                warn!(
+                    "Dropping tool call with oversized name ({} bytes)",
+                    ptc.name.len()
+                );
+                return false;
+            }
+            if ptc.arguments.len() > constants::MAX_TOOL_ARGS_LEN {
+                warn!(
+                    "Dropping tool call '{}' with oversized arguments ({} bytes)",
+                    ptc.name,
+                    ptc.arguments.len()
+                );
+                return false;
+            }
+            if serde_json::from_str::<serde_json::Value>(&ptc.arguments).is_err() {
+                warn!(
+                    "Dropping tool call '{}' with incomplete JSON arguments",
+                    ptc.name
+                );
+                return false;
+            }
+            true
+        })
+        .map(|ptc| ToolCall {
+            id: ptc.id.clone(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: ptc.name.clone(),
+                arguments: ptc.arguments.clone(),
+            },
+        })
+        .collect()
 }
 
 #[derive(Default)]

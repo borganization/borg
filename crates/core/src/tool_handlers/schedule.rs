@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::tasks;
 
-use super::require_str_param;
+use super::{optional_i64_param, optional_str_param, optional_u64_param, require_str_param};
 
 /// Open the database and run a callback, formatting the open error if it fails.
 fn with_db<F>(f: F) -> Result<String>
@@ -19,8 +19,8 @@ where
 
 /// Unified schedule handler: dispatches to manage_tasks or manage_cron based on `type` field.
 pub fn handle_schedule(args: &serde_json::Value, config: &Config) -> Result<String> {
-    let job_type = args["type"].as_str().unwrap_or("");
-    let action = args["action"].as_str().unwrap_or("");
+    let job_type = optional_str_param(args, "type").unwrap_or("");
+    let action = optional_str_param(args, "action").unwrap_or("");
 
     // For create, type is required
     if action == "create" && job_type.is_empty() {
@@ -109,9 +109,9 @@ pub fn handle_manage_tasks(args: &serde_json::Value, _config: &Config) -> Result
 fn manage_tasks_create(args: &serde_json::Value) -> Result<String> {
     let task_name = require_str_param(args, "name")?;
     let prompt = require_str_param(args, "prompt")?;
-    let schedule_type = args["schedule_type"].as_str().unwrap_or("interval");
+    let schedule_type = optional_str_param(args, "schedule_type").unwrap_or("interval");
     let schedule_expr = require_str_param(args, "schedule_expr")?;
-    let timezone = args["timezone"].as_str().unwrap_or("local");
+    let timezone = optional_str_param(args, "timezone").unwrap_or("local");
     if let Err(e) = tasks::validate_schedule(schedule_type, schedule_expr) {
         return Ok(format!("Error: Invalid schedule: {e}"));
     }
@@ -129,11 +129,11 @@ fn manage_tasks_create(args: &serde_json::Value) -> Result<String> {
             schedule_expr,
             timezone,
             next_run,
-            max_retries: args["max_retries"].as_i64().map(|v| v as i32),
-            timeout_ms: args["timeout_ms"].as_i64(),
-            delivery_channel: args["delivery_channel"].as_str(),
-            delivery_target: args["delivery_target"].as_str(),
-            allowed_tools: args["allowed_tools"].as_str(),
+            max_retries: optional_i64_param(args, "max_retries").map(|v| v as i32),
+            timeout_ms: optional_i64_param(args, "timeout_ms"),
+            delivery_channel: optional_str_param(args, "delivery_channel"),
+            delivery_target: optional_str_param(args, "delivery_target"),
+            allowed_tools: optional_str_param(args, "allowed_tools"),
             task_type: "prompt",
         }) {
             Ok(()) => Ok(format!(
@@ -181,11 +181,11 @@ fn manage_tasks_get(args: &serde_json::Value) -> Result<String> {
 fn manage_tasks_update(args: &serde_json::Value) -> Result<String> {
     let task_id = require_str_param(args, "task_id")?;
     let update = crate::db::UpdateTask {
-        name: args["name"].as_str(),
-        prompt: args["prompt"].as_str(),
-        schedule_type: args["schedule_type"].as_str(),
-        schedule_expr: args["schedule_expr"].as_str(),
-        timezone: args["timezone"].as_str(),
+        name: optional_str_param(args, "name"),
+        prompt: optional_str_param(args, "prompt"),
+        schedule_type: optional_str_param(args, "schedule_type"),
+        schedule_expr: optional_str_param(args, "schedule_expr"),
+        timezone: optional_str_param(args, "timezone"),
     };
     if let Some(st) = update.schedule_type {
         let expr = update.schedule_expr.unwrap_or("");
@@ -216,7 +216,7 @@ fn manage_tasks_update(args: &serde_json::Value) -> Result<String> {
 
 fn manage_tasks_runs(args: &serde_json::Value) -> Result<String> {
     let task_id = require_str_param(args, "task_id")?;
-    let limit = args["limit"].as_u64().unwrap_or(5) as usize;
+    let limit = optional_u64_param(args, "limit", 5) as usize;
     with_db(|db| match db.task_run_history(task_id, limit) {
         Ok(runs) if runs.is_empty() => Ok("No runs recorded.".to_string()),
         Ok(runs) => {
@@ -315,7 +315,7 @@ pub fn handle_manage_cron(args: &serde_json::Value, _config: &Config) -> Result<
         }
         "runs" => {
             let job_id = require_str_param(args, "job_id")?;
-            let limit = args["limit"].as_u64().unwrap_or(5) as usize;
+            let limit = optional_u64_param(args, "limit", 5) as usize;
             with_db(|db| match db.task_run_history(job_id, limit) {
                 Ok(runs) if runs.is_empty() => {
                     Ok(format!("No runs recorded for cron job {job_id}."))
@@ -401,9 +401,9 @@ fn manage_cron_create(args: &serde_json::Value) -> Result<String> {
             timezone: "local",
             next_run,
             max_retries: Some(0),
-            timeout_ms: args["timeout_ms"].as_i64(),
-            delivery_channel: args["delivery_channel"].as_str(),
-            delivery_target: args["delivery_target"].as_str(),
+            timeout_ms: optional_i64_param(args, "timeout_ms"),
+            delivery_channel: optional_str_param(args, "delivery_channel"),
+            delivery_target: optional_str_param(args, "delivery_target"),
             allowed_tools: None,
             task_type: "command",
         }) {
