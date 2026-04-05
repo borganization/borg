@@ -33,6 +33,11 @@ fn short_id(id: &str) -> &str {
 #[derive(Parser)]
 #[command(name = "borg", about = "AI Personal Assistant Agent", version)]
 struct Cli {
+    /// Resume a specific session by ID (full UUID or unique prefix).
+    /// Only applies when launching the interactive TUI.
+    #[arg(long, global = true, value_name = "SESSION_ID")]
+    resume: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -484,7 +489,11 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Start) | None => {
             ensure_onboarded()?;
-            repl::run().await?;
+            if let Some(hint) = repl::run(cli.resume.clone()).await? {
+                println!();
+                println!("Session: {} ({})", hint.title, hint.short_id);
+                println!("Resume with: borg --resume {}", hint.short_id);
+            }
         }
         Some(Commands::Stop) => service::stop_service()?,
         Some(Commands::Restart) => service::restart_service()?,
@@ -1942,5 +1951,34 @@ mod tests {
     fn test_truncate_str_long() {
         let result = truncate_str("hello world", 5);
         assert_eq!(result, "hell…");
+    }
+
+    // -- --resume flag parsing --
+
+    #[test]
+    fn test_parse_resume_flag_no_subcommand() {
+        let cli = Cli::try_parse_from(["borg", "--resume", "abcd1234"]).unwrap();
+        assert_eq!(cli.resume.as_deref(), Some("abcd1234"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn test_parse_resume_flag_with_start() {
+        let cli = Cli::try_parse_from(["borg", "start", "--resume", "abcd1234"]).unwrap();
+        assert_eq!(cli.resume.as_deref(), Some("abcd1234"));
+        assert!(matches!(cli.command, Some(Commands::Start)));
+    }
+
+    #[test]
+    fn test_parse_without_resume_flag() {
+        let cli = Cli::try_parse_from(["borg"]).unwrap();
+        assert!(cli.resume.is_none());
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn test_parse_resume_requires_value() {
+        // --resume with no value should fail to parse
+        assert!(Cli::try_parse_from(["borg", "--resume"]).is_err());
     }
 }

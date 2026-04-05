@@ -388,6 +388,112 @@ mod tests {
     }
 
     #[test]
+    fn resolve_session_id_empty() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+        let result = resolve_session_id("");
+        assert!(matches!(result, Err(ResolveSessionError::Empty)));
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
+    fn resolve_session_id_not_found_empty_dir() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+        let sdir = tmp.path().join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+
+        let result = resolve_session_id("anything");
+        assert!(matches!(result, Err(ResolveSessionError::NotFound(_))));
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
+    fn resolve_session_id_not_found() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+        let sdir = tmp.path().join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+        write_test_session(&sdir, "aaa-111", "2025-01-01T00:00:00+00:00");
+
+        let result = resolve_session_id("zzz");
+        match result {
+            Err(ResolveSessionError::NotFound(p)) => assert_eq!(p, "zzz"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
+    fn resolve_session_id_exact_match() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+        let sdir = tmp.path().join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+        write_test_session(&sdir, "aaa-111", "2025-01-01T00:00:00+00:00");
+
+        let meta = resolve_session_id("aaa-111").unwrap();
+        assert_eq!(meta.id, "aaa-111");
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
+    fn resolve_session_id_unique_prefix() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+        let sdir = tmp.path().join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+        write_test_session(&sdir, "aaa-111", "2025-01-01T00:00:00+00:00");
+        write_test_session(&sdir, "bbb-222", "2025-02-01T00:00:00+00:00");
+
+        let meta = resolve_session_id("aaa").unwrap();
+        assert_eq!(meta.id, "aaa-111");
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
+    fn resolve_session_id_ambiguous_prefix() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+        let sdir = tmp.path().join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+        write_test_session(&sdir, "aaa-111", "2025-01-01T00:00:00+00:00");
+        write_test_session(&sdir, "aaa-222", "2025-02-01T00:00:00+00:00");
+
+        let result = resolve_session_id("aaa");
+        match result {
+            Err(ResolveSessionError::Ambiguous { prefix, count }) => {
+                assert_eq!(prefix, "aaa");
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
+    fn resolve_session_id_exact_wins_over_prefix() {
+        let _lock = SESSION_ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("BORG_DATA_DIR", tmp.path());
+        let sdir = tmp.path().join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+        write_test_session(&sdir, "abc", "2025-01-01T00:00:00+00:00");
+        write_test_session(&sdir, "abcdef", "2025-02-01T00:00:00+00:00");
+
+        // "abc" is both an exact id and a prefix of "abcdef" — exact must win.
+        let meta = resolve_session_id("abc").unwrap();
+        assert_eq!(meta.id, "abc");
+        std::env::remove_var("BORG_DATA_DIR");
+    }
+
+    #[test]
     fn save_does_not_create_last_session_file() {
         let _lock = SESSION_ENV_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -399,6 +505,54 @@ mod tests {
         let last_file = tmp.path().join("last_session");
         assert!(!last_file.exists());
         std::env::remove_var("BORG_DATA_DIR");
+    }
+}
+
+/// Error returned when resolving a session ID prefix to a concrete session.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveSessionError {
+    /// Empty prefix provided.
+    #[error("Session ID must not be empty")]
+    Empty,
+    /// No session matched the prefix.
+    #[error("No session found matching '{0}'")]
+    NotFound(String),
+    /// Multiple sessions matched the prefix.
+    #[error("Ambiguous session ID '{prefix}' — matches {count} sessions")]
+    Ambiguous {
+        /// The prefix that was ambiguous.
+        prefix: String,
+        /// Number of matching sessions.
+        count: usize,
+    },
+}
+
+/// Resolve a full or prefix session ID to a concrete [`SessionMeta`].
+///
+/// Accepts exact matches and unique prefix matches. If the input exactly matches
+/// a session ID, that session is returned even if it is also a prefix of longer IDs.
+pub fn resolve_session_id(prefix: &str) -> std::result::Result<SessionMeta, ResolveSessionError> {
+    if prefix.is_empty() {
+        return Err(ResolveSessionError::Empty);
+    }
+    let sessions = list_sessions().unwrap_or_default();
+
+    // Prefer exact match to disambiguate when a short id is also a prefix of longer ids.
+    if let Some(exact) = sessions.iter().find(|s| s.id == prefix) {
+        return Ok(exact.clone());
+    }
+
+    let matches: Vec<&SessionMeta> = sessions
+        .iter()
+        .filter(|s| s.id.starts_with(prefix))
+        .collect();
+    match matches.len() {
+        0 => Err(ResolveSessionError::NotFound(prefix.to_string())),
+        1 => Ok(matches[0].clone()),
+        count => Err(ResolveSessionError::Ambiguous {
+            prefix: prefix.to_string(),
+            count,
+        }),
     }
 }
 
