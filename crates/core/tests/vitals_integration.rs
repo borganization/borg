@@ -149,8 +149,11 @@ fn apply_deltas_clamps() {
 
 #[test]
 fn decay_reduces_stats_over_time() {
-    let state = vitals::baseline();
+    let mut state = vitals::baseline();
+    // baseline() anchors timestamps at epoch for replay determinism; simulate
+    // a recent interaction so the "no decay within 24h" assertion is meaningful.
     let now = chrono::Utc::now();
+    state.last_interaction_at = now;
 
     // No decay within 24h
     let no_decay = vitals::apply_decay(&state, now);
@@ -185,8 +188,11 @@ fn drift_detection_flags_inactivity() {
 
 #[test]
 fn no_drift_for_healthy_state() {
-    let state = vitals::baseline();
+    let mut state = vitals::baseline();
+    // baseline() anchors timestamps at the Unix epoch for replay determinism;
+    // for a "healthy" check we simulate that the user just interacted.
     let now = chrono::Utc::now();
+    state.last_interaction_at = now;
     let drift = vitals::detect_drift(&state, now);
     assert!(drift.is_empty(), "Baseline state should not have drift");
 }
