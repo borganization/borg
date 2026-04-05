@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -102,13 +104,13 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
     let tz = config.user_timezone();
     let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), tz, poke_rx);
     let hb_cancel = shutdown.clone();
-    tokio::spawn(async move {
+    let hb_handle = tokio::spawn(async move {
         scheduler.run(hb_tx, hb_cancel).await;
     });
     println!("Heartbeat scheduler started.");
 
     // Start gateway server (with poke channel for /internal/poke endpoint)
-    {
+    let gw_handle = {
         let gw_config = config.clone();
         let gw_shutdown = shutdown.clone();
         let gw_poke_tx = Some(poke_tx);
@@ -131,13 +133,13 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                 }
                 Err(e) => tracing::error!("Failed to create gateway server: {e}"),
             }
-        });
-        println!("Gateway server started.");
-    }
+        })
+    };
+    println!("Gateway server started.");
 
     // Start native iMessage monitor if channel is installed (macOS only)
     #[cfg(target_os = "macos")]
-    {
+    let im_handle: Option<tokio::task::JoinHandle<()>> = {
         let imessage_dir = Config::data_dir()?.join("channels/imessage");
         if imessage_dir.join("channel.toml").exists() {
             let probe = borg_gateway::imessage::probe::probe_imessage();
@@ -145,46 +147,82 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                 borg_gateway::imessage::probe::ProbeStatus::Ok => {
                     let im_config = config.clone();
                     let im_shutdown = shutdown.clone();
-                    tokio::spawn(async move {
+                    Some(tokio::spawn(async move {
                         match borg_gateway::imessage::start_imessage_monitor(im_config, im_shutdown)
                             .await
                         {
                             Ok(_handle) => tracing::info!("iMessage monitor started"),
                             Err(e) => tracing::warn!("iMessage monitor failed: {e}"),
                         }
-                    });
+                    }))
                 }
                 borg_gateway::imessage::probe::ProbeStatus::NoDiskAccess => {
                     tracing::warn!("iMessage: Full Disk Access required (System Settings > Privacy & Security). Skipping monitor.");
+                    None
                 }
                 other => {
                     tracing::warn!("iMessage probe: {other}. Skipping monitor.");
+                    None
                 }
             }
+        } else {
+            None
         }
-    }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let im_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     println!("Daemon running. Press Ctrl+C to stop.");
 
     // Missed job catch-up: skip tasks overdue by more than 7 days
-    {
-        let now = chrono::Utc::now().timestamp();
-        if let Ok(stale_tasks) = db.get_due_tasks(now) {
-            for task in &stale_tasks {
-                let age = now - task.next_run.unwrap_or(0);
-                if age > 7 * 86400 {
-                    tracing::warn!(
-                        "Skipping stale task '{}' ({}d overdue), advancing to next run",
-                        task.name,
-                        age / 86400
-                    );
-                    let _ = borg_core::tasks::advance_next_run(task, &db);
-                }
-            }
-        }
-    }
+    skip_stale_tasks(&db);
 
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+
+    // Pin subsystem handles for monitoring in select! loop
+    tokio::pin!(hb_handle);
+    tokio::pin!(gw_handle);
+
+    // Wrap optional iMessage handle into a future that pends forever if absent
+    let im_fut = async {
+        match im_handle {
+            Some(handle) => handle.await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(im_fut);
+
+    let mut lock_refresh_failures: u32 = 0;
+    const MAX_LOCK_REFRESH_FAILURES: u32 = 3;
+
+    // Watchdog: detect main loop deadlocks
+    let watchdog_ts = Arc::new(AtomicI64::new(chrono::Utc::now().timestamp()));
+    {
+        let ts = watchdog_ts.clone();
+        let wd_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut wd_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = wd_shutdown.cancelled() => return,
+                    _ = wd_interval.tick() => {}
+                }
+                let last = ts.load(Ordering::Relaxed);
+                let now = chrono::Utc::now().timestamp();
+                if now - last > 180 {
+                    tracing::error!(
+                        "Daemon watchdog: main loop stale for {}s, exiting",
+                        now - last
+                    );
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
+
+    // Track wall-clock time for drift detection after sleep/wake
+    let mut last_tick_wall = std::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -198,6 +236,24 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                 println!("All tasks drained. Goodbye.");
                 return Ok(());
             }
+            result = &mut hb_handle => {
+                tracing::error!("Heartbeat scheduler exited unexpectedly: {result:?}");
+                borg_core::activity_log::log_activity(&db, "error", "system", "Heartbeat scheduler crashed, daemon restarting");
+                shutdown.cancel();
+                continue; // graceful shutdown branch will handle drain
+            }
+            result = &mut gw_handle => {
+                tracing::error!("Gateway server exited unexpectedly: {result:?}");
+                borg_core::activity_log::log_activity(&db, "error", "system", "Gateway server crashed, daemon restarting");
+                shutdown.cancel();
+                continue;
+            }
+            result = &mut im_fut => {
+                tracing::error!("iMessage monitor exited unexpectedly: {result:?}");
+                borg_core::activity_log::log_activity(&db, "error", "system", "iMessage monitor crashed, daemon restarting");
+                shutdown.cancel();
+                continue;
+            }
             Some(HeartbeatEvent::Fire) = hb_rx.recv() => {
                 let hb_config = config.clone();
                 tokio::spawn(async move {
@@ -208,11 +264,46 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
             _ = interval.tick() => {}
         }
 
+        // Update watchdog timestamp
+        watchdog_ts.store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+
+        // Detect sleep/wake drift: if wall-clock elapsed >> 60s, we likely resumed from sleep
+        let elapsed = last_tick_wall.elapsed();
+        last_tick_wall = std::time::Instant::now();
+        if elapsed.as_secs() > 120 {
+            tracing::info!(
+                "Daemon resumed after {}s pause (likely sleep/wake), re-checking stale tasks",
+                elapsed.as_secs()
+            );
+            skip_stale_tasks(&db);
+        }
+
         let now = chrono::Utc::now().timestamp();
 
-        // Refresh daemon lock heartbeat
-        if let Err(e) = db.refresh_daemon_lock(daemon_pid, now) {
-            tracing::warn!("Failed to refresh daemon lock heartbeat: {e}");
+        // Refresh daemon lock heartbeat — exit after consecutive failures (lock stolen)
+        match db.refresh_daemon_lock(daemon_pid, now) {
+            Ok(()) => {
+                lock_refresh_failures = 0;
+            }
+            Err(e) => {
+                lock_refresh_failures += 1;
+                tracing::warn!(
+                    "Failed to refresh daemon lock ({lock_refresh_failures}/{MAX_LOCK_REFRESH_FAILURES}): {e}"
+                );
+                if lock_refresh_failures >= MAX_LOCK_REFRESH_FAILURES {
+                    tracing::error!(
+                        "Daemon lock lost after {MAX_LOCK_REFRESH_FAILURES} consecutive failures, exiting"
+                    );
+                    borg_core::activity_log::log_activity(
+                        &db,
+                        "error",
+                        "system",
+                        "Daemon lock lost, restarting",
+                    );
+                    shutdown.cancel();
+                    continue;
+                }
+            }
         }
 
         // Process due tasks (atomic claim: advances next_run + creates running task_run in one transaction)
@@ -248,6 +339,24 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
                 }
             }
             Err(e) => tracing::warn!("Failed to check retry tasks: {e}"),
+        }
+    }
+}
+
+/// Skip tasks overdue by more than 7 days, advancing them to their next run.
+fn skip_stale_tasks(db: &borg_core::db::Database) {
+    let now = chrono::Utc::now().timestamp();
+    if let Ok(stale_tasks) = db.get_due_tasks(now) {
+        for task in &stale_tasks {
+            let age = now - task.next_run.unwrap_or(0);
+            if age > 7 * 86400 {
+                tracing::warn!(
+                    "Skipping stale task '{}' ({}d overdue), advancing to next run",
+                    task.name,
+                    age / 86400
+                );
+                let _ = borg_core::tasks::advance_next_run(task, db);
+            }
         }
     }
 }
@@ -301,7 +410,7 @@ async fn spawn_task_execution(
         let started_at = chrono::Utc::now().timestamp();
 
         let exec_ctx = TaskExecContext {
-            task_name,
+            task_name: task_name.clone(),
             task_id,
             prompt_or_command: task_prompt,
             timeout: task_timeout,
@@ -314,10 +423,37 @@ async fn spawn_task_execution(
             delivery_target,
             config,
         };
-        if task_type == "command" {
-            execute_command_task(&exec_ctx).await;
-        } else {
-            execute_prompt_task(&exec_ctx).await;
+
+        let result = std::panic::AssertUnwindSafe(async {
+            if task_type == "command" {
+                execute_command_task(&exec_ctx).await;
+            } else {
+                execute_prompt_task(&exec_ctx).await;
+            }
+        });
+
+        if let Err(panic_err) = futures::FutureExt::catch_unwind(result).await {
+            let panic_msg = panic_err
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic_err.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            tracing::error!("Task '{task_name}' panicked: {panic_msg}");
+            if let Ok(db) = borg_core::db::Database::open() {
+                let duration_ms = (chrono::Utc::now().timestamp() - started_at) * 1000;
+                let _ = db.complete_task_run(
+                    run_id,
+                    duration_ms,
+                    None,
+                    Some(&format!("panic: {panic_msg}")),
+                );
+                borg_core::activity_log::log_activity(
+                    &db,
+                    "error",
+                    "task",
+                    &format!("Task '{task_name}' panicked: {panic_msg}"),
+                );
+            }
         }
     });
 }
@@ -939,14 +1075,30 @@ pub fn ensure_service_running() -> Result<()> {
     if !is_running {
         if cfg!(target_os = "macos") {
             if let Ok(plist) = launchd_plist_path() {
-                let _ = std::process::Command::new("launchctl")
+                match std::process::Command::new("launchctl")
                     .args(["load", &plist.to_string_lossy()])
-                    .status();
+                    .output()
+                {
+                    Ok(output) if !output.status.success() => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::warn!("launchctl load failed: {stderr}");
+                    }
+                    Err(e) => tracing::warn!("Failed to run launchctl load: {e}"),
+                    _ => {}
+                }
             }
         } else if cfg!(target_os = "linux") {
-            let _ = std::process::Command::new("systemctl")
+            match std::process::Command::new("systemctl")
                 .args(["--user", "start", "borg.service"])
-                .status();
+                .output()
+            {
+                Ok(output) if !output.status.success() => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    tracing::warn!("systemctl start failed: {stderr}");
+                }
+                Err(e) => tracing::warn!("Failed to run systemctl start: {e}"),
+                _ => {}
+            }
         }
     }
 
@@ -965,8 +1117,38 @@ pub fn ensure_service_installed() -> Result<()> {
 
     if !already_installed {
         install_service_inner()?;
+    } else if service_binary_path_stale() {
+        tracing::info!("Service binary path is stale, reinstalling service file");
+        install_service_inner()?;
     }
     Ok(())
+}
+
+/// Check if the installed service file points to a different binary than the current one.
+fn service_binary_path_stale() -> bool {
+    // Canonicalize to resolve symlinks — prevents false positives when plist uses a
+    // symlink path but current_exe() returns the resolved target.
+    let current = match std::env::current_exe().and_then(|p| p.canonicalize()) {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => return false,
+    };
+
+    let service_content = if cfg!(target_os = "macos") {
+        launchd_plist_path()
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+    } else if cfg!(target_os = "linux") {
+        systemd_unit_path()
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+    } else {
+        None
+    };
+
+    match service_content {
+        Some(content) => !content.contains(&current),
+        None => false,
+    }
 }
 
 fn install_service_inner() -> Result<()> {
@@ -1058,10 +1240,14 @@ fn install_launchd(
     std::fs::write(&plist_path, &content)
         .with_context(|| format!("Failed to write plist to {}", plist_path.display()))?;
 
-    let _ = std::process::Command::new("launchctl")
+    let output = std::process::Command::new("launchctl")
         .args(["load", &plist_path.to_string_lossy()])
-        .status()
+        .output()
         .context("Failed to run launchctl load")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("launchctl load returned non-zero: {stderr}");
+    }
 
     Ok(())
 }
@@ -1155,14 +1341,26 @@ fn install_systemd(binary_path: &str, home: &std::path::Path) -> Result<()> {
     std::fs::write(&unit_path, &content)
         .with_context(|| format!("Failed to write unit to {}", unit_path.display()))?;
 
-    let _ = std::process::Command::new("systemctl")
+    match std::process::Command::new("systemctl")
         .args(["--user", "daemon-reload"])
-        .status();
+        .output()
+    {
+        Ok(output) if !output.status.success() => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("systemctl daemon-reload failed: {stderr}");
+        }
+        Err(e) => tracing::warn!("Failed to run systemctl daemon-reload: {e}"),
+        _ => {}
+    }
 
-    let _ = std::process::Command::new("systemctl")
+    let output = std::process::Command::new("systemctl")
         .args(["--user", "enable", "--now", "borg.service"])
-        .status()
+        .output()
         .context("Failed to enable service")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("systemctl enable --now failed: {stderr}");
+    }
 
     Ok(())
 }
@@ -1341,5 +1539,43 @@ mod tests {
             0,     // prev_time (never set)
             3600,  // window
         ));
+    }
+
+    #[test]
+    fn stale_binary_path_detected_for_launchd() {
+        // Test that a plist with a different binary path is detected as stale
+        let content = LAUNCHD_PLIST_TEMPLATE
+            .replace("{{BINARY_PATH}}", "/old/path/to/borg")
+            .replace("{{LOG_DIR}}", "/tmp/logs")
+            .replace("{{HOME}}", "/Users/test");
+
+        // The content should NOT contain the current exe
+        let current_exe = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        assert!(
+            !content.contains(&current_exe),
+            "plist with old path should not contain current exe"
+        );
+
+        // Verify it does contain the old path
+        assert!(content.contains("/old/path/to/borg"));
+    }
+
+    #[test]
+    fn stale_binary_path_not_detected_when_matching() {
+        let current_exe = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/usr/local/bin/borg".to_string());
+
+        let content = LAUNCHD_PLIST_TEMPLATE
+            .replace("{{BINARY_PATH}}", &current_exe)
+            .replace("{{LOG_DIR}}", "/tmp/logs")
+            .replace("{{HOME}}", "/Users/test");
+
+        assert!(
+            content.contains(&current_exe),
+            "plist with current path should contain current exe"
+        );
     }
 }

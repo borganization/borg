@@ -3444,6 +3444,53 @@ fn daemon_lock_not_held_after_release() {
     assert!(!db.is_daemon_lock_held());
 }
 
+// ── Daemon lock refresh resilience tests ──
+
+#[test]
+fn refresh_daemon_lock_updates_heartbeat() {
+    let db = test_db();
+    let now = chrono::Utc::now().timestamp();
+    assert!(db.acquire_daemon_lock(100, now).unwrap());
+
+    // Refresh should succeed and update heartbeat
+    db.refresh_daemon_lock(100, now + 60).unwrap();
+
+    // Verify heartbeat was updated (lock should still be held)
+    assert!(db.is_daemon_lock_held());
+}
+
+#[test]
+fn refresh_daemon_lock_stolen_returns_error() {
+    let db = test_db();
+    let now = 1000;
+    assert!(db.acquire_daemon_lock(100, now).unwrap());
+
+    // Simulate lock theft: manually update PID to a different value
+    db.conn
+        .execute("UPDATE daemon_lock SET pid = 999 WHERE id = 1", [])
+        .unwrap();
+
+    // Refresh with original PID should fail (0 rows matched)
+    let result = db.refresh_daemon_lock(100, now + 60);
+    assert!(result.is_err(), "refresh should fail when lock is stolen");
+    assert!(
+        result.unwrap_err().to_string().contains("lock lost"),
+        "error should mention lock lost"
+    );
+}
+
+#[test]
+fn refresh_daemon_lock_after_release_returns_error() {
+    let db = test_db();
+    let now = 1000;
+    assert!(db.acquire_daemon_lock(100, now).unwrap());
+    db.release_daemon_lock(100).unwrap();
+
+    // Refresh after release should fail (no row to update)
+    let result = db.refresh_daemon_lock(100, now + 60);
+    assert!(result.is_err(), "refresh should fail after release");
+}
+
 // ── Tamper-proof validation tests ──
 
 #[test]

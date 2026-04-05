@@ -180,6 +180,7 @@ impl HeartbeatScheduler {
         let _ = tx.try_send(HeartbeatEvent::SchedulerStarted { mode });
 
         let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticker.tick().await; // Skip immediate first tick
 
         loop {
@@ -794,5 +795,52 @@ mod tests {
             SkipReason::DuplicateResponse.to_string(),
             "duplicate response"
         );
+    }
+
+    #[tokio::test]
+    async fn scheduler_does_not_burst_after_sleep() {
+        // Verify MissedTickBehavior::Skip prevents burst-firing after a long pause
+        tokio::time::pause();
+
+        let config = HeartbeatConfig {
+            interval: "60s".to_string(),
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            cron: None,
+            channels: Vec::new(),
+        };
+
+        let (_wake_tx, wake_rx) = mpsc::channel(8);
+        let (fire_tx, mut fire_rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
+
+        // Drain SchedulerStarted
+        drain_started(&mut fire_rx).await;
+
+        // Advance past 10 intervals (600s) in one jump — simulates sleep/wake
+        tokio::time::advance(std::time::Duration::from_secs(600)).await;
+        // Yield to let the scheduler process
+        tokio::task::yield_now().await;
+
+        // Should get at most 1 Fire event, not 10 (thanks to MissedTickBehavior::Skip)
+        let mut fire_count = 0;
+        while let Ok(Some(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), fire_rx.recv()).await
+        {
+            if matches!(event, HeartbeatEvent::Fire) {
+                fire_count += 1;
+            }
+        }
+
+        assert!(
+            fire_count <= 1,
+            "expected at most 1 fire after sleep, got {fire_count}"
+        );
+
+        cancel.cancel();
     }
 }
