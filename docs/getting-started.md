@@ -159,7 +159,6 @@ borg service status     # check service status
 ## Next steps
 
 - [Configuration](configuration.md) — customize the provider, model, timeouts, and all settings
-- [Tools](tools.md) — learn how the agent creates and uses tools
 - [Skills](skills.md) — instruction bundles for teaching the agent CLI workflows
 - [Memory](memory.md) — how the agent remembers things across sessions
 - [Heartbeat](heartbeat.md) — proactive check-ins and daemon mode

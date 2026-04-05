@@ -15,39 +15,32 @@ Under **OAuth & Permissions**, add the following Bot Token Scopes:
 
 Install the app to your workspace and copy the **Bot User OAuth Token** (`xoxb-...`).
 
-## 3. Store Credentials
+The **Signing Secret** is found under **Basic Information** > **App Credentials**.
 
-Add the bot token and signing secret to `~/.borg/config.toml`:
+## 3. Install via Borg
 
-```toml
-[credentials]
-# Option A: environment variable
-SLACK_BOT_TOKEN = "SLACK_BOT_TOKEN"
-SLACK_SIGNING_SECRET = "SLACK_SIGNING_SECRET"
+Credentials are stored in your OS keychain (macOS Keychain / Linux `secret-tool`) and wired into `config.toml` automatically. No manual file editing required.
 
-# Option B: macOS Keychain
-SLACK_BOT_TOKEN = { source = "exec", command = "security", args = ["find-generic-password", "-s", "slack-bot", "-w"] }
-SLACK_SIGNING_SECRET = { source = "exec", command = "security", args = ["find-generic-password", "-s", "slack-signing", "-w"] }
+### TUI (recommended)
 
-# Option C: file
-SLACK_BOT_TOKEN = { source = "file", path = "~/.config/slack/bot-token" }
-
-# Option D: explicit env var
-SLACK_BOT_TOKEN = { source = "env", var = "SLACK_BOT_TOKEN" }
+```sh
+borg
 ```
 
-The signing secret is found under **Basic Information** > **App Credentials** in your Slack app settings.
+Type `/plugins`, find **Slack**, press Space to select, Enter to install, and paste each credential when prompted.
 
-## 4. Enable the Gateway
+### CLI
 
-```toml
-[gateway]
-enabled = true
-host = "127.0.0.1"
-port = 7842
+```sh
+borg add slack
 ```
 
-## 5. Enable Event Subscriptions
+You will be prompted for:
+
+- **Bot Token** — from Slack App settings > OAuth & Permissions
+- **Signing Secret** — from Slack App settings > Basic Information
+
+## 4. Enable Event Subscriptions
 
 Expose a public URL (e.g. via ngrok):
 
@@ -64,15 +57,7 @@ In your Slack app settings, go to **Event Subscriptions**:
    - `message.im` — direct messages
    - `app_mention` — @mentions in channels
 
-## 6. Start the Gateway
-
-```sh
-borg gateway
-```
-
-The gateway also runs automatically as part of the daemon.
-
-## 7. Verify
+## 5. Verify
 
 Invite the bot to a channel or send it a direct message. You should get a response from your agent.
 
@@ -111,8 +96,6 @@ group_activation = "mention"   # mention (default) | always
 - `always` — responds to all messages in channels the bot is in
 
 ### Access control
-
-Configure sender pairing policy for Slack:
 
 ```toml
 [gateway.channel_policies]

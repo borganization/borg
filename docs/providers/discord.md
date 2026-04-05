@@ -9,11 +9,13 @@ Go to the [Discord Developer Portal](https://discord.com/developers/applications
 Under your application, go to **Bot** and click **Add Bot**. Copy the **Bot Token**.
 
 Under **Privileged Gateway Intents**, enable:
-- **Message Content Intent** -- required to read message text
+
+- **Message Content Intent** — required to read message text
 
 ## 3. Configure OAuth2
 
 Under **OAuth2** > **URL Generator**:
+
 - Select scopes: `bot`, `applications.commands`
 - Select bot permissions: `Send Messages`, `Read Message History`, `Use Slash Commands`
 
@@ -23,35 +25,30 @@ Copy the generated URL and use it to invite the bot to your server.
 
 Under **General Information**, copy the **Public Key** (used for interaction signature verification).
 
-## 5. Store Credentials
+## 5. Install via Borg
 
-Add credentials to `~/.borg/config.toml`:
+Credentials are stored in your OS keychain (macOS Keychain / Linux `secret-tool`) and wired into `config.toml` automatically. No manual file editing required.
 
-```toml
-[credentials]
-# Option A: environment variable
-DISCORD_BOT_TOKEN = "DISCORD_BOT_TOKEN"
-DISCORD_PUBLIC_KEY = "DISCORD_PUBLIC_KEY"
+### TUI (recommended)
 
-# Option B: macOS Keychain
-DISCORD_BOT_TOKEN = { source = "exec", command = "security", args = ["find-generic-password", "-s", "discord-bot", "-w"] }
-
-# Option C: file
-DISCORD_BOT_TOKEN = { source = "file", path = "~/.config/discord/token" }
-
-# Option D: explicit env var
-DISCORD_BOT_TOKEN = { source = "env", var = "DISCORD_BOT_TOKEN" }
+```sh
+borg
 ```
 
-## 6. Enable the Gateway
+Type `/plugins`, find **Discord**, press Space to select, Enter to install, and paste each credential when prompted.
 
-```toml
-[gateway]
-host = "127.0.0.1"
-port = 7842
+### CLI
+
+```sh
+borg add discord
 ```
 
-## 7. Set the Interactions Endpoint
+You will be prompted for:
+
+- **Bot Token** — from Discord Developer Portal > Bot
+- **Public Key** — from Discord Developer Portal > General Information
+
+## 6. Set the Interactions Endpoint
 
 Expose a public URL (e.g. via ngrok):
 
@@ -60,21 +57,14 @@ ngrok http 7842
 ```
 
 In the Discord Developer Portal, go to **General Information** and set the **Interactions Endpoint URL** to:
+
 ```
 https://your-domain.ngrok-free.app/webhook/discord
 ```
 
-Discord will send a verification ping -- the gateway handles this automatically.
+Discord will send a verification ping — the gateway handles this automatically.
 
-## 8. Start the Gateway
-
-```sh
-borg gateway
-```
-
-The gateway also runs automatically as part of the daemon.
-
-## 9. Verify
+## 7. Verify
 
 Send a message to your bot in Discord (DM or in a server channel where the bot is present). You should get a response from your agent.
 

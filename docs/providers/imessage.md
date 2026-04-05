@@ -1,6 +1,6 @@
 # iMessage Setup
 
-iMessage integration is macOS-only. It monitors the iMessage database directly -- no webhook or external service needed.
+iMessage integration is macOS-only. It monitors the iMessage database directly — no webhook or external service needed, and no credentials to configure.
 
 ## Requirements
 
@@ -13,23 +13,17 @@ iMessage integration is macOS-only. It monitors the iMessage database directly -
 
 Go to **System Settings** > **Privacy & Security** > **Full Disk Access** and add your terminal application (Terminal.app, iTerm2, etc.).
 
-## 2. Enable via Plugin
+## 2. Install via Borg
+
+iMessage is installed through the TUI plugin marketplace. No credentials are required — the plugin installs the channel templates and hooks directly into the local Messages database.
 
 ```sh
-borg add imessage
+borg
 ```
 
-Or install via the TUI: run `borg` and use `/plugins` to find and install iMessage.
+Type `/plugins`, find **iMessage**, press Space to select, and Enter to install. The gateway will start monitoring `~/Library/Messages/chat.db` automatically.
 
-## 3. Start the Gateway
-
-```sh
-borg gateway
-```
-
-The gateway monitors `~/Library/Messages/chat.db` for new messages using SQLite polling. No public URL or port forwarding is required.
-
-## 4. Verify
+## 3. Verify
 
 Send an iMessage to the Mac running Borg. You should get a response from your agent.
 
@@ -52,6 +46,6 @@ imessage = "pairing"   # pairing (default) | open | disabled
 
 ## Limitations
 
-- macOS only -- not available on Linux or Windows
+- macOS only — not available on Linux or Windows
 - Requires Full Disk Access permission
 - Uses AppleScript for sending, which may prompt for accessibility permissions
