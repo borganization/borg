@@ -260,25 +260,26 @@ pub async fn run() -> Result<()> {
     let daemon_running = borg_core::db::Database::open()
         .map(|db| db.is_daemon_lock_held())
         .unwrap_or(false);
-    let (heartbeat_rx, heartbeat_event_tx) = if !daemon_running {
+    let (heartbeat_rx, heartbeat_event_tx, poke_tx) = if !daemon_running {
         let (hb_tx, hb_rx) = mpsc::channel::<HeartbeatEvent>(32);
-        // Keep wake_tx alive so the wake_rx channel doesn't close immediately
-        let (wake_tx, wake_rx) = mpsc::channel::<()>(8);
+        // Keep poke_tx alive so the poke_rx channel doesn't close immediately
+        let (poke_tx, poke_rx) = mpsc::channel::<()>(8);
+        let poke_tx_for_app = poke_tx.clone();
         let tz = config.user_timezone();
-        let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), tz, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), tz, poke_rx);
         let hb_cancel = heartbeat_cancel.clone();
         let hb_tx_clone = hb_tx.clone();
         tokio::spawn(async move {
-            // Move wake_tx into the task to keep it alive for the scheduler's lifetime
-            let _wake_tx = wake_tx;
+            // Move poke_tx into the task to keep it alive for the scheduler's lifetime
+            let _poke_tx = poke_tx;
             scheduler.run(hb_tx, hb_cancel).await;
         });
-        (Some(hb_rx), Some(hb_tx_clone))
+        (Some(hb_rx), Some(hb_tx_clone), Some(poke_tx_for_app))
     } else {
         tracing::info!(
             "Daemon is running — TUI heartbeat scheduler skipped (daemon owns heartbeat)"
         );
-        (None, None)
+        (None, None, None)
     };
 
     // Auto-start gateway if enabled and any channels are installed
@@ -312,7 +313,7 @@ pub async fn run() -> Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(config, heartbeat_rx, heartbeat_event_tx);
+    let mut app = App::new(config, heartbeat_rx, heartbeat_event_tx, poke_tx);
     if let Some((title, count)) = resumed_info {
         app.push_system_message(format!("Resumed session: {title} ({count} messages)"));
     }
@@ -1144,6 +1145,31 @@ async fn run_event_loop(
                 goodbye::render(terminal)?;
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 return Ok(());
+            }
+            AppAction::Poke => {
+                let config = app.config.clone();
+                tokio::spawn(async move {
+                    let url = format!(
+                        "http://{}:{}/internal/poke",
+                        config.gateway.host, config.gateway.port
+                    );
+                    let client = reqwest::Client::new();
+                    match client
+                        .post(&url)
+                        .timeout(std::time::Duration::from_secs(5))
+                        .send()
+                        .await
+                    {
+                        Ok(r) if r.status().is_success() => {}
+                        Ok(r) => {
+                            tracing::warn!("Poke via HTTP failed: {}", r.status());
+                        }
+                        Err(e) => {
+                            tracing::warn!("Poke via HTTP failed: {e}");
+                        }
+                    }
+                });
+                app.push_system_message("[poke: sent to daemon]".to_string());
             }
             AppAction::RunDoctor => {
                 app.push_system_message("Borg Doctor\n───────────".to_string());

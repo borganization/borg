@@ -135,6 +135,7 @@ pub enum AppAction {
     },
     Uninstall,
     RunDoctor,
+    Poke,
 }
 
 pub struct App<'a> {
@@ -150,6 +151,7 @@ pub struct App<'a> {
     pub event_rx: Option<mpsc::Receiver<AgentEvent>>,
     pub heartbeat_rx: Option<mpsc::Receiver<HeartbeatEvent>>,
     pub heartbeat_event_tx: Option<mpsc::Sender<HeartbeatEvent>>,
+    pub poke_tx: Option<mpsc::Sender<()>>,
     pub cancel_token: Option<CancellationToken>,
     auto_scroll: bool,
     /// Accumulated token usage for the current session
@@ -188,6 +190,7 @@ impl<'a> App<'a> {
         config: Config,
         heartbeat_rx: Option<mpsc::Receiver<HeartbeatEvent>>,
         heartbeat_event_tx: Option<mpsc::Sender<HeartbeatEvent>>,
+        poke_tx: Option<mpsc::Sender<()>>,
     ) -> Self {
         Self {
             cells: Vec::new(),
@@ -202,6 +205,7 @@ impl<'a> App<'a> {
             event_rx: None,
             heartbeat_rx,
             heartbeat_event_tx,
+            poke_tx,
             cancel_token: None,
             auto_scroll: true,
             session_prompt_tokens: 0,
@@ -1781,7 +1785,7 @@ mod tests {
 
     fn make_app() -> App<'static> {
         let config = Config::default();
-        App::new(config, None, None)
+        App::new(config, None, None, None)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2673,5 +2677,46 @@ mod tests {
         popup.update_filter("/unins");
         let matches = popup.filtered();
         assert!(matches.is_empty());
+    }
+
+    // --- /poke command ---
+
+    #[test]
+    fn poke_with_channel_sends_and_continues() {
+        let config = Config::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let mut app = App::new(config, None, None, Some(tx));
+        let result = app.try_handle_command("/poke");
+        assert!(result.is_some());
+        let action = result.unwrap().unwrap();
+        assert!(matches!(action, AppAction::Continue));
+        let sys = last_system_text(&app).unwrap();
+        assert!(sys.contains("heartbeat triggered"));
+    }
+
+    #[test]
+    fn poke_without_channel_returns_poke_action() {
+        let mut app = make_app(); // poke_tx is None
+        let result = app.try_handle_command("/poke");
+        assert!(result.is_some());
+        let action = result.unwrap().unwrap();
+        assert!(matches!(action, AppAction::Poke));
+        let sys = last_system_text(&app).unwrap();
+        assert!(sys.contains("sending to daemon"));
+    }
+
+    #[test]
+    fn poke_full_channel_shows_pending_message() {
+        let config = Config::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        // Fill the channel
+        tx.try_send(()).unwrap();
+        let mut app = App::new(config, None, None, Some(tx));
+        let result = app.try_handle_command("/poke");
+        assert!(result.is_some());
+        let action = result.unwrap().unwrap();
+        assert!(matches!(action, AppAction::Continue));
+        let sys = last_system_text(&app).unwrap();
+        assert!(sys.contains("already pending"));
     }
 }

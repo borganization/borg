@@ -132,7 +132,7 @@ borg service status     # check service status
 | `borg doctor` | Run diagnostics |
 | `borg daemon` | Run background service |
 | `borg gateway` | Start webhook gateway standalone |
-| `borg wake` | Trigger immediate heartbeat check-in |
+| `borg poke` | Trigger immediate heartbeat check-in |
 | `borg tasks list/create/run/runs/status/pause/resume/delete` | Manage scheduled tasks |
 | `borg pairing list/approve/revoke/approved` | Manage sender access |
 | `borg settings get/set/unset` | Manage settings |

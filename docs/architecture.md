@@ -66,7 +66,7 @@ The heart of the project. Contains:
 
 ### `heartbeat`
 
-A proactive scheduler that runs as a separate tokio task. Fires at a configured interval or cron schedule, skips during quiet hours (timezone-aware), and suppresses duplicate or empty LLM responses. Supports channel delivery and wake signals. Messages render in cyan in the TUI.
+A proactive scheduler that runs as a separate tokio task. Fires at a configured interval or cron schedule, skips during quiet hours (timezone-aware), and suppresses duplicate or empty LLM responses. Supports channel delivery and poke signals. Messages render in cyan in the TUI.
 
 Key file: `scheduler.rs`
 
