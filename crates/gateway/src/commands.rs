@@ -88,6 +88,12 @@ pub const GATEWAY_COMMANDS: &[CommandDef] = &[
         accepts_args: false,
         pass_through: false,
     },
+    CommandDef {
+        name: "cancel",
+        description: "Stop the current in-progress turn",
+        accepts_args: false,
+        pass_through: false,
+    },
 ];
 
 /// Trait for platforms that support registering slash commands in native menus.
@@ -109,6 +115,7 @@ enum Command {
     Memory,
     Doctor,
     Pairing,
+    Cancel,
 }
 
 impl Command {
@@ -134,14 +141,27 @@ impl Command {
             "/memory" => Self::Memory,
             "/doctor" => Self::Doctor,
             "/pairing" => Self::Pairing,
+            "/cancel" | "/stop" | "/abort" => Self::Cancel,
             _ => return None,
         };
         Some((cmd, args))
     }
 }
 
+/// Returns `true` if `text` parses as the `/cancel` slash command. Handled
+/// separately from [`try_handle_command`] because cancellation requires an
+/// async registry call, and the main dispatcher is intentionally synchronous
+/// (it holds a `&Database` which is `!Send`).
+pub fn is_cancel_command(text: &str) -> bool {
+    matches!(Command::parse(text), Some((Command::Cancel, _)))
+}
+
 /// Try to handle a slash command. Returns `Some(response)` if the message was
 /// a recognised command, `None` to fall through to the agent.
+///
+/// Note: `/cancel` is **not** handled here — it is intercepted in
+/// `handler::invoke_agent_with_auto_reply` via [`is_cancel_command`] so the
+/// async cancellation path can run without holding a DB reference.
 pub fn try_handle_command(
     text: &str,
     db: &Database,
@@ -165,6 +185,8 @@ pub fn try_handle_command(
         Command::Memory => handle_memory(),
         Command::Doctor => handle_doctor(config),
         Command::Pairing => handle_pairing(db, channel_name, sender_id),
+        // Handled out-of-band in the caller; see `is_cancel_command`.
+        Command::Cancel => return None,
     };
     Some(response)
 }
@@ -384,6 +406,46 @@ mod tests {
             Command::parse("/skill"),
             Some((Command::Skill, _))
         ));
+        assert!(matches!(
+            Command::parse("/cancel"),
+            Some((Command::Cancel, _))
+        ));
+        // /stop and /abort are aliases for /cancel.
+        assert!(matches!(
+            Command::parse("/stop"),
+            Some((Command::Cancel, _))
+        ));
+        assert!(matches!(
+            Command::parse("/abort"),
+            Some((Command::Cancel, _))
+        ));
+    }
+
+    #[test]
+    fn is_cancel_command_matches_aliases() {
+        assert!(is_cancel_command("/cancel"));
+        assert!(is_cancel_command("/stop"));
+        assert!(is_cancel_command("/abort"));
+        assert!(is_cancel_command("/Cancel"));
+        assert!(is_cancel_command("/cancel@MyBorgBot"));
+        assert!(!is_cancel_command("/status"));
+        assert!(!is_cancel_command("cancel"));
+        assert!(!is_cancel_command(""));
+    }
+
+    #[tokio::test]
+    async fn cancel_command_intercepted_via_in_flight_registry() {
+        // Simulates the handler.rs interception path: a /cancel message finds
+        // the session's in-flight token in the global registry and cancels it.
+        use tokio_util::sync::CancellationToken;
+        let session_id = "test-session-cancel-intercept";
+        let token = CancellationToken::new();
+        crate::in_flight::GLOBAL
+            .register(session_id, token.clone())
+            .await;
+        assert!(is_cancel_command("/cancel"));
+        assert!(crate::in_flight::GLOBAL.cancel(session_id).await);
+        assert!(token.is_cancelled());
     }
 
     #[test]

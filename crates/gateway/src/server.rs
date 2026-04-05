@@ -216,6 +216,7 @@ impl GatewayServer {
             .route("/health/channels", get(channel_health_handler))
             .route("/channels", get(list_channels_handler))
             .route("/internal/poke", post(poke_handler))
+            .route("/internal/cancel", post(cancel_handler))
             .route("/internal/away", post(away_handler))
             .route("/internal/available", post(available_handler))
             .route("/webhook/slack/command", post(slack_command_handler))
@@ -714,6 +715,46 @@ async fn poke_handler(
             StatusCode::SERVICE_UNAVAILABLE,
             axum::Json(serde_json::json!({"error": "heartbeat poke channel not available"})),
         ),
+    }
+}
+
+/// Cancel an in-progress agent turn. Only localhost.
+///
+/// Accepts an optional `?session=<id>` query parameter. If provided, only that
+/// session's in-flight turn is cancelled. If omitted, **all** in-flight turns
+/// are cancelled — this is the expected `borg cancel` (no args) behavior for a
+/// user with a single active session.
+async fn cancel_handler(
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    if !addr.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"error": "localhost only"})),
+        );
+    }
+    let registry = &*crate::in_flight::GLOBAL;
+    if let Some(session_id) = params.get("session") {
+        let cancelled = registry.cancel(session_id).await;
+        let count = if cancelled { 1 } else { 0 };
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "status": "ok",
+                "cancelled": count,
+                "session": session_id,
+            })),
+        )
+    } else {
+        let count = registry.cancel_all().await;
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "status": "ok",
+                "cancelled": count,
+            })),
+        )
     }
 }
 
