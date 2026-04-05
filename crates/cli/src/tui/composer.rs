@@ -318,7 +318,12 @@ impl<'a> Composer<'a> {
         self.is_single_line() && self.textarea.lines().first().is_none_or(String::is_empty)
     }
 
-    #[cfg(test)]
+    /// Whether the composer is currently showing a recalled history entry
+    /// (i.e. the user pressed Up/Ctrl+P to browse previously submitted
+    /// messages and has not yet edited or cleared the recalled text).
+    ///
+    /// Used by `App::handle_key` to disambiguate wheel-sourced Up/Down
+    /// (transcript scroll) from intentional history navigation.
     pub fn is_browsing_history(&self) -> bool {
         self.history.is_browsing()
     }

@@ -265,54 +265,23 @@ impl<'a> App<'a> {
     }
 
     // =========================================================================
-    // IMPORTANT: Mouse handling must NOT break native text selection.
-    // Only scroll wheel and scrollbar interactions are handled here.
-    // Regular left-click/drag in the transcript area must pass through to the
-    // terminal for native text selection. See mod.rs EnableScrollMouseCapture.
-    // DO NOT add handlers for arbitrary left-click or motion events.
+    // NO MOUSE HANDLER.
     // =========================================================================
-    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> AppAction {
-        use crossterm::event::{MouseButton, MouseEventKind};
-
-        let area = self.transcript_area;
-        if area.width == 0 || area.height == 0 {
-            return AppAction::Continue;
-        }
-
-        let visible_height = area.height as usize;
-        let max_scroll = self.total_lines.saturating_sub(visible_height);
-
-        match event.kind {
-            MouseEventKind::ScrollUp => {
-                self.scroll_offset = (self.scroll_offset + 3).min(max_scroll);
-                self.auto_scroll = false;
-            }
-            MouseEventKind::ScrollDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                if self.scroll_offset == 0 {
-                    self.auto_scroll = true;
-                }
-            }
-            MouseEventKind::Down(MouseButton::Left) => {
-                // Scrollbar click-to-jump: clicking on the scrollbar column
-                // jumps the scroll position. Drag is NOT handled (?1002h is
-                // disabled to preserve native text selection).
-                let scrollbar_col = area.x + area.width - 1;
-                if event.column == scrollbar_col
-                    && event.row >= area.y
-                    && event.row < area.y + area.height
-                {
-                    let local_y = (event.row - area.y) as usize;
-                    self.scroll_offset =
-                        mouse_y_to_scroll_offset(local_y, visible_height, max_scroll);
-                    self.auto_scroll = self.scroll_offset == 0;
-                }
-            }
-            _ => {}
-        }
-
-        AppAction::Continue
-    }
+    // We do not enable any mouse tracking mode (see tui::mod::EnableAlternateScroll),
+    // so the event loop never dispatches crossterm mouse events to us. This is
+    // what keeps native click+drag text selection working in all terminals with
+    // no modifier keys.
+    //
+    // Mouse-wheel scroll still works because xterm Alternate Scroll Mode
+    // (?1007h) makes the terminal translate wheel events into CUR_UP / CUR_DOWN
+    // key sequences. Those arrive as KeyCode::Up / KeyCode::Down and are routed
+    // by `handle_key` to transcript scroll (when scroll_offset > 0) or composer
+    // history (when pinned at the bottom).
+    //
+    // DO NOT add `fn handle_mouse`. DO NOT match `Event::Mouse` in mod.rs.
+    // Either would require turning on a mouse tracking mode, which breaks text
+    // selection. Source-guard tests in this file enforce this.
+    // =========================================================================
 
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Result<AppAction> {
         use crossterm::event::{KeyCode, KeyModifiers};
@@ -845,10 +814,36 @@ impl<'a> App<'a> {
                     return Ok(AppAction::Continue);
                 }
 
-                // IMPORTANT: Up/Down arrows ALWAYS go to composer for input history navigation.
-                // Do NOT add special-case arms that intercept Up/Down for transcript scrolling —
-                // that regresses shell-like history recall. Use PageUp/PageDown or mouse wheel
-                // for transcript scrolling instead.
+                // ------------------------------------------------------------
+                // Up / Down arrow routing — dual semantics.
+                // ------------------------------------------------------------
+                // Mouse-wheel events are delivered to us as KeyCode::Up /
+                // KeyCode::Down by the terminal, via xterm Alternate Scroll
+                // Mode (?1007h — see tui::mod::EnableAlternateScroll). This is
+                // the mechanism that lets us support wheel scroll WITHOUT
+                // enabling any mouse tracking mode, which would otherwise
+                // break native click+drag text selection.
+                //
+                // We cannot distinguish wheel-sourced arrows from keyboard
+                // arrows (they are identical byte sequences), so Up/Down is
+                // overloaded. Routing rule:
+                //
+                //   A. scroll_offset > 0 (already reading scrollback)
+                //        → Up/Down scroll the transcript line-by-line.
+                //          Reaching offset 0 re-enables auto-scroll.
+                //   B. composer is idle (empty AND not browsing history)
+                //        → Up/Down scroll the transcript (wheel semantics
+                //          dominate in the normal typing-at-bottom state).
+                //          Ctrl+P / Ctrl+N still recall shell history — they
+                //          are handled inside the composer regardless.
+                //   C. composer has text OR is already browsing history
+                //        → Up/Down navigate composer history (the user is
+                //          actively in the composer and expects arrows to
+                //          move through drafts).
+                //
+                // PageUp / PageDown always scroll the transcript, independent
+                // of this rule. Ctrl+P / Ctrl+N always hit composer history.
+                // ------------------------------------------------------------
                 match key.code {
                     KeyCode::PageUp => {
                         self.scroll_offset = self
@@ -861,6 +856,29 @@ impl<'a> App<'a> {
                         self.scroll_offset = self
                             .scroll_offset
                             .saturating_sub(borg_core::constants::PAGE_SCROLL_LINES);
+                        if self.scroll_offset == 0 {
+                            self.auto_scroll = true;
+                        }
+                        return Ok(AppAction::Continue);
+                    }
+                    KeyCode::Up
+                        if key.modifiers.is_empty()
+                            && (self.scroll_offset > 0
+                                || (self.composer.is_empty()
+                                    && !self.composer.is_browsing_history())) =>
+                    {
+                        let max_scroll = self
+                            .total_lines
+                            .saturating_sub(self.transcript_area.height as usize);
+                        if max_scroll > 0 {
+                            self.scroll_offset = (self.scroll_offset + 1).min(max_scroll);
+                            self.auto_scroll = false;
+                            return Ok(AppAction::Continue);
+                        }
+                        // No scrollable content — fall through to composer.
+                    }
+                    KeyCode::Down if key.modifiers.is_empty() && self.scroll_offset > 0 => {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(1);
                         if self.scroll_offset == 0 {
                             self.auto_scroll = true;
                         }
@@ -1701,16 +1719,6 @@ impl<'a> App<'a> {
     }
 }
 
-/// Map a mouse y-position within the scrollbar track to a scroll offset.
-/// Top of track (y=0) maps to max_scroll, bottom (y=visible_height-1) maps to 0.
-fn mouse_y_to_scroll_offset(y: usize, visible_height: usize, max_scroll: usize) -> usize {
-    if visible_height <= 1 {
-        return max_scroll;
-    }
-    let fraction = y as f64 / (visible_height - 1) as f64;
-    (((1.0 - fraction) * max_scroll as f64).round() as usize).min(max_scroll)
-}
-
 /// Extract the query portion after the last `@` in text, if it looks like a file
 /// mention in progress (preceded by whitespace or at position 0, and no space after it).
 fn extract_at_query(text: &str) -> Option<String> {
@@ -1799,304 +1807,215 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    // --- Up/Down arrow: always history navigation (never transcript scroll) ---
+    // ========================================================================
+    // Up/Down arrow routing — dual semantics (transcript scroll vs. composer
+    // history). See the big block comment in `App::handle_key`.
+    //
+    // CRITICAL: mouse wheel is delivered as KeyCode::Up/Down via xterm
+    // Alternate Scroll Mode (?1007h) — see tui::mod::EnableAlternateScroll.
+    // These tests pin down the routing rule so wheel-scroll and shell-style
+    // history recall can coexist without regressing native text selection.
+    // ========================================================================
+
+    /// Helper: configure an app that has a scrollable transcript (so
+    /// `max_scroll > 0` and the transcript-scroll branch can actually fire).
+    fn app_with_scrollable_transcript() -> App<'static> {
+        let mut app = make_app();
+        app.transcript_area = Rect::new(0, 0, 80, 40);
+        app.total_lines = 200;
+        app
+    }
+
+    // --- Rule A: scroll_offset > 0 → arrows scroll the transcript ---
 
     #[test]
-    fn up_arrow_does_not_scroll_transcript_when_composer_empty() {
-        let mut app = make_app();
+    fn arrow_up_scrolls_transcript_when_scroll_offset_positive() {
+        let mut app = app_with_scrollable_transcript();
+        app.scroll_offset = 5;
+        app.auto_scroll = false;
+
+        app.handle_key(key(KeyCode::Up)).unwrap();
+
+        assert_eq!(app.scroll_offset, 6);
+        assert!(!app.auto_scroll);
+        assert!(app.composer.is_empty(), "composer must be untouched");
+        assert!(!app.composer.is_browsing_history());
+    }
+
+    #[test]
+    fn arrow_down_scrolls_transcript_when_scroll_offset_positive() {
+        let mut app = app_with_scrollable_transcript();
+        app.scroll_offset = 5;
+        app.auto_scroll = false;
+
+        app.handle_key(key(KeyCode::Down)).unwrap();
+
+        assert_eq!(app.scroll_offset, 4);
+        assert!(!app.auto_scroll);
+    }
+
+    #[test]
+    fn arrow_down_at_offset_one_restores_auto_scroll() {
+        let mut app = app_with_scrollable_transcript();
+        app.scroll_offset = 1;
+        app.auto_scroll = false;
+
+        app.handle_key(key(KeyCode::Down)).unwrap();
+
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn arrow_up_scroll_clamped_to_max_offset() {
+        let mut app = app_with_scrollable_transcript();
+        let max_scroll = app
+            .total_lines
+            .saturating_sub(app.transcript_area.height as usize);
+        app.scroll_offset = max_scroll;
+
+        // Hammer Up many times — must never exceed the cap.
+        for _ in 0..50 {
+            app.handle_key(key(KeyCode::Up)).unwrap();
+        }
+
+        assert_eq!(app.scroll_offset, max_scroll);
+    }
+
+    // --- Rule B: idle composer at bottom → arrows scroll (wheel semantics) ---
+
+    #[test]
+    fn arrow_up_scrolls_transcript_when_composer_idle_and_scrollable() {
+        let mut app = app_with_scrollable_transcript();
         assert!(app.composer.is_empty());
         assert_eq!(app.scroll_offset, 0);
 
         app.handle_key(key(KeyCode::Up)).unwrap();
-        // Up should NOT scroll transcript — it goes to composer for history
-        assert_eq!(app.scroll_offset, 0);
+
+        // Wheel-from-bottom: mouse wheel (delivered as Up) starts scrolling.
+        assert_eq!(app.scroll_offset, 1);
+        assert!(!app.auto_scroll);
+        assert!(app.composer.is_empty());
     }
 
     #[test]
-    fn up_arrow_does_not_scroll_transcript_when_composer_has_text() {
+    fn arrow_up_falls_through_to_history_when_transcript_not_scrollable() {
         let mut app = make_app();
-        app.composer.set_text("hello");
+        // Default transcript_area is 0x0, so max_scroll == 0 regardless.
+        app.composer.set_text("first");
+        app.composer.handle_key(key(KeyCode::Enter));
+        assert!(app.composer.is_empty());
 
         app.handle_key(key(KeyCode::Up)).unwrap();
+
+        // No scrollable content → fall through to composer history recall.
         assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.composer.text(), "first");
     }
 
+    // --- Rule C: active composer → arrows navigate history ---
+
     #[test]
-    fn up_arrow_navigates_history_when_composer_has_text() {
-        let mut app = make_app();
+    fn arrow_up_navigates_history_when_composer_has_text() {
+        let mut app = app_with_scrollable_transcript();
         app.composer.set_text("first message");
         app.composer.handle_key(key(KeyCode::Enter));
         app.composer.set_text("draft");
 
         app.handle_key(key(KeyCode::Up)).unwrap();
+
         assert_eq!(app.composer.text(), "first message");
         assert!(app.composer.is_browsing_history());
+        assert_eq!(
+            app.scroll_offset, 0,
+            "transcript must NOT scroll while composer is active"
+        );
     }
 
     #[test]
-    fn up_arrow_recalls_history_when_composer_empty() {
-        let mut app = make_app();
-        app.composer.set_text("first");
-        app.composer.handle_key(key(KeyCode::Enter));
-        app.composer.set_text("second");
-        app.composer.handle_key(key(KeyCode::Enter));
-        assert!(app.composer.is_empty());
-
-        app.handle_key(key(KeyCode::Up)).unwrap();
-        assert_eq!(app.composer.text(), "second");
-        app.handle_key(key(KeyCode::Up)).unwrap();
-        assert_eq!(app.composer.text(), "first");
-        assert_eq!(app.scroll_offset, 0);
-    }
-
-    #[test]
-    fn up_arrow_repeated_does_not_scroll_transcript() {
-        let mut app = make_app();
-
-        app.handle_key(key(KeyCode::Up)).unwrap();
-        app.handle_key(key(KeyCode::Up)).unwrap();
-        app.handle_key(key(KeyCode::Up)).unwrap();
-        // No transcript scrolling — Up always goes to composer
-        assert_eq!(app.scroll_offset, 0);
-    }
-
-    // --- Down arrow: always history navigation (never transcript scroll) ---
-
-    #[test]
-    fn down_arrow_does_not_scroll_transcript() {
-        let mut app = make_app();
-        app.scroll_offset = 5;
-        app.auto_scroll = false;
-
-        app.handle_key(key(KeyCode::Down)).unwrap();
-        // Down goes to composer, does NOT change scroll offset
-        assert_eq!(app.scroll_offset, 5);
-    }
-
-    #[test]
-    fn down_arrow_navigates_history_when_browsing() {
+    fn arrow_down_navigates_history_while_browsing() {
+        // Non-scrollable transcript (max_scroll == 0) so rule B falls through
+        // to composer history; the test exercises rule C.
         let mut app = make_app();
         app.composer.set_text("msg1");
         app.composer.handle_key(key(KeyCode::Enter));
         app.composer.set_text("msg2");
         app.composer.handle_key(key(KeyCode::Enter));
 
+        // Enter history browse mode.
         app.handle_key(key(KeyCode::Up)).unwrap(); // -> msg2
         app.handle_key(key(KeyCode::Up)).unwrap(); // -> msg1
         assert!(app.composer.is_browsing_history());
         assert_eq!(app.composer.text(), "msg1");
 
+        // Down must keep navigating history, not scroll.
         app.handle_key(key(KeyCode::Down)).unwrap();
         assert_eq!(app.composer.text(), "msg2");
         assert_eq!(app.scroll_offset, 0);
     }
 
-    // --- Mouse scrollbar interaction ---
-
-    fn mouse_event(
-        kind: crossterm::event::MouseEventKind,
-        col: u16,
-        row: u16,
-    ) -> crossterm::event::MouseEvent {
-        crossterm::event::MouseEvent {
-            kind,
-            column: col,
-            row,
-            modifiers: KeyModifiers::NONE,
-        }
-    }
-
-    fn setup_app_with_transcript() -> App<'static> {
-        let mut app = make_app();
-        app.transcript_area = Rect::new(0, 0, 80, 40);
-        app.total_lines = 100;
-        app
-    }
+    // --- Escape hatch: Ctrl+P / Ctrl+N always navigate history ---
 
     #[test]
-    fn mouse_scroll_up_increases_offset() {
-        use crossterm::event::MouseEventKind;
-        let mut app = setup_app_with_transcript();
-
-        app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 10, 10));
-        assert_eq!(app.scroll_offset, 3);
-        assert!(!app.auto_scroll);
-    }
-
-    #[test]
-    fn mouse_scroll_down_decreases_offset() {
-        use crossterm::event::MouseEventKind;
-        let mut app = setup_app_with_transcript();
+    fn ctrl_p_navigates_history_even_when_transcript_is_scrolled() {
+        let mut app = app_with_scrollable_transcript();
+        app.composer.set_text("msg1");
+        app.composer.handle_key(key(KeyCode::Enter));
         app.scroll_offset = 10;
         app.auto_scroll = false;
 
-        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 10, 10));
-        assert_eq!(app.scroll_offset, 7);
-        assert!(!app.auto_scroll);
-    }
+        let ctrl_p = crossterm::event::KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        app.handle_key(ctrl_p).unwrap();
 
-    #[test]
-    fn mouse_scroll_down_restores_auto_scroll_at_zero() {
-        use crossterm::event::MouseEventKind;
-        let mut app = setup_app_with_transcript();
-        app.scroll_offset = 2;
-        app.auto_scroll = false;
-
-        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 10, 10));
-        assert_eq!(app.scroll_offset, 0);
-        assert!(app.auto_scroll);
-    }
-
-    #[test]
-    fn mouse_scroll_up_clamped_to_max_scroll() {
-        use crossterm::event::MouseEventKind;
-        let mut app = setup_app_with_transcript();
-        let max_scroll = app
-            .total_lines
-            .saturating_sub(app.transcript_area.height as usize);
-        app.scroll_offset = max_scroll;
-
-        app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 10, 10));
-        assert_eq!(app.scroll_offset, max_scroll);
-    }
-
-    #[test]
-    fn click_scrollbar_bottom_sets_offset_zero() {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        let mut app = setup_app_with_transcript();
-        app.scroll_offset = 30;
-        let scrollbar_col = app.transcript_area.x + app.transcript_area.width - 1;
-        let bottom_row = app.transcript_area.y + app.transcript_area.height - 1;
-
-        app.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Left),
-            scrollbar_col,
-            bottom_row,
-        ));
-        assert_eq!(app.scroll_offset, 0);
-        assert!(app.auto_scroll);
-    }
-
-    #[test]
-    fn click_scrollbar_top_sets_max_offset() {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        let mut app = setup_app_with_transcript();
-        let max_scroll = app
-            .total_lines
-            .saturating_sub(app.transcript_area.height as usize);
-        let scrollbar_col = app.transcript_area.x + app.transcript_area.width - 1;
-        let top_row = app.transcript_area.y;
-
-        app.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Left),
-            scrollbar_col,
-            top_row,
-        ));
-        assert_eq!(app.scroll_offset, max_scroll);
-    }
-
-    #[test]
-    fn click_outside_scrollbar_does_nothing() {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        let mut app = setup_app_with_transcript();
-        app.scroll_offset = 10;
-
-        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 10));
+        // History recalled; transcript scroll untouched.
+        assert_eq!(app.composer.text(), "msg1");
         assert_eq!(app.scroll_offset, 10);
     }
 
-    // NOTE: Scrollbar drag tests removed — ?1002h (button-event tracking) is
-    // disabled to preserve native text selection. Scrollbar click-to-jump
-    // still works via ?1000h. See mod.rs EnableScrollMouseCapture.
+    // --- Wheel simulation: many Up events starting from bottom ---
 
     #[test]
-    fn mouse_ignored_before_first_render() {
-        use crossterm::event::MouseEventKind;
-        let mut app = make_app();
-        // transcript_area is Rect::default() (all zeros)
-        app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 10, 10));
+    fn wheel_up_simulation_scrolls_transcript_progressively() {
+        let mut app = app_with_scrollable_transcript();
         assert_eq!(app.scroll_offset, 0);
+
+        for expected in 1..=10 {
+            app.handle_key(key(KeyCode::Up)).unwrap();
+            assert_eq!(
+                app.scroll_offset, expected,
+                "each Up (wheel tick) should advance scroll by 1"
+            );
+        }
+        assert!(!app.auto_scroll);
+        assert!(app.composer.is_empty());
     }
 
     #[test]
-    fn mouse_y_to_scroll_offset_degenerate_height() {
-        assert_eq!(mouse_y_to_scroll_offset(0, 0, 50), 50);
-        assert_eq!(mouse_y_to_scroll_offset(0, 1, 50), 50);
-    }
-
-    // --- Text selection protection (DO NOT REMOVE) ---
-    // These tests guard against regressions where mouse handling breaks native
-    // text selection. If any of these fail, something is consuming mouse events
-    // that should be passed through to the terminal.
-
-    #[test]
-    fn left_click_in_transcript_does_not_change_state() {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        let mut app = setup_app_with_transcript();
+    fn wheel_down_simulation_restores_auto_scroll() {
+        let mut app = app_with_scrollable_transcript();
         app.scroll_offset = 5;
         app.auto_scroll = false;
 
-        // Click in transcript body (not scrollbar) must be a no-op so the
-        // terminal can handle native text selection.
-        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 40, 20));
-        assert_eq!(
-            app.scroll_offset, 5,
-            "click in transcript must not change scroll"
-        );
+        for _ in 0..10 {
+            app.handle_key(key(KeyCode::Down)).unwrap();
+        }
+
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.auto_scroll);
     }
 
-    #[test]
-    fn drag_in_transcript_does_not_change_state() {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        let mut app = setup_app_with_transcript();
-        app.scroll_offset = 5;
-
-        // Drag without prior scrollbar click must be a no-op (text selection).
-        app.handle_mouse(mouse_event(MouseEventKind::Drag(MouseButton::Left), 40, 25));
-        assert_eq!(
-            app.scroll_offset, 5,
-            "drag in transcript must not change scroll"
-        );
-    }
+    // --- Regression guards: non-arrow keys unaffected ---
 
     #[test]
-    fn mouse_move_events_are_ignored() {
-        use crossterm::event::MouseEventKind;
-        let mut app = setup_app_with_transcript();
+    fn printable_char_still_goes_to_composer_while_scrolled() {
+        let mut app = app_with_scrollable_transcript();
         app.scroll_offset = 5;
 
-        // MouseEventKind::Moved should be a no-op. If EnableMouseCapture's
-        // ?1003h is accidentally enabled, these events will flood in.
-        app.handle_mouse(mouse_event(MouseEventKind::Moved, 40, 20));
-        assert_eq!(app.scroll_offset, 5, "mouse move must not change scroll");
-    }
+        let ch = crossterm::event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        app.handle_key(ch).unwrap();
 
-    #[test]
-    fn right_click_is_ignored() {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        let mut app = setup_app_with_transcript();
-        app.scroll_offset = 5;
-
-        app.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Right),
-            40,
-            20,
-        ));
-        assert_eq!(app.scroll_offset, 5, "right click must not change scroll");
-    }
-
-    #[test]
-    fn middle_click_is_ignored() {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        let mut app = setup_app_with_transcript();
-        app.scroll_offset = 5;
-
-        app.handle_mouse(mouse_event(
-            MouseEventKind::Down(MouseButton::Middle),
-            40,
-            20,
-        ));
-        assert_eq!(app.scroll_offset, 5, "middle click must not change scroll");
+        assert_eq!(app.composer.text(), "x");
+        assert_eq!(app.scroll_offset, 5, "typing must not move scroll");
     }
 
     // --- PageUp / PageDown ---

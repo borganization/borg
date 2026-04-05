@@ -110,15 +110,31 @@ After onboarding, SETUP.md is created with first-conversation instructions so th
 
 ## Mouse Interaction
 
-- Mouse wheel scrolls transcript 3 lines per tick
-- Click scrollbar track to jump to position
-- Drag scrollbar thumb for continuous scrolling
-- Native text selection (click+drag) must work — this is critical UX
-- Shift+click also works as fallback for text selection
-- Up/Down arrows navigate composer history and must NOT affect the scrollbar
+**Native click+drag text selection MUST work in the transcript with no modifier keys.** This is critical UX and has regressed multiple times — treat it as a hard invariant.
 
-**CRITICAL — DO NOT REGRESS TEXT SELECTION:**
-The TUI uses a custom `EnableScrollMouseCapture` (in `tui/mod.rs`) that only enables `?1000h` (button tracking) and `?1006h` (SGR coordinates). It intentionally does NOT enable `?1002h` (drag tracking) or `?1003h` (any-event tracking). Both `?1002h` and `?1003h` break native text selection by capturing click+drag events. **Never use crossterm's `EnableMouseCapture`** — it enables `?1003h`. **Never add `?1002h`** — it captures drag events needed for text selection. Scrollbar supports click-to-jump only (no drag). This has regressed multiple times. Tests in `mod.rs` verify excluded modes; tests in `app.rs` verify mouse handling only processes scroll and scrollbar click events.
+**Strategy — xterm Alternate Scroll Mode (`?1007h`), nothing else.**
+The TUI enables ONLY `?1007h` via the custom `EnableAlternateScroll` command in `crates/cli/src/tui/mod.rs`. In alternate screen, the terminal itself translates mouse-wheel events into `CUR_UP` / `CUR_DOWN` key sequences that arrive as normal `KeyCode::Up` / `KeyCode::Down`. Because no mouse tracking mode is enabled, click+drag stays handled entirely by the terminal — exactly like `less` or `vim`. Reference implementation: `reference/codex/codex-rs/tui/src/tui.rs`.
+
+**Behavior:**
+- Click+drag anywhere in the transcript selects text natively (Cmd/Ctrl+C copies). No Option/Fn/Shift modifier needed.
+- Mouse wheel scrolls the transcript one line per tick (via terminal-level wheel→arrow translation).
+- `PageUp` / `PageDown` scroll the transcript in 20-line jumps.
+- `Up` / `Down` arrows are routed by `App::handle_key` using dual semantics:
+  - If `scroll_offset > 0` (reading scrollback) → scroll transcript one line.
+  - Else if composer is idle (empty AND not browsing history) AND transcript is scrollable → scroll transcript (wheel semantics win from the bottom).
+  - Else → composer history navigation (shell-style recall).
+- `Ctrl+P` / `Ctrl+N` always navigate composer history regardless of scroll state.
+- Scrollbar click/drag is intentionally NOT supported — it would require `?1000h`, which breaks selection.
+
+**FORBIDDEN — any of these will regress text selection:**
+- Escape sequences: `?1000h` (button tracking), `?1002h` (drag tracking), `?1003h` (any-event tracking), `?1006h` (SGR coordinates — only meaningful with the above).
+- Crossterm API: `EnableMouseCapture`, `DisableMouseCapture` (they enable `?1000h`+`?1002h`+`?1003h`+`?1006h`).
+- `Event::Mouse` match arms in the event loop — there is no mouse event source.
+- `App::handle_mouse` or `MouseEventKind` references in `app.rs`.
+
+**Guard tests (do not remove or weaken):**
+- `crates/cli/src/tui/mod.rs` — escape-sequence correctness (`enable_alternate_scroll_emits_exactly_1007h`, etc.), symmetry check, and source-level guards (`mod_rs_code_contains_no_forbidden_mouse_modes`, `app_rs_code_contains_no_forbidden_mouse_modes`, `mod_rs_code_does_not_call_crossterm_enable_mouse_capture`, `app_rs_has_no_event_mouse_match_arm`, `app_rs_has_no_mouse_event_kind_references`) that read both files via `include_str!` and fail the build if any forbidden pattern is reintroduced.
+- `crates/cli/src/tui/app.rs` — arrow-routing tests cover all three rules (scroll-while-scrolled-up, wheel-from-bottom, active-composer-history), plus `Ctrl+P` escape hatch, wheel simulation, and regression guards for PageUp/PageDown and printable input.
 
 ## Plugins
 

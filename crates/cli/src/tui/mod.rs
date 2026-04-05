@@ -34,60 +34,68 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 
 // ============================================================================
-// IMPORTANT: Custom mouse capture — DO NOT replace with EnableMouseCapture!
+// IMPORTANT: Native text selection MUST work in this TUI. DO NOT regress.
 // ============================================================================
-// crossterm's EnableMouseCapture enables ?1003h (any-event tracking) which
-// captures ALL mouse events (including movement), breaking native text
-// selection in terminals. We ONLY enable scroll-wheel tracking:
-//   - ?1000h: Normal tracking (button press/release) — for scroll wheel
-//   - ?1006h: SGR mouse mode — for coordinates >223
+// Users expect click+drag selection (for copy/paste) to work exactly like any
+// normal terminal, with no modifier keys required. Any form of mouse tracking
+// reported to the application breaks this, because the terminal hands click
+// events to us instead of engaging its own selection handler.
 //
-// EXCLUDED modes (DO NOT ADD):
-//   - ?1002h: Button-event tracking (drag) — breaks native text selection
-//             because click+drag events go to the app instead of the terminal.
-//             Scrollbar drag is sacrificed to preserve text selection.
-//   - ?1003h: Any-event tracking — captures ALL mouse events including bare
-//             movement, completely breaks text selection.
+// Strategy: we enable ONLY xterm "Alternate Scroll Mode" (?1007h). In alt
+// screen, the terminal itself translates mouse-wheel events into CUR_UP /
+// CUR_DOWN key sequences that arrive as normal KeyCode::Up / KeyCode::Down.
+// We never enable any mouse tracking mode, so click+drag text selection stays
+// handled entirely by the terminal — exactly like in `less`, `vim`, etc.
 //
-// Native text selection (click+drag) MUST work in the transcript area.
-// This has regressed multiple times. See CLAUDE.md "Mouse Interaction".
+// FORBIDDEN — DO NOT ADD any of these (each one will regress text selection):
+//   - ?1000h  Normal button tracking — clicks go to app, breaks selection.
+//   - ?1002h  Button-event (drag) tracking — same, plus eats drag events.
+//   - ?1003h  Any-event tracking — captures every mouse movement.
+//   - ?1006h  SGR extended coordinates — only meaningful with the above.
+//   - crossterm::event::EnableMouseCapture — it turns on ?1000h + ?1002h + ?1003h + ?1006h.
+//
+// Wheel-sourced arrow keys are routed to transcript scroll vs composer history
+// in App::handle_key using the existing scroll_offset state as disambiguator.
+//
+// This has regressed multiple times. Source-string guard tests in this module
+// and in app.rs will fail the build if any forbidden mode is reintroduced.
+// See CLAUDE.md "Mouse Interaction" for the full rationale.
+// Reference implementation: reference/codex/codex-rs/tui/src/tui.rs
 // ============================================================================
 
-/// Enable mouse capture for scroll wheel only.
-/// Does NOT enable drag (?1002h) or any-event (?1003h) tracking — both break
-/// native text selection. Scrollbar click-to-jump still works via ?1000h.
-struct EnableScrollMouseCapture;
+/// Enable xterm Alternate Scroll Mode (`?1007h`).
+///
+/// When active inside the alternate screen, the terminal translates
+/// mouse-wheel events into cursor-up / cursor-down key sequences. No mouse
+/// tracking is enabled, so native click+drag text selection is untouched.
+struct EnableAlternateScroll;
 
-impl crossterm::Command for EnableScrollMouseCapture {
+impl crossterm::Command for EnableAlternateScroll {
     fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
-        // ?1000h: Normal tracking — button press/release (includes scroll wheel
-        //         and single clicks, e.g. scrollbar click-to-jump)
-        // ?1006h: SGR extended mode — coordinates >223
-        //
-        // DO NOT add ?1002h — it captures drag events, breaking text selection.
-        // DO NOT add ?1003h — it captures all mouse events, breaking text selection.
-        f.write_str("\x1b[?1000h\x1b[?1006h")
+        // ?1007h — xterm Alternate Scroll Mode. DO NOT add any other mode here.
+        f.write_str("\x1b[?1007h")
     }
 
     #[cfg(windows)]
     fn execute_winapi(&self) -> std::io::Result<()> {
-        // On Windows, fall back to crossterm's built-in mouse capture
-        crossterm::event::EnableMouseCapture.execute_winapi()
+        // Windows consoles deliver wheel events through input records without
+        // needing an xterm-style mode switch, and there is no native equivalent
+        // to ?1007h. No-op is correct here.
+        Ok(())
     }
 }
 
-/// Disable the mouse capture modes enabled by EnableScrollMouseCapture.
-struct DisableScrollMouseCapture;
+/// Disable xterm Alternate Scroll Mode (`?1007l`).
+struct DisableAlternateScroll;
 
-impl crossterm::Command for DisableScrollMouseCapture {
+impl crossterm::Command for DisableAlternateScroll {
     fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
-        // Only disable the modes we enabled: ?1000h and ?1006h
-        f.write_str("\x1b[?1006l\x1b[?1000l")
+        f.write_str("\x1b[?1007l")
     }
 
     #[cfg(windows)]
     fn execute_winapi(&self) -> std::io::Result<()> {
-        crossterm::event::DisableMouseCapture.execute_winapi()
+        Ok(())
     }
 }
 use futures::StreamExt;
@@ -190,7 +198,7 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = stdout().execute(DisableBracketedPaste);
-        let _ = stdout().execute(DisableScrollMouseCapture);
+        let _ = stdout().execute(DisableAlternateScroll);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
     }
@@ -294,7 +302,7 @@ pub async fn run() -> Result<()> {
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
-    stdout().execute(EnableScrollMouseCapture)?;
+    stdout().execute(EnableAlternateScroll)?;
     stdout().execute(EnableBracketedPaste)?;
 
     // Guard ensures terminal is restored on any exit path (error or normal)
@@ -304,7 +312,7 @@ pub async fn run() -> Result<()> {
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         let _ = stdout().execute(DisableBracketedPaste);
-        let _ = stdout().execute(DisableScrollMouseCapture);
+        let _ = stdout().execute(DisableAlternateScroll);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
         original_hook(info);
@@ -464,7 +472,13 @@ async fn run_event_loop(
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => app.handle_key(key)?,
                     Some(Ok(Event::Paste(text))) => app.handle_paste(text),
-                    Some(Ok(Event::Mouse(mouse))) => app.handle_mouse(mouse),
+                    // Intentionally NO `Event::Mouse` arm. We do not enable any
+                    // mouse tracking mode (see EnableAlternateScroll above), so
+                    // no mouse events should ever arrive here. Wheel events are
+                    // delivered as Up/Down key events via xterm ?1007h and are
+                    // handled in App::handle_key. DO NOT re-introduce a mouse
+                    // handler — it would require enabling ?1000h/?1002h/?1003h,
+                    // all of which break native text selection.
                     Some(Ok(Event::Resize(_, _))) => AppAction::Continue,
                     Some(Err(_)) | None => AppAction::Quit,
                     _ => AppAction::Continue,
@@ -1202,49 +1216,203 @@ async fn run_event_loop(
     }
 }
 
+// =============================================================================
+// Tests — DO NOT REMOVE OR WEAKEN.
+// =============================================================================
+// These tests enforce the native-text-selection invariant. If any of them fail,
+// text selection in the TUI is almost certainly broken in at least one
+// terminal. This has regressed multiple times; the belt-and-suspenders approach
+// (sequence tests + source-string guards + lifecycle test) is intentional.
+// See CLAUDE.md "Mouse Interaction" for the full rationale.
+// =============================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::Command;
 
-    /// Verify that our custom mouse capture preserves native text selection.
-    /// Only ?1000h (scroll wheel / single click) and ?1006h (SGR coords) are
-    /// enabled. ?1002h (drag) and ?1003h (any-event) MUST be excluded — both
-    /// break native text selection. This test prevents a recurring regression.
+    /// Forbidden escape-sequence modes. Presence of ANY of these in the code
+    /// paths that emit ANSI to the terminal will break native text selection.
+    const FORBIDDEN_MODES: &[&str] = &["?1000", "?1002", "?1003", "?1006"];
+
+    // ------------------------------------------------------------------------
+    // Escape-sequence correctness
+    // ------------------------------------------------------------------------
+
     #[test]
-    fn enable_scroll_mouse_capture_preserves_text_selection() {
+    fn enable_alternate_scroll_emits_exactly_1007h() {
         let mut buf = String::new();
-        EnableScrollMouseCapture.write_ansi(&mut buf).unwrap();
-
-        // Must include the modes we need
-        assert!(buf.contains("?1000h"), "must enable normal button tracking");
-        assert!(
-            buf.contains("?1006h"),
-            "must enable SGR extended coordinates"
-        );
-
-        // Must NOT include drag tracking — breaks native text selection
-        assert!(
-            !buf.contains("?1002h"),
-            "MUST NOT enable ?1002h (drag tracking) — it breaks native text selection"
-        );
-
-        // Must NOT include any-event tracking — breaks native text selection
-        assert!(
-            !buf.contains("?1003h"),
-            "MUST NOT enable ?1003h (any-event tracking) — it breaks native text selection"
+        EnableAlternateScroll.write_ansi(&mut buf).unwrap();
+        assert_eq!(
+            buf, "\x1b[?1007h",
+            "EnableAlternateScroll must emit exactly ?1007h (xterm Alternate \
+             Scroll Mode). Anything else risks breaking text selection."
         );
     }
 
     #[test]
-    fn disable_scroll_mouse_capture_reverses_enable() {
+    fn disable_alternate_scroll_emits_exactly_1007l() {
         let mut buf = String::new();
-        DisableScrollMouseCapture.write_ansi(&mut buf).unwrap();
+        DisableAlternateScroll.write_ansi(&mut buf).unwrap();
+        assert_eq!(buf, "\x1b[?1007l");
+    }
 
-        assert!(buf.contains("?1000l"), "must disable normal tracking");
-        assert!(buf.contains("?1006l"), "must disable SGR mode");
-        // Must not reference modes we don't enable
-        assert!(!buf.contains("?1002l"), "must not reference ?1002 at all");
-        assert!(!buf.contains("?1003l"), "must not reference ?1003 at all");
+    #[test]
+    fn enable_alternate_scroll_contains_no_forbidden_modes() {
+        let mut buf = String::new();
+        EnableAlternateScroll.write_ansi(&mut buf).unwrap();
+        for mode in FORBIDDEN_MODES {
+            assert!(
+                !buf.contains(mode),
+                "EnableAlternateScroll must NOT emit {mode} — it breaks native text selection"
+            );
+        }
+    }
+
+    #[test]
+    fn disable_alternate_scroll_contains_no_forbidden_modes() {
+        let mut buf = String::new();
+        DisableAlternateScroll.write_ansi(&mut buf).unwrap();
+        for mode in FORBIDDEN_MODES {
+            assert!(
+                !buf.contains(mode),
+                "DisableAlternateScroll must NOT reference {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn enable_and_disable_are_symmetric() {
+        let mut enable = String::new();
+        let mut disable = String::new();
+        EnableAlternateScroll.write_ansi(&mut enable).unwrap();
+        DisableAlternateScroll.write_ansi(&mut disable).unwrap();
+        // Strip the trailing `h`/`l` and compare — catches someone changing
+        // one side without the other.
+        assert_eq!(
+            enable.trim_end_matches('h'),
+            disable.trim_end_matches('l'),
+            "enable/disable sequences must target the same mode"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Source-level guards — read this file and app.rs via include_str! and
+    // assert no forbidden mode appears in CODE (comments are allowed to
+    // reference them; they must, to document why they're forbidden).
+    // ------------------------------------------------------------------------
+
+    /// Strip line comments AND the `#[cfg(test)] mod tests { ... }` module
+    /// from a Rust source string. This lets us search code-only (i.e.,
+    /// non-test runtime code) for forbidden patterns while still allowing
+    /// comments and test scaffolding to reference them — comments must
+    /// document WHY the modes are forbidden, and tests must reference them
+    /// to assert their absence.
+    ///
+    /// Intentionally simple: the line-comment stripper does not handle block
+    /// comments or string literals containing `//`, and the test-module cut
+    /// is a naive "everything from the first `#[cfg(test)]` onward" slice.
+    /// Both are sufficient for the two files we guard.
+    fn strip_tests_and_comments(src: &str) -> String {
+        let code = match src.find("#[cfg(test)]") {
+            Some(idx) => &src[..idx],
+            None => src,
+        };
+        code.lines()
+            .map(|line| match line.find("//") {
+                Some(idx) => &line[..idx],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn mod_rs_code_contains_no_forbidden_mouse_modes() {
+        let src = include_str!("mod.rs");
+        let code = strip_tests_and_comments(src);
+        for mode in FORBIDDEN_MODES {
+            assert!(
+                !code.contains(mode),
+                "crates/cli/src/tui/mod.rs code contains forbidden mouse mode {mode}. \
+                 This will break native text selection. See the comment block above \
+                 EnableAlternateScroll for the allowed modes and the rationale."
+            );
+        }
+    }
+
+    #[test]
+    fn app_rs_code_contains_no_forbidden_mouse_modes() {
+        let src = include_str!("app.rs");
+        let code = strip_tests_and_comments(src);
+        for mode in FORBIDDEN_MODES {
+            assert!(
+                !code.contains(mode),
+                "crates/cli/src/tui/app.rs code contains forbidden mouse mode {mode}. \
+                 No mouse tracking mode may be referenced from app code — mouse events \
+                 are not delivered to the app at all (wheel → arrow keys via ?1007h)."
+            );
+        }
+    }
+
+    #[test]
+    fn mod_rs_code_does_not_call_crossterm_enable_mouse_capture() {
+        let src = include_str!("mod.rs");
+        let code = strip_tests_and_comments(src);
+        assert!(
+            !code.contains("EnableMouseCapture"),
+            "crossterm's EnableMouseCapture enables ?1000h/?1002h/?1003h/?1006h, \
+             all of which break native text selection. Use EnableAlternateScroll \
+             (?1007h) instead."
+        );
+        assert!(
+            !code.contains("DisableMouseCapture"),
+            "crossterm's DisableMouseCapture must not appear in code — we never \
+             enable mouse capture, so there is nothing to disable."
+        );
+    }
+
+    #[test]
+    fn app_rs_has_no_event_mouse_match_arm() {
+        let src = include_str!("app.rs");
+        let code = strip_tests_and_comments(src);
+        assert!(
+            !code.contains("Event::Mouse("),
+            "app.rs must not match Event::Mouse — we do not enable mouse \
+             tracking, and adding such a handler would require enabling a \
+             forbidden mode."
+        );
+        assert!(
+            !code.contains("fn handle_mouse"),
+            "app.rs must not define handle_mouse — there is no mouse event \
+             source. Wheel is routed as KeyCode::Up/Down via ?1007h and \
+             handled in handle_key."
+        );
+    }
+
+    #[test]
+    fn app_rs_has_no_mouse_event_kind_references() {
+        let src = include_str!("app.rs");
+        let code = strip_tests_and_comments(src);
+        assert!(
+            !code.contains("MouseEventKind"),
+            "app.rs must not reference crossterm::event::MouseEventKind — \
+             mouse events are not delivered to this crate."
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Lifecycle — dropping TerminalGuard must emit the disable sequence.
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn disable_alternate_scroll_command_can_be_written_to_buffer() {
+        // Smoke test that the Command impl is still usable by crossterm.
+        // (TerminalGuard::drop writes to stdout which isn't capturable here;
+        // we verify the Command encoding instead, which is the only state
+        // the guard's drop reaches through.)
+        let mut buf = String::new();
+        DisableAlternateScroll.write_ansi(&mut buf).unwrap();
+        assert!(buf.ends_with('l'));
+        assert!(buf.contains("?1007"));
     }
 }
