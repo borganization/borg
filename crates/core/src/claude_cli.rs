@@ -134,6 +134,34 @@ fn read_keychain_credentials() -> Option<ClaudeCredential> {
     parse_credentials_json(json.trim())
 }
 
+// ── Model Alias Mapping ──
+
+/// Map a model identifier to the short alias the `claude` CLI expects for `--model`.
+///
+/// The CLI accepts both long IDs (`claude-sonnet-4-6`) and short aliases (`sonnet`) in
+/// current versions, but the short aliases are the documented/stable surface. Mapping
+/// here protects us from CLI version drift and new model revisions.
+///
+/// Case-insensitive. Unknown inputs pass through unchanged.
+pub fn normalize_cli_model(model: &str) -> String {
+    let key = model.trim().to_ascii_lowercase();
+    match key.as_str() {
+        // Opus family
+        "opus" | "claude-opus" | "opus-4" | "opus-4-6" | "opus-4.6" | "claude-opus-4"
+        | "claude-opus-4-6" | "claude-opus-4.6" => "opus".to_string(),
+        // Sonnet family
+        "sonnet" | "claude-sonnet" | "sonnet-4" | "sonnet-4-5" | "sonnet-4-6" | "sonnet-4.5"
+        | "sonnet-4.6" | "claude-sonnet-4" | "claude-sonnet-4-5" | "claude-sonnet-4-6"
+        | "claude-sonnet-4.5" | "claude-sonnet-4.6" => "sonnet".to_string(),
+        // Haiku family
+        "haiku" | "claude-haiku" | "haiku-3-5" | "haiku-4-5" | "haiku-3.5" | "haiku-4.5"
+        | "claude-haiku-3-5" | "claude-haiku-4-5" | "claude-haiku-3.5" | "claude-haiku-4.5" => {
+            "haiku".to_string()
+        }
+        _ => model.to_string(),
+    }
+}
+
 // ── JSONL Stream Types ──
 
 /// Top-level event from `claude --output-format stream-json`.
@@ -338,9 +366,11 @@ pub async fn stream_claude_cli(
         });
     }
 
+    let cli_model = normalize_cli_model(model);
     debug!(
         cli = %cli_path.display(),
-        model,
+        requested_model = model,
+        cli_model = %cli_model,
         user_prompt_len = assembled.user.len(),
         system_prompt_len = assembled.system.len(),
         "spawning claude CLI subprocess"
@@ -353,7 +383,7 @@ pub async fn stream_claude_cli(
         "stream-json",
         "--verbose",
         "--model",
-        model,
+        &cli_model,
         "--permission-mode",
         "bypassPermissions",
     ]);
@@ -363,8 +393,11 @@ pub async fn stream_claude_cli(
         cmd.args(["--append-system-prompt", &assembled.system]);
     }
 
-    // Clear ANTHROPIC_API_KEY to force OAuth path
+    // Clear API key env vars to force OAuth path. ANTHROPIC_API_KEY_OLD is an
+    // undocumented fallback the CLI honors in some environments — clearing both
+    // matches OpenClaw's CLAUDE_CLI_CLEAR_ENV list.
     cmd.env_remove("ANTHROPIC_API_KEY");
+    cmd.env_remove("ANTHROPIC_API_KEY_OLD");
 
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
@@ -680,6 +713,44 @@ mod tests {
         let prompt = assemble_prompt(&msgs);
         assert!(prompt.user.is_empty());
         assert!(prompt.system.is_empty());
+    }
+
+    // ── Model Alias Mapping ──
+
+    #[test]
+    fn normalize_cli_model_long_ids_to_short() {
+        assert_eq!(normalize_cli_model("claude-sonnet-4-6"), "sonnet");
+        assert_eq!(normalize_cli_model("claude-opus-4-6"), "opus");
+        assert_eq!(normalize_cli_model("claude-haiku-4-5"), "haiku");
+    }
+
+    #[test]
+    fn normalize_cli_model_short_aliases_passthrough() {
+        assert_eq!(normalize_cli_model("sonnet"), "sonnet");
+        assert_eq!(normalize_cli_model("opus"), "opus");
+        assert_eq!(normalize_cli_model("haiku"), "haiku");
+    }
+
+    #[test]
+    fn normalize_cli_model_case_insensitive() {
+        assert_eq!(normalize_cli_model("CLAUDE-SONNET-4-6"), "sonnet");
+        assert_eq!(normalize_cli_model("Claude-Opus-4-6"), "opus");
+    }
+
+    #[test]
+    fn normalize_cli_model_unknown_passthrough() {
+        assert_eq!(
+            normalize_cli_model("unknown-model-xyz"),
+            "unknown-model-xyz"
+        );
+        assert_eq!(normalize_cli_model(""), "");
+    }
+
+    #[test]
+    fn normalize_cli_model_dotted_variants() {
+        assert_eq!(normalize_cli_model("sonnet-4.6"), "sonnet");
+        assert_eq!(normalize_cli_model("claude-opus-4.6"), "opus");
+        assert_eq!(normalize_cli_model("haiku-4.5"), "haiku");
     }
 
     // ── CLI Detection ──

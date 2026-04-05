@@ -823,6 +823,19 @@ mod tests {
     }
 
     #[test]
+    fn claude_cli_models_all_normalize_to_known_aliases() {
+        // Every entry must map to one of the short CLI aliases so the subprocess
+        // gets a value the `claude` binary understands regardless of version drift.
+        for (id, _) in CLAUDE_CLI_MODELS {
+            let alias = borg_core::claude_cli::normalize_cli_model(id);
+            assert!(
+                matches!(alias.as_str(), "opus" | "sonnet" | "haiku"),
+                "model {id} normalized to {alias}, expected opus/sonnet/haiku"
+            );
+        }
+    }
+
+    #[test]
     fn providers_includes_claude_cli() {
         assert!(
             PROVIDERS.iter().any(|(id, _, _)| *id == "claude-cli"),
