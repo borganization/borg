@@ -131,6 +131,22 @@ impl HourlyRateLimiter {
         *count += 1;
         true
     }
+
+    /// Source-specific diminishing returns. Returns a multiplier (0.0..=1.0)
+    /// based on how many times this source has been seen this hour.
+    /// Increments the internal counter on each call.
+    pub fn source_decay_multiplier(&mut self, timestamp: i64, source: &str) -> f64 {
+        let hour_bucket = timestamp / constants::SECS_PER_HOUR;
+        let key = (hour_bucket, format!("__decay__{source}"));
+        let count = self.type_counts.entry(key).or_insert(0);
+        *count += 1;
+        match *count {
+            1..=2 => 1.0,
+            3 => 0.5,
+            4 => 0.25,
+            _ => 0.0,
+        }
+    }
 }
 
 /// HMAC chain checkpoint for recovery after corruption.
@@ -230,6 +246,41 @@ mod tests {
         assert!(!rl.check_source(3600, "run_shell", 3));
         // Different source should work
         assert!(rl.check_source(3600, "other", 3));
+    }
+
+    #[test]
+    fn source_decay_multiplier_schedule() {
+        let mut rl = HourlyRateLimiter::new(None, None);
+        assert_eq!(rl.source_decay_multiplier(3600, "run_shell"), 1.0); // count=1
+        assert_eq!(rl.source_decay_multiplier(3600, "run_shell"), 1.0); // count=2
+        assert_eq!(rl.source_decay_multiplier(3600, "run_shell"), 0.5); // count=3
+        assert_eq!(rl.source_decay_multiplier(3600, "run_shell"), 0.25); // count=4
+        assert_eq!(rl.source_decay_multiplier(3600, "run_shell"), 0.0); // count=5
+        assert_eq!(rl.source_decay_multiplier(3600, "run_shell"), 0.0); // count=6
+    }
+
+    #[test]
+    fn source_decay_per_source_isolation() {
+        let mut rl = HourlyRateLimiter::new(None, None);
+        // Exhaust run_shell
+        for _ in 0..5 {
+            rl.source_decay_multiplier(3600, "run_shell");
+        }
+        assert_eq!(rl.source_decay_multiplier(3600, "run_shell"), 0.0);
+        // Different source starts fresh
+        assert_eq!(rl.source_decay_multiplier(3600, "apply_patch"), 1.0);
+    }
+
+    #[test]
+    fn source_decay_resets_each_hour() {
+        let mut rl = HourlyRateLimiter::new(None, None);
+        // Use up decay in hour 1
+        for _ in 0..5 {
+            rl.source_decay_multiplier(3600, "run_shell");
+        }
+        assert_eq!(rl.source_decay_multiplier(3600, "run_shell"), 0.0);
+        // New hour resets
+        assert_eq!(rl.source_decay_multiplier(7200, "run_shell"), 1.0);
     }
 
     #[test]

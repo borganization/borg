@@ -130,9 +130,6 @@ pub(crate) fn rate_limit_for(event_type: &str) -> u32 {
     }
 }
 
-/// Source-specific rate limit per hour.
-const SOURCE_RATE_LIMIT: u32 = 5;
-
 // ── Types ──
 
 /// The 10 archetypes that classify usage patterns.
@@ -494,7 +491,7 @@ pub(crate) const VALID_EVOLUTION_EVENT_TYPES: &[&str] =
     &["xp_gain", "evolution", "classification", "archetype_shift"];
 /// Total evolution events per hour (write-time cap).
 pub(crate) const TOTAL_EVENTS_PER_HOUR: i64 = 20;
-/// Per-source events per hour (write-time cap, matches replay SOURCE_RATE_LIMIT).
+/// Per-source events per hour (write-time coarse gate; replay applies graduated decay).
 pub(crate) const WRITE_SOURCE_RATE_LIMIT: i64 = 5;
 
 // ── Event Replay (Event Sourcing) ──
@@ -530,12 +527,9 @@ pub fn replay_events_with_key(key: &[u8], events: &[EvolutionEvent]) -> Evolutio
         }
         expected_prev_hmac = event.hmac.clone();
 
-        // Rate limiting: per-type and per-source
+        // Rate limiting: per-type per hour
         let type_cap = rate_limit_for(&event.event_type);
         if !rate_limiter.check_and_consume(event.created_at, &event.event_type, type_cap, false) {
-            continue;
-        }
-        if !rate_limiter.check_source(event.created_at, &event.source, SOURCE_RATE_LIMIT) {
             continue;
         }
 
@@ -543,12 +537,17 @@ pub fn replay_events_with_key(key: &[u8], events: &[EvolutionEvent]) -> Evolutio
 
         match event.event_type.as_str() {
             "xp_gain" => {
-                total_xp = total_xp.saturating_add(event.xp_delta.max(0) as u32);
-                // Update archetype score
+                // Diminishing returns: repeated same-source calls yield less XP
+                let source_multiplier =
+                    rate_limiter.source_decay_multiplier(event.created_at, &event.source);
+                let effective_xp =
+                    (event.xp_delta.max(0) as f64 * source_multiplier).floor() as u32;
+                total_xp = total_xp.saturating_add(effective_xp);
+                // Update archetype score with decayed XP
                 if let Some(ref arch_str) = event.archetype {
                     if let Some(arch) = Archetype::parse(arch_str) {
                         let score = archetype_scores.entry(arch).or_insert(0);
-                        *score = score.saturating_add(event.xp_delta.max(0) as u32);
+                        *score = score.saturating_add(effective_xp);
                     }
                 }
             }
@@ -1529,9 +1528,117 @@ mod tests {
             events.push(e);
         }
         let state = replay_events(&events);
-        // Only 15 should count (rate limited), but source limit is 5
-        // Since all have same source "test", only 5 should count
-        assert_eq!(state.total_xp, 5);
+        // All same source "test" with xp_delta=1: diminishing returns
+        // counts 1-2: 1.0*1=1 each (2), count 3: floor(0.5*1)=0, count 4: floor(0.25*1)=0, 5+: 0
+        // Plus type rate limit caps at 15 total xp_gain events per hour
+        assert_eq!(state.total_xp, 2);
+    }
+
+    #[test]
+    fn replay_source_decay_with_creation_xp() {
+        // Creation events have xp_delta=2. Decay: 2*1.0, 2*1.0, floor(2*0.5)=1, floor(2*0.25)=0
+        let mut events = Vec::new();
+        let mut prev = "0".to_string();
+        for i in 0..4 {
+            let e = make_event(
+                i + 1,
+                "xp_gain",
+                2,
+                Some("creator"),
+                "write_memory",
+                1000 + i as i64,
+                &prev,
+            );
+            prev = e.hmac.clone();
+            events.push(e);
+        }
+        let state = replay_events(&events);
+        assert_eq!(state.total_xp, 5); // 2 + 2 + 1 + 0
+    }
+
+    #[test]
+    fn replay_diverse_tools_earn_more() {
+        // 4 different sources, each used once = full XP
+        let e1 = make_event(1, "xp_gain", 1, Some("ops"), "run_shell", 1000, "0");
+        let e2 = make_event(
+            2,
+            "xp_gain",
+            1,
+            Some("builder"),
+            "apply_patch",
+            1001,
+            &e1.hmac,
+        );
+        let e3 = make_event(3, "xp_gain", 1, Some("analyst"), "browser", 1002, &e2.hmac);
+        let e4 = make_event(
+            4,
+            "xp_gain",
+            1,
+            Some("creator"),
+            "write_memory",
+            1003,
+            &e3.hmac,
+        );
+        let diverse = replay_events(&[e1, e2, e3, e4]);
+        assert_eq!(diverse.total_xp, 4); // All full
+
+        // 4 same source = 2 XP (1+1+0+0)
+        let mut spam = Vec::new();
+        let mut prev = "0".to_string();
+        for i in 0..4 {
+            let e = make_event(
+                i + 1,
+                "xp_gain",
+                1,
+                None,
+                "run_shell",
+                1000 + i as i64,
+                &prev,
+            );
+            prev = e.hmac.clone();
+            spam.push(e);
+        }
+        let spammed = replay_events(&spam);
+        assert_eq!(spammed.total_xp, 2); // Diminished
+
+        assert!(diverse.total_xp > spammed.total_xp);
+    }
+
+    #[test]
+    fn replay_source_decay_resets_each_hour() {
+        let mut events = Vec::new();
+        let mut prev = "0".to_string();
+        // 3 events in hour 0 (timestamps 100-102)
+        for i in 0..3 {
+            let e = make_event(
+                i + 1,
+                "xp_gain",
+                1,
+                None,
+                "run_shell",
+                100 + i as i64,
+                &prev,
+            );
+            prev = e.hmac.clone();
+            events.push(e);
+        }
+        // 3 events in hour 1 (timestamps 3700-3702)
+        for i in 0..3 {
+            let e = make_event(
+                i + 4,
+                "xp_gain",
+                1,
+                None,
+                "run_shell",
+                3700 + i as i64,
+                &prev,
+            );
+            prev = e.hmac.clone();
+            events.push(e);
+        }
+        let state = replay_events(&events);
+        // Hour 0: 1+1+0 = 2, Hour 1: 1+1+0 = 2, Total = 4
+        assert_eq!(state.total_xp, 4);
     }
 
     #[test]
