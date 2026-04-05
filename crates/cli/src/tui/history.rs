@@ -254,6 +254,15 @@ fn style_indented_line(line: &str) -> Line<'static> {
 }
 
 impl HistoryCell {
+    /// True when this cell should visually hug the previous cell
+    /// (no blank-line spacer inserted before it by the render loop).
+    pub fn is_stream_continuation(&self) -> bool {
+        matches!(
+            self,
+            HistoryCell::ToolResult { .. } | HistoryCell::ToolStreaming { .. }
+        )
+    }
+
     pub fn render(
         &self,
         width: u16,
@@ -286,6 +295,7 @@ impl HistoryCell {
                     }
                     lines.push(Line::from(all_spans).style(bg));
                 }
+                lines.push(Line::from(Span::styled(" ".repeat(w), bg)).style(bg));
                 lines
             }
             HistoryCell::Assistant { text, streaming } => {
@@ -314,8 +324,6 @@ impl HistoryCell {
                 };
                 if *streaming {
                     lines.push(Line::from(Span::styled("▊", theme::dim())));
-                } else {
-                    lines.push(Line::default());
                 }
                 lines
             }
@@ -426,19 +434,12 @@ impl HistoryCell {
                 ]
             }
             HistoryCell::Heartbeat { text } => {
-                vec![
-                    Line::from(vec![
-                        Span::styled("[heartbeat] ", theme::code_style()),
-                        Span::styled(text.clone(), theme::code_style()),
-                    ]),
-                    Line::default(),
-                ]
+                vec![Line::from(vec![
+                    Span::styled("[heartbeat] ", theme::code_style()),
+                    Span::styled(text.clone(), theme::code_style()),
+                ])]
             }
-            HistoryCell::System { text } => {
-                let mut lines: Vec<Line<'static>> = text.lines().map(style_system_line).collect();
-                lines.push(Line::default());
-                lines
-            }
+            HistoryCell::System { text } => text.lines().map(style_system_line).collect(),
             HistoryCell::Thinking { text } => {
                 // Don't render an empty thinking box
                 if text.is_empty() {
@@ -535,19 +536,14 @@ impl HistoryCell {
                         Span::styled(step.title.clone(), style),
                     ]));
                 }
-                lines.push(Line::default());
                 lines
             }
             HistoryCell::Separator => {
                 let rule_width = ((width as usize) * 2 / 3).min(80);
-                vec![
-                    Line::default(),
-                    Line::from(Span::styled(
-                        theme::SEPARATOR.repeat(rule_width),
-                        theme::dim(),
-                    )),
-                    Line::default(),
-                ]
+                vec![Line::from(Span::styled(
+                    theme::SEPARATOR.repeat(rule_width),
+                    theme::dim(),
+                ))]
             }
         }
     }
@@ -680,22 +676,29 @@ mod tests {
             text: "hello".to_string(),
         };
         let lines = cell.render(40, None);
-        // Should have top padding + content line(s), no bottom padding
-        assert_eq!(lines.len(), 2); // 1 top padding + 1 content line
+        // 1 top pad + 1 content + 1 bottom pad
+        assert_eq!(lines.len(), 3);
     }
 
     #[test]
-    fn render_user_cell_no_double_background() {
+    fn render_user_cell_padded_box() {
         let cell = HistoryCell::User {
             text: "hello world".to_string(),
         };
         let lines = cell.render(80, None);
-        // Last line should be a content line (contains the chevron), not empty padding
-        let last = lines.last().unwrap();
-        let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+        // The chevron should appear on an interior line, not the first or last
+        // (first and last are styled background padding blanks).
+        let chevron_line_idx = lines.iter().position(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.as_ref().contains(super::theme::CHEVRON))
+        });
+        assert!(chevron_line_idx.is_some(), "chevron must be present");
+        let idx = chevron_line_idx.unwrap();
+        assert!(idx > 0, "chevron should not be on the first (top pad) line");
         assert!(
-            text.contains(super::theme::CHEVRON),
-            "last line should contain the chevron prefix, not be empty padding"
+            idx < lines.len() - 1,
+            "chevron should not be on the last (bottom pad) line"
         );
     }
 
@@ -719,9 +722,46 @@ mod tests {
             streaming: false,
         };
         let lines = cell.render(40, None);
+        // No trailing blank line; last line should contain the rendered text.
         let last = &lines[lines.len() - 1];
-        // Last line should be empty (separator)
-        assert!(last.spans.is_empty());
+        let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("done"),
+            "last line should contain rendered text, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn stream_continuation_classification() {
+        let tool_start = HistoryCell::ToolStart {
+            name: "run_shell".to_string(),
+            args: "{}".to_string(),
+            completed: false,
+            start_time: None,
+        };
+        assert!(!tool_start.is_stream_continuation());
+
+        let tool_result = HistoryCell::ToolResult {
+            output: "ok".to_string(),
+            is_error: false,
+            duration_ms: Some(10),
+            display_label: "run_shell".to_string(),
+        };
+        assert!(tool_result.is_stream_continuation());
+
+        let tool_streaming = HistoryCell::ToolStreaming { lines: vec![] };
+        assert!(tool_streaming.is_stream_continuation());
+
+        let assistant = HistoryCell::Assistant {
+            text: "hi".to_string(),
+            streaming: false,
+        };
+        assert!(!assistant.is_stream_continuation());
+
+        let user = HistoryCell::User {
+            text: "hey".to_string(),
+        };
+        assert!(!user.is_stream_continuation());
     }
 
     #[test]
@@ -854,7 +894,8 @@ mod tests {
     fn render_separator() {
         let cell = HistoryCell::Separator;
         let lines = cell.render(60, None);
-        assert_eq!(lines.len(), 3);
+        // Only the rule line; surrounding spacing is handled by the render loop.
+        assert_eq!(lines.len(), 1);
     }
 
     #[test]
@@ -926,8 +967,8 @@ mod tests {
     fn render_plan_cell_empty() {
         let cell = HistoryCell::Plan { steps: vec![] };
         let lines = cell.render(80, None);
-        // Should have the "Plan:" header + empty line
-        assert!(lines.len() >= 2);
+        // Should have at least the "Plan:" header
+        assert!(!lines.is_empty());
     }
 
     #[test]

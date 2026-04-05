@@ -1535,7 +1535,10 @@ impl<'a> App<'a> {
 
         all_lines.push(Line::default());
 
-        for cell in &self.cells {
+        for (i, cell) in self.cells.iter().enumerate() {
+            if i > 0 && !cell.is_stream_continuation() {
+                all_lines.push(Line::default());
+            }
             all_lines.extend(cell.render(width, throbber_state));
         }
 
