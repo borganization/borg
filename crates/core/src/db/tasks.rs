@@ -341,11 +341,15 @@ impl Database {
     }
 
     /// Refresh the daemon lock heartbeat timestamp.
+    /// Returns an error if the lock was stolen (0 rows updated).
     pub fn refresh_daemon_lock(&self, pid: u32, now: i64) -> Result<()> {
-        self.conn.execute(
+        let rows = self.conn.execute(
             "UPDATE daemon_lock SET heartbeat_at = ?1 WHERE id = 1 AND pid = ?2",
             params![now, pid as i64],
         )?;
+        if rows == 0 {
+            anyhow::bail!("daemon lock lost: no row matched pid {pid} (lock stolen or released)");
+        }
         Ok(())
     }
 
