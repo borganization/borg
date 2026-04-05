@@ -494,6 +494,29 @@ impl<'a> App<'a> {
                 } else if key.code == KeyCode::Enter {
                     // Send as a steer (mid-turn injection at tool boundary)
                     let text = self.composer.text().trim().to_string();
+                    // Intercept /cancel mid-stream so it doesn't get sent to
+                    // the agent as a steer. Equivalent to pressing Esc.
+                    if matches!(text.as_str(), "/cancel" | "/stop" | "/abort") {
+                        self.composer.set_text("");
+                        if let Some(token) = self.cancel_token.take() {
+                            token.cancel();
+                        }
+                        self.event_rx = None;
+                        self.steer_tx = None;
+                        self.pending_steers.clear();
+                        for cell in self.cells.iter_mut().rev() {
+                            if let HistoryCell::Assistant { streaming, .. } = cell {
+                                *streaming = false;
+                                break;
+                            }
+                        }
+                        self.cells.push(HistoryCell::System {
+                            text: "[cancelled]".to_string(),
+                        });
+                        self.plan_mode = false;
+                        self.state = AppState::Idle;
+                        return Ok(AppAction::Continue);
+                    }
                     if !text.is_empty() {
                         if let Some(ref steer_tx) = self.steer_tx {
                             let _ = steer_tx.send(text.clone());
@@ -2182,6 +2205,54 @@ mod tests {
 
         let sys = last_system_text(&app).unwrap();
         assert_eq!(sys, "[interrupted]");
+    }
+
+    // --- /cancel slash command ---
+
+    #[test]
+    fn cmd_cancel_with_in_flight_token_cancels_and_clears() {
+        let mut app = make_app();
+        let token = CancellationToken::new();
+        app.cancel_token = Some(token.clone());
+
+        let action = app.cmd_cancel().unwrap();
+        assert!(matches!(action, AppAction::Continue));
+        assert!(token.is_cancelled());
+        assert!(app.cancel_token.is_none());
+        let sys = last_system_text(&app).unwrap();
+        assert_eq!(sys, "[cancelled]");
+    }
+
+    #[test]
+    fn cmd_cancel_without_in_flight_token_reports_nothing() {
+        let mut app = make_app();
+        app.cancel_token = None;
+
+        let action = app.cmd_cancel().unwrap();
+        assert!(matches!(action, AppAction::Continue));
+        let sys = last_system_text(&app).unwrap();
+        assert_eq!(sys, "Nothing to cancel.");
+    }
+
+    #[test]
+    fn cancel_typed_mid_stream_interrupts_instead_of_steering() {
+        // /cancel typed into the composer during streaming must not be sent
+        // as a mid-turn steer — it should behave the same as pressing Esc.
+        let mut app = make_app();
+        app.state = AppState::Streaming {
+            start: Instant::now(),
+        };
+        let token = CancellationToken::new();
+        app.cancel_token = Some(token.clone());
+        app.composer.set_text("/cancel");
+
+        app.handle_key(key(KeyCode::Enter)).unwrap();
+
+        assert!(token.is_cancelled());
+        assert!(app.cancel_token.is_none());
+        assert!(matches!(app.state, AppState::Idle));
+        let sys = last_system_text(&app).unwrap();
+        assert_eq!(sys, "[cancelled]");
     }
 
     #[test]

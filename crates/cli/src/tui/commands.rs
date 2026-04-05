@@ -43,6 +43,7 @@ impl App<'_> {
                 return Some(Ok(AppAction::Continue));
             }
             "/poke" => return Some(self.cmd_poke()),
+            "/cancel" | "/stop" | "/abort" => return Some(self.cmd_cancel()),
             "/restart" => return Some(Ok(AppAction::RestartGateway)),
             "/compact" => return Some(Ok(AppAction::CompactHistory)),
             "/clear" => {
@@ -119,6 +120,7 @@ impl App<'_> {
              \n  \
              /compact   - Compact conversation history\n  \
              /clear     - Clear conversation\n  \
+             /cancel    - Stop the current in-progress turn\n  \
              /undo      - Undo last agent turn\n\
              \n  \
              /memory    - Show memory\n  \
@@ -146,6 +148,23 @@ impl App<'_> {
                 .to_string(),
         );
         Ok(AppAction::Continue)
+    }
+
+    /// Cancel the in-progress agent turn, if any. Equivalent to pressing Esc
+    /// during streaming — provided as an explicit command so messaging-channel
+    /// users (who can't press Esc) have a consistent verb across surfaces.
+    pub(super) fn cmd_cancel(&mut self) -> Result<AppAction> {
+        if let Some(token) = self.cancel_token.take() {
+            token.cancel();
+            self.event_rx = None;
+            self.steer_tx = None;
+            self.pending_steers.clear();
+            self.push_system_message("[cancelled]".to_string());
+            Ok(AppAction::Continue)
+        } else {
+            self.push_system_message("Nothing to cancel.".to_string());
+            Ok(AppAction::Continue)
+        }
     }
 
     fn cmd_memory(&mut self) -> Result<AppAction> {

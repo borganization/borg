@@ -40,6 +40,8 @@ pub mod http_retry;
 /// Native iMessage integration (macOS only).
 #[cfg(target_os = "macos")]
 pub mod imessage;
+/// Per-session in-flight agent turn cancellation registry.
+pub mod in_flight;
 /// URL preview and link understanding for enriched responses.
 pub mod link_understanding;
 /// `channel.toml` manifest parsing.

@@ -403,6 +403,27 @@ pub async fn invoke_agent_with_auto_reply(
         warn!("Failed to log inbound message for channel '{channel_name}': {e}");
     }
 
+    // Handle `/cancel` before the sync dispatcher so the async registry call
+    // doesn't hold `&db` across an await point (Database is !Send).
+    if crate::commands::is_cancel_command(&inbound.text) {
+        let response = if crate::in_flight::GLOBAL.cancel(&session_id).await {
+            "Cancelled.".to_string()
+        } else {
+            "Nothing to cancel.".to_string()
+        };
+        if let Err(e) = db.log_channel_message(
+            channel_name,
+            &inbound.sender_id,
+            "outbound",
+            Some(&response),
+            None,
+            Some(&session_id),
+        ) {
+            warn!("Failed to log /cancel response: {e}");
+        }
+        return Ok((response, session_id));
+    }
+
     // Check for slash commands before creating agent (use original text for commands)
     if let Some(response) = crate::commands::try_handle_command(
         &inbound.text,
@@ -515,6 +536,12 @@ pub async fn invoke_agent_with_auto_reply(
         .any(|a| a.mime_type.starts_with("image/"));
 
     let agent_cancel = CancellationToken::new();
+    // Register this turn's cancel token so a subsequent `/cancel` from the
+    // same sender (or a `borg cancel` CLI call) can interrupt it. Cleared
+    // unconditionally once the turn completes, below.
+    crate::in_flight::GLOBAL
+        .register(&session_id, agent_cancel.clone())
+        .await;
     let agent_handle = if has_image_attachments {
         let mut parts = vec![borg_core::types::ContentPart::Text(message_text)];
         for att in &inbound.attachments {
@@ -616,6 +643,10 @@ pub async fn invoke_agent_with_auto_reply(
         Ok(Err(e)) => warn!("Agent task panicked: {e}"),
         Err(_) => warn!("Agent did not finish within grace period for channel '{channel_name}'"),
     }
+
+    // Turn is no longer in flight; drop the registry entry regardless of
+    // whether it completed normally, errored, or was externally cancelled.
+    crate::in_flight::GLOBAL.clear(&session_id).await;
 
     if response_text.is_empty() {
         response_text = "(no response)".to_string();

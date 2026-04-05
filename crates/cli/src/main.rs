@@ -135,6 +135,18 @@ enum Commands {
     /// Trigger an immediate heartbeat check-in
     #[command(alias = "wake")]
     Poke,
+    /// Cancel the in-progress agent turn
+    ///
+    /// Sends a cancel signal to the running daemon/gateway. With `--session`,
+    /// cancels only that session's in-flight turn; otherwise cancels all.
+    /// Note: `stop` is already taken by the daemon stop command, so only
+    /// `abort` is offered as an alias here.
+    #[command(alias = "abort")]
+    Cancel {
+        /// Session ID to target (default: cancel all in-flight turns)
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Set the agent to away mode (auto-replies to messages)
     Away {
         /// Custom away message (uses config default if omitted)
@@ -605,6 +617,7 @@ async fn main() -> Result<()> {
             None => run_pairing_list(None)?,
         },
         Some(Commands::Poke) => run_poke().await?,
+        Some(Commands::Cancel { session }) => run_cancel(session).await?,
         Some(Commands::Away { message }) => run_away(message).await?,
         Some(Commands::Available) => run_available().await?,
         Some(Commands::Migrate { action }) => match action {
@@ -710,6 +723,41 @@ async fn run_poke() -> Result<()> {
     {
         Ok(r) if r.status().is_success() => println!("Poke signal sent."),
         Ok(r) => println!("Poke failed: {}", r.status()),
+        Err(_) => {
+            println!("Could not reach daemon. Is it running?");
+            println!("Start it with: borg service start");
+        }
+    }
+    Ok(())
+}
+
+async fn run_cancel(session: Option<String>) -> Result<()> {
+    let config = borg_core::config::Config::load()?;
+    let url = format!(
+        "http://{}:{}/internal/cancel",
+        config.gateway.host, config.gateway.port
+    );
+    let client = reqwest::Client::new();
+    let mut req = client.post(&url).timeout(std::time::Duration::from_secs(5));
+    if let Some(ref sid) = session {
+        req = req.query(&[("session", sid)]);
+    }
+    match req.send().await {
+        Ok(r) if r.status().is_success() => {
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            let count = body
+                .get("cancelled")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if count == 0 {
+                println!("Nothing to cancel.");
+            } else if count == 1 {
+                println!("Cancelled 1 in-flight turn.");
+            } else {
+                println!("Cancelled {count} in-flight turns.");
+            }
+        }
+        Ok(r) => println!("Cancel failed: {}", r.status()),
         Err(_) => {
             println!("Could not reach daemon. Is it running?");
             println!("Start it with: borg service start");
