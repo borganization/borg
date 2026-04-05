@@ -67,10 +67,24 @@ pub async fn handle_slack_webhook(
             Ok(SlackWebhookResult::Challenge(challenge))
         }
         SlackEnvelope::EventCallback(callback) => {
-            // Deduplicate events by event_id
-            if let (Some(dedup), Some(event_id)) = (dedup, callback.event_id.as_deref()) {
-                if dedup.lock().await.is_duplicate(event_id) {
-                    return Ok(SlackWebhookResult::Skip);
+            if let Some(dedup) = dedup {
+                let mut guard = dedup.lock().await;
+                // Dedupe by event_id — guards against webhook retries from Slack.
+                if let Some(event_id) = callback.event_id.as_deref() {
+                    if guard.is_duplicate(event_id) {
+                        return Ok(SlackWebhookResult::Skip);
+                    }
+                }
+                // Dedupe by (channel, ts) — guards against Slack delivering the same
+                // underlying @mention as both a `message` and an `app_mention` event
+                // (two different event_ids for one user action).
+                if let (Some(channel), Some(ts)) = (
+                    callback.event.channel.as_deref(),
+                    callback.event.ts.as_deref(),
+                ) {
+                    if guard.is_duplicate_channel_ts(channel, ts) {
+                        return Ok(SlackWebhookResult::Skip);
+                    }
                 }
             }
 
