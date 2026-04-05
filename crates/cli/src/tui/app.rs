@@ -1359,7 +1359,14 @@ impl<'a> App<'a> {
                 // If we receive one here, it means the event loop forwarded it.
             }
             HeartbeatEvent::SchedulerStarted { mode } => {
-                self.push_system_message(format!("[heartbeat scheduler started: {mode}]"));
+                if let Ok(db) = borg_core::db::Database::open() {
+                    borg_core::activity_log::log_activity(
+                        &db,
+                        "info",
+                        "heartbeat",
+                        &format!("Heartbeat scheduler started ({mode})"),
+                    );
+                }
             }
             HeartbeatEvent::Result(result) => match result {
                 HeartbeatResult::Ran { message, .. } => {
