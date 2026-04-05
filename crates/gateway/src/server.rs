@@ -62,7 +62,7 @@ struct AppState {
     teams_app_secret: Option<String>,
     google_chat_client: Option<Arc<GoogleChatClient>>,
     google_chat_token: Option<String>,
-    wake_tx: Option<mpsc::Sender<()>>,
+    poke_tx: Option<mpsc::Sender<()>>,
     /// Telegram bot @username for group mention activation.
     telegram_bot_username: Option<String>,
     /// Slack bot user ID for group mention activation (e.g. "U123ABC").
@@ -78,7 +78,7 @@ pub struct GatewayServer {
     config: Config,
     shutdown: CancellationToken,
     metrics: BorgMetrics,
-    wake_tx: Option<mpsc::Sender<()>>,
+    poke_tx: Option<mpsc::Sender<()>>,
 }
 
 impl GatewayServer {
@@ -87,13 +87,13 @@ impl GatewayServer {
         config: Config,
         shutdown: CancellationToken,
         metrics: BorgMetrics,
-        wake_tx: Option<mpsc::Sender<()>>,
+        poke_tx: Option<mpsc::Sender<()>>,
     ) -> Result<Self> {
         Ok(Self {
             config,
             shutdown,
             metrics,
-            wake_tx,
+            poke_tx,
         })
     }
 
@@ -168,7 +168,7 @@ impl GatewayServer {
             teams_app_secret,
             google_chat_client,
             google_chat_token,
-            wake_tx: self.wake_tx,
+            poke_tx: self.poke_tx,
             telegram_bot_username: telegram_bot_username.clone(),
             slack_bot_user_id,
             auto_reply_state: std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -187,7 +187,7 @@ impl GatewayServer {
             .route("/readyz", get(readyz_handler))
             .route("/health/channels", get(channel_health_handler))
             .route("/channels", get(list_channels_handler))
-            .route("/internal/wake", post(wake_handler))
+            .route("/internal/poke", post(poke_handler))
             .route("/internal/away", post(away_handler))
             .route("/internal/available", post(available_handler))
             .route("/webhook/slack/command", post(slack_command_handler))
@@ -663,18 +663,18 @@ async fn list_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoR
     axum::Json(serde_json::json!({ "channels": channels }))
 }
 
-async fn wake_handler(
+async fn poke_handler(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
-    // Only allow wake from localhost to prevent unauthorized LLM cost
+    // Only allow poke from localhost to prevent unauthorized LLM cost
     if !addr.ip().is_loopback() {
         return (
             StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({"error": "localhost only"})),
         );
     }
-    match &state.wake_tx {
+    match &state.poke_tx {
         Some(tx) => {
             let _ = tx.send(()).await;
             (
@@ -684,7 +684,7 @@ async fn wake_handler(
         }
         None => (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(serde_json::json!({"error": "heartbeat wake channel not available"})),
+            axum::Json(serde_json::json!({"error": "heartbeat poke channel not available"})),
         ),
     }
 }

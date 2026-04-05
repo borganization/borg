@@ -74,7 +74,7 @@ Release binaries are built via `.github/workflows/release.yml` on tag push (`v*`
 - `borg remove <name>` — remove an integration's credentials
 - `borg plugins` — list all integrations with configured/unconfigured status
 - `borg gateway` — start webhook gateway server for messaging channels
-- `borg wake` — trigger an immediate heartbeat check-in (sends wake signal to daemon)
+- `borg poke` — trigger an immediate heartbeat check-in (sends poke signal to daemon)
 - `borg status` — show agent vitals (stability, focus, sync, growth, happiness)
 - `borg doctor` — run diagnostics (config, provider, sandbox, tools, skills, memory, gateway, budget, host security)
 - `borg tasks list` — list all scheduled tasks
@@ -90,6 +90,7 @@ Release binaries are built via `.github/workflows/release.yml` on tag push (`v*`
 - `borg cron runs <id>` — show execution history for a cron job
 - `borg update` — update borg to latest stable release (supports `--dev` for pre-release, `--check` for check-only)
 - `/update` (TUI command) — update borg to latest version (`/update --dev` for pre-release)
+- `/poke` (TUI command) — trigger an immediate heartbeat check-in
 - `/plugins` (TUI command) — open marketplace popup to install/uninstall messaging, email, and productivity integrations
 
 ## Onboarding
@@ -515,7 +516,7 @@ Proactive check-in system. The `HeartbeatScheduler` (pure timer) emits `Fire` ev
 - **HEARTBEAT.md**: Optional checklist at `~/.borg/HEARTBEAT.md`; injected into the heartbeat agent turn so the agent can check email, calendar, etc.
 - **Channel delivery**: `heartbeat.channels` list (e.g. `["telegram"]`); delivers to the owner's sender_id from `approved_senders` table
 - **Suppression**: Empty responses and duplicate hash responses are suppressed
-- **Wake**: `borg wake` sends HTTP POST to `/internal/wake` on the gateway, triggering an immediate heartbeat (bypasses quiet hours)
+- **Poke**: `borg poke` (CLI) or `/poke` (TUI) triggers an immediate heartbeat (bypasses quiet hours). CLI sends HTTP POST to `/internal/poke` on the gateway; TUI sends directly via channel when owning the scheduler
 - **Daemon**: Heartbeat is spawned in `run_daemon()` alongside the gateway; runs without a TUI
 - **TUI**: Heartbeat renders in cyan as `[heartbeat]` prefix in the transcript
 
@@ -573,7 +574,7 @@ Five-layer defense against prompt injection attacks:
 | `crates/core/src/rate_guard.rs` | Per-session rate limiting for tool calls, shell commands, file/memory writes, web requests |
 | `crates/core/src/db.rs` | SQLite database with versioned migrations |
 | `crates/core/src/types.rs` | Message (with timestamps), ToolCall, ToolDefinition |
-| `crates/heartbeat/src/scheduler.rs` | Pure timer: interval/cron scheduling, quiet hours (timezone-aware), wake signal |
+| `crates/heartbeat/src/scheduler.rs` | Pure timer: interval/cron scheduling, quiet hours (timezone-aware), poke signal |
 | `crates/sandbox/src/runner.rs` | Script runner: sandboxed subprocess execution |
 | `crates/sandbox/src/policy.rs` | SandboxPolicy + command wrapping |
 | `crates/sandbox/src/seatbelt.rs` | macOS profile generation |

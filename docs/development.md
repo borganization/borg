@@ -121,7 +121,7 @@ borg/
 │   │       └── scheduler/SKILL.md
 │   ├── heartbeat/          # heartbeat scheduler
 │   │   └── src/
-│   │       ├── scheduler.rs    # interval/cron scheduling, quiet hours, wake signal
+│   │       ├── scheduler.rs    # interval/cron scheduling, quiet hours, poke signal
 │   │       └── lib.rs
 │   ├── sandbox/            # platform sandboxing + script runner
 │   │   └── src/

@@ -97,27 +97,27 @@ pub async fn run_daemon(shutdown: CancellationToken) -> Result<()> {
 
     // Set up heartbeat scheduler (always on — heartbeat is a core feature)
     let (hb_tx, mut hb_rx) = mpsc::channel::<HeartbeatEvent>(32);
-    let (wake_tx, wake_rx) = mpsc::channel::<()>(8);
+    let (poke_tx, poke_rx) = mpsc::channel::<()>(8);
 
     let tz = config.user_timezone();
-    let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), tz, wake_rx);
+    let scheduler = HeartbeatScheduler::new(config.heartbeat.clone(), tz, poke_rx);
     let hb_cancel = shutdown.clone();
     tokio::spawn(async move {
         scheduler.run(hb_tx, hb_cancel).await;
     });
     println!("Heartbeat scheduler started.");
 
-    // Start gateway server (with wake channel for /internal/wake endpoint)
+    // Start gateway server (with poke channel for /internal/poke endpoint)
     {
         let gw_config = config.clone();
         let gw_shutdown = shutdown.clone();
-        let gw_wake_tx = Some(wake_tx);
+        let gw_poke_tx = Some(poke_tx);
         tokio::spawn(async move {
             match borg_gateway::GatewayServer::new(
                 gw_config,
                 gw_shutdown,
                 borg_core::telemetry::BorgMetrics::noop(),
-                gw_wake_tx,
+                gw_poke_tx,
             ) {
                 Ok(gateway) => {
                     if let Err(e) = gateway.run().await {

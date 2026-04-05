@@ -65,15 +65,17 @@ This file is injected into the heartbeat agent turn so the agent can proactively
 
 If the LLM responds with the exact same message as the previous heartbeat, it's suppressed. This prevents repetitive notifications when nothing has changed.
 
-## Wake command
+## Poke command
 
 Trigger an immediate heartbeat check-in at any time:
 
 ```sh
-borg wake
+borg poke
 ```
 
-This sends an HTTP POST to `/internal/wake` on the gateway, triggering a heartbeat that bypasses quiet hours.
+From the TUI, use `/poke`.
+
+This sends a poke signal to the heartbeat scheduler, triggering a heartbeat that bypasses quiet hours. The CLI sends an HTTP POST to `/internal/poke` on the gateway; the TUI sends directly via channel when it owns the scheduler.
 
 ## Daemon mode
 

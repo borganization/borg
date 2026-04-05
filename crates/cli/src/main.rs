@@ -128,7 +128,8 @@ enum Commands {
         action: Option<PairingAction>,
     },
     /// Trigger an immediate heartbeat check-in
-    Wake,
+    #[command(alias = "wake")]
+    Poke,
     /// Set the agent to away mode (auto-replies to messages)
     Away {
         /// Custom away message (uses config default if omitted)
@@ -594,7 +595,7 @@ async fn main() -> Result<()> {
             Some(PairingAction::Approved { channel }) => run_pairing_approved(channel.as_deref())?,
             None => run_pairing_list(None)?,
         },
-        Some(Commands::Wake) => run_wake().await?,
+        Some(Commands::Poke) => run_poke().await?,
         Some(Commands::Away { message }) => run_away(message).await?,
         Some(Commands::Available) => run_available().await?,
         Some(Commands::Migrate { action }) => match action {
@@ -685,10 +686,10 @@ fn ensure_onboarded() -> Result<()> {
     Ok(())
 }
 
-async fn run_wake() -> Result<()> {
+async fn run_poke() -> Result<()> {
     let config = borg_core::config::Config::load()?;
     let url = format!(
-        "http://{}:{}/internal/wake",
+        "http://{}:{}/internal/poke",
         config.gateway.host, config.gateway.port
     );
     let client = reqwest::Client::new();
@@ -698,8 +699,8 @@ async fn run_wake() -> Result<()> {
         .send()
         .await
     {
-        Ok(r) if r.status().is_success() => println!("Wake signal sent."),
-        Ok(r) => println!("Wake failed: {}", r.status()),
+        Ok(r) if r.status().is_success() => println!("Poke signal sent."),
+        Ok(r) => println!("Poke failed: {}", r.status()),
         Err(_) => {
             println!("Could not reach daemon. Is it running?");
             println!("Start it with: borg service start");

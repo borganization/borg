@@ -74,19 +74,19 @@ pub enum HeartbeatEvent {
 pub struct HeartbeatScheduler {
     config: HeartbeatConfig,
     timezone: Tz,
-    wake_rx: Option<mpsc::Receiver<()>>,
+    poke_rx: Option<mpsc::Receiver<()>>,
     /// Parsed quiet hours (start, end) cached at construction time.
     quiet_hours: Option<(NaiveTime, NaiveTime)>,
 }
 
 impl HeartbeatScheduler {
-    /// Create a new scheduler with the given config, timezone, and wake signal receiver.
-    pub fn new(config: HeartbeatConfig, timezone: Tz, wake_rx: mpsc::Receiver<()>) -> Self {
+    /// Create a new scheduler with the given config, timezone, and poke signal receiver.
+    pub fn new(config: HeartbeatConfig, timezone: Tz, poke_rx: mpsc::Receiver<()>) -> Self {
         let quiet_hours = Self::parse_quiet_hours(&config);
         Self {
             config,
             timezone,
-            wake_rx: Some(wake_rx),
+            poke_rx: Some(poke_rx),
             quiet_hours,
         }
     }
@@ -121,16 +121,16 @@ impl HeartbeatScheduler {
         }
     }
 
-    /// Receive a wake signal, or pend forever if the channel is closed/absent.
+    /// Receive a poke signal, or pend forever if the channel is closed/absent.
     #[instrument(skip_all)]
-    async fn recv_wake(&mut self) {
-        match &mut self.wake_rx {
+    async fn recv_poke(&mut self) {
+        match &mut self.poke_rx {
             Some(rx) => match rx.recv().await {
                 Some(()) => {}
                 None => {
-                    // Sender dropped — disable wake to avoid busy-loop
-                    debug!("Wake channel closed, disabling wake");
-                    self.wake_rx = None;
+                    // Sender dropped — disable poke to avoid busy-loop
+                    debug!("Poke channel closed, disabling poke");
+                    self.poke_rx = None;
                     std::future::pending().await
                 }
             },
@@ -189,9 +189,9 @@ impl HeartbeatScheduler {
                     info!("Heartbeat scheduler shutting down");
                     return;
                 }
-                _ = self.recv_wake() => {
-                    // Wake signal — fire immediately, skip quiet hours (intentional wake)
-                    debug!("Heartbeat: wake signal received, firing immediately");
+                _ = self.recv_poke() => {
+                    // Poke signal — fire immediately, skip quiet hours (intentional poke)
+                    debug!("Heartbeat: poke signal received, firing immediately");
                     if !Self::try_fire(&tx) { return; }
                 }
                 _ = ticker.tick() => {
@@ -271,8 +271,8 @@ impl HeartbeatScheduler {
                     info!("Heartbeat scheduler shutting down");
                     return;
                 }
-                _ = self.recv_wake() => {
-                    debug!("Heartbeat: wake signal received, firing immediately");
+                _ = self.recv_poke() => {
+                    debug!("Heartbeat: poke signal received, firing immediately");
                     if !Self::try_fire(&tx) { return; }
                 }
                 _ = tokio::time::sleep(wait) => {
@@ -314,7 +314,7 @@ mod tests {
         HeartbeatScheduler {
             config,
             timezone: tz,
-            wake_rx: Some(rx),
+            poke_rx: Some(rx),
             quiet_hours,
         }
     }
@@ -419,11 +419,11 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (_wake_tx, wake_rx) = mpsc::channel(1);
+        let (_poke_tx, poke_rx) = mpsc::channel(1);
         let (fire_tx, _fire_rx) = mpsc::channel(8);
         let cancel = CancellationToken::new();
 
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let cancel_clone = cancel.clone();
         let handle = tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wake_signal_triggers_fire() {
+    async fn poke_signal_triggers_fire() {
         let config = HeartbeatConfig {
             interval: "30m".to_string(),
             quiet_hours_start: None,
@@ -447,11 +447,11 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (wake_tx, wake_rx) = mpsc::channel(8);
+        let (poke_tx, poke_rx) = mpsc::channel(8);
         let (fire_tx, mut fire_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
 
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
             scheduler.run(fire_tx, cancel_clone).await;
@@ -460,8 +460,8 @@ mod tests {
         // Drain SchedulerStarted
         drain_started(&mut fire_rx).await;
 
-        // Send wake signal
-        wake_tx.send(()).await.unwrap();
+        // Send poke signal
+        poke_tx.send(()).await.unwrap();
 
         // Should receive a Fire event
         let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
@@ -484,18 +484,18 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (wake_tx, wake_rx) = mpsc::channel(8);
+        let (poke_tx, poke_rx) = mpsc::channel(8);
         let (fire_tx, _fire_rx) = mpsc::channel(1); // capacity 1, never drained
         let cancel = CancellationToken::new();
 
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
-        // First wake fills the channel, second should be skipped (not block)
-        wake_tx.send(()).await.unwrap();
+        // First poke fills the channel, second should be skipped (not block)
+        poke_tx.send(()).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        wake_tx.send(()).await.unwrap();
+        poke_tx.send(()).await.unwrap();
 
         // If try_send works, scheduler is still alive and responds to cancel
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -512,17 +512,17 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (wake_tx, wake_rx) = mpsc::channel(1);
+        let (poke_tx, poke_rx) = mpsc::channel(1);
         let (fire_tx, fire_rx) = mpsc::channel(1);
         drop(fire_rx); // Close the receiving end
 
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let handle = tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
-        // Send a wake to trigger a try_send on the closed channel
-        let _ = wake_tx.send(()).await;
+        // Send a poke to trigger a try_send on the closed channel
+        let _ = poke_tx.send(()).await;
 
         // Scheduler should exit on its own when it detects closed channel
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)
@@ -541,19 +541,19 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (wake_tx, wake_rx) = mpsc::channel(8);
+        let (poke_tx, poke_rx) = mpsc::channel(8);
         let (fire_tx, mut fire_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
 
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
         // Drain SchedulerStarted
         drain_started(&mut fire_rx).await;
 
-        // Should still respond to wake (interval gets clamped, not rejected)
-        wake_tx.send(()).await.unwrap();
+        // Should still respond to poke (interval gets clamped, not rejected)
+        poke_tx.send(()).await.unwrap();
         let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
             .await
             .expect("timed out")
@@ -572,19 +572,19 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (wake_tx, wake_rx) = mpsc::channel(8);
+        let (poke_tx, poke_rx) = mpsc::channel(8);
         let (fire_tx, mut fire_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
 
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
         // Drain SchedulerStarted
         drain_started(&mut fire_rx).await;
 
-        // Wake should still work
-        wake_tx.send(()).await.unwrap();
+        // Poke should still work
+        poke_tx.send(()).await.unwrap();
         let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
             .await
             .expect("timed out")
@@ -603,19 +603,19 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (wake_tx, wake_rx) = mpsc::channel(8);
+        let (poke_tx, poke_rx) = mpsc::channel(8);
         let (fire_tx, mut fire_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
 
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
         // Drain SchedulerStarted (from the interval fallback)
         drain_started(&mut fire_rx).await;
 
-        // Should fall back to interval mode and respond to wake
-        wake_tx.send(()).await.unwrap();
+        // Should fall back to interval mode and respond to poke
+        poke_tx.send(()).await.unwrap();
         let event = tokio::time::timeout(std::time::Duration::from_secs(2), fire_rx.recv())
             .await
             .expect("timed out — invalid cron should fall back to interval")
@@ -634,11 +634,11 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (_wake_tx, wake_rx) = mpsc::channel(1);
+        let (_poke_tx, poke_rx) = mpsc::channel(1);
         let (fire_tx, mut fire_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
 
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
@@ -660,7 +660,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // Should receive a Fire event from the interval (no wake needed)
+        // Should receive a Fire event from the interval (no poke needed)
         match fire_rx.try_recv() {
             Ok(event) => assert!(matches!(event, HeartbeatEvent::Fire)),
             Err(_) => panic!("expected Fire event after advancing past interval"),
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multiple_rapid_wakes_dont_block() {
+    async fn multiple_rapid_pokes_dont_block() {
         let config = HeartbeatConfig {
             interval: "30m".to_string(),
             quiet_hours_start: None,
@@ -678,17 +678,17 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (wake_tx, wake_rx) = mpsc::channel(16);
+        let (poke_tx, poke_rx) = mpsc::channel(16);
         let (fire_tx, mut fire_rx) = mpsc::channel(2); // small buffer
         let cancel = CancellationToken::new();
 
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
-        // Send 5 rapid wakes — some will be skipped due to full channel
+        // Send 5 rapid pokes — some will be skipped due to full channel
         for _ in 0..5 {
-            let _ = wake_tx.send(()).await;
+            let _ = poke_tx.send(()).await;
         }
 
         // Drain what we can — should get at least 1, at most 2 (channel capacity)
@@ -715,11 +715,11 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (_wake_tx, wake_rx) = mpsc::channel(8);
+        let (_poke_tx, poke_rx) = mpsc::channel(8);
         let (fire_tx, mut fire_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
 
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 
@@ -753,11 +753,11 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let (_wake_tx, wake_rx) = mpsc::channel(1);
+        let (_poke_tx, poke_rx) = mpsc::channel(1);
         let (fire_tx, mut fire_rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
 
-        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, wake_rx);
+        let scheduler = HeartbeatScheduler::new(config, chrono_tz::UTC, poke_rx);
         let cancel_clone = cancel.clone();
         tokio::spawn(async move { scheduler.run(fire_tx, cancel_clone).await });
 

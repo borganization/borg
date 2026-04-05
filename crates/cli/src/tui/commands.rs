@@ -42,6 +42,7 @@ impl App<'_> {
                 self.migrate_popup.show();
                 return Some(Ok(AppAction::Continue));
             }
+            "/poke" => return Some(self.cmd_poke()),
             "/restart" => return Some(Ok(AppAction::RestartGateway)),
             "/compact" => return Some(Ok(AppAction::CompactHistory)),
             "/clear" => {
@@ -126,6 +127,7 @@ impl App<'_> {
              /logs      - Show activity log (error|warn|info|debug|all|raw)\n  \
              /doctor    - Run diagnostics\n  \
              /status    - Show agent vitals\n  \
+             /poke      - Trigger immediate heartbeat\n  \
              /pairing   - Show channel pairing info\n  \
              /update    - Update borg to latest version\n\
              \n  \
@@ -339,6 +341,27 @@ impl App<'_> {
                 "Usage: /settings <key> <value>\nUse /settings to see current values.".to_string(),
             );
             Ok(AppAction::Continue)
+        }
+    }
+
+    fn cmd_poke(&mut self) -> Result<AppAction> {
+        if let Some(tx) = &self.poke_tx {
+            match tx.try_send(()) {
+                Ok(()) => {
+                    self.push_system_message("[poke: heartbeat triggered]".to_string());
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    self.push_system_message("[poke: heartbeat already pending]".to_string());
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    self.push_system_message("[poke: scheduler not running]".to_string());
+                }
+            }
+            Ok(AppAction::Continue)
+        } else {
+            // Daemon mode: no local scheduler, send via HTTP
+            self.push_system_message("[poke: sending to daemon...]".to_string());
+            Ok(AppAction::Poke)
         }
     }
 
