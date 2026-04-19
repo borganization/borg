@@ -416,48 +416,19 @@ impl SettingsPopup {
         forward: bool,
     ) -> anyhow::Result<Option<AppAction>> {
         let entry = &self.entries[self.selected];
-        let mut actions: Vec<AppAction> = Vec::new();
 
         match entry.key {
-            "provider" => {
-                let count = PROVIDERS.len();
-                self.provider_index = if forward {
-                    (self.provider_index + 1) % count
-                } else {
-                    (self.provider_index + count - 1) % count
-                };
-                let (id, _, _) = PROVIDERS[self.provider_index];
-                match self.apply_and_save(config, "provider", id) {
-                    Some(action) => actions.push(action),
-                    None => return Ok(None),
-                }
-                // Reset model to first option for new provider. Best-effort:
-                // we keep the "Updated: provider=..." status and only log on save failure.
-                self.model_index = 0;
-                let models = models_for_provider(id);
-                if let Some((model_id, _)) = models.first() {
-                    if config.apply_setting("model", model_id).is_ok() {
-                        if let Err(e) = self.save_setting("model", model_id) {
-                            tracing::warn!("Failed to persist model reset: {e}");
-                        }
-                        actions.push(AppAction::UpdateSetting {
-                            key: "model".to_string(),
-                            value: model_id.to_string(),
-                        });
-                    }
-                }
-            }
+            "provider" => Ok(self.cycle_provider(config, forward)),
             "conversation.collaboration_mode" => {
                 const MODES: &[&str] = &["default", "execute", "plan"];
                 let current = format!("{}", config.conversation.collaboration_mode);
-                let new_mode = cycle_option(MODES, &current, forward);
-                if let Some(action) =
-                    self.apply_and_save(config, "conversation.collaboration_mode", new_mode)
-                {
-                    actions.push(action);
-                } else {
-                    return Ok(None);
-                }
+                Ok(self.cycle_simple(
+                    config,
+                    "conversation.collaboration_mode",
+                    MODES,
+                    &current,
+                    forward,
+                ))
             }
             "llm.cache.strategy" => {
                 const MODES: &[&str] = &["tools_system_and_2", "system_and_3"];
@@ -465,28 +436,56 @@ impl SettingsPopup {
                 // enum tag in quotes (e.g. `"system_and_3"`). Strip them so the
                 // current value lines up with the unquoted cycle options.
                 let current = serde_json::to_string(&config.llm.cache.strategy).unwrap_or_default();
-                let new_val = cycle_option(MODES, current.trim_matches('"'), forward);
-                if let Some(action) = self.apply_and_save(config, "llm.cache.strategy", new_val) {
-                    actions.push(action);
-                } else {
-                    return Ok(None);
-                }
+                Ok(self.cycle_simple(
+                    config,
+                    "llm.cache.strategy",
+                    MODES,
+                    current.trim_matches('"'),
+                    forward,
+                ))
             }
             "workflow.enabled" => {
                 const MODES: &[&str] = &["auto", "on", "off"];
                 let current = config.workflow.enabled.clone();
-                let new_val = cycle_option(MODES, &current, forward);
-                if let Some(action) = self.apply_and_save(config, "workflow.enabled", new_val) {
-                    actions.push(action);
-                } else {
-                    return Ok(None);
+                Ok(self.cycle_simple(config, "workflow.enabled", MODES, &current, forward))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn cycle_simple(
+        &mut self,
+        config: &mut Config,
+        key: &str,
+        modes: &[&str],
+        current: &str,
+        forward: bool,
+    ) -> Option<AppAction> {
+        let new_val = cycle_option(modes, current, forward);
+        self.apply_and_save(config, key, new_val)
+    }
+
+    fn cycle_provider(&mut self, config: &mut Config, forward: bool) -> Option<AppAction> {
+        let count = PROVIDERS.len();
+        self.provider_index = if forward {
+            (self.provider_index + 1) % count
+        } else {
+            (self.provider_index + count - 1) % count
+        };
+        let (id, _, _) = PROVIDERS[self.provider_index];
+        let action = self.apply_and_save(config, "provider", id)?;
+
+        // Reset model to first option for new provider. Best-effort:
+        // we keep the "Updated: provider=..." status and only log on save failure.
+        self.model_index = 0;
+        if let Some((model_id, _)) = models_for_provider(id).first() {
+            if config.apply_setting("model", model_id).is_ok() {
+                if let Err(e) = self.save_setting("model", model_id) {
+                    tracing::warn!("Failed to persist model reset: {e}");
                 }
             }
-            _ => return Ok(None),
         }
-
-        // Return the first action (provider change is the primary one)
-        Ok(actions.into_iter().next())
+        Some(action)
     }
 
     fn step_float(
